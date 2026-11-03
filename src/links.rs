@@ -151,9 +151,19 @@ fn web_or_mail(url: &str) -> bool {
     })
 }
 
-/// The system command for a target, or `None` when it could start a program.
+/// How a target reaches the system.
+enum Opener {
+    /// A system command: xdg-open or open, or explorer showing a file.
+    Command(std::process::Command),
+    /// A web or mail link for Windows' default handler. Explorer would read
+    /// `=` in a query as its own arguments; the handler gets the literal URL.
+    #[cfg(windows)]
+    Shell(String),
+}
+
+/// How the system is handed a target, or `None` when it could start a program.
 /// Files are only ever shown in their folder, never opened.
-fn opener(target: &Target) -> Option<std::process::Command> {
+fn opener(target: &Target) -> Option<Opener> {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(windows) {
@@ -164,6 +174,9 @@ fn opener(target: &Target) -> Option<std::process::Command> {
     let mut command = std::process::Command::new(opener);
     match target {
         Target::Url(url) if web_or_mail(url) => {
+            #[cfg(windows)]
+            return Some(Opener::Shell(url.clone()));
+            #[cfg(not(windows))]
             command.arg(url);
         }
         Target::Url(url) => {
@@ -190,14 +203,17 @@ fn opener(target: &Target) -> Option<std::process::Command> {
             command.arg(path.parent().unwrap_or(path));
         }
     }
-    Some(command)
+    Some(Opener::Command(command))
 }
 
-/// Hands a web or mail link to the system (xdg-open, open on macOS, explorer
-/// on Windows), or shows a file selected in its folder.
+/// Hands a web or mail link to the system's default handler, or shows a file
+/// selected in its folder.
 pub fn open(target: &Target) {
-    let Some(mut command) = opener(target) else {
-        return;
+    let mut command = match opener(target) {
+        None => return,
+        Some(Opener::Command(command)) => command,
+        #[cfg(windows)]
+        Some(Opener::Shell(url)) => return open_shell(&url),
     };
     let spawned = command
         .stdin(std::process::Stdio::null())
@@ -208,6 +224,21 @@ pub fn open(target: &Target) {
         // Reaped off the UI thread so it never lingers as a zombie.
         Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
         Err(e) => tracing::warn!("cannot run {:?}: {e}", command.get_program()),
+    }
+}
+
+/// Opens a web or mail link (already checked by `web_or_mail`, so it has no
+/// NUL) with its registered handler, without a command line in between.
+#[cfg(windows)]
+fn open_shell(url: &str) {
+    use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+
+    let wide: Vec<u16> = url.encode_utf16().chain([0]).collect();
+    let result = unsafe {
+        ShellExecuteW(std::ptr::null_mut(), std::ptr::null(), wide.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL)
+    } as isize;
+    if result <= 32 {
+        tracing::warn!("cannot open link: ShellExecuteW returned {result}");
     }
 }
 
@@ -406,7 +437,26 @@ mod tests {
     }
 
     fn opener_args(target: &Target) -> Option<Vec<String>> {
-        opener(target).map(|c| c.get_args().map(|a| a.to_string_lossy().into_owned()).collect())
+        opener(target).map(|o| match o {
+            Opener::Command(c) => c.get_args().map(|a| a.to_string_lossy().into_owned()).collect(),
+            #[cfg(windows)]
+            Opener::Shell(url) => vec![url],
+        })
+    }
+
+    #[test]
+    fn query_links_keep_their_full_target() {
+        for url in ["https://example.com/?a=1&b=2", "https://localhost:17480/login?t=abc%3D%3D", "file:///C:/Windows/System32/winver.exe"] {
+            let text = format!("Dashboard: {url}");
+            let range = find(&text, text.find(url).unwrap()).unwrap();
+            assert_eq!(&text[range.clone()], url);
+            assert_eq!(resolve(&text[range], None), Some(Target::Url(url.into())));
+        }
+        // The whole query reaches the handler; a file: link still never does.
+        for url in ["https://example.com/?a=1&b=2", "https://localhost:17480/login?t=abc%3D%3D"] {
+            assert_eq!(opener_args(&Target::Url(url.into())), Some(vec![url.to_owned()]), "{url}");
+        }
+        assert_eq!(opener_args(&Target::Url("file:///C:/Windows/System32/winver.exe".into())), None);
     }
 
     #[test]
