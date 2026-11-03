@@ -50,7 +50,7 @@ Open **Settings → Machines** and pick a host from your SSH config. HyperOx con
 - **Settings**: look, sounds, machines, updates, and the raw `settings.json` in your app home.
 - **Layouts**: HyperOx (the default), Terminals (just terminals), and HyperOx 98 (a whole desktop in one mod). Clone one and change anything.
 - **Mods** are small JavaScript programs that draw panels, overlays and windows. The shipped ones are examples; your agent can write new ones. `AGENTS.md` in your app home is the guide, written for agents and people alike.
-- **Keys**: `keys.json` in your app home rebinds anything.
+- **Keys**: `keys.json` in your app home rebinds anything; see [the keys section](defaults/AGENTS.md#keys-keysjson) of the mod guide for the format, including JSON objects for named, typed command arguments.
 
 ## Updates and privacy
 
