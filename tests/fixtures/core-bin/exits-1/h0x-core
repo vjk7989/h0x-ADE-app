@@ -1,0 +1,3 @@
+#!/bin/sh
+echo 'h0x-core 0.1.0'
+exit 1

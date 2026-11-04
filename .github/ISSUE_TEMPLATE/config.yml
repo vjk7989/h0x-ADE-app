@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Share a layout
+    url: https://github.com/topics/h0x-layout
+    about: Publish a layout with the GitHub topic h0x-layout.
+  - name: Report a vulnerability privately
+    url: https://github.com/vjk7989/h0x-ADE-app/security/advisories/new
+    about: Don't post security details in a public issue.

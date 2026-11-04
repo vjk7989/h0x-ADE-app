@@ -1,0 +1,272 @@
+//! Finding h0x-core on this machine. The app doesn't carry one: it
+//! uses the core people installed, or installs the core's own release.
+//!
+//! Where it looks, in order: `core` in settings.json; this process's PATH;
+//! the person's login shell's PATH (an app opened from the Dock or a
+//! launcher doesn't get it); then the usual install places. A candidate
+//! counts only if `--version` says `h0x-core …`.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::time::Duration;
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+mod cli_link;
+
+static BIN: OnceLock<PathBuf> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+pub fn install_cli_link() {
+    if let Err(e) = std::thread::Builder::new().name("cli-link".into()).spawn(|| {
+        let result = std::env::current_exe().and_then(|exe| cli_link::ensure(&crate::mods::home(), &exe));
+        if let Err(e) = result {
+            tracing::warn!("cannot install h0x-ade CLI link: {e}");
+        }
+    }) {
+        tracing::warn!("cannot start h0x-ade CLI setup: {e}");
+    }
+}
+
+/// The core the app runs (`h0x-core` until one is found).
+pub fn path() -> PathBuf {
+    BIN.get().cloned().unwrap_or_else(|| PathBuf::from("h0x-core"))
+}
+
+/// Uses this core from now on, and puts its folder first on PATH so mods'
+/// `core()` and anything the app runs find the same one.
+pub fn use_core(bin: PathBuf) {
+    if let Some(dir) = bin.parent() {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
+        dirs.extend(std::env::split_paths(&path).filter(|d| d != dir));
+        if let Ok(joined) = std::env::join_paths(dirs) {
+            // SAFETY: set once at start, before other threads read the environment.
+            unsafe { std::env::set_var("PATH", joined) };
+        }
+    }
+    let _ = BIN.set(bin);
+}
+
+/// Finder and Dock launches don't inherit the person's shell PATH.
+#[cfg(target_os = "macos")]
+pub fn fill_path() {
+    if std::os::unix::process::parent_id() != 1 {
+        return;
+    }
+    let home = crate::mods::home();
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    if let Some(path) = merged_path(login_shell_path().as_deref(), &usual_dirs(&home)[..3], &current) {
+        // SAFETY: called at startup, before other threads read the environment.
+        unsafe { std::env::set_var("PATH", path) };
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn merged_path(login: Option<&std::ffi::OsStr>, usual: &[PathBuf], current: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+    let mut dirs: Vec<PathBuf> = login.map(|path| dirs_on(path).collect()).unwrap_or_default();
+    dirs.extend_from_slice(usual);
+    dirs.extend(dirs_on(current));
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|dir| seen.insert(dir.clone()));
+    std::env::join_paths(dirs).ok()
+}
+
+/// `h0x-core X.Y.Z` if this binary is h0x-core and runs.
+pub fn version(bin: &Path) -> Option<String> {
+    let out = crate::spawn::command(bin).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (out.status.success() && text.starts_with("h0x-core ")).then_some(text)
+}
+
+/// The first h0x-core found, or None.
+pub fn find(configured: Option<&str>) -> Option<PathBuf> {
+    let home = crate::mods::home();
+    let pick = |candidates: Vec<PathBuf>| candidates.into_iter().filter(|c| c.is_file()).find(|c| version(c).is_some());
+    if let Some(found) = pick(configured.map(|c| vec![expand(c, &home)]).unwrap_or_default()) {
+        return Some(found);
+    }
+    // Tests: H0X_CORE_DIRS replaces every place HyperOx would look.
+    if let Some(dirs) = std::env::var_os("H0X_CORE_DIRS") {
+        return pick(std::env::split_paths(&dirs).map(|d| core_in(&d)).collect());
+    }
+    // The quick places first; the login shell (slow) only if they have none.
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let quick: Vec<PathBuf> = dirs_on(&path).chain(usual_dirs(&home)).map(|d| core_in(&d)).collect();
+    pick(quick).or_else(|| pick(dirs_on(&login_shell_path()?).map(|d| core_in(&d)).collect()))
+}
+
+fn expand(p: &str, home: &Path) -> PathBuf {
+    match p.strip_prefix("~/") {
+        Some(rest) => home.join(rest),
+        None => PathBuf::from(p),
+    }
+}
+
+fn core_in(dir: &Path) -> PathBuf {
+    dir.join(format!("h0x-core{}", std::env::consts::EXE_SUFFIX))
+}
+
+fn dirs_on(path: &std::ffi::OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+    std::env::split_paths(path)
+}
+
+/// Where h0x-core gets installed: its own installer (~/.local/bin),
+/// Homebrew, mise, Nix, cargo.
+fn usual_dirs(home: &Path) -> Vec<PathBuf> {
+    if cfg!(windows) {
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home.join("AppData/Local"));
+        return vec![local.join("Programs/h0x-core"), home.join(".cargo/bin")];
+    }
+    vec![
+        home.join(".local/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        home.join(".local/share/mise/shims"),
+        home.join(".nix-profile/bin"),
+        PathBuf::from("/run/current-system/sw/bin"),
+        home.join(".cargo/bin"),
+    ]
+}
+
+/// The PATH the person's login shell sets up, or None if it doesn't answer quickly.
+fn login_shell_path() -> Option<std::ffi::OsString> {
+    if cfg!(windows) {
+        return None;
+    }
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let mut child = Command::new(shell)
+        .args(["-lc", "printf %s \"$PATH\""])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // A slow or interactive shell profile must not hold up the app.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if child.try_wait().ok()?.is_some() {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut out = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
+    Some(out.into())
+}
+
+/// Installs the core's latest release with its own installer (into
+/// ~/.local/bin, or H0X_CORE_INSTALL_DIR), then finds it. Err: what went wrong.
+pub fn install() -> Result<PathBuf, String> {
+    let releases = crate::update::core_releases();
+    let mut cmd = if cfg!(windows) {
+        let mut c = crate::spawn::command("powershell");
+        c.args(["-NoProfile", "-Command", &format!("irm {releases}/latest/download/install.ps1 | iex")]);
+        c
+    } else {
+        let mut c = crate::spawn::command("sh");
+        c.args(["-c", &format!("curl -fsSL {releases}/latest/download/install.sh | sh")]);
+        c
+    };
+    let out = cmd.env("H0X_CORE_RELEASES_URL", &releases).stdin(Stdio::null()).output().map_err(|e| format!("cannot run the installer: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        return Err(if err.is_empty() { "the installer failed".into() } else { err });
+    }
+    let home = crate::mods::home();
+    let dir = std::env::var_os("H0X_CORE_INSTALL_DIR").map(PathBuf::from).unwrap_or_else(|| {
+        if cfg!(windows) {
+            usual_dirs(&home).remove(0)
+        } else {
+            home.join(".local/bin")
+        }
+    });
+    let bin = core_in(&dir);
+    version(&bin).map(|_| bin).ok_or_else(|| "installed, but h0x-core doesn't run".into())
+}
+
+/// Updates the core to its latest release (`h0x-core update`: same generation only,
+/// terminals kept). Ok: the version it runs now. Err: what it said.
+pub fn update() -> Result<String, String> {
+    update_to(None)
+}
+
+/// `h0x-core update --version X`: at least X (a newer core stays).
+pub fn update_to(at_least: Option<&str>) -> Result<String, String> {
+    let mut cmd = crate::spawn::command(path());
+    cmd.args(["update", "--json"]);
+    if let Some(v) = at_least {
+        cmd.args(["--version", v]);
+    }
+    let out = cmd.stdin(Stdio::null()).output().map_err(|e| format!("cannot run h0x-core update: {e}"))?;
+    let reply: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    if out.status.success() {
+        return Ok(reply.get("now").and_then(|v| v.as_str()).unwrap_or("the latest").to_owned());
+    }
+    let err: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap_or_default();
+    let message = err.pointer("/error/message").and_then(|v| v.as_str()).map(str::to_owned);
+    let hint = err.pointer("/error/hint").and_then(|v| v.as_str()).map(|h| format!(" ({h})")).unwrap_or_default();
+    Err(message.map(|m| m + &hint).unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_path_keeps_shell_order_and_falls_back_to_usual_dirs() {
+        let usual = [PathBuf::from("/home/test/.local/bin"), PathBuf::from("/opt/homebrew/bin")];
+        let current = std::env::join_paths(["/usr/bin", "/bin"]).unwrap();
+        let login = std::env::join_paths(["/custom/bin", "/opt/homebrew/bin", "/usr/bin"]).unwrap();
+        let merged = merged_path(Some(&login), &usual, &current).unwrap();
+        assert_eq!(std::env::split_paths(&merged).collect::<Vec<_>>(), ["/custom/bin", "/opt/homebrew/bin", "/usr/bin", "/home/test/.local/bin", "/bin"].map(PathBuf::from));
+        let fallback = merged_path(None, &usual, &current).unwrap();
+        assert_eq!(std::env::split_paths(&fallback).collect::<Vec<_>>(), ["/home/test/.local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"].map(PathBuf::from));
+    }
+
+    // Fakes the binary with a shell script.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_binary_that_says_h0x_core_counts() {
+        // Runtime writes can leave a writer fd in a parallel fork, causing ETXTBSY.
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core-bin");
+        assert_eq!(version(&dir.join("missing")), None);
+        let real = core_in(&dir);
+        assert_eq!(version(&real).as_deref(), Some("h0x-core 0.1.0"));
+
+        assert_eq!(find(Some(real.to_str().unwrap())), Some(real));
+    }
+
+    // Fakes the binary with a shell script (committed fixtures, see above).
+    #[cfg(unix)]
+    #[test]
+    fn upstream_version_lines_and_failing_cores_are_not_accepted() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core-bin");
+        for (dir, says) in [("says-hc", "hc 0.1.0"), ("says-herdr-core", "herdr-core 0.1.0"), ("exits-1", "h0x-core 0.1.0 (exit 1)")] {
+            let bin = core_in(&fixtures.join(dir));
+            // A fixture without its exec bit would be rejected for the wrong reason.
+            assert_ne!(std::fs::metadata(&bin).unwrap().permissions().mode() & 0o111, 0, "{} must be executable", bin.display());
+            assert_eq!(version(&bin), None, "a core saying {says}");
+        }
+    }
+
+    #[test]
+    fn the_core_is_looked_for_only_as_h0x_core() {
+        let windows = core_in(Path::new(r"C:\Users\me\AppData\Local\Programs\h0x-core"));
+        assert_eq!(windows.file_name().unwrap(), format!("h0x-core{}", std::env::consts::EXE_SUFFIX).as_str());
+        assert!(windows.to_string_lossy().starts_with(r"C:\Users\me\AppData\Local\Programs\h0x-core"));
+        assert_eq!(core_in(Path::new("")), PathBuf::from(format!("h0x-core{}", std::env::consts::EXE_SUFFIX)));
+        #[cfg(windows)]
+        {
+            let dirs = usual_dirs(Path::new(r"C:\Users\me"));
+            assert!(dirs[0].ends_with(r"Programs\h0x-core"), "{}", dirs[0].display());
+            assert!(core_in(&dirs[0]).ends_with(r"Programs\h0x-core\h0x-core.exe"));
+            assert!(dirs.iter().all(|d| !d.to_string_lossy().contains("herdr")), "{dirs:?}");
+        }
+    }
+}
