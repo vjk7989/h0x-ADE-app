@@ -53,6 +53,30 @@ pub fn app_dir() -> PathBuf {
     env("H0X_ADE_HOME").unwrap_or_else(|| env("XDG_CONFIG_HOME").unwrap_or_else(|| home().join(".config")).join("h0x-ade"))
 }
 
+/// Creates the app home. It holds settings, the control socket and mod
+/// consent, so on unix it is kept private (0700) when this user owns it.
+pub fn ensure_app_dir() -> std::io::Result<PathBuf> {
+    let dir = app_dir();
+    make_private_dir(&dir)?;
+    Ok(dir)
+}
+
+fn make_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let meta = std::fs::metadata(dir)?;
+        // SAFETY: getuid has no preconditions and cannot fail.
+        if meta.uid() != unsafe { libc::getuid() } {
+            tracing::warn!("{} belongs to another user; leaving its mode alone", dir.display());
+        } else if meta.permissions().mode() & 0o777 != 0o700 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn mods_dir() -> PathBuf {
     app_dir().join("mods")
 }
@@ -62,7 +86,7 @@ const AGENTS_MD: &str = include_str!("../defaults/AGENTS.md");
 /// Writes the agent guide and API types, and installs or updates the default
 /// mods. Shipped mods are replaced whole; edits are first moved to a clone.
 pub fn write_workspace() -> std::io::Result<()> {
-    let dir = app_dir();
+    let dir = ensure_app_dir()?;
     std::fs::create_dir_all(mods_dir())?;
     write_if_changed(&dir.join("AGENTS.md"), AGENTS_MD)?;
     // Agents read AGENTS.md now; the pointer file we used to write goes (only ours).
@@ -1254,6 +1278,34 @@ pub fn prepare_load(inst: &Instance) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn app_home_is_created_private_and_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let root = std::env::temp_dir().join(format!("h0x-ade-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let fresh = root.join("fresh");
+        make_private_dir(&fresh).unwrap();
+        assert_eq!(mode(&fresh), 0o700);
+        assert_eq!(mode(&root), 0o755, "parents keep their mode");
+        let themes = fresh.join("themes");
+        std::fs::create_dir(&themes).unwrap();
+        std::fs::set_permissions(&themes, std::fs::Permissions::from_mode(0o755)).unwrap();
+        make_private_dir(&fresh).unwrap();
+        assert_eq!(mode(&themes), 0o755, "subdirectories keep their mode");
+
+        let open = root.join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        make_private_dir(&open).unwrap();
+        assert_eq!(mode(&open), 0o700);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn live_reads_ignore_unread_inputs_and_keep_pending_changes() {

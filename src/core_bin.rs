@@ -167,7 +167,8 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
 pub fn install() -> Result<PathBuf, String> {
     let releases = crate::update::core_releases();
     let script = if cfg!(windows) { "install.ps1" } else { "install.sh" };
-    let work = crate::mods::app_dir().join(format!("core-install-{}", std::process::id()));
+    let home = crate::mods::ensure_app_dir().map_err(|e| format!("{}: {e}", crate::mods::app_dir().display()))?;
+    let work = home.join(format!("core-install-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
     let file = work.join(script);
