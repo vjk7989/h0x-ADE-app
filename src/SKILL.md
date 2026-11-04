@@ -51,7 +51,9 @@ login/interactive shell (sh, bash, zsh, dash, ksh or fish), including its
 configured PATH. Other shells keep the sh launcher.
 `terminal.open --folder /path --place down` starts the split in that folder,
 including when `--argv` supplies a program. Without `--folder`, it follows the
-focused terminal's folder.
+focused terminal's folder. If an inherited local folder was deleted, new spaces,
+tabs and splits retry in that machine's home. An explicit invalid folder
+still fails.
 `h0x-core machine ls` lists machines. Use `h0x-core run --on vps ...`, `h0x-core exec --on vps ...`
 and `h0x-core file ... --on vps ...` for remote work, not your local file tools.
 
