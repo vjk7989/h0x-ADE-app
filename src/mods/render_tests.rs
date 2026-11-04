@@ -83,7 +83,6 @@ fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Val
         ("settings".into(), serde_json::to_value(crate::settings::Settings::default()).unwrap()),
         ("themes".into(), json!([{"name":"graphite", "colors": &*crate::settings::theme()}])),  ("fonts".into(), json!(["Monospace", "Sans"])),
         ("updates".into(), update),
-        ("telemetry".into(), json!({"enabled":true,"setting":true,"sends":true,"off_because":null,"endpoint":"https://invalid.example", "draft":{},"queued":[],"last_sent":null})),
         ("window".into(), json!({"platform":"linux","titlebar":"none","buttons":true,"maximized":false,"fullscreen":false,"active":true})),
         ("placement".into(), Value::Null),
         ("home".into(), json!("/fixture")), ("appHome".into(), json!("/fixture/app")),
@@ -467,7 +466,7 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let start = Instant::now();
     let staged = Staged::new();
-    for section in ["look", "alerts", "privacy", "updates"] {
+    for section in ["look", "alerts", "updates"] {
         let mut p = props();
         p["section"] = json!(section);
         describe(cx, &staged, "frame/settings", true, p, updates("current", "current"), None).unwrap();
@@ -620,7 +619,7 @@ fn local_state_and_overlay_initial_descriptions(cx: &mut TestAppContext) {
             );
         } else {
             assert!(
-                tree.contains(if setup.contains("sent") { "Sent. Thanks" } else { "Fixture error" }),
+                tree.contains(if setup.contains("sent") { "Your browser opened a new GitHub issue" } else { "Fixture error" }),
                 "{tree}"
             );
         }

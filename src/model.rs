@@ -637,7 +637,7 @@ mod tests {
         m.pane_folders.insert("x1".into(), "/src/notes".into());
         assert_eq!(m.space_name(&p, "/home/me"), "notes");
         m.folder_info.insert("t1".into(), FolderInfo { top: "/src/h0x".into(), branch: Some("main".into()) });
-        assert_eq!(m.space_name(&p, "/home/me"), "herdr");
+        assert_eq!(m.space_name(&p, "/home/me"), "h0x");
         let names: Vec<String> = p.tabs.iter().map(|c| Model::tab_name(&p, c)).collect();
         assert_eq!(names.iter().map(String::as_str).collect::<Vec<_>>(), ["1", "review", "3"]);
         m.space_mut("p1").unwrap().name = "api".into();
