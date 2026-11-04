@@ -96,6 +96,11 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
         PathBuf::from(link)
     };
     let full = if expanded.is_absolute() { expanded } else { cwd?.join(expanded) };
+    // Checking a share path for existence already reaches out to that machine.
+    if network(&full) {
+        tracing::warn!("refusing network path link {full:?}");
+        return None;
+    }
     // Windows ignores a trailing period when checking whether a path exists.
     if !(cfg!(windows) && full.extension().is_some_and(|ext| ext.is_empty())) && full.exists() {
         return Some(Target::File(full));
@@ -111,12 +116,31 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
     Path::new(bare).exists().then(|| Target::File(PathBuf::from(bare)))
 }
 
-/// Hands the target to the system (xdg-open, open on macOS, explorer on Windows).
-pub fn open(target: &Target) {
-    let arg = match target {
-        Target::Url(u) => std::ffi::OsStr::new(u),
-        Target::File(p) => p.as_os_str(),
+/// UNC and `//host` paths, which name another machine.
+fn network(path: &Path) -> bool {
+    let path = path.as_os_str().to_string_lossy();
+    ["\\\\", "//", "\\/", "/\\"].into_iter().any(|p| path.starts_with(p))
+}
+
+/// Only web and mail links reach the system opener: any other scheme can name
+/// a local program or a protocol handler that starts one.
+fn web_or_mail(url: &str) -> bool {
+    // Invisible and bidi format characters disguise where a link goes.
+    let hidden = |c: char| {
+        matches!(c, '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
     };
+    if url.chars().any(|c| c.is_whitespace() || c.is_control() || hidden(c)) {
+        return false;
+    }
+    url.split_once(':').is_some_and(|(scheme, rest)| {
+        scheme.eq_ignore_ascii_case("mailto")
+            || ((scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) && rest.starts_with("//"))
+    })
+}
+
+/// The system command for a target, or `None` when it could start a program.
+/// Files are only ever shown in their folder, never opened.
+fn opener(target: &Target) -> Option<std::process::Command> {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(windows) {
@@ -124,8 +148,45 @@ pub fn open(target: &Target) {
     } else {
         "xdg-open"
     };
-    let spawned = std::process::Command::new(opener)
-        .arg(arg)
+    let mut command = std::process::Command::new(opener);
+    match target {
+        Target::Url(url) if web_or_mail(url) => {
+            command.arg(url);
+        }
+        Target::Url(url) => {
+            tracing::warn!("refusing to open link {url:?}: only http, https and mailto links open");
+            return None;
+        }
+        Target::File(path) if network(path) => {
+            tracing::warn!("refusing network path link {path:?}");
+            return None;
+        }
+        Target::File(path) => {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                // Explorer parses `/select,"path"` itself, not as one quoted argument.
+                let mut select = std::ffi::OsString::from("/select,\"");
+                select.push(path.components().collect::<PathBuf>());
+                select.push("\"");
+                command.raw_arg(select);
+            }
+            #[cfg(target_os = "macos")]
+            command.arg("-R").arg(path);
+            #[cfg(not(any(windows, target_os = "macos")))]
+            command.arg(path.parent().unwrap_or(path));
+        }
+    }
+    Some(command)
+}
+
+/// Hands a web or mail link to the system (xdg-open, open on macOS, explorer
+/// on Windows), or shows a file selected in its folder.
+pub fn open(target: &Target) {
+    let Some(mut command) = opener(target) else {
+        return;
+    };
+    let spawned = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -133,7 +194,7 @@ pub fn open(target: &Target) {
     match spawned {
         // Reaped off the UI thread so it never lingers as a zombie.
         Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
-        Err(e) => tracing::warn!("cannot run {opener}: {e}"),
+        Err(e) => tracing::warn!("cannot run {:?}: {e}", command.get_program()),
     }
 }
 
@@ -329,5 +390,134 @@ mod tests {
             assert_eq!(resolve("src/main.rs.", Some(&dir)), Some(Target::File(dotted)));
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn opener_args(target: &Target) -> Option<Vec<String>> {
+        opener(target).map(|c| c.get_args().map(|a| a.to_string_lossy().into_owned()).collect())
+    }
+
+    #[test]
+    fn only_web_and_mail_links_reach_the_opener() {
+        for url in ["https://a.com/x", "HTTP://A.COM", "Https://a.com", "mailto:a@b.c", "MAILTO:a@b.c"] {
+            assert_eq!(opener_args(&Target::Url(url.into())), Some(vec![url.to_owned()]), "{url}");
+        }
+        for url in [
+            "",
+            "javascript:alert(1)",
+            "file:///C:/Windows/System32/calc.exe",
+            "FILE:///etc/passwd",
+            "smb://server/share/a.bat",
+            "ms-settings:",
+            "ms-msdt:/id",
+            "search-ms:query=x",
+            "vscode://file/x",
+            "ftp://a.com/x",
+            "http:a.com",
+            "https:\\\\server\\share",
+            "\\\\server\\share\\a.bat",
+            "https://a.com/x y",
+            "https://a.com/x\ty",
+            "https://a.com/\u{7}",
+            "https://a.com/\n",
+            "mailto:a@b.c\r\n",
+            " https://a.com",
+        ] {
+            assert_eq!(opener_args(&Target::Url(url.into())), None, "{url:?}");
+        }
+    }
+
+    #[test]
+    fn links_with_invisible_or_bidi_characters_never_reach_the_opener() {
+        assert!(web_or_mail("https://a.com/gpj.exe"));
+        for c in ['\u{200B}', '\u{200F}', '\u{2028}', '\u{2029}', '\u{202A}', '\u{202E}', '\u{2060}', '\u{2064}', '\u{2066}', '\u{2069}', '\u{FEFF}'] {
+            for url in [format!("https://a.com/{c}gpj.exe"), format!("{c}https://a.com/"), format!("mailto:a{c}@b.c")] {
+                assert!(!web_or_mail(&url), "{url:?}");
+                assert_eq!(opener_args(&Target::Url(url.clone())), None, "{url:?}");
+            }
+        }
+        assert!(!web_or_mail("https://a.com/\u{202E}gpj.exe"));
+        assert!(!web_or_mail("https://a\u{200B}.com/"));
+        // Just outside the refused ranges.
+        for c in ['\u{200A}', '\u{2010}', '\u{2027}', '\u{202F}', '\u{2065}', '\u{206A}', '\u{FEFE}'] {
+            let url = format!("https://a.com/{c}");
+            assert_eq!(web_or_mail(&url), !c.is_whitespace() && !c.is_control(), "{url:?}");
+        }
+    }
+
+    #[test]
+    fn files_are_shown_in_their_folder_never_opened() {
+        let dir = std::env::temp_dir();
+        for name in ["y.exe", "a.bat", "a.cmd", "a.ps1", "a.sh", "a.lnk", "A.app", "notes.txt"] {
+            let path = dir.join(name);
+            let args = opener_args(&Target::File(path.clone())).unwrap();
+            assert!(!args.iter().any(|a| Path::new(a) == path.as_path()), "{name}: {args:?}");
+            #[cfg(windows)]
+            assert_eq!(args, [format!("/select,\"{}\"", path.components().collect::<PathBuf>().display())]);
+            #[cfg(target_os = "macos")]
+            assert_eq!(args, ["-R".to_owned(), path.display().to_string()]);
+            #[cfg(not(any(windows, target_os = "macos")))]
+            assert_eq!(args, [path.parent().unwrap().display().to_string()]);
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(opener_args(&Target::File(PathBuf::from(r"C:\x\y.exe"))), Some(vec![r#"/select,"C:\x\y.exe""#.to_owned()]));
+            assert_eq!(opener_args(&Target::File(PathBuf::from(r"C:\x/src/y.bat"))), Some(vec![r#"/select,"C:\x\src\y.bat""#.to_owned()]));
+        }
+    }
+
+    #[test]
+    fn network_paths_are_refused() {
+        for path in [r"\\server\share\a.bat", "//server/share/a.bat", r"\\?\UNC\server\share\a.exe"] {
+            assert_eq!(opener_args(&Target::File(PathBuf::from(path))), None, "{path}");
+            assert_eq!(resolve(path, None), None, "{path}");
+            assert_eq!(resolve(path, Some(&std::env::temp_dir())), None, "{path}");
+        }
+        assert_eq!(resolve("", None), None);
+    }
+
+    #[test]
+    fn spoofed_and_injected_links_are_refused() {
+        for url in [
+            "mailto:a@b.c\nBcc:evil@x.com",
+            "mailto:a@b.c\r\nBcc:evil@x.com",
+            "https://a.com/\u{85}",
+            "https://a.com/\u{a0}x",
+            "https://a.com/\u{2028}x",
+            "https://a.com/\u{3000}x",
+            "https://a.com/\u{0}",
+            "https://a.com/\u{9b}",
+            "https:",
+            "https:/a.com",
+            "https ://a.com",
+            "http//a.com",
+        ] {
+            assert_eq!(opener_args(&Target::Url(url.into())), None, "{url:?}");
+        }
+        // Hosts are the browser's business: any https link without whitespace opens as given.
+        for url in ["https://xn--e1afmkfd.xn--p1ai/", "https://bücher.de/", "https://a.com?q=1", "https://a.com#top", "MailTo:a@b.c?subject=hi%0Athere"] {
+            assert_eq!(opener_args(&Target::Url(url.into())), Some(vec![url.to_owned()]), "{url}");
+        }
+    }
+
+    #[test]
+    fn mixed_slash_network_paths_and_remote_folders_are_refused() {
+        for path in [r"\/server/share/a.bat", r"/\server\share\a.bat", r"\\.\PIPE\x", "//?/UNC/server/share/a.exe"] {
+            assert_eq!(opener_args(&Target::File(PathBuf::from(path))), None, "{path}");
+            assert_eq!(resolve(path, None), None, "{path}");
+            assert_eq!(resolve(path, Some(&std::env::temp_dir())), None, "{path}");
+        }
+        // A relative link in a terminal whose folder is a share names the other machine too.
+        for cwd in [r"\\server\share\project", "//server/share/project"] {
+            for link in ["a.txt", "src/main.rs:42", "$PWD/a.txt"] {
+                assert_eq!(resolve(link, Some(Path::new(cwd))), None, "{cwd} {link}");
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_forward_slash_files_are_selected_with_backslashes() {
+        assert_eq!(opener_args(&Target::File(PathBuf::from("C:/x/y.exe"))), Some(vec![r#"/select,"C:\x\y.exe""#.to_owned()]));
+        assert_eq!(opener_args(&Target::File(PathBuf::from("C:/My Files/a b.txt"))), Some(vec![r#"/select,"C:\My Files\a b.txt""#.to_owned()]));
     }
 }

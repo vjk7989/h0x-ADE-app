@@ -1362,3 +1362,110 @@ fn files_panel_keeps_windows_paths_with_spaces_unchanged(cx: &mut TestAppContext
         "the path travels inside one argv element"
     );
 }
+
+#[gpui::test]
+fn files_panel_note_drops_control_characters_and_caps_each_name(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // A newline in a file name would submit a fake prompt line to the agent.
+    let name = format!("a\r\nb\u{1b}c\u{7f}\u{85}\t{}.txt", "x".repeat(250));
+    let full = format!("/fixture/project/{name}");
+    let disk = files_disk(&[(full.as_str(), "data\n")]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, &format!("open {name}"));
+    files_type(&mut visual, "q");
+    files_keys(&mut visual, "ctrl-s");
+    assert_eq!(files_writes(&disk).len(), 1, "the file itself is saved under its real name");
+    assert_eq!(files_writes(&disk)[0].0, full);
+    let clean = format!("abc{}", "x".repeat(197));
+    assert_eq!(
+        files_sends(&disk),
+        vec![vec!["send".to_string(), "idle1".into(), files_note(&clean), "--if".into(), "idle".into()]],
+        "control characters are dropped and the name is capped at 200 characters"
+    );
+}
+
+#[gpui::test]
+fn files_panel_note_caps_names_at_200_code_points_not_utf16_units(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Each emoji is one code point but two UTF-16 units.
+    let exact = format!("{}.txt", "\u{1f600}".repeat(196));
+    let over = format!("{}.txt", "\u{1f600}".repeat(197));
+    assert_eq!((exact.chars().count(), over.chars().count()), (200, 201));
+    let paths = [format!("/fixture/project/{exact}"), format!("/fixture/project/{over}")];
+    let disk = files_disk(&paths.iter().map(|p| (p.as_str(), "data\n")).collect::<Vec<_>>());
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, &format!("open {exact}"));
+    files_type(&mut visual, "q");
+    files_step(&mut visual, &disk, &format!("open {over}"));
+    files_type(&mut visual, "q");
+    files_keys(&mut visual, "ctrl-s");
+    assert_eq!(files_writes(&disk).len(), 2);
+    let cut = format!("{}.tx", "\u{1f600}".repeat(197));
+    let notes: Vec<String> = files_sends(&disk).into_iter().map(|send| send[2].clone()).collect();
+    assert_eq!(notes, [files_note(&exact), files_note(&cut)], "200 code points stay whole, 201 lose the last one");
+}
+
+#[gpui::test]
+fn files_panel_note_for_a_name_made_only_of_control_characters_carries_none(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let name = "\u{1}\r\n\u{1b}\u{7f}\u{9f}";
+    let full = format!("/fixture/project/{name}");
+    let disk = files_disk(&[(full.as_str(), "data\n")]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, &format!("open {name}"));
+    files_type(&mut visual, "q");
+    files_keys(&mut visual, "ctrl-s");
+    assert_eq!(files_writes(&disk).len(), 1);
+    assert_eq!(files_writes(&disk)[0].0, full);
+    let sends = files_sends(&disk);
+    assert_eq!(sends.len(), 1, "{sends:?}");
+    assert!(!sends[0][2].chars().any(char::is_control), "{:?}", sends[0][2]);
+    assert_eq!(sends[0][2], files_note("a file"), "a name that sanitises to nothing is not listed");
+}
+
+#[gpui::test]
+fn files_panel_note_drops_invisible_and_bidi_format_characters(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // U+202E would show "a.txt.exe" reversed; U+2028 is a line break to some readers.
+    let name = "a\u{202E}gpj\u{200B}\u{200F}\u{2028}\u{2029}\u{202A}\u{2060}\u{2064}\u{2066}\u{2069}\u{FEFF}.exe.txt";
+    let full = format!("/fixture/project/{name}");
+    let disk = files_disk(&[(full.as_str(), "data\n")]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, &format!("open {name}"));
+    files_type(&mut visual, "q");
+    files_keys(&mut visual, "ctrl-s");
+    assert_eq!(files_writes(&disk).len(), 1);
+    assert_eq!(files_writes(&disk)[0].0, full, "the file itself is saved under its real name");
+    assert_eq!(
+        files_sends(&disk),
+        vec![vec!["send".to_string(), "idle1".into(), files_note("agpj.exe.txt"), "--if".into(), "idle".into()]],
+    );
+}
+
+#[gpui::test]
+fn files_panel_note_leaves_out_a_name_that_sanitises_to_nothing(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let empty = "\u{202E}\u{200B}\u{FEFF}";
+    let paths = [format!("/fixture/project/{empty}"), "/fixture/project/b.txt".to_owned()];
+    let disk = files_disk(&paths.iter().map(|p| (p.as_str(), "data\n")).collect::<Vec<_>>());
+    disk.borrow_mut().send_code = 1;
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, &format!("open {empty}"));
+    files_type(&mut visual, "q");
+    files_step(&mut visual, &disk, "open b.txt");
+    files_type(&mut visual, "q");
+    let failed = files_sends(&disk);
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0][2], files_note("a file"));
+    disk.borrow_mut().send_code = 0;
+    files_step(&mut visual, &disk, "back");
+    let sends = files_sends(&disk);
+    assert_eq!(files_writes(&disk).len(), 2);
+    assert_eq!(sends.len(), 2, "{sends:?}");
+    assert_eq!(sends[1][2], files_note("b.txt"), "the unheard edit with no name is not listed");
+}

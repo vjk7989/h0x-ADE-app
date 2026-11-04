@@ -3588,6 +3588,9 @@ impl AppWindow {
             return self.run_as(name, args, false, window, cx);
         }
         if let Some(path) = cmd.get("shot").and_then(Value::as_str) {
+            if !crate::control::is_png(std::path::Path::new(path)) {
+                return json!({ "error": "screenshot path must end in .png" });
+            }
             return match crate::control::save_shot(window, std::path::Path::new(path)) {
                 Ok(()) => json!({ "path": path }),
                 Err(error) => json!({ "error": format!("cannot save screenshot: {error:#}") }),

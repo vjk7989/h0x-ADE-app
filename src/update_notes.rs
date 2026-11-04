@@ -47,7 +47,8 @@ fn parse_for_os(text: &str, os: &str) -> Vec<Note> {
             } else if line.starts_with("### ") {
                 fixed = line == "### Fixed";
             } else if let Some(url) = line.strip_prefix("![").and_then(|s| s.split_once("](")).and_then(|(_, s)| s.strip_suffix(')')) {
-                if url.starts_with("https://") && let Some(item) = note.items.last_mut() {
+                // Media loads only over https from GitHub; any other image is dropped.
+                if crate::update::trusted_url(url) && let Some(item) = note.items.last_mut() {
                     item.media.push(Media { path: url.into(), ..Media::default() });
                 }
             } else if let Some(text) = line.strip_prefix("- ") {
@@ -167,9 +168,13 @@ fn fetch_media(notes: &[Note]) {
         // The same URL may be in both the startup and newly fetched feed.
         let temp = file.with_extension(format!("{:?}.new", std::thread::current().id()));
         let result = crate::spawn::command(crate::update::system("curl"))
-            .args(["-fsSL", "--max-time", "30", "--max-filesize", "16777216", "-o"])
+            .args(["-fsSL", "--max-time", "30", "--max-filesize", "16777216"])
+            .args(crate::update::CURL_HTTPS)
+            .args(crate::update::CURL_LANDED)
+            .arg("-o")
             .arg(&temp).arg(url).stdin(std::process::Stdio::null()).output();
-        if result.is_ok_and(|out| out.status.success())
+        // A redirect off the trusted hosts leaves the temp file to be deleted below.
+        if result.is_ok_and(|out| out.status.success() && crate::update::landed(&out.stdout).is_ok())
             && std::fs::rename(&temp, &file).is_ok()
         {
             MEDIA.lock().unwrap().0.remove(&file);
@@ -347,17 +352,26 @@ mod tests {
 
     #[test]
     fn sections_and_item_media() {
-        let notes = parse("## [1.8.0] - 2026-10-23\n### New\n- **A headline.** Its detail.\n![demo](https://example.com/demo.png)\n- **Another headline.** More detail.\n![bad](http://example.com/no.png)\n### Fixed\n- A short fix.\n## [1.7.0] - 2026-10-22\n- Plain item.\n");
+        let notes = parse("## [1.8.0] - 2026-10-23\n### New\n- **A headline.** Its detail.\n![demo](https://release-assets.githubusercontent.com/demo.png)\n![foreign](https://example.com/demo.png)\n- **Another headline.** More detail.\n![bad](http://github.com/no.png)\n![userinfo](https://github.com@evil.com/no.png)\n![lookalike](https://github.com.evil.com/no.png)\n![port](https://github.com:8443/no.png)\n![local](file:///C:/Users/me/no.png)\n### Fixed\n- A short fix.\n## [1.7.0] - 2026-10-22\n- Plain item.\n");
         let items = &notes[0].items;
         assert_eq!(items[0].headline, "A headline.");
         assert_eq!(items[0].detail, "Its detail.");
-        assert_eq!(items[0].media[0].path, "https://example.com/demo.png");
+        assert_eq!(items[0].media.len(), 1, "the foreign host is dropped");
+        assert_eq!(items[0].media[0].path, "https://release-assets.githubusercontent.com/demo.png");
         assert!(items[1].media.is_empty());
         assert!(items[2].fixed);
         assert_eq!(items[2].detail, "A short fix.");
         assert!(!notes[1].items[0].fixed);
         assert_eq!(notes[1].items[0].detail, "Plain item.");
     }
+
+    #[test]
+    fn media_hosts_must_be_github_exactly() {
+        let notes = parse("## [1.8.0] - 2026-10-23\n- Item.\n![dot](https://github.com./a.png)\n![upper](https://GITHUB.COM/a.png)\n![idn](https://xn--github-9za.com/a.png)\n![encoded](https://github.com%40evil.com/a.png)\n![windows](C:\\Users\\me\\a.png)\n![unc](\\\\server\\share\\a.png)\n![empty]()\n![query](https://objects.githubusercontent.com/a.png?token=1)\n");
+        let media: Vec<&str> = notes[0].items[0].media.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(media, ["https://objects.githubusercontent.com/a.png?token=1"]);
+    }
+
     #[test]
     fn curated_markdown_and_remote_media() {
         let notes = fixture();
