@@ -450,6 +450,8 @@ mod tests {
         for name in ["y.exe", "a.bat", "a.cmd", "a.ps1", "a.sh", "a.lnk", "A.app", "notes.txt"] {
             let path = dir.join(name);
             let args = opener_args(&Target::File(path.clone())).unwrap();
+            // macOS passes the path after `-R`, which reveals it in Finder; the exact args are asserted below.
+            #[cfg(not(target_os = "macos"))]
             assert!(!args.iter().any(|a| Path::new(a) == path.as_path()), "{name}: {args:?}");
             #[cfg(windows)]
             assert_eq!(args, [format!("/select,\"{}\"", path.components().collect::<PathBuf>().display())]);
