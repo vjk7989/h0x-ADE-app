@@ -12,6 +12,6 @@ body:
     id: missing
     attributes:
       label: What is missing?
-      description: What does Herdr need to expose so your mod can do it?
+      description: What does HyperOx need to expose so your mod can do it?
     validations:
       required: true

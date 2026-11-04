@@ -1,4 +1,4 @@
-//! One framed connection to herdr-core through `hc connect`: JSON-RPC on
+//! One framed connection to h0x-core through `h0x-core connect`: JSON-RPC on
 //! channel 0, terminal byte streams on their own channels.
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -37,7 +37,7 @@ pub struct EventLines {
     seq: u64,
     /// Every terminal the stream describes, in its order (schema/README.md, Events).
     terminals: Vec<Value>,
-    /// Each terminal's highest `herdr.seen` among the label changes since the
+    /// Each terminal's highest `h0x.seen` among the label changes since the
     /// last `take_seen`: `terminals` keeps only the last, which may hide a
     /// write of ours under a later, lower one (docs/labels.md).
     seen: HashMap<String, u64>,
@@ -60,13 +60,13 @@ impl EventLines {
         EventLines { seq: snapshot["seq"].as_u64().unwrap_or(0), terminals, resynced: true, ..Default::default() }
     }
 
-    /// The `herdr.seen` values that went by, and whether a snapshot replaced everything.
+    /// The `h0x.seen` values that went by, and whether a snapshot replaced everything.
     pub fn take_seen(&mut self) -> (HashMap<String, u64>, bool) {
         (std::mem::take(&mut self.seen), std::mem::take(&mut self.resynced))
     }
 
     fn note_seen(&mut self, address: &Value, labels: &Value) {
-        let (Some(address), Some(seen)) = (address.as_str(), labels["herdr.seen"].as_str().and_then(|s| s.parse::<u64>().ok())) else { return };
+        let (Some(address), Some(seen)) = (address.as_str(), labels["h0x.seen"].as_str().and_then(|s| s.parse::<u64>().ok())) else { return };
         let high = self.seen.entry(address.to_owned()).or_default();
         *high = (*high).max(seen);
     }
@@ -216,7 +216,7 @@ pub fn core_min() -> &'static str {
 }
 
 fn semver(v: &str) -> (u64, u64, u64) {
-    let mut p = v.trim().trim_start_matches("hc ").split(['.', '-']).map(|n| n.parse::<u64>().unwrap_or(0));
+    let mut p = v.trim().trim_start_matches("h0x-core ").split(['.', '-']).map(|n| n.parse::<u64>().unwrap_or(0));
     (p.next().unwrap_or(0), p.next().unwrap_or(0), p.next().unwrap_or(0))
 }
 
@@ -281,7 +281,7 @@ impl Core {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .context("cannot run `hc connect`: is herdr-core installed?")?;
+            .context("cannot run `h0x-core connect`: is h0x-core installed?")?;
         let mut stdin = child.stdin.take().unwrap();
         let mut reader = BufReader::new(child.stdout.take().unwrap());
         stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"hello\",\"params\":{\"framed\":true}}\n")?;
@@ -293,7 +293,7 @@ impl Core {
         }
 
         let (writer, frames) = mpsc::channel::<Vec<u8>>();
-        std::thread::Builder::new().name("hc-writer".into()).spawn(move || {
+        std::thread::Builder::new().name("core-writer".into()).spawn(move || {
             while let Ok(frame) = frames.recv() {
                 if stdin.write_all(&frame).is_err() {
                     break;
@@ -311,7 +311,7 @@ impl Core {
             child: Mutex::new(child),
             lost,
         });
-        std::thread::Builder::new().name("hc-reader".into()).spawn(move || {
+        std::thread::Builder::new().name("core-reader".into()).spawn(move || {
             let _lost_tx = lost_tx;
             while let Some((channel, kind, payload)) = read_frame(&mut reader) {
                 let mut r = routes.lock().unwrap();
@@ -391,9 +391,9 @@ impl Core {
     }
 
     /// Starts a program in a new core terminal and returns its address (`tN`).
-    /// Starts a terminal, here or on another machine (`on`: its name in `hc machine ls`).
+    /// Starts a terminal, here or on another machine (`on`: its name in `h0x-core machine ls`).
     pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>, size: Option<(u16, u16)>) -> Result<String> {
-        let env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "herdr"});
+        let env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "h0x"});
         let mut params = json!({"argv": argv, "cwd": cwd, "env": env, "labels": labels, "on": on, "keep": true});
         // Released cores ignore unknown parameters, including when forwarding to another machine.
         if let Some((cols, rows)) = size {
@@ -545,13 +545,13 @@ mod tests {
     #[test]
     fn a_seen_write_stays_known_under_a_later_lower_one() {
         let labels = |seq: u64, seen: &str| {
-            format!("{}\n", json!({"method": "event", "params": {"seq": seq, "type": "labels", "terminal": "t1", "data": {"labels": {"herdr.seen": seen}}}}))
+            format!("{}\n", json!({"method": "event", "params": {"seq": seq, "type": "labels", "terminal": "t1", "data": {"labels": {"h0x.seen": seen}}}}))
         };
         let mut lines = EventLines::new(&json!({"seq": 1, "terminals": [{"address": "t1", "state": "live", "labels": {}}]}));
         assert_eq!(lines.take_seen(), (HashMap::new(), true), "a snapshot: can't tell");
         // Ours (5), then another client's mark unread (4), in one drain.
         lines.push(format!("{}{}", labels(2, "5"), labels(3, "4")).as_bytes());
-        assert_eq!(lines.live()["terminals"][0]["labels"]["herdr.seen"], "4");
+        assert_eq!(lines.live()["terminals"][0]["labels"]["h0x.seen"], "4");
         assert_eq!(lines.take_seen(), (HashMap::from([("t1".to_owned(), 5)]), false));
         assert_eq!(lines.take_seen(), (HashMap::new(), false));
         lines.push(format!("{}\n", json!({"method": "missed", "params": {"seq": 9, "terminals": []}})).as_bytes());
@@ -592,7 +592,7 @@ mod tests {
             lost,
         };
         let start = std::time::Instant::now();
-        assert!(core.call("doc.get", json!({"name":"herdr-app"})).unwrap_err().to_string().contains("lost the core"));
+        assert!(core.call("doc.get", json!({"name":"h0x-ade"})).unwrap_err().to_string().contains("lost the core"));
         assert!(start.elapsed() < Duration::from_secs(1));
         assert!(core.routes.lock().unwrap().replies.is_empty());
     }
@@ -622,9 +622,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires an isolated HC_SESSION=test-* and a running hc on PATH"]
+    #[ignore = "requires an isolated H0X_CORE_SESSION=test-* and a running h0x-core on PATH"]
     fn two_app_viewers_answer_queries_without_idle_size_theft() {
-        assert!(std::env::var("HC_SESSION").unwrap().starts_with("test-"));
+        assert!(std::env::var("H0X_CORE_SESSION").unwrap().starts_with("test-"));
         let root = std::path::PathBuf::from(std::env::var_os("XDG_STATE_HOME").unwrap());
         std::fs::create_dir_all(&root).unwrap();
         let core = Core::connect().unwrap();

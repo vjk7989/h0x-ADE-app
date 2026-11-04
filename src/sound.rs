@@ -1,5 +1,5 @@
-//! Attention sounds, as Herdr plays them: one when an agent needs you, one
-//! when it finished while you weren't looking. Bundled sounds (Herdr's), or a
+//! Attention sounds, as HyperOx plays them: one when an agent needs you, one
+//! when it finished while you weren't looking. Bundled sounds (HyperOx's), or a
 //! file from settings.json; played with whichever MP3-capable player exists
 //! (Windows plays them itself).
 
@@ -26,9 +26,9 @@ const PLAYERS: &[(&str, &[&str])] = &[
 #[cfg(not(windows))]
 const PLAYER_LIMIT: Duration = Duration::from_secs(15);
 
-/// `done`, `blocked`, or a file (absolute, or relative to ~/.config/herdr-app). Off the UI thread.
+/// `done`, `blocked`, or a file (absolute, or relative to ~/.config/h0x-ade). Off the UI thread.
 pub fn play(sound: &str) {
-    if std::env::var_os("HERDR_APP_NO_SOUND").is_some() {
+    if std::env::var_os("H0X_ADE_NO_SOUND").is_some() {
         return;
     }
     let sound = sound.to_owned();
@@ -64,7 +64,7 @@ fn custom(sound: &str) -> Option<PathBuf> {
 /// The bundled sound, written once to a temp file players can open.
 fn bundled(sound: &str) -> Result<PathBuf, String> {
     let (name, bytes) = if sound == "done" { ("done", DONE) } else { ("blocked", BLOCKED) };
-    let path = std::env::temp_dir().join(format!("herdr-app-{}-{name}.mp3", std::process::id()));
+    let path = std::env::temp_dir().join(format!("h0x-ade-{}-{name}.mp3", std::process::id()));
     if !path.exists() {
         std::fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     }
@@ -78,7 +78,7 @@ fn play_file(path: &Path) -> Result<(), String> {
     use windows_sys::Win32::Media::Multimedia::mciSendStringW;
     static NEXT: AtomicU32 = AtomicU32::new(0);
     // Its own alias, so two sounds can overlap.
-    let alias = format!("herdr{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    let alias = format!("h0x{}", NEXT.fetch_add(1, Ordering::Relaxed));
     let mci = |cmd: String| {
         let wide: Vec<u16> = cmd.encode_utf16().chain([0]).collect();
         match unsafe { mciSendStringW(wide.as_ptr(), std::ptr::null_mut(), 0, std::ptr::null_mut()) } {

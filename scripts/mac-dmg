@@ -4,10 +4,10 @@
 # Uses the same APPLE_CERTIFICATE_* and APPLE_API_* secrets as mac-sign/notary-test.
 set -euo pipefail
 
-app=${1:?usage: mac-dmg signed-Herdr.app output.dmg}
-out=${2:?usage: mac-dmg signed-Herdr.app output.dmg}
+app=${1:?usage: mac-dmg signed-HyperOx.app output.dmg}
+out=${2:?usage: mac-dmg signed-HyperOx.app output.dmg}
 [[ $(uname -s) == Darwin ]] || { echo 'mac-dmg requires macOS' >&2; exit 1; }
-[[ $(basename "$app") == Herdr.app && -d $app ]] || { echo 'expected a signed Herdr.app' >&2; exit 1; }
+[[ $(basename "$app") == HyperOx.app && -d $app ]] || { echo 'expected a signed HyperOx.app' >&2; exit 1; }
 [[ $out == *.dmg && ! -e $out ]] || { echo 'output must be a new .dmg file' >&2; exit 1; }
 : "${APPLE_CERTIFICATE_P12:?missing certificate}"
 : "${APPLE_CERTIFICATE_PASSWORD:?missing certificate password}"
@@ -17,7 +17,7 @@ out=${2:?usage: mac-dmg signed-Herdr.app output.dmg}
 for tool in create-dmg jq tiffutil xcrun; do command -v "$tool" >/dev/null; done
 root=$(cd "$(dirname "$0")/.." && pwd)
 umask 077
-work=$(mktemp -d "${TMPDIR:-/tmp}/herdr-dmg.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/h0x-ade-dmg.XXXXXX")
 # hdiutil reports physical paths (e.g. /private/tmp instead of /tmp).
 work=$(cd "$work" && pwd -P)
 start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -49,22 +49,22 @@ codesign --verify --deep --strict "$app"
 signature=$(codesign -dvv "$app" 2>&1)
 [[ $signature == *"Authority=Developer ID Application:"* ]] || { echo 'DMG requires a Developer ID signed app' >&2; exit 1; }
 mkdir "$work/source"
-ditto "$app" "$work/source/Herdr.app"
+ditto "$app" "$work/source/HyperOx.app"
 tiffutil -cathidpicheck "$root/distribution/macos/dmg/background.png" \
   "$root/distribution/macos/dmg/background@2x.png" -out "$work/background.tiff"
 # create-dmg handles Finder's layout on macOS CI runners too. Do not use
 # --skip-jenkins: it silently drops the background and icon positions.
-create-dmg --volname Herdr --volicon "$root/assets/icons/Herdr.icns" \
+create-dmg --volname HyperOx --volicon "$root/assets/icons/HyperOx.icns" \
   --window-size 660 400 --background "$work/background.tiff" \
-  --icon-size 128 --icon Herdr.app 165 190 --hide-extension Herdr.app \
-  --app-drop-link 495 190 "$work/Herdr.dmg" "$work/source"
-"$root/scripts/mac-sign" "$work/Herdr.dmg"
+  --icon-size 128 --icon HyperOx.app 165 190 --hide-extension HyperOx.app \
+  --app-drop-link 495 190 "$work/HyperOx.dmg" "$work/source"
+"$root/scripts/mac-sign" "$work/HyperOx.dmg"
 build_seconds=$((SECONDS - started))
 printf '%s' "$APPLE_API_KEY" > "$work/key.p8"
 auth=(--key "$work/key.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
 notary_started=$SECONDS
 status=0
-xcrun notarytool submit "$work/Herdr.dmg" "${auth[@]}" --wait --timeout 30m \
+xcrun notarytool submit "$work/HyperOx.dmg" "${auth[@]}" --wait --timeout 30m \
   --output-format json | tee "$work/submission.json" || status=$?
 notary_seconds=$((SECONDS - notary_started))
 if [[ $status != 0 ]] || ! jq -e '.status == "Accepted"' "$work/submission.json" >/dev/null; then
@@ -75,9 +75,9 @@ if [[ $status != 0 ]] || ! jq -e '.status == "Accepted"' "$work/submission.json"
   echo 'DMG notarization failed' >&2
   exit 1
 fi
-xcrun stapler staple "$work/Herdr.dmg"
-xcrun stapler validate "$work/Herdr.dmg"
-spctl --assess --type open --context context:primary-signature --verbose=2 "$work/Herdr.dmg"
+xcrun stapler staple "$work/HyperOx.dmg"
+xcrun stapler validate "$work/HyperOx.dmg"
+spctl --assess --type open --context context:primary-signature --verbose=2 "$work/HyperOx.dmg"
 mkdir -p "$(dirname "$out")"
-mv "$work/Herdr.dmg" "$out"
+mv "$work/HyperOx.dmg" "$out"
 echo "mac-dmg: $out"

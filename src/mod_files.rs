@@ -30,7 +30,7 @@ fn write(path: &Path, text: &str, expected: Option<&str>) -> Result<(), String> 
     }
     if read(path)?.as_deref() != expected {
         return Err(
-            "The file changed outside Herdr. Reload before saving; your draft is still here."
+            "The file changed outside HyperOx. Reload before saving; your draft is still here."
                 .into(),
         );
     }
@@ -47,7 +47,7 @@ fn write(path: &Path, text: &str, expected: Option<&str>) -> Result<(), String> 
     // Resolve symlinks so replacing the file does not replace the link itself.
     let target = crate::persist::resolve_target(path).map_err(|e| e.to_string())?;
     let temp = target.with_file_name(format!(
-        ".herdr-app-write-{}",
+        ".h0x-ade-write-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn creates_updates_and_rejects_stale_text() {
         let root = std::path::PathBuf::from("/var/tmp").join(format!(
-            "herdr-app-files-{}",
+            "h0x-ade-files-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

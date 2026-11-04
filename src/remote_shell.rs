@@ -1,8 +1,8 @@
 //! The shell used to check and launch agents on another machine.
 
 pub fn check(commands: &[String]) -> Vec<String> {
-    let posix = "for c; do unalias -- \"$c\" 2>/dev/null; command -v \"$c\" >/dev/null 2>&1 && printf 'herdr-has:%s\\n' \"$c\"; done";
-    in_shell(posix, "for c in $argv[2..]; command -v $c >/dev/null 2>&1; and printf 'herdr-has:%s\\n' $c; end", posix, commands.to_vec())
+    let posix = "for c; do unalias -- \"$c\" 2>/dev/null; command -v \"$c\" >/dev/null 2>&1 && printf 'h0x-has:%s\\n' \"$c\"; done";
+    in_shell(posix, "for c in $argv[2..]; command -v $c >/dev/null 2>&1; and printf 'h0x-has:%s\\n' $c; end", posix, commands.to_vec())
 }
 
 pub fn launch(command: Vec<String>) -> Vec<String> {
@@ -45,10 +45,10 @@ mod tests {
         fn new() -> Self {
             use std::os::unix::fs::PermissionsExt;
             static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let dir = std::env::temp_dir().join(format!("herdr-shell-{}-{} 'home", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            let dir = std::env::temp_dir().join(format!("h0x-ade-shell-{}-{} 'home", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
             std::fs::create_dir_all(dir.join("agent bin")).unwrap();
-            let login = "export HERDR_TEST_LOGIN=loaded\nexport HERDR_TEST_BIN=\"$HOME/agent bin\"\n";
-            let interactive = "export PATH=\"$HERDR_TEST_BIN:$PATH\"\nprintf 'rc greeting without newline'\nsleep 0.1\nfixture_function() { :; }\nalias missing_agent='printf alias'\n";
+            let login = "export H0X_ADE_TEST_LOGIN=loaded\nexport H0X_ADE_TEST_BIN=\"$HOME/agent bin\"\n";
+            let interactive = "export PATH=\"$H0X_ADE_TEST_BIN:$PATH\"\nprintf 'rc greeting without newline'\nsleep 0.1\nfixture_function() { :; }\nalias missing_agent='printf alias'\n";
             for (file, text) in [
                 (".zprofile", login.to_owned()),
                 (".zshrc", interactive.to_owned()),
@@ -58,7 +58,7 @@ mod tests {
                 std::fs::write(dir.join(file), text).unwrap();
             }
             let agent = dir.join("agent bin/fixture_agent");
-            std::fs::write(&agent, "#!/bin/sh\nprintf '<%s>\\n' \"$HERDR_TEST_LOGIN\" \"$@\"\n").unwrap();
+            std::fs::write(&agent, "#!/bin/sh\nprintf '<%s>\\n' \"$H0X_ADE_TEST_LOGIN\" \"$@\"\n").unwrap();
             std::fs::set_permissions(agent, std::fs::Permissions::from_mode(0o755)).unwrap();
             Self(dir)
         }
@@ -103,9 +103,9 @@ mod tests {
         let commands = ["fixture_agent", "fixture_function", "missing_agent", "missing'command;false"].map(String::from);
         let out = home.run(check(&commands), Some(shell));
         let stdout = String::from_utf8(out.stdout).unwrap();
-        assert!(stdout.contains("herdr-has:fixture_agent\n"), "{stdout:?}: {}", String::from_utf8_lossy(&out.stderr));
-        assert!(stdout.contains("herdr-has:fixture_function\n"), "{stdout:?}");
-        assert!(!stdout.contains("herdr-has:missing"), "{stdout:?}");
+        assert!(stdout.contains("h0x-has:fixture_agent\n"), "{stdout:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(stdout.contains("h0x-has:fixture_function\n"), "{stdout:?}");
+        assert!(!stdout.contains("h0x-has:missing"), "{stdout:?}");
     }
 
     fn launches_agent(shell: &str) {
@@ -152,8 +152,8 @@ mod tests {
         std::fs::write(config.join("config.fish"), "if status is-interactive\nset -gx PATH \"$HOME/agent bin\" $PATH\necho rc greeting\nsleep 0.1\nend\n").unwrap();
         let out = home.run(check(&["fixture_agent".into(), "missing_agent".into()]), Some(shell));
         let stdout = String::from_utf8(out.stdout).unwrap();
-        assert!(stdout.contains("herdr-has:fixture_agent\n"), "{stdout:?}");
-        assert!(!stdout.contains("herdr-has:missing"), "{stdout:?}");
+        assert!(stdout.contains("h0x-has:fixture_agent\n"), "{stdout:?}");
+        assert!(!stdout.contains("h0x-has:missing"), "{stdout:?}");
         let out = home.run(launch(vec!["fixture_agent".into(), "a 'quoted' task; $(not-a-command)".into(), "".into()]), Some(shell));
         let stdout = String::from_utf8(out.stdout).unwrap();
         assert!(stdout.contains("<a 'quoted' task; $(not-a-command)>\n<>\n"), "{stdout:?}");
@@ -163,7 +163,7 @@ mod tests {
     fn missing_shell_keeps_working_with_sh() {
         let home = Home::new();
         let out = home.run(check(&["printf".into()]), None);
-        assert!(String::from_utf8(out.stdout).unwrap().contains("herdr-has:printf\n"));
+        assert!(String::from_utf8(out.stdout).unwrap().contains("h0x-has:printf\n"));
         let out = home.run(launch(vec!["/usr/bin/printf".into(), "%s".into(), "literal 'argument'".into()]), None);
         // The account's own shell may still greet (zsh on macOS runners).
         let stdout = String::from_utf8(out.stdout).unwrap();
@@ -186,7 +186,7 @@ mod tests {
         symlink("/bin/bash", &shell).unwrap();
         let shell = shell.to_str().unwrap();
         let out = home.run(check(&["fixture_agent".into()]), Some(shell));
-        assert!(String::from_utf8(out.stdout).unwrap().contains("herdr-has:fixture_agent\n"));
+        assert!(String::from_utf8(out.stdout).unwrap().contains("h0x-has:fixture_agent\n"));
         let out = home.run(launch(vec!["fixture_agent".into(), "literal".into()]), Some(shell));
         assert!(String::from_utf8(out.stdout).unwrap().contains("<loaded>\n<literal>\n"));
     }
@@ -197,7 +197,7 @@ mod tests {
         let home = Home::new();
         std::fs::write(home.0.join(".tcshrc"), "# scratch shell home\n").unwrap();
         let out = home.run(check(&["printf".into()]), Some("/bin/tcsh"));
-        assert!(String::from_utf8(out.stdout).unwrap().contains("herdr-has:printf\n"));
+        assert!(String::from_utf8(out.stdout).unwrap().contains("h0x-has:printf\n"));
         let out = home.run(launch(vec!["/usr/bin/printf".into(), "%s".into(), "literal 'argument'".into()]), Some("/bin/tcsh"));
         assert!(String::from_utf8(out.stdout).unwrap().contains("literal 'argument'"));
     }

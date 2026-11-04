@@ -8,7 +8,7 @@ struct Fixture(PathBuf);
 impl Fixture {
     fn new(source: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let dir = PathBuf::from(format!("/var/tmp/herdr-lifecycle-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let dir = PathBuf::from(format!("/var/tmp/h0x-lifecycle-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("main.js"), source).unwrap();
         Self(dir)
@@ -110,7 +110,7 @@ fn mod_run_rejects_unknown_arguments_before_queueing_a_command(cx: &mut TestAppC
     cx.update(gpui_shell::init);
     let fixture = Fixture::new(r#"
 import { View, div } from "gpui-kit";
-import { run } from "herdr";
+import { run } from "h0x";
 import { note } from "fixture";
 export default class extends View {
   init() {
@@ -143,7 +143,7 @@ fn focus_command_lets_a_mod_take_arrow_keys(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let fixture = Fixture::new(r#"
 import { View, div } from "gpui-kit";
-import { nextCommand } from "herdr";
+import { nextCommand } from "h0x";
 import { note } from "fixture";
 export default class extends View {
   init(_props, cx) {

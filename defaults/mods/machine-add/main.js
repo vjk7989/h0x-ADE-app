@@ -1,6 +1,6 @@
 // Add a machine: the hosts in ~/.ssh/config to pick from (or type one),
-// each added with one click (`hc machine add`). When the machine needs
-// something first (herdr-core installed there, a password, a new host
+// each added with one click (`h0x-core machine add`). When the machine needs
+// something first (h0x-core installed there, a password, a new host
 // key), the same command opens in a small terminal window where you answer
 // it; the list sees the machine once it's added. Opened as a dialog
 // (`mod.open machine-add`); the sidebars' Add machine and the welcome
@@ -8,7 +8,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { hc, exec, home, readTextFile, theme, props, closeOverlay, openOverlay } from "herdr";
+import { core, exec, home, readTextFile, theme, props, closeOverlay, openOverlay } from "h0x";
 
 const I = (name) => `mods/workspace-chrome/${name}.svg`;
 
@@ -85,7 +85,7 @@ export default class MachineAdd extends View {
   }
 
   async refresh() {
-    const r = await hc(["machine", "ls", "--json"]).catch(() => null);
+    const r = await core(["machine", "ls", "--json"]).catch(() => null);
     try {
       this.added = r?.code === 0 ? (JSON.parse(r.stdout).machines ?? []).filter((m) => !m.temporary) : [];
     } catch {
@@ -108,7 +108,7 @@ export default class MachineAdd extends View {
     this.state[target] = "adding";
     cx.notify();
     cx.spawn(async (cx) => {
-      const r = await hc(["machine", "add", target, "--json"]).catch((e) => ({ code: 1, stderr: String(e), stdout: "" }));
+      const r = await core(["machine", "add", target, "--json"]).catch((e) => ({ code: 1, stderr: String(e), stdout: "" }));
       let why = null;
       try {
         why = r.code === 0 ? null : (JSON.parse(r.stdout || r.stderr).error ?? { message: (r.stderr || r.stdout).trim() });
@@ -136,9 +136,9 @@ export default class MachineAdd extends View {
   async checkMac(target) {
     const m = this.added.find((x) => x.target === target || x.name === target);
     if (!m) return;
-    const r = await exec("sh", ["-c", 'uname; command -v herdr-core || echo "$HOME/.local/bin/herdr-core"'], { on: m.name }).catch(() => null);
+    const r = await exec("sh", ["-c", 'uname; command -v h0x-core || echo "$HOME/.local/bin/h0x-core"'], { on: m.name }).catch(() => null);
     const [os, core] = (r?.stdout ?? "").trim().split("\n");
-    if (os === "Darwin") this.macs[target] = { name: m.name, core: core ?? "~/.local/bin/herdr-core" };
+    if (os === "Darwin") this.macs[target] = { name: m.name, core: core ?? "~/.local/bin/h0x-core" };
   }
 
   macCard(t, target) {
@@ -158,7 +158,7 @@ export default class MachineAdd extends View {
           .text_size(12.5)
           .line_height("18px")
           .text_color(t.muted)
-          .child("macOS asks on the Mac's own screen before an agent reads Desktop, Documents or Downloads, and waits until someone answers. Give herdr-core Full Disk Access there and it never asks again: in the list, press + and pick this file:"),
+          .child("macOS asks on the Mac's own screen before an agent reads Desktop, Documents or Downloads, and waits until someone answers. Give h0x-core Full Disk Access there and it never asks again: in the list, press + and pick this file:"),
       )
       .child(div().px(8).py(4).rounded(6).bg(t.background).border_1().border_color(t.border).text_size(12).text_color(t.foreground).child(mac.core))
       .child(
@@ -192,13 +192,13 @@ export default class MachineAdd extends View {
 
   // The same add in a terminal, for what only the person can answer.
   async inTerminal(target) {
-    const r = await hc(["run", "--bg", "--json", "--no-parent", "--name", `add-${target.replace(/[^a-z0-9_-]/gi, "-").toLowerCase()}`.slice(0, 32), "--", "hc", "machine", "add", target]).catch(() => null);
+    const r = await core(["run", "--bg", "--json", "--no-parent", "--name", `add-${target.replace(/[^a-z0-9_-]/gi, "-").toLowerCase()}`.slice(0, 32), "--", "h0x-core", "machine", "add", target]).catch(() => null);
     let address = null;
     try {
       address = r?.code === 0 ? JSON.parse(r.stdout).address : null;
     } catch {}
     if (!address) {
-      this.state[target] = "Couldn't open a terminal for it. Run `hc machine add " + target + "` in one.";
+      this.state[target] = "Couldn't open a terminal for it. Run `h0x-core machine add " + target + "` in one.";
       return;
     }
     openOverlay({
@@ -322,7 +322,7 @@ export default class MachineAdd extends View {
           .text_size(12.8)
           .line_height("19px")
           .text_color(t.muted)
-          .child("A VPS, a Mac mini, a box at home: Herdr reaches it over ssh, and agents there keep running while your laptop sleeps."),
+          .child("A VPS, a Mac mini, a box at home: HyperOx reaches it over ssh, and agents there keep running while your laptop sleeps."),
       )
       .child(div().pt(16).pb(6).text_size(11.5).font_medium().text_color(t.dim).child(hosts.length ? "From your ssh config" : "Your ssh config lists no hosts"))
       .child(

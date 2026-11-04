@@ -1,4 +1,4 @@
-// Herdr 98's drawing kit: Windows 98 colors, bevels, buttons, title bars,
+// HyperOx 98's drawing kit: Windows 98 colors, bevels, buttons, title bars,
 // menus' bits and sounds, shared by every role of the win98 mod.
 //
 // Pixels: Win98 is drawn in whole device pixels. `unit()` gives u(n): n Win98
@@ -7,7 +7,7 @@
 
 import { div, svg, image, PathBuilder, Background } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { settings, shared, setShared, playSound, run, layout, openOverlay, closeOverlay, exec, window as appWindow } from "herdr";
+import { settings, shared, setShared, playSound, run, layout, openOverlay, closeOverlay, exec, window as appWindow } from "h0x";
 
 export const C = {
   face: "#c0c0c0",
@@ -403,7 +403,7 @@ export { closeOverlay };
 
 // ---- sounds
 
-/** Plays a Herdr 98 sound unless sounds are off (settings, or the speaker in the tray). */
+/** Plays a HyperOx 98 sound unless sounds are off (settings, or the speaker in the tray). */
 export function sfx(name) {
   if (settings()?.sounds?.enabled === false) return;
   if (shared("win98.mute") === true) return;
@@ -448,7 +448,7 @@ export function fitLayout() {
   const k = scale() / z;
   const want = (n) => Math.round(n * k * 1000) / 1000;
   let changed = false;
-  // Large Fonts: the MS-DOS font at a crisp 32 px too; Small: Herdr's zoom as usual.
+  // Large Fonts: the MS-DOS font at a crisp 32 px too; Small: HyperOx's zoom as usual.
   const font = scale() === 2 ? want(16) : 16;
   if (Math.abs((l.font_size ?? 0) - font) > 0.01) {
     l.font_size = font;

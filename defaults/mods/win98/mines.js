@@ -1,6 +1,6 @@
 import { div, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { shared, setShared } from "herdr";
+import { shared, setShared } from "h0x";
 import { unit, root, C, bevel, button, win, icon, label, own, apps, setApp, openMenu, openDialog, sfx, ASSETS } from "./kit.js";
 
 const LEVELS = { beginner: [9, 9, 10], intermediate: [16, 16, 40], expert: [30, 16, 99] };
@@ -126,7 +126,7 @@ export default class Mines {
     if (help) return [
       { label: "&Contents", act: { run: ["app.help"] } },
       { sep: true },
-      { label: "&About Mines...", act: { dialog: { kind: "message", title: "About Mines", text: "Mines\nHerdr 98\n\nFind all the mines without uncovering one.\nRight-click to mark a mine. Double-click a number to clear its neighbors." } } },
+      { label: "&About Mines...", act: { dialog: { kind: "message", title: "About Mines", text: "Mines\nHyperOx 98\n\nFind all the mines without uncovering one.\nRight-click to mark a mine. Double-click a number to clear its neighbors." } } },
     ];
     const item = (name, cmd, extra = {}) => ({ label: name, ...extra, act: { shared: ["win98.mines.req", { cmd, t: Date.now() }] } });
     return [item("&New", "new", { shortcut: "F2" }), { sep: true },

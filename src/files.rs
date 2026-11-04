@@ -378,7 +378,7 @@ mod tests {
     }
 
     fn test_repo(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("herdr-watch-{name}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("h0x-watch-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         assert!(std::process::Command::new("git").arg("init").arg("-q").arg(&root).status().unwrap().success());
@@ -506,7 +506,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn oversized_trees_reject_instead_of_silently_missing_nested_changes() {
-        let root = std::env::temp_dir().join(format!("herdr-watch-limit-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("h0x-watch-limit-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         for i in 0..MAX_DIRECTORIES {
             std::fs::create_dir_all(root.join(i.to_string())).unwrap();

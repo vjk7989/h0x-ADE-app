@@ -48,7 +48,7 @@ mod tests {
     #[test]
     fn atomic_write_preserves_symlink_chains_and_dangling_targets() {
         let root = std::env::temp_dir().join(format!(
-            "herdr-persist-{}-{}",
+            "h0x-ade-persist-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn atomic_write_rejects_symlink_cycles() {
-        let link = std::env::temp_dir().join(format!("herdr-persist-cycle-{}", std::process::id()));
+        let link = std::env::temp_dir().join(format!("h0x-ade-persist-cycle-{}", std::process::id()));
         symlink(&link, &link).unwrap();
         assert!(write_atomic(&link, "ignored").is_err());
         assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());

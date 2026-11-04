@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "herdr";
+import { core, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "h0x";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -15,7 +15,7 @@ const SECTIONS = [
   { id: "privacy", title: "Privacy", icon: "shield" },
 ];
 
-const LOOKS = { main: "Herdr", terminals: "Terminals", win98: "Herdr 98" };
+const LOOKS = { main: "HyperOx", terminals: "Terminals", win98: "HyperOx 98" };
 const APPEARANCES = [
   [null, "System"],
   ["light", "Light"],
@@ -543,7 +543,7 @@ export default class Settings extends View {
     if (this.machineLoading) return;
     this.machineLoading = true;
     try {
-      const r = await hc(["machine", "ls", "--json"]);
+      const r = await core(["machine", "ls", "--json"]);
       if (r.code !== 0) throw new Error(r.stderr || r.stdout || "Couldn't read machines.");
       const list = JSON.parse(r.stdout).machines;
       if (!Array.isArray(list)) throw new Error("Couldn't read machines.");
@@ -568,12 +568,12 @@ export default class Settings extends View {
       try {
         const args = ["machine", action, machine];
         if (action === "rename") args.push(name.trim());
-        const r = await hc(args);
+        const r = await core(args);
         let payload = null;
         try { payload = JSON.parse(r.stdout || r.stderr); } catch {}
         if (r.code !== 0) throw new Error(payload?.error?.message || (r.stderr || r.stdout || "It didn't work.").trim());
         const message = action === "update"
-          ? `Updated ${machine}${payload?.version ? ` to hc ${payload.version}` : ""}; its terminals kept running.`
+          ? `Updated ${machine}${payload?.version ? ` to h0x-core ${payload.version}` : ""}; its terminals kept running.`
           : action === "rename" ? `Renamed ${machine} to ${name.trim()}.` : `Removed ${machine}; its terminals keep running there.`;
         if (action === "update") this.machineResults[machine] = { message, ok: true };
         else this.machineNotice = message;
@@ -633,9 +633,9 @@ export default class Settings extends View {
         .child(div().w(7).h(7).flex_none().rounded(4).bg(color))
         .child(v_flex().flex_1().min_w(0).gap(3)
           .child(div().text_size(14).text_color(t.foreground).child(m.name))
-          .child(div().text_size(12.5).text_color(t.dim).child(`${m.target ?? ""} · ${state} · ${m.version ? `hc ${m.version}` : "hc version unknown"}`)))
+          .child(div().text_size(12.5).text_color(t.dim).child(`${m.target ?? ""} · ${state} · ${m.version ? `h0x-core ${m.version}` : "h0x-core version unknown"}`)))
         .child(controls.flex_none()));
-    if (busy === "update") row.child(div().text_size(12.5).text_color(t.dim).child("Copying this computer's herdr-core. Its terminals keep running."));
+    if (busy === "update") row.child(div().text_size(12.5).text_color(t.dim).child("Copying this computer's h0x-core. Its terminals keep running."));
     if (edit && !busy) {
       const cancel = this.button(t, `st-m-cancel-${m.name}`, "Cancel", (_e, cx) => { this.machineEdit = null; this.handle.focus(); cx.notify(); });
       if (edit.action === "rm") row.child(v_flex().gap(8)
@@ -656,7 +656,7 @@ export default class Settings extends View {
     return v_flex().w_full()
       .child(this.heading(t, "Machines"))
       .child(div().pb(8).text_size(12.5).line_height("18px").text_color(t.dim).child("Your computers, reached over ssh. Their terminals keep running when you disconnect."))
-      .child(this.row(t, "This computer", `Connected · ${version ? `hc ${version}` : "hc version unknown"}`, div().w(7).h(7).rounded(4).bg(t.ansi2)))
+      .child(this.row(t, "This computer", `Connected · ${version ? `h0x-core ${version}` : "h0x-core version unknown"}`, div().w(7).h(7).rounded(4).bg(t.ansi2)))
       .children((this.machineList ?? []).map((m) => this.machineRow(t, m, version)))
       .when(this.machineList === null && !this.machineError, (el) => el.child(h_flex().py(14).gap(8).items_center().child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)).child(div().text_size(12.5).text_color(t.dim).child("Reading machines…"))))
       .when(this.machineList?.length === 0, (el) => el.child(div().py(14).text_size(12.5).text_color(t.dim).child("No other machines yet.")))
@@ -670,7 +670,7 @@ export default class Settings extends View {
   alerts(t) {
     const sounds = this.person.sounds ?? {};
     const on = sounds.enabled !== false;
-    const file = (f) => (f ? f.split(/[\\/]/).pop() : "Herdr's sound");
+    const file = (f) => (f ? f.split(/[\\/]/).pop() : "HyperOx's sound");
     return v_flex()
       .w_full()
       .child(this.heading(t, "Sounds"))
@@ -722,27 +722,27 @@ export default class Settings extends View {
         ? [`${u.app.ready} is ready. Restart to switch now; it also switches when you quit.`, primary("st-app-update", "Restart to update", () => run("app.update"))]
         : [result, check("st-check-app")];
     const c = u.core;
-    const core = c.managed
+    const coreRow = c.managed
       ? [`Managed by ${c.managed}: update it there.`, null]
       : c.updating
         ? ["Updating\u2026 your terminals keep running.", null]
         : c.error
           ? [`The update failed: ${c.error}`, primary("st-core-retry", "Try again", () => run("app.update_core"))]
           : c.ready
-            ? [`${c.ready} is ready. Your terminals keep running through it.`, primary("st-core-update", "Update herdr-core", () => run("app.update_core"))]
+            ? [`${c.ready} is ready. Your terminals keep running through it.`, primary("st-core-update", "Update h0x-core", () => run("app.update_core"))]
             : u.checks
               ? [result, check("st-check-core")]
               : ["Not checked: a build from source looks for no updates.", null];
     return v_flex()
       .w_full()
-      .child(this.heading(t, "Herdr"))
-      .child(this.row(t, `Herdr ${u.app.version}`, app[0], h_flex().gap(8).flex_none()
+      .child(this.heading(t, "HyperOx"))
+      .child(this.row(t, `HyperOx ${u.app.version}`, app[0], h_flex().gap(8).flex_none()
         .child(this.button(t, "st-whats-new", "What's new", () => { closeOverlay(props()?.overlay); run("app.whats_new"); }))
         .when(Boolean(app[1]), (el) => el.child(app[1]))))
       .child(div().h(18))
-      .child(this.heading(t, "herdr-core"))
-      .child(this.row(t, `herdr-core ${c.version ?? ""}`, core[0], core[1] ?? div()))
-      .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("Herdr looks for both every hour and tells you in the corner. herdr-core runs your terminals, so they keep running through its updates."));
+      .child(this.heading(t, "h0x-core"))
+      .child(this.row(t, `h0x-core ${c.version ?? ""}`, coreRow[0], coreRow[1] ?? div()))
+      .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("HyperOx looks for both every hour and tells you in the corner. h0x-core runs your terminals, so they keep running through its updates."));
   }
 
 
@@ -773,9 +773,9 @@ export default class Settings extends View {
 
   privacy(t) {
     const s = telemetry();
-    const on = s ? s.setting : this.person.telemetry !== false;
+    const on = s ? s.setting : this.person.telemetry === true;
     const at = (secs) => new Date(secs * 1000).toLocaleString();
-    const why = s?.off_because ? `Off for now: ${s.off_because} is set where Herdr started.` : null;
+    const why = s?.off_because ? `Off for now: ${s.off_because} is set where HyperOx started.` : null;
     const body = v_flex()
       .w_full()
       .child(this.heading(t, "Usage data"))
@@ -783,11 +783,11 @@ export default class Settings extends View {
         this.row(
           t,
           "Share anonymous usage data",
-          why ?? "Once a day: which agents and features you use, how many spaces and tabs, your system and Herdr's version. Never what's in your terminals, never names of files, folders or projects.",
+          why ?? "Off by default, and nothing is sent unless H0X_ADE_TELEMETRY_URL names a server where HyperOx started. When on: once a day, which agents and features you use, how many spaces and tabs, your system and HyperOx's version. Never what's in your terminals, never names of files, folders or projects.",
           this.toggle(t, "st-telemetry", on, (_e, cx) =>
             this.change((p) => {
-              if (on) p.telemetry = false;
-              else delete p.telemetry;
+              if (on) delete p.telemetry;
+              else p.telemetry = true;
             }, cx),
           ),
         ),
@@ -796,7 +796,7 @@ export default class Settings extends View {
         this.row(
           t,
           "What we send",
-          s && !s.sends ? "This build never sends: it's built from source. You can still see what a release would send." : "Exactly what leaves your computer, word for word.",
+          s && !s.sends ? "Nothing is sent: no H0X_ADE_TELEMETRY_URL is set. You can still see what would be sent." : "Exactly what leaves your computer, word for word.",
           this.button(t, "st-telemetry-show", this.showData ? "Hide" : "Show", (_e, cx) => {
             this.showData = !this.showData;
             cx.notify();

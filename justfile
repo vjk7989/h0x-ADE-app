@@ -3,21 +3,12 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 default:
     @just --list
 
-notes-clip scene version="":
-    bun scripts/notes-media.ts clip "{{scene}}" "{{version}}"
-
-notes-upload version:
-    bun scripts/notes-media.ts upload "{{version}}"
-
-notes-check version:
-    bun scripts/notes-media.ts check "{{version}}"
-
 check: test
 
 notices:
     bun scripts/notices.ts
 
-# Before a release: tests, docs, the next version's notes and clips, then what
+# Before a release: tests, docs, the next version's notes, then what
 # changed since the last release, to review by hand.
 [unix]
 pre-release: test docs-check
@@ -25,17 +16,15 @@ pre-release: test docs-check
     set -euo pipefail
     version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
     last=$(git describe --tags --abbrev=0 --match 'v*')
-    if grep -q "^## \[$version\]" CHANGELOG.md; then
-      bun scripts/notes-media.ts check "$version"
-    else
+    if ! grep -q "^## \[$version\]" CHANGELOG.md; then
       echo "note: CHANGELOG.md has no [$version] entry yet: write the release notes before tagging."
     fi
     echo; echo "Since $last:"; git log --oneline "$last"..HEAD
     echo
     if git diff --quiet "$last"..HEAD -- src/SKILL.md; then
-      echo "review: the agent manual (herdr-app --skill, src/SKILL.md) is unchanged since $last. Does it still match the changes above?"
+      echo "review: the agent manual (h0x-ade --skill, src/SKILL.md) is unchanged since $last. Does it still match the changes above?"
     else
-      echo "review: the agent manual (herdr-app --skill) changed since $last. Read it once more."
+      echo "review: the agent manual (h0x-ade --skill) changed since $last. Read it once more."
     fi
     echo "review: the mod guide (defaults/AGENTS.md), README.md and docs/ describe the changes above."
 

@@ -1,4 +1,4 @@
-//! ~/.config/herdr-app/keys.json: every key is a string action, reloaded live.
+//! ~/.config/h0x-ade/keys.json: every key is a string action, reloaded live.
 //!
 //! ```json
 //! {
@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 pub const ESCAPE_HATCH: &str = "ctrl-alt-shift-escape";
 
 /// The shipped keys: prefix-free; plain ctrl+letter always stays with the
-/// program. Herdr uses ctrl+shift (defaults/keys.json), or cmd on macOS
+/// program. HyperOx uses ctrl+shift (defaults/keys.json), or cmd on macOS
 /// (defaults/keys.macos.json, with Mac terminal editing keys).
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULTS: &str = include_str!("../defaults/keys.json");
@@ -62,7 +62,7 @@ pub fn path() -> std::path::PathBuf {
 /// `terminal` and `mod:` by order.
 fn tab(section: &str) -> Result<String, String> {
     match section {
-        "global" => Ok("Herdr".into()),
+        "global" => Ok("HyperOx".into()),
         "terminal" => Ok("Terminal".into()),
         s => match (s.strip_prefix("mod:"), s.strip_prefix("layout:")) {
             (Some(p), _) if !p.is_empty() => Ok(format!("mod == {p}")),
@@ -139,7 +139,7 @@ pub fn parse(text: &str) -> Result<Vec<KeyBinding>, String> {
                 continue;
             }
             if keys == ESCAPE_HATCH {
-                problems.push(format!("{ESCAPE_HATCH} is reserved for resetting Herdr"));
+                problems.push(format!("{ESCAPE_HATCH} is reserved for resetting HyperOx"));
                 continue;
             }
             let predicate = match KeyBindingContextPredicate::parse(&ctx) {

@@ -1,16 +1,17 @@
-//! The app's own updates. An installed app (Linux: `~/.local/share/herdr-app`,
-//! macOS: `Herdr.app`) checks `releases.herdr.dev/app/latest.json` a little
+//! The app's own updates. An installed app (Linux: `~/.local/share/h0x-ade`,
+//! macOS: `HyperOx.app`, Windows: `%LOCALAPPDATA%\Programs\h0x-ade`) checks
+//! the latest GitHub release's `latest.json` a little
 //! after it opens and every hour, downloads a newer build for this
 //! machine, checks its sha256 and unpacks it next to itself (`<install>.new`).
 //! The frame then shows "Restart"; the swap happens on restart or the next
 //! quit, or before opening the next window after a crash. The first start
-//! after a swap runs `hc update` for the core.
+//! after a swap runs `h0x-core update` for the core.
 //!
 //! A build from source never updates: only `scripts/package` (the release
-//! builds) sets `HERDR_APP_RELEASE`. `scripts/install-macos` makes a
-//! Herdr.app too, so the install's shape alone can't tell.
+//! builds) sets `H0X_ADE_RELEASE`. `scripts/install-macos` makes a
+//! HyperOx.app too, so the install's shape alone can't tell.
 //!
-//! The core is checked on the same clock (`core/latest.json`): a newer core
+//! The core is checked on the same clock (the core release's `latest.json`): a newer core
 //! of the same generation is offered (also applied after an app update), unless
 //! a package manager owns it. Within a generation a newer core only adds.
 
@@ -35,23 +36,23 @@ fn find_root() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
     let dir = exe.parent()?;
     if cfg!(target_os = "macos") {
-        // Herdr.app/Contents/MacOS/Herdr
+        // HyperOx.app/Contents/MacOS/HyperOx
         let bundle = dir.parent()?.parent()?;
         (bundle.extension()? == "app").then(|| bundle.to_path_buf())
     } else {
         // The release folder holds the binary and its icon; cargo's target/ doesn't.
-        dir.join("herdr-app.svg").is_file().then(|| dir.to_path_buf())
+        dir.join("h0x-ade.svg").is_file().then(|| dir.to_path_buf())
     }
 }
 
 /// The folder or bundle name inside a release tarball.
-const PACKED: &str = if cfg!(target_os = "macos") { "Herdr.app" } else { "herdr-app" };
+const PACKED: &str = if cfg!(target_os = "macos") { "HyperOx.app" } else { "h0x-ade" };
 
 fn beside(root: &Path, suffix: &str) -> PathBuf {
     let mut name = root.file_name().unwrap_or_default().to_os_string();
     name.push(suffix);
     // macOS: Spotlight skips a folder ending in `.noindex`, so a staged
-    // `Herdr.app.new` never shows up in search under that name.
+    // `HyperOx.app.new` never shows up in search under that name.
     if cfg!(target_os = "macos") {
         name.push(".noindex");
     }
@@ -70,7 +71,11 @@ fn target() -> String {
 }
 
 fn releases() -> String {
-    std::env::var("HERDR_RELEASES_URL").unwrap_or_else(|_| "https://releases.herdr.dev".into())
+    std::env::var("H0X_ADE_RELEASES_URL").unwrap_or_else(|_| "https://github.com/vjk7989/h0x-ADE-app/releases".into())
+}
+
+fn core_releases() -> String {
+    std::env::var("H0X_CORE_RELEASES_URL").unwrap_or_else(|_| "https://github.com/vjk7989/h0x-ADE-core/releases".into())
 }
 
 /// The version downloaded and waiting for a restart.
@@ -117,12 +122,12 @@ pub fn set_core(version: Option<String>, managed: Option<String>) {
 }
 
 fn checks_app() -> Option<PathBuf> {
-    root().filter(|_| option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some())
+    root().filter(|_| option_env!("H0X_ADE_RELEASE").is_some() || std::env::var_os("H0X_ADE_RELEASES_URL").is_some())
 }
 
 /// A release build checks the core; a source build only when pointed at a test release server.
 fn checks_core() -> bool {
-    option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some()
+    option_env!("H0X_ADE_RELEASE").is_some() || std::env::var_os("H0X_ADE_RELEASES_URL").is_some()
 }
 
 /// For the settings screen: both programs, what's waiting, when we last looked.
@@ -222,21 +227,18 @@ struct CoreRelease {
 }
 
 fn latest_core() -> Result<CoreRelease, String> {
-    let text = curl_text(&format!("{}/core/latest.json", releases()))?;
-    serde_json::from_str(&text).map_err(|e| format!("core/latest.json: {e}"))
+    let text = curl_text(&format!("{}/latest/download/latest.json", core_releases()))?;
+    serde_json::from_str(&text).map_err(|e| format!("core latest.json: {e}"))
 }
 
 fn after_update_target<'a>(have: &str, latest: Option<&'a CoreRelease>, generation: u64, core_min: &'a str) -> Option<&'a str> {
-    if newer("0.1.5", have) {
-        return None;
-    }
     Some(match latest {
         Some(latest) if latest.generation == Some(generation) && newer(&latest.version, have) => &latest.version,
         _ => core_min,
     })
 }
 
-/// `hc update` (terminals keep running; the app reconnects when the core restarts).
+/// `h0x-core update` (terminals keep running; the app reconnects when the core restarts).
 pub fn update_core() {
     {
         let mut c = CORE.lock().unwrap();
@@ -252,7 +254,7 @@ pub fn update_core() {
         c.updating = false;
         match result {
             Ok(now) => {
-                c.version = Some(now.trim_start_matches("hc ").to_owned());
+                c.version = Some(now.trim_start_matches("h0x-core ").to_owned());
                 c.ready = None;
                 crate::telemetry::count("core_update_ok");
             }
@@ -270,7 +272,7 @@ fn check(root: &Path) -> Result<Option<String>, String> {
 }
 
 fn check_from(root: &Path, releases: &str) -> Result<Option<String>, String> {
-    let path = "app/latest.json";
+    let path = "latest/download/latest.json";
     let text = curl_text(&format!("{releases}/{path}"))?;
     let manifest: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
     let version = manifest["version"].as_str().ok_or(format!("{path}: no version"))?;
@@ -279,7 +281,7 @@ fn check_from(root: &Path, releases: &str) -> Result<Option<String>, String> {
     }
     // Notes are optional: a missing feed must never hold up the update.
     if !crate::update_notes::has(version)
-        && let Ok(text) = curl_text(&format!("{releases}/app/{version}/changelog.md"))
+        && let Ok(text) = curl_text(&format!("{releases}/download/v{version}/changelog.md"))
     {
         crate::update_notes::cache(&text);
     }
@@ -291,7 +293,7 @@ fn check_from(root: &Path, releases: &str) -> Result<Option<String>, String> {
     let (Some(url), Some(sha)) = (entry["url"].as_str(), entry["sha256"].as_str()) else {
         return Ok(None);
     };
-    tracing::info!("downloading Herdr {version}");
+    tracing::info!("downloading HyperOx {version}");
     let work = beside(root, ".download");
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
@@ -386,20 +388,20 @@ fn run(cmd: &mut Command) -> Result<(), String> {
 
 fn exe_in(app: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
-        app.join("Contents/MacOS/Herdr")
+        app.join("Contents/MacOS/HyperOx")
     } else {
-        app.join(format!("herdr-app{}", std::env::consts::EXE_SUFFIX))
+        app.join(format!("h0x-ade{}", std::env::consts::EXE_SUFFIX))
     }
 }
 
-/// What `herdr-app --version` says in this folder or bundle (`0.2.0`).
+/// What `h0x-ade --version` says in this folder or bundle (`0.2.0`).
 fn version_of(app: &Path) -> Option<String> {
     let out = crate::spawn::command(exe_in(app)).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     if !out.status.success() {
         return None;
     }
-    text.trim().strip_prefix("herdr-app ").map(str::to_owned)
+    text.trim().strip_prefix("h0x-ade ").map(str::to_owned)
 }
 
 /// `a` is a later version than `b` (semver; `0.2.0-rc.1` comes before `0.2.0`).
@@ -446,11 +448,11 @@ fn startup_target<'a>(running: &str, staged: Option<&'a str>, relaunched: Option
 /// Recover a staged hotfix even when the previous window never quit cleanly.
 /// The inherited expected version allows only one automatic relaunch.
 pub fn apply_on_startup() -> bool {
-    let expected = std::env::var("HERDR_APP_UPDATE_EXPECTED").ok();
+    let expected = std::env::var("H0X_ADE_UPDATE_EXPECTED").ok();
     if let Some(expected) = &expected {
         // SAFETY: startup runs before any app threads. Do not leak the guard
         // into the core's environment and every terminal it later starts.
-        unsafe { std::env::remove_var("HERDR_APP_UPDATE_EXPECTED") };
+        unsafe { std::env::remove_var("H0X_ADE_UPDATE_EXPECTED") };
         if expected != env!("CARGO_PKG_VERSION") {
             tracing::warn!("update: relaunched as {}, expected {expected}; not retrying", env!("CARGO_PKG_VERSION"));
         }
@@ -511,7 +513,7 @@ fn relaunch_expected(expected: Option<&str>) -> bool {
     let script = format!("Wait-Process -Id {} -ErrorAction SilentlyContinue; Start-Process '{exe}'", std::process::id());
     let mut command = crate::spawn::command("powershell");
     if let Some(expected) = expected {
-        command.env("HERDR_APP_UPDATE_EXPECTED", expected);
+        command.env("H0X_ADE_UPDATE_EXPECTED", expected);
     }
     let spawned = command
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
@@ -534,16 +536,16 @@ fn relaunch_expected(expected: Option<&str>) -> bool {
     let Some(root) = root() else { return false };
     // LaunchServices need not preserve the startup guard or an isolated home.
     let open = if cfg!(target_os = "macos") {
-        if expected.is_some() { "exec \"$1/Contents/MacOS/Herdr\"" } else { "open \"$1\"" }
+        if expected.is_some() { "exec \"$1/Contents/MacOS/HyperOx\"" } else { "open \"$1\"" }
     } else {
-        "exec \"$1/herdr-app\""
+        "exec \"$1/h0x-ade\""
     };
     let script = format!("while kill -0 \"$0\" 2>/dev/null; do sleep 0.1; done; {open}");
     let spawned = {
         use std::os::unix::process::CommandExt;
         let mut command = Command::new("sh");
         if let Some(expected) = expected {
-            command.env("HERDR_APP_UPDATE_EXPECTED", expected);
+            command.env("H0X_ADE_UPDATE_EXPECTED", expected);
         }
         command
             .arg("-c")
@@ -571,10 +573,9 @@ fn marker() -> PathBuf {
 }
 
 /// The first start after an app update brings the core to the latest release
-/// of this app's generation (`hc update --version`, terminals kept). If the
+/// of this app's generation (`h0x-core update --version`, terminals kept). If the
 /// release check fails or offers another generation, keep the minimum pin.
-/// Cores before 0.1.5 lack `--version`: they keep their same-generation update
-/// path. A core a package manager owns is left alone (hc says so).
+/// A core a package manager owns is left alone (h0x-core says so).
 pub fn after_update() {
     if std::fs::remove_file(marker()).is_err() {
         return;
@@ -583,7 +584,7 @@ pub fn after_update() {
         let have = crate::core_bin::version(&crate::core_bin::path()).unwrap_or_default();
         CORE.lock().unwrap().updating = true;
         let latest = latest_core().map_err(|e| tracing::warn!("core release check after app update: {e}")).ok();
-        let target = after_update_target(have.trim_start_matches("hc "), latest.as_ref(), crate::hc::GENERATION, crate::hc::core_min());
+        let target = after_update_target(have.trim_start_matches("h0x-core "), latest.as_ref(), crate::hc::GENERATION, crate::hc::core_min());
         let result = crate::core_bin::update_to(target);
         let mut core = CORE.lock().unwrap();
         core.updating = false;
@@ -592,12 +593,12 @@ pub fn after_update() {
                 if let Some(root) = root() {
                     let _ = std::fs::remove_dir_all(beside(&root, ".old"));
                 }
-                tracing::info!("herdr-core is {now}");
-                core.version = Some(now.trim_start_matches("hc ").to_owned());
+                tracing::info!("h0x-core is {now}");
+                core.version = Some(now.trim_start_matches("h0x-core ").to_owned());
                 core.error = None;
             }
             Err(e) => {
-                tracing::warn!("herdr-core update: {e}");
+                tracing::warn!("h0x-core update: {e}");
                 core.error = Some(e);
             }
         }
@@ -627,14 +628,14 @@ mod tests {
                     stream.read_exact(&mut byte).unwrap();
                     request.push(byte[0]);
                 }
-                assert!(request.starts_with(b"GET /app/latest.json HTTP/1.1\r\n"));
+                assert!(request.starts_with(b"GET /latest/download/latest.json HTTP/1.1\r\n"));
                 if recover {
                     let body = format!(r#"{{"version":"{}"}}"#, env!("CARGO_PKG_VERSION"));
                     write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
                 }
             }
         });
-        let home = std::env::temp_dir().join(format!("herdr-offline-check-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("h0x-ade-offline-check-{}", std::process::id()));
         let mut checked = checked_at(true, 100);
         assert_eq!(checked, Some(100));
         let failed = check_from(&home, &url);
@@ -663,13 +664,13 @@ mod tests {
     #[test]
     fn stages_need_a_receipt_and_a_matching_executable() {
         use std::os::unix::fs::PermissionsExt;
-        let work = std::env::temp_dir().join(format!("herdr-update-{}", std::process::id()));
+        let work = std::env::temp_dir().join(format!("h0x-ade-update-{}", std::process::id()));
         let root = work.join(PACKED);
         let staged = beside(&root, ".new");
         let receipt = beside(&root, ".new.json");
         let exe = exe_in(&staged);
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
-        std::fs::write(&exe, "#!/bin/sh\necho herdr-app 0.1.8\n").unwrap();
+        std::fs::write(&exe, "#!/bin/sh\necho h0x-ade 0.1.8\n").unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(staged_version(&root), None);
         assert!(staged.is_dir()); // Legacy stages are left for the checker.
@@ -704,7 +705,7 @@ mod tests {
     #[test]
     fn unknown_signature_does_not_modify_the_bundle() {
         use std::os::unix::process::ExitStatusExt;
-        let work = std::env::temp_dir().join(format!("herdr-unknown-signature-{}", std::process::id()));
+        let work = std::env::temp_dir().join(format!("h0x-ade-unknown-signature-{}", std::process::id()));
         let plist = work.join("Contents/Info.plist");
         std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
         std::fs::write(&plist, "unchanged plist").unwrap();
@@ -724,8 +725,8 @@ mod tests {
     #[ignore = "downloads the current release; runs real codesign on isolated bundles"]
     fn macos_unpack_preserves_release_signature_and_prepares_dev_builds() {
         let version = env!("CARGO_PKG_VERSION");
-        let manifest: serde_json::Value = serde_json::from_str(&curl_text(&format!("{}/app/{version}/manifest.json", releases())).unwrap()).unwrap();
-        let work = std::env::temp_dir().join(format!("herdr-signature-test-{}", std::process::id()));
+        let manifest: serde_json::Value = serde_json::from_str(&curl_text(&format!("{}/download/v{version}/latest.json", releases())).unwrap()).unwrap();
+        let work = std::env::temp_dir().join(format!("h0x-ade-signature-test-{}", std::process::id()));
         let signed = work.join("signed");
         let reference = work.join("reference");
         std::fs::create_dir_all(&signed).unwrap();
@@ -736,7 +737,7 @@ mod tests {
         assert_eq!(release_signature(signature.status.success(), &String::from_utf8_lossy(&signature.stderr)), Ok(true));
         run(Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(&app)).unwrap();
         run(Command::new("tar").arg("-xzf").arg(signed.join("app.tar.gz")).arg("-C").arg(&reference)).unwrap();
-        for file in ["Contents/Info.plist", "Contents/MacOS/Herdr", "Contents/_CodeSignature/CodeResources"] {
+        for file in ["Contents/Info.plist", "Contents/MacOS/HyperOx", "Contents/_CodeSignature/CodeResources"] {
             assert_eq!(std::fs::read(app.join(file)).unwrap(), std::fs::read(reference.join(PACKED).join(file)).unwrap(), "{file} was modified");
         }
         for kind in ["adhoc", "unsigned"] {
@@ -787,11 +788,10 @@ mod tests {
         }
         for latest in [None, Some(release("0.2.0", Some(2))), Some(release("0.1.13", None))] {
             assert_eq!(after_update_target("0.1.12", latest.as_ref(), 1, "0.1.11"), Some("0.1.11"));
-            assert_eq!(after_update_target("0.1.4", latest.as_ref(), 1, "0.1.11"), None);
         }
-        assert_eq!(after_update_target("0.1.4", Some(&latest), 1, "0.1.11"), None);
-        assert_eq!(after_update_target("0.1.5", Some(&latest), 1, "0.1.11"), Some("0.1.13"));
-        assert_eq!(after_update_target("0.1.5", None, 1, "0.1.11"), Some("0.1.11"));
+        // Every h0x-core release has `update --version`: the first one is bumped too.
+        assert_eq!(after_update_target("0.1.0", Some(&latest), 1, "0.1.11"), Some("0.1.13"));
+        assert_eq!(after_update_target("0.1.0", None, 1, "0.1.11"), Some("0.1.11"));
     }
 
     #[test]

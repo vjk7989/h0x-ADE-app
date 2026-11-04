@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, run, theme, home, openOverlay, window as win } from "herdr";
+import { spaces, panes, run, theme, home, openOverlay, window as win } from "h0x";
 
 const C = {
   tray: "#1d1f22",

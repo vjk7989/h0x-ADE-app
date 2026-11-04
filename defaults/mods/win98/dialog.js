@@ -3,9 +3,9 @@
 //   confirm   { title, text, icon, buttons: [{ label, default, act }] }
 //   message   { title, text, icon }
 //   run       Run...: a command line in a new tab
-//   shutdown  Shut Down Herdr: stand by, shut down, restart, MS-DOS mode
+//   shutdown  Shut Down HyperOx: stand by, shut down, restart, MS-DOS mode
 //   logoff    back to the main layout
-//   about     About Herdr 98
+//   about     About HyperOx 98
 //   taskman   Close Program: every terminal, End Task kills it
 //   display   Display Properties: scale, desktop color, sounds, assistant
 //   datetime  Date/Time Properties
@@ -15,8 +15,8 @@
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import {
-  props, closeOverlay, run, shared, setShared, terminals, spaces, agents, updates, hc, layout, openOverlay, home, settings,
-} from "herdr";
+  props, closeOverlay, run, shared, setShared, terminals, spaces, agents, updates, core, layout, openOverlay, home, settings,
+} from "h0x";
 import {
   C, ASSETS, FONT, DOS, unit, root, win, bevel, button, field, well, label, plain, icon, programIcon, sfx, perform, etch,
   scale, gradient, openDialog, dosPath, setApp,
@@ -25,13 +25,13 @@ import { userName } from "./taskbar.js";
 
 const KIND_TITLE = {
   run: "Run",
-  shutdown: "Shut Down Herdr",
-  logoff: "Log Off Herdr",
-  about: "About Herdr 98",
+  shutdown: "Shut Down HyperOx",
+  logoff: "Log Off HyperOx",
+  about: "About HyperOx 98",
   taskman: "Close Program",
   display: "Display Properties",
   datetime: "Date/Time Properties",
-  welcome: "Welcome to Herdr 98",
+  welcome: "Welcome to HyperOx 98",
   mycomputer: "My Computer",
   network: "Network Neighborhood",
   bin: "Recycle Bin",
@@ -65,7 +65,7 @@ export default class Dialog {
     if ((this.kind === "prompt" && p.machines) || this.kind === "network")
       cx.spawn(async (cx) => {
         try {
-          const r = await hc(["machine", "ls", "--json"]);
+          const r = await core(["machine", "ls", "--json"]);
           this.machines = r.code === 0 ? (JSON.parse(r.stdout).machines ?? []).filter((m) => !m.temporary) : [];
         } catch {}
         cx.notify();
@@ -128,7 +128,7 @@ export default class Dialog {
             .child("It's now safe to turn off")
             .child("your computer."),
         );
-    const msg = this.p.mode === "shutdown" || this.stage === 0 ? "Herdr is shutting down..." : "Starting Herdr 98...";
+    const msg = this.p.mode === "shutdown" || this.stage === 0 ? "HyperOx is shutting down..." : "Starting HyperOx 98...";
     return div()
       .size_full()
       .relative()
@@ -394,7 +394,7 @@ export default class Dialog {
           .gap(u(12))
           .items_start()
           .child(icon(u, "run", 32))
-          .child(v_flex().flex_1().children(lines("Type the name of a program, and Herdr will\nopen it for you in a new window."))),
+          .child(v_flex().flex_1().children(lines("Type the name of a program, and HyperOx will\nopen it for you in a new window."))),
       )
       .child(
         h_flex()
@@ -473,7 +473,7 @@ export default class Dialog {
             v_flex()
               .flex_1()
               .gap(u(2))
-              .child("Herdr 98")
+              .child("HyperOx 98")
               .child(`Version ${up?.app?.version ?? "4.10.1998"} Second Edition`)
               .child("Copyright \u00a9 1981-2026 The Herd Corp.")
               .child(div().h(u(6)))
@@ -485,7 +485,7 @@ export default class Dialog {
               .child(div().h(u(4)))
               .child(`Terminals running:  ${n}`)
               .child(`Agents at work:  ${a}`)
-              .child(`herdr-core:  ${up?.core?.version ?? "?"}`)
+              .child(`h0x-core:  ${up?.core?.version ?? "?"}`)
               .child("Physical memory available to agents:  64.0 MB RAM"),
           ),
       )
@@ -627,7 +627,7 @@ export default class Dialog {
         .child(this.check(u, "snd", "Play &sounds (startup, dialogs, games)", shared("win98.mute") !== true, () => setShared("win98.mute", shared("win98.mute") !== true)))
         .child(this.check(u, "clippy", "Show the &Office Assistant", shared("win98.clippy") !== "off", () => setShared("win98.clippy", shared("win98.clippy") === "off" ? "on" : "off")))
         .child(etch(u))
-        .child(v_flex().text_color(C.gray).children(lines("Sounds also follow Herdr's own setting\n(Control Panel > Alerts)."))),
+        .child(v_flex().text_color(C.gray).children(lines("Sounds also follow HyperOx's own setting\n(Control Panel > Alerts)."))),
       v_flex()
         .gap(u(10))
         .p(u(6))
@@ -635,7 +635,7 @@ export default class Dialog {
         .child(this.radio(u, "s1", "&Small Fonts (pixel perfect)", scaleNow === 1, () => setShared("win98.scale", 1)))
         .child(this.radio(u, "s2", "&Large Fonts (every pixel doubled)", scaleNow === 2, () => setShared("win98.scale", 2)))
         .child(etch(u))
-        .child(v_flex().text_color(C.gray).children(lines(`Herdr's zoom is ${settings()?.zoom ?? 1}x; Herdr 98 draws whole\npixels at any zoom.`))),
+        .child(v_flex().text_color(C.gray).children(lines(`HyperOx's zoom is ${settings()?.zoom ?? 1}x; HyperOx 98 draws whole\npixels at any zoom.`))),
     ][this.page];
     return v_flex()
       .p(u(8))
@@ -777,11 +777,11 @@ export default class Dialog {
 
   renderWelcome(u) {
     const items = [
-      { icon: "programs", title: "Begin an Agent", text: "Herdr runs your coding agents in windows,\nlike it's 1998 and the future at once.\n\nStart one from Start > Programs > Agents,\nor open the Run box and type its name.", go: "&Run...", act: { dialog: { kind: "run", value: "claude" } } },
-      { icon: "help", title: "Discover Herdr 98", text: "The taskbar is your tabs. The folders on\nthe desktop are your spaces. Each window\nis a pane: double-click its title bar to\nmaximize it, or use _ to minimize the tab.\n\nCtrl+Esc opens the Start menu.", go: "&Help", act: { run: ["app.help", {}] } },
+      { icon: "programs", title: "Begin an Agent", text: "HyperOx runs your coding agents in windows,\nlike it's 1998 and the future at once.\n\nStart one from Start > Programs > Agents,\nor open the Run box and type its name.", go: "&Run...", act: { dialog: { kind: "run", value: "claude" } } },
+      { icon: "help", title: "Discover HyperOx 98", text: "The taskbar is your tabs. The folders on\nthe desktop are your spaces. Each window\nis a pane: double-click its title bar to\nmaximize it, or use _ to minimize the tab.\n\nCtrl+Esc opens the Start menu.", go: "&Help", act: { run: ["app.help", {}] } },
       { icon: "mines", title: "Play Mines", text: "Your agent is thinking.\nYou've earned a break.\n\nSolitaire is on the desktop too.", go: "&Play", act: { app: "mines" } },
-      { icon: "taskman", title: "Maintain Your Computer", text: "See every program Herdr runs, and end\nthe ones you don't need anymore.\n\nCtrl+Shift+Esc opens it anytime.", go: "&Open", act: { dialog: { kind: "taskman" } } },
-      { icon: "logoff", title: "Leave Herdr 98", text: "Miss the future? Log Off takes you\nback to Herdr's normal layout.\nYour terminals keep running.", go: "&Log Off", act: { dialog: { kind: "logoff" } } },
+      { icon: "taskman", title: "Maintain Your Computer", text: "See every program HyperOx runs, and end\nthe ones you don't need anymore.\n\nCtrl+Shift+Esc opens it anytime.", go: "&Open", act: { dialog: { kind: "taskman" } } },
+      { icon: "logoff", title: "Leave HyperOx 98", text: "Miss the future? Log Off takes you\nback to HyperOx's normal layout.\nYour terminals keep running.", go: "&Log Off", act: { dialog: { kind: "logoff" } } },
     ];
     const it = items[this.sel] ?? items[0];
     const show = shared("win98.welcome") !== "off";
@@ -801,7 +801,7 @@ export default class Dialog {
               .gap(u(6))
               .child(icon(u, "start", 32))
               .child(div().text_size(u(22)).line_height(`${u(26)}px`).text_color(C.navy).child("Welcome to"))
-              .child(div().text_size(u(22)).line_height(`${u(26)}px`).font_weight(700).text_color(C.text).child("Herdr"))
+              .child(div().text_size(u(22)).line_height(`${u(26)}px`).font_weight(700).text_color(C.text).child("HyperOx"))
               .child(div().text_size(u(22)).line_height(`${u(26)}px`).text_color("#d07000").child("98")),
           ),
       )
@@ -859,7 +859,7 @@ export default class Dialog {
           .p(u(8))
           .justify_between()
           .items_center()
-          .child(this.check(u, "wl-show", "&Show this screen each time Herdr 98 starts", show, () => setShared("win98.welcome", show ? "off" : "on")))
+          .child(this.check(u, "wl-show", "&Show this screen each time HyperOx 98 starts", show, () => setShared("win98.welcome", show ? "off" : "on")))
           .child(this.btn(u, "close", "&Close", () => this.close())),
       );
   }
@@ -904,7 +904,7 @@ export default class Dialog {
         .w_full()
         .min_h(0),
     ).child(
-      this.frame(u, p.title ?? KIND_TITLE[this.kind] ?? "Herdr", body, {
+      this.frame(u, p.title ?? KIND_TITLE[this.kind] ?? "HyperOx", body, {
         icon: iconFor ? icon(u, iconFor, 16) : null,
         help: !explorerish,
       }),

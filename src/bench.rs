@@ -1,5 +1,5 @@
 //! Counts for `scripts/bench.py`: how often the window and terminals are drawn.
-//! With HERDR_APP_BENCH=<file>, one JSON line per second goes there.
+//! With H0X_ADE_BENCH=<file>, one JSON line per second goes there.
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -61,7 +61,7 @@ pub fn count(c: &AtomicU64) {
 }
 
 pub fn start() {
-    let Some(path) = std::env::var_os("HERDR_APP_BENCH") else { return };
+    let Some(path) = std::env::var_os("H0X_ADE_BENCH") else { return };
     std::thread::spawn(move || {
         use std::io::Write;
         let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else { return };

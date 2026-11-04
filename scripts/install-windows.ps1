@@ -1,5 +1,5 @@
 # Builds this checkout and installs it for the current Windows user.
-function Install-HerdrAppFiles($Binary, $Icon, $Destination) {
+function Install-H0xAdeFiles($Binary, $Icon, $Destination) {
     $ErrorActionPreference = "Stop"
     $Destination = [IO.Path]::GetFullPath($Destination)
     $stage = "$Destination.install-$([guid]::NewGuid().ToString('N'))"
@@ -7,8 +7,8 @@ function Install-HerdrAppFiles($Binary, $Icon, $Destination) {
     $installed = $false
     try {
         New-Item -ItemType Directory -Path $stage -Force | Out-Null
-        Copy-Item -LiteralPath $Binary -Destination "$stage\herdr-app.exe"
-        Copy-Item -LiteralPath $Icon -Destination "$stage\herdr-app.svg"
+        Copy-Item -LiteralPath $Binary -Destination "$stage\h0x-ade.exe"
+        Copy-Item -LiteralPath $Icon -Destination "$stage\h0x-ade.svg"
         # Renaming the folder leaves an already running app alive.
         if (Test-Path -LiteralPath $Destination) {
             Rename-Item -LiteralPath $Destination -NewName (Split-Path $backup -Leaf)
@@ -33,7 +33,7 @@ function Install-HerdrAppFiles($Binary, $Icon, $Destination) {
         }
         if ($installed -and (Test-Path -LiteralPath $backup)) {
             try { Remove-Item -LiteralPath $backup -Recurse -Force }
-            catch { Write-Warning "Previous build remains at $backup. Remove it after quitting Herdr." }
+            catch { Write-Warning "Previous build remains at $backup. Remove it after quitting HyperOx." }
         }
     }
 }
@@ -46,16 +46,16 @@ if ($env:OS -ne "Windows_NT") { throw "This installer requires Windows." }
 Push-Location "$PSScriptRoot\.."
 try {
     cargo build --release --locked --target-dir target
-    if ($LASTEXITCODE) { throw "Herdr build failed (exit $LASTEXITCODE)." }
-    $dir = Join-Path $env:LOCALAPPDATA "Programs\herdr-app"
-    Install-HerdrAppFiles "target\release\herdr-app.exe" "assets\icons\herdr-ui-icon-clean.svg" $dir
+    if ($LASTEXITCODE) { throw "HyperOx build failed (exit $LASTEXITCODE)." }
+    $dir = Join-Path $env:LOCALAPPDATA "Programs\h0x-ade"
+    Install-H0xAdeFiles "target\release\h0x-ade.exe" "assets\icons\h0x-ade-icon.svg" $dir
 } finally {
     Pop-Location
 }
 
-$menu = Join-Path ([Environment]::GetFolderPath("Programs")) "Herdr.lnk"
+$menu = Join-Path ([Environment]::GetFolderPath("Programs")) "HyperOx.lnk"
 $link = (New-Object -ComObject WScript.Shell).CreateShortcut($menu)
-$link.TargetPath = Join-Path $dir "herdr-app.exe"
+$link.TargetPath = Join-Path $dir "h0x-ade.exe"
 $link.WorkingDirectory = $env:USERPROFILE
 $link.Description = "Terminals and coding agents that keep running"
 $link.Save()
@@ -68,11 +68,11 @@ try {
     if (-not $listed) {
         $kind = if ($key.GetValueNames() -contains "Path") { $key.GetValueKind("Path") } else { [Microsoft.Win32.RegistryValueKind]::ExpandString }
         $key.SetValue("Path", $(if ($raw) { "$($raw.TrimEnd(';'));$dir" } else { $dir }), $kind)
-        [Environment]::SetEnvironmentVariable("HERDR_INSTALLING", "1", "User")
-        [Environment]::SetEnvironmentVariable("HERDR_INSTALLING", $null, "User")
+        [Environment]::SetEnvironmentVariable("H0X_ADE_INSTALLING", "1", "User")
+        [Environment]::SetEnvironmentVariable("H0X_ADE_INSTALLING", $null, "User")
     }
 } finally {
     $key.Close()
 }
 if (($env:Path -split ";") -notcontains $dir) { $env:Path += ";$dir" }
-Write-Host "Installed herdr-app. Quit and reopen Herdr to use the new build."
+Write-Host "Installed h0x-ade. Quit and reopen HyperOx to use the new build."

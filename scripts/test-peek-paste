@@ -2,8 +2,8 @@
 # Linux UI regression: paste/copy follow a peek's keyboard focus, not its source pane.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-export HERDR_APP_SANDBOX="peek-paste-test-$$"
-root="/var/tmp/herdr-app-$HERDR_APP_SANDBOX"
+export H0X_ADE_SANDBOX="peek-paste-test-$$"
+root="/var/tmp/h0x-ade-$H0X_ADE_SANDBOX"
 sandbox() { scripts/sandbox "$@"; }
 trap 'sandbox down' EXIT
 sandbox up
@@ -26,16 +26,16 @@ process.stdin.on("data", chunk => {
     received = Buffer.alloc(0);
   }
 });'
-child=$(sandbox hc run --bg --name peek-child bun -e "$probe" | jq -r .address)
+child=$(sandbox core run --bg --name peek-child bun -e "$probe" | jq -r .address)
 wait_for() {
   local expected=$1
   for _ in {1..100}; do
-    if sandbox hc read "$child" --lines 30 | grep -Fq "$expected"; then return; fi
+    if sandbox core read "$child" --lines 30 | grep -Fq "$expected"; then return; fi
     sleep 0.1
   done
   echo "missing from peek: $expected" >&2
-  sandbox hc read "$child" --lines 30
-  sandbox hc read "$parent" --lines 30
+  sandbox core read "$child" --lines 30
+  sandbox core read "$parent" --lines 30
   sandbox status
   return 1
 }
@@ -67,12 +67,12 @@ sandbox key C Control_L Shift_L
 [[ $(xsel --clipboard --output) == READY ]]
 sandbox do terminal.right_click '{"to":"program"}'
 for _ in {1..100}; do
-  if [[ $(sandbox hc get "$child" | jq -r '.labels["herdr.right-click"]') == program ]]; then break; fi
+  if [[ $(sandbox core get "$child" | jq -r '.labels["h0x.right-click"]') == program ]]; then break; fi
   sleep 0.1
 done
-[[ $(sandbox hc get "$child" | jq -r '.labels["herdr.right-click"]') == program ]]
-[[ $(sandbox hc get "$parent" | jq -r '.labels["herdr.right-click"]') == null ]]
-if sandbox hc read "$parent" --lines 30 | grep -Eq 'SENTINEL|PASTE:|CTRL_V'; then
+[[ $(sandbox core get "$child" | jq -r '.labels["h0x.right-click"]') == program ]]
+[[ $(sandbox core get "$parent" | jq -r '.labels["h0x.right-click"]') == null ]]
+if sandbox core read "$parent" --lines 30 | grep -Eq 'SENTINEL|PASTE:|CTRL_V'; then
   echo 'input leaked into the parent terminal' >&2
   exit 1
 fi

@@ -73,7 +73,7 @@ fn rpc_error(error: anyhow::Error) -> Outcome {
 
 fn read(core: &Core, machine: &str, timeout: Duration) -> Result<(Document, u64), Outcome> {
     let on = (!machine.is_empty()).then_some(machine);
-    let result = core.call_timeout("doc.get", json!({"name":"herdr-app", "on":on}), timeout).map_err(rpc_error)?;
+    let result = core.call_timeout("doc.get", json!({"name":"h0x-ade", "on":on}), timeout).map_err(rpc_error)?;
     let document = if result["value"].is_null() {
         Document::default()
     } else {
@@ -91,7 +91,7 @@ pub fn round_timeout(core: &Core, work: Work, timeout: Duration) -> (String, Out
     let on = (!work.machine.is_empty()).then_some(work.machine.as_str());
     let deadline = std::time::Instant::now() + timeout;
     let result = match work.write {
-        Some(document) => match core.call_timeout("doc.set", json!({"name":"herdr-app", "on":on, "version":work.version, "value":document}), timeout) {
+        Some(document) => match core.call_timeout("doc.set", json!({"name":"h0x-ade", "on":on, "version":work.version, "value":document}), timeout) {
             Ok(v) => match v["version"].as_u64() {
                 Some(version) => Outcome::Written(document, version),
                 None => Outcome::Undecodable("Layout write returned no version".into()),
@@ -182,10 +182,10 @@ mod tests {
     #[test]
     fn login_and_update_errors_keep_the_real_reason_and_hint() {
         for kind in ["needs_login", "needs_update"] {
-            let error = anyhow::Error::new(hc::RpcError(json!({"message":"cannot use machine", "data":{"kind":kind,"hint":"run hc machine login"}})));
+            let error = anyhow::Error::new(hc::RpcError(json!({"message":"cannot use machine", "data":{"kind":kind,"hint":"run h0x-core machine login"}})));
             let Outcome::Blocked(reason) = rpc_error(error) else { panic!("must not retry this error on a timer") };
             assert!(reason.contains("cannot use machine"));
-            assert!(reason.contains("run hc machine login"));
+            assert!(reason.contains("run h0x-core machine login"));
         }
     }
 }

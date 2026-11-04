@@ -6,7 +6,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, terminals, run, hc, theme, settings, props, closeOverlay, openOverlay, shared, setShared } from "herdr";
+import { agents, spaces, terminals, run, core, theme, settings, props, closeOverlay, openOverlay, shared, setShared } from "h0x";
 
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
@@ -49,7 +49,7 @@ export default class Picker extends View {
     this.handle = cx.focus_handle();
     cx.spawn(async (cx) => {
       try {
-        const r = await hc(["machine", "ls", "--json"]);
+        const r = await core(["machine", "ls", "--json"]);
         if (r.code === 0) this.machines = (JSON.parse(r.stdout).machines ?? []).filter((m) => m.state === "connected" && !m.temporary).map((m) => m.name);
       } catch {}
       cx.notify();

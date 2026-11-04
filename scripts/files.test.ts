@@ -16,7 +16,7 @@ const directory = new Function("exec", "window", `${directorySource}; return dir
 );
 
 test("Files lists literal folder names, not shell expressions", async () => {
-  const root = await mkdtemp(join(process.platform === "linux" ? "/var/tmp" : tmpdir(), "herdr-files-"));
+  const root = await mkdtemp(join(process.platform === "linux" ? "/var/tmp" : tmpdir(), "h0x-files-"));
   try {
     for (const name of ["Test Folder (ACME)", "O'Brien $folder; (ACME)", "O’Brien ‘quoted’ ‚low‛"]) {
       const folder = join(root, name);
@@ -33,7 +33,7 @@ test("Files lists literal folder names, not shell expressions", async () => {
 });
 
 test("Files preserves Unicode names when listing and expanding folders", async () => {
-  const root = await mkdtemp(join(tmpdir(), "herdr-files-unicode-"));
+  const root = await mkdtemp(join(tmpdir(), "h0x-files-unicode-"));
   try {
     const folder = "中文目录 O'Brien (测试)", file = "项目说明.txt", child = "子文件.txt";
     await mkdir(join(root, folder));
@@ -50,7 +50,7 @@ test("Files preserves Unicode names when listing and expanding folders", async (
 });
 
 test("Files follows directory links one level at a time", async () => {
-  const root = await mkdtemp(join(tmpdir(), "herdr-files-links-"));
+  const root = await mkdtemp(join(tmpdir(), "h0x-files-links-"));
   try {
     const target = join(root, "versions");
     await mkdir(target);

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """How much CPU the app uses, and how often it draws, in fixed scenarios.
 
-    scripts/bench.py [--bin target/release/herdr-app] [--seconds 20] [--sample]
+    scripts/bench.py [--bin target/release/h0x-ade] [--seconds 20] [--sample]
 
 Runs the app on its own temporary home and core session, so nothing of yours
-is touched; prints the artifact folder and keeps it after cleanup. Requires hc
+is touched; prints the artifact folder and keeps it after cleanup. Requires h0x-core
 on PATH and the Python running this script. Both scenario sets use only Python
 fixture programs. The window must stay
 visible while it runs (hidden windows aren't drawn, which flatters the
@@ -82,12 +82,12 @@ while True:
 def env():
     e = dict(os.environ)
     e.update(
-        HERDR_APP_HOME=f"{ROOT}/home",
-        HC_SESSION=SESSION,  # Short name avoids macOS socket-path limits.
+        H0X_ADE_HOME=f"{ROOT}/home",
+        H0X_CORE_SESSION=SESSION,  # Short name avoids macOS socket-path limits.
         XDG_STATE_HOME=f"{ROOT}/state",
         PYTHONIOENCODING="utf-8",
-        HERDR_APP_NO_SOUND="1",
-        HERDR_APP_BENCH=f"{ROOT}/frames.jsonl",
+        H0X_ADE_NO_SOUND="1",
+        H0X_ADE_BENCH=f"{ROOT}/frames.jsonl",
         WAYLAND_DISPLAY=e.get("WAYLAND_DISPLAY", ""),
     )
     for key in ("HC_SOCKET", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SCOPE"):
@@ -230,7 +230,7 @@ def rss_mb(pid):
 
 
 def core_pids():
-    out = subprocess.run(["hc", "server", "status", "--json"], env=env(), capture_output=True, text=True).stdout
+    out = subprocess.run(["h0x-core", "server", "status", "--json"], env=env(), capture_output=True, text=True).stdout
     s = json.loads(out or "{}")
     holders = [h["pid"] for h in s.get("holders", [])]
     return s.get("pid"), holders
@@ -239,9 +239,9 @@ def core_pids():
 def end_terminals():
     """Every terminal of the bench's core: they outlive `server stop` (their
     holder keeps them), and runs piling up end in too many open files."""
-    out = subprocess.run(["hc", "ls", "--json"], env=env(), capture_output=True, text=True).stdout
+    out = subprocess.run(["h0x-core", "ls", "--json"], env=env(), capture_output=True, text=True).stdout
     for t in json.loads(out or "{}").get("terminals", []):
-        subprocess.run(["hc", "kill", t["address"]], env=env(), capture_output=True)
+        subprocess.run(["h0x-core", "kill", t["address"]], env=env(), capture_output=True)
 
 
 def frames_since(offset):
@@ -317,7 +317,7 @@ def measure(name, app, seconds, sample):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--bin", default=os.path.join(HERE, "..", "target", "release", "herdr-app.exe" if sys.platform == "win32" else "herdr-app"))
+    ap.add_argument("--bin", default=os.path.join(HERE, "..", "target", "release", "h0x-ade.exe" if sys.platform == "win32" else "h0x-ade"))
     ap.add_argument("--seconds", type=int, default=20)
     ap.add_argument("--sample", action="store_true")
     ap.add_argument("--zoom", type=float, default=1.0)
@@ -331,7 +331,7 @@ def main():
     ONLY = a.only
     bin = os.path.abspath(a.bin)
 
-    ROOT = tempfile.mkdtemp(prefix="herdr-app-bench-", dir=None if sys.platform == "win32" else "/var/tmp")
+    ROOT = tempfile.mkdtemp(prefix="h0x-ade-bench-", dir=None if sys.platform == "win32" else "/var/tmp")
     SESSION = "hb" + os.path.basename(ROOT)[-6:]
     print(f"bench: {ROOT}", flush=True)
     with open(f"{ROOT}/run.json", "w") as f:
@@ -355,7 +355,7 @@ def main():
     app = awake = None
     rows = []
     try:
-        core = subprocess.run(["hc", "server", "start"], env=env(), capture_output=True, text=True)
+        core = subprocess.run(["h0x-core", "server", "start"], env=env(), capture_output=True, text=True)
         if core.returncode:
             sys.exit(f"bench: core startup failed: {core.stdout}{core.stderr}")
         app = subprocess.Popen([bin], env=env(), stdin=subprocess.DEVNULL, stdout=log, stderr=log)
@@ -424,7 +424,7 @@ def main():
             awake.terminate()
             awake.wait()
         end_terminals()
-        subprocess.run(["hc", "server", "stop"], env=env(), capture_output=True)
+        subprocess.run(["h0x-core", "server", "stop"], env=env(), capture_output=True)
         print(f"results: {ROOT}/results.json", flush=True)
 
 

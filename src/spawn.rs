@@ -1,5 +1,5 @@
 //! Starting programs. The app has no console on Windows, so each console
-//! program it starts (git, hc, curl) would open a window of its own.
+//! program it starts (git, h0x-core, curl) would open a window of its own.
 
 use std::ffi::OsStr;
 use std::process::Command;

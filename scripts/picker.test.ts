@@ -27,7 +27,7 @@ const values: Record<string, any> = {
   Input: { new: element }, InputState: { new: () => ({ on() {}, focus() {} }) },
   agents: () => [], spaces: () => [], terminals: () => [], theme: () => ({}),
   settings: () => ({ zoom: 1.2 }), props: () => ({}), shared: () => ({}),
-  setShared() {}, closeOverlay() {}, openOverlay() {}, run(...args: unknown[]) { commands.push(args); }, hc() {},
+  setShared() {}, closeOverlay() {}, openOverlay() {}, run(...args: unknown[]) { commands.push(args); }, core() {},
 };
 const Picker = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Picker", "return class Picker"))(...Object.values(values));
 const cx = { notify() {}, stop_propagation() {}, timer: { after() {} }, focus_handle() {}, spawn() {} };

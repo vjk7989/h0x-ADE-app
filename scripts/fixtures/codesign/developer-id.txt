@@ -1,9 +1,9 @@
-Executable=/private/tmp/herdr-codesign2/Herdr.app/Contents/MacOS/Herdr
-Identifier=dev.herdr.app
+Executable=/private/tmp/h0x-codesign2/HyperOx.app/Contents/MacOS/HyperOx
+Identifier=tech.pavii.h0xade
 Format=app bundle with Mach-O thin (arm64)
 CodeDirectory v=20500 size=498361 flags=0x10000(runtime) hashes=15563+7 location=embedded
 Signature size=9042
-Authority=Developer ID Application: Herdr, Inc. (2W9652Q7QR)
+Authority=Developer ID Application: HyperOx, Inc. (2W9652Q7QR)
 Authority=Developer ID Certification Authority
 Authority=Apple Root CA
 Timestamp=30 Oct 2026 at 01:45:11

@@ -46,10 +46,10 @@ fn manifest_inputs(manifest: &str) -> String {
 
 #[test]
 fn lock_fingerprint_tracks_third_party_packages_only() {
-    let workspace = BTreeSet::from(["herdr-app"]);
+    let workspace = BTreeSet::from(["h0x-ade"]);
     let lock = r#"
 [[package]]
-name = "herdr-app"
+name = "h0x-ade"
 version = "0.1.7"
 [[package]]
 name = "registry-dep"

@@ -1,17 +1,15 @@
-//! Explicit, person-reviewed beta feedback. No usage-data consent or install id.
-//! Screenshots are what the person pastes or picks, each shown before sending.
+//! Explicit, person-reviewed feedback. No usage-data consent or install id.
+//! Nothing is posted anywhere: sending opens a new issue on the app's GitHub
+//! repository in the browser, prefilled with the reviewed draft. Screenshots
+//! are what the person pastes or picks, each shown before sending; they stay
+//! in the form's folder so the person can drag them into the issue.
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
 pub const MAX_IMAGES: usize = 3;
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
-const ENDPOINT: &str = "https://telemetry.herdr.dev/v1/feedback";
-
-fn endpoint() -> Option<String> {
-    std::env::var("HERDR_FEEDBACK_URL").ok().filter(|u| !u.is_empty())
-        .or_else(|| option_env!("HERDR_APP_RELEASE").map(|_| ENDPOINT.to_owned()))
-}
+const ISSUES_URL: &str = "https://github.com/vjk7989/h0x-ADE-app/issues/new";
 
 pub fn draft(message: &str, email: &str, images: usize, from: &str, layout: &str) -> Value {
     json!({
@@ -46,7 +44,7 @@ pub fn attach(bytes: &[u8]) -> Result<String, String> {
     let (bytes, ext) = match sniff(bytes) {
         Some(ext) => (bytes.to_vec(), ext),
         None => {
-            let img = image::load_from_memory(bytes).map_err(|_| "That isn't an image Herdr can read.".to_owned())?;
+            let img = image::load_from_memory(bytes).map_err(|_| "That isn't an image HyperOx can read.".to_owned())?;
             let mut png = std::io::Cursor::new(Vec::new());
             img.write_to(&mut png, image::ImageFormat::Png).map_err(|_| "Couldn't convert that image.".to_owned())?;
             (png.into_inner(), "png")
@@ -92,8 +90,6 @@ fn shot_file(rel: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-pub fn available() -> bool { endpoint().is_some() }
-
 fn validate(body: &Value) -> Result<(), String> {
     let message = body["message"].as_str().unwrap_or_default();
     if message.is_empty() { return Err("Write a message first.".into()); }
@@ -110,58 +106,50 @@ fn validate(body: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Opens a new GitHub issue in the browser, prefilled with the reviewed draft.
+/// Screenshots are checked but never uploaded: they stay in the form's folder
+/// for the person to drag into the issue.
 pub async fn send(body: Value, shots: Vec<String>) -> Result<(), String> {
     validate(&body)?;
     if shots.len() > MAX_IMAGES || body["images"].as_u64() != Some(shots.len() as u64) {
         return Err("Up to 3 screenshots.".into());
     }
-    let files = shots.iter().map(|s| shot_file(s)).collect::<Result<Vec<_>, _>>()?;
-    let url = endpoint().ok_or("This build was made from source and doesn't send feedback. Use a release build.")?;
-    let (tx, rx) = async_channel::bounded(1);
-    std::thread::spawn(move || {
-        let result = post(&url, &body.to_string(), &files);
-        if result.is_ok() { clear_shots(); }
-        let _ = tx.send_blocking(result);
-    });
-    rx.recv().await.map_err(|_| "The feedback request was lost.".to_owned())?
+    shots.iter().map(|s| shot_file(s)).collect::<Result<Vec<_>, _>>()?;
+    crate::links::open(&crate::links::Target::Url(issue_url(&body)));
+    Ok(())
 }
 
-/// Text alone goes as JSON (what every version sends); with screenshots, as a
-/// form: the same JSON in `feedback`, each image in `image`.
-fn post(url: &str, body: &str, files: &[PathBuf]) -> Result<(), String> {
-    use std::io::Write;
-    use std::process::Stdio;
-    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
-    let network = || "Couldn't reach the feedback server. Check your connection and try again.".to_owned();
-    let mut args: Vec<String> = ["-sS", "--max-time", "60", "-X", "POST"].map(String::from).to_vec();
-    if files.is_empty() {
-        args.extend(["-H", "content-type: application/json", "--data-binary", "@-"].map(String::from));
-    } else {
-        args.extend(["-F".into(), "feedback=<-;type=application/json".into()]);
-        for f in files {
-            let kind = if f.extension().is_some_and(|e| e == "png") { "image/png" } else { "image/jpeg" };
-            args.extend(["-F".into(), format!("image=@{};type={kind}", f.display())]);
+/// `ISSUES_URL?title=…&body=…`: the message's first line as the title, the
+/// whole draft in the body.
+fn issue_url(body: &Value) -> String {
+    let message = body["message"].as_str().unwrap_or_default();
+    let title: String = message.lines().next().unwrap_or_default().chars().take(80).collect();
+    let field = |k: &str| body[k].as_str().unwrap_or_default().to_owned();
+    let email = field("email");
+    let text = format!(
+        "{message}\n\n---\n- from: {}\n- email: {}\n- app: {} ({} {})\n- core: {}\n- layout: {}\n- screenshots: {} (drag them into this issue)\n",
+        field("from"),
+        if email.is_empty() { "-" } else { email.as_str() },
+        body["app"]["version"].as_str().unwrap_or_default(),
+        body["app"]["os"].as_str().unwrap_or_default(),
+        body["app"]["arch"].as_str().unwrap_or_default(),
+        body["core"]["version"].as_str().unwrap_or("-"),
+        field("layout"),
+        body["images"].as_u64().unwrap_or(0),
+    );
+    format!("{ISSUES_URL}?title={}&body={}", encode(&title), encode(&text))
+}
+
+/// Percent-encodes everything but unreserved characters (RFC 3986).
+fn encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
         }
     }
-    args.extend(["-o", null, "-w", "%{http_code}", url].map(String::from));
-    let mut child = crate::spawn::command(crate::update::system("curl"))
-        .args(&args)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|_| network())?;
-    if child.stdin.take().ok_or_else(network)?.write_all(body.as_bytes()).is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(network());
-    }
-    let out = child.wait_with_output().map_err(|_| network())?;
-    if !out.status.success() { return Err(network()); }
-    match String::from_utf8_lossy(&out.stdout).trim() {
-        "204" => Ok(()),
-        "429" => Err("Too many, try in a minute.".into()),
-        "503" => Err("Not taking feedback right now. Try again later.".into()),
-        "400" => Err("The server couldn't accept this feedback. Check the message and email.".into()),
-        "413" => Err("The feedback is too large. Shorten the message or remove a screenshot.".into()),
-        _ => Err("The feedback server returned an unexpected answer. Try again later.".into()),
-    }
+    out
 }
 
 #[cfg(test)]
@@ -186,6 +174,20 @@ mod tests {
         }
         assert!(validate(&draft("ok", "a@b.c", 0, "person", "main")).is_ok());
     }
+    #[test]
+    fn the_issue_link_targets_the_repo_and_carries_the_draft() {
+        let url = issue_url(&draft("Tabs vanish\nafter a resize & reload", "me@x.y", 1, "person", "main"));
+        assert!(url.starts_with("https://github.com/vjk7989/h0x-ADE-app/issues/new?title=Tabs%20vanish&body="), "{url}");
+        assert_eq!(url.matches('&').count(), 1, "everything else is encoded: {url}");
+        assert!(url.contains("resize%20%26%20reload"), "{url}");
+        assert!(url.contains("email%3A%20me%40x.y"), "{url}");
+        assert!(url.contains("screenshots%3A%201"), "{url}");
+        let blank = issue_url(&draft("x", "", 0, "person", "main"));
+        assert!(blank.contains("email%3A%20-"), "{blank}");
+        assert_eq!(encode(""), "");
+        assert_eq!(encode("a b/\u{e9}"), "a%20b%2F%C3%A9");
+    }
+
     #[test]
     fn only_png_and_jpeg_leave_as_they_are() {
         assert_eq!(sniff(b"\x89PNG\r\n\x1a\nrest"), Some("png"));

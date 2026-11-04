@@ -1,5 +1,5 @@
-//! Mods: folders of JavaScript under ~/.config/herdr-app/mods that agents write and
-//! Herdr runs live (gpui-shell), plus the `herdr` module they import.
+//! Mods: folders of JavaScript under ~/.config/h0x-ade/mods that agents write and
+//! HyperOx runs live (gpui-shell), plus the `h0x` module they import.
 
 use crate::layout::Node;
 use gpui::App;
@@ -46,11 +46,11 @@ pub fn note_fonts(cx: &gpui::App) {
     *FONTS.lock().unwrap() = names;
 }
 
-/// The app's home: `$HERDR_APP_HOME` (tests, experiments), else
-/// `$XDG_CONFIG_HOME/herdr-app`, else `~/.config/herdr-app`, on every OS.
+/// The app's home: `$H0X_ADE_HOME` (tests, experiments), else
+/// `$XDG_CONFIG_HOME/h0x-ade`, else `~/.config/h0x-ade`, on every OS.
 pub fn app_dir() -> PathBuf {
     let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
-    env("HERDR_APP_HOME").unwrap_or_else(|| env("XDG_CONFIG_HOME").unwrap_or_else(|| home().join(".config")).join("herdr-app"))
+    env("H0X_ADE_HOME").unwrap_or_else(|| env("XDG_CONFIG_HOME").unwrap_or_else(|| home().join(".config")).join("h0x-ade"))
 }
 
 pub fn mods_dir() -> PathBuf {
@@ -69,7 +69,7 @@ pub fn write_workspace() -> std::io::Result<()> {
     if std::fs::read_to_string(dir.join("CLAUDE.md")).is_ok_and(|s| s == "@AGENTS.md\n") {
         let _ = std::fs::remove_file(dir.join("CLAUDE.md"));
     }
-    write_if_changed(&dir.join("herdr.d.ts"), DECLARATIONS)?;
+    write_if_changed(&dir.join("h0x.d.ts"), DECLARATIONS)?;
     let types = gpui_shell::type_declarations(&gpui_shell::FrozenComponentRegistry::default());
     write_if_changed(&dir.join("gpui-kit.d.ts"), &types)?;
     let _ = std::fs::remove_dir_all(frame_dir());
@@ -311,7 +311,7 @@ fn as_shipped(dir: &Path, files: &Files) -> bool {
 
 /// File path (inside the mod) to content fingerprint.
 type Files = std::collections::BTreeMap<String, String>;
-/// Default mods Herdr installed, with the files as installed.
+/// Default mods HyperOx installed, with the files as installed.
 type Installed = std::collections::BTreeMap<String, Files>;
 
 /// FNV-1a: stable across builds, unlike std's hasher.
@@ -320,7 +320,7 @@ fn fingerprint(bytes: &[u8]) -> String {
     format!("{h:016x}")
 }
 
-/// Whether every file Herdr installed is still there as installed.
+/// Whether every file HyperOx installed is still there as installed.
 fn untouched(dir: &Path, files: &Files) -> bool {
     files.iter().all(|(path, want)| std::fs::read(dir.join(path)).is_ok_and(|b| fingerprint(&b) == *want))
 }
@@ -391,7 +391,7 @@ pub enum Request {
     OpenOverlay { id: String, spec: Value },
     CloseOverlay { id: String },
     Refresh,
-    /// From `herdr-app do` / `herdr-app status` (control.rs); answer on `reply`.
+    /// From `h0x-ade do` / `h0x-ade status` (control.rs); answer on `reply`.
     Control { cmd: Value, reply: std::sync::mpsc::Sender<Value> },
 }
 
@@ -741,7 +741,7 @@ pub fn from_host(v: &HostValue) -> Value {
     }
 }
 
-pub const DECLARATIONS: &str = include_str!("../defaults/herdr.d.ts");
+pub const DECLARATIONS: &str = include_str!("../defaults/h0x.d.ts");
 
 fn strings(v: Option<&HostValue>) -> Vec<String> {
     v.and_then(HostValue::as_array).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_owned)).collect()).unwrap_or_default()
@@ -802,10 +802,10 @@ pub fn run_remote(machine: &str, command: &str, args: &[String], cwd: Option<Str
     hc_args.push("--".into());
     hc_args.push(command.into());
     hc_args.extend(args.iter().cloned());
-    let (_, out, err) = run_blocking("hc", &hc_args, None)?;
-    let v: Value = serde_json::from_str(out.trim()).or_else(|_| serde_json::from_str(err.trim())).map_err(|_| format!("hc exec: {}", err.trim()))?;
+    let (_, out, err) = run_blocking("h0x-core", &hc_args, None)?;
+    let v: Value = serde_json::from_str(out.trim()).or_else(|_| serde_json::from_str(err.trim())).map_err(|_| format!("h0x-core exec: {}", err.trim()))?;
     if let Some(e) = v.get("error") {
-        return Err(e.get("message").and_then(Value::as_str).unwrap_or("hc exec failed").to_owned());
+        return Err(e.get("message").and_then(Value::as_str).unwrap_or("h0x-core exec failed").to_owned());
     }
     if v.get("timed_out").and_then(Value::as_bool) == Some(true) {
         return Err(format!("{command} took longer than {} s on {machine} and was stopped", EXEC_LIMIT.as_secs()));
@@ -891,7 +891,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
     let (cmd_tx, commands) = async_channel::unbounded::<String>();
     COMMANDS.with(|c| c.borrow_mut().push((copy, inst.name.clone(), cmd_tx)));
-    HostModule::new("herdr")
+    HostModule::new("h0x")
         .declarations(DECLARATIONS)
         .async_function("exec", |a| {
             let command = a.string(0)?.to_owned();
@@ -909,7 +909,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             let expected = a.get(2).and_then(|v| match v { HostValue::Str(s) => Some(s.clone()), _ => None });
             Ok(crate::mod_files::write_text(a.string(0)?.to_owned(), a.string(1)?.to_owned(), expected))
         })
-        .async_function("hc", |a| Ok(exec_future("hc".into(), strings(a.get(0)), None, None)))
+        .async_function("core", |a| Ok(exec_future("h0x-core".into(), strings(a.get(0)), None, None)))
         .function("home", |_| Ok(home().to_string_lossy().into_owned().into()))
         .function("appHome", |_| Ok(app_dir().to_string_lossy().into_owned().into()))
         .function("fonts", |_| Ok(to_host(&json!(*FONTS.lock().unwrap()))))
@@ -922,7 +922,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .function("feedbackPreview", move |a| {
             let images = a.get(2).and_then(|v| match v { HostValue::Number(n) => Some(*n as usize), _ => None }).unwrap_or(0);
             let body = crate::feedback::draft(a.string(0)?, a.string(1)?, images, &feedback_from, &feedback_layout);
-            Ok(to_host(&json!({ "body": body, "available": crate::feedback::available() })))
+            Ok(to_host(&json!({ "body": body })))
         })
         .function("feedbackPasteImage", move |_| {
             if !feedback_frame { return Err(HostError::new("feedback screenshots are frame-only")); }
@@ -1086,7 +1086,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         })
         .async_function("nextCommand", move |_| {
             let rx = commands.clone();
-            Ok(async move { rx.recv().await.map(HostValue::Str).map_err(|_| HostError::new("herdr-app is shutting down")) })
+            Ok(async move { rx.recv().await.map(HostValue::Str).map_err(|_| HostError::new("h0x-ade is shutting down")) })
         })
 }
 
@@ -1132,19 +1132,19 @@ fn capabilities() -> Capabilities {
         .clipboard_write(true)
 }
 
-/// What mods may touch, and the `herdr` module they import. Also used by `herdr-app check`.
+/// What mods may touch, and the `h0x` module they import. Also used by `h0x-ade check`.
 pub fn install_policy() -> async_channel::Receiver<Request> {
     gpui_shell::policy::update_default(|p| {
         p.with_capabilities(capabilities())
             .with_host_module(module(Instance { name: String::new(), props: Value::Null }, 0))
-            .expect("herdr module is valid")
+            .expect("h0x module is valid")
     });
     let (tx, rx) = async_channel::unbounded();
     let _ = REQUESTS.set(tx);
     rx
 }
 
-/// Gives the next mod copy to load a policy of its own: its `herdr` module
+/// Gives the next mod copy to load a policy of its own: its `h0x` module
 /// (its props, its identity) and its localStorage file. The shell hands every
 /// view a copy of the default that *shares* modules and storage, so each copy
 /// needs a fresh default rather than an edit of the old one.
@@ -1169,7 +1169,7 @@ pub fn prepare_load(inst: &Instance) -> u64 {
         .with_capabilities(capabilities())
         .with_storage_path(dir.join(file))
         .with_host_module(module(inst.clone(), copy))
-        .expect("herdr module is valid");
+        .expect("h0x module is valid");
     gpui_shell::policy::set_default(policy);
     copy
 }
@@ -1255,9 +1255,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn known_agents_uses_snapshot_and_refreshes_changed_commands() {
-        let snapshot = vec![json!({"key": "claude", "run": ["herdr_issue57_not_installed"]})];
+        let snapshot = vec![json!({"key": "claude", "run": ["h0x_issue57_not_installed"]})];
         let first = std::thread::spawn(move || known_agents(None, snapshot)).join().unwrap();
-        assert_eq!(first[0]["run"], json!(["herdr_issue57_not_installed"]));
+        assert_eq!(first[0]["run"], json!(["h0x_issue57_not_installed"]));
         assert_eq!(first[0]["installed"], false);
         let snapshot = vec![json!({"key": "claude", "run": ["printf"]}), json!({"key": "claude-alt", "run": ["printf"]})];
         let next = std::thread::spawn(move || known_agents(None, snapshot)).join().unwrap();
@@ -1270,7 +1270,7 @@ mod tests {
     #[test]
     fn shared_bursts_persist_only_complete_snapshots_and_finish_at_final_state() {
         let root = if cfg!(target_os = "linux") { PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
-        let dir = root.join(format!("herdr-shared-stress-{}", std::process::id()));
+        let dir = root.join(format!("h0x-shared-stress-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("shared.json");
         let reading = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -1308,7 +1308,7 @@ mod tests {
     #[test]
     fn corrupt_shared_file_is_kept_before_starting_empty() {
         let root = if cfg!(target_os = "linux") { PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
-        let dir = root.join(format!("herdr-shared-corrupt-{}", std::process::id()));
+        let dir = root.join(format!("h0x-shared-corrupt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("shared.json");
         let corrupt = b"{\"kept\":true} old snapshot tail";
@@ -1340,7 +1340,7 @@ mod tests {
 
     #[test]
     fn an_added_file_makes_a_shipped_mod_edited() {
-        let dir = std::env::temp_dir().join(format!("herdr-app-shipped-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("h0x-ade-shipped-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("icons")).unwrap();
         std::fs::write(dir.join("main.js"), "a").unwrap();
@@ -1361,7 +1361,7 @@ mod tests {
 
     #[test]
     fn cloned_mods_rewrite_assets_and_self_overlays_and_reject_nonobject_metadata() {
-        let root = std::env::temp_dir().join(format!("herdr-mod-clone-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("h0x-mod-clone-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("original")).unwrap();
         std::fs::write(root.join("original/mod.json"), "{}").unwrap();
@@ -1384,7 +1384,7 @@ mod tests {
     fn layout_formatting_is_not_an_edit_and_rescued_clicks_still_apply() {
         use crate::layout::{Node, Size};
         use crate::layout_sync::State;
-        let root = std::env::temp_dir().join(format!("herdr-layout-click-rescue-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("h0x-layout-click-rescue-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("layouts");
         std::fs::create_dir_all(dir.join(".state")).unwrap();
@@ -1414,7 +1414,7 @@ mod tests {
 
     #[test]
     fn a_0_1_x_layout_is_kept_aside_quietly_not_rescued() {
-        let root = std::env::temp_dir().join(format!("herdr-layout-0-1-x-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("h0x-layout-0-1-x-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("layouts");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1432,7 +1432,7 @@ mod tests {
 
     #[test]
     fn layouts_restore_preserve_edits_clicks_and_drop_only_untouched() {
-        let root = std::env::temp_dir().join(format!("herdr-layout-sync-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("h0x-layout-sync-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("layouts");
         sync_layouts(&root, &[("a", "a1"), ("b", "b1"), ("c", "c1")]).unwrap();
@@ -1458,7 +1458,7 @@ mod tests {
 
     #[test]
     fn default_mods_restore_shipped_and_move_edits_to_clones() {
-        let root = std::env::temp_dir().join(format!("herdr-app-sync-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("h0x-ade-sync-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (mods, record) = (root.join("mods"), root.join("installed.json"));
         let read = |p: &str| std::fs::read_to_string(mods.join(p)).unwrap_or_default();

@@ -1,6 +1,6 @@
 import { div, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { settings } from "herdr";
+import { settings } from "h0x";
 
 export function versionHeader(t, note) {
   const [year, month, day] = note.date.split("-");

@@ -98,7 +98,7 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Vec<String> {
         }
         None if cfg!(windows) => {
             let list = commands.iter().map(|c| format!("'{}'", c.replace('\'', "''"))).collect::<Vec<_>>().join(",");
-            let script = format!("foreach($c in @({list})){{ if(Get-Command $c -ErrorAction SilentlyContinue){{ \"herdr-has:$c\" }} }}");
+            let script = format!("foreach($c in @({list})){{ if(Get-Command $c -ErrorAction SilentlyContinue){{ \"h0x-has:$c\" }} }}");
             crate::mods::run_here(&crate::window::shell(), &["-NoLogo".into(), "-Command".into(), script]).unwrap_or_default()
         }
         None => {
@@ -107,7 +107,7 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Vec<String> {
             crate::mods::run_here(&shell, &["-ic".into(), line]).unwrap_or_default()
         }
     };
-    let found: std::collections::HashSet<&str> = out.split("herdr-has:").skip(1).filter_map(|s| s.split_whitespace().next()).collect();
+    let found: std::collections::HashSet<&str> = out.split("h0x-has:").skip(1).filter_map(|s| s.split_whitespace().next()).collect();
     commands.iter().filter(|c| found.contains(c.as_str())).cloned().collect()
 }
 
@@ -118,7 +118,7 @@ fn installed_line(commands: &[String], fish: bool) -> String {
         .map(|c| {
             let word = format!("'{}'", c.replace('\'', "'\\''"));
             let unalias = if fish { String::new() } else { format!("unalias -- {word} 2>/dev/null; ") };
-            format!("{unalias}command -v {word} >/dev/null 2>&1 && printf 'herdr-has:%s\\n' {word};")
+            format!("{unalias}command -v {word} >/dev/null 2>&1 && printf 'h0x-has:%s\\n' {word};")
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -171,7 +171,7 @@ pub fn of(app: Option<&str>, argv: &[String]) -> Value {
     TABLE.with(|t| resolve(&t.borrow(), app, argv))
 }
 
-/// An agent's 7501 `app` as a name Herdr ships (`claude` for `claude-code`),
+/// An agent's 7501 `app` as a name HyperOx ships (`claude` for `claude-code`),
 /// else `other` (`unknown` when it gave none): never the person's own words.
 pub fn agent_name(app: Option<&str>) -> String {
     static NAMES: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
@@ -380,7 +380,7 @@ mod tests {
             .args(["-c", &format!("issue57_function() {{ :; }}; alias issue57_alias='printf alias'; {line}")])
             .output()
             .unwrap();
-        assert_eq!(String::from_utf8(out.stdout).unwrap(), "herdr-has:issue57_function\nherdr-has:printf\n");
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "h0x-has:issue57_function\nh0x-has:printf\n");
     }
 
     #[test]

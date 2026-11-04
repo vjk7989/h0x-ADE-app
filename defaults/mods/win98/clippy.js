@@ -5,19 +5,19 @@
 
 import { div, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { agents, run, shared, setShared, placement } from "herdr";
+import { agents, run, shared, setShared, placement } from "h0x";
 import { C, ASSETS, unit, root, button, label, sfx, own } from "./kit.js";
 
 const TIPS = [
   "It looks like you're herding agents.\n\nDid you know? Ctrl+Esc opens the Start menu.",
-  "Click a tab's taskbar button while it's\nshown to minimize it (Herdr settles it).\nClick again to bring it back.",
-  "Ctrl+Shift+Esc opens Close Program:\nevery terminal Herdr runs, and End Task.",
+  "Click a tab's taskbar button while it's\nshown to minimize it (HyperOx settles it).\nClick again to bring it back.",
+  "Ctrl+Shift+Esc opens Close Program:\nevery terminal HyperOx runs, and End Task.",
   "Right-click a folder on the desktop to\nrename or close that space.",
   "Waiting on an agent? Mines is on\nthe desktop. I won't tell anyone.",
   "Double-click a window's title bar to\nmaximize it. Double-click again to restore.",
   "Start > Run... opens any command line\nin a new window, like it's 1998.",
   "Shut Down > Restart in DOS mode\ntakes you to the Terminals layout.",
-  "Log Off takes you back to Herdr's\nnormal layout. I'll miss you.",
+  "Log Off takes you back to HyperOx's\nnormal layout. I'll miss you.",
 ];
 
 export default class Clippy {

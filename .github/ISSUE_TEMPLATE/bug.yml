@@ -1,5 +1,5 @@
 name: Bug
-description: Something broke in Herdr or a shipped layout or mod.
+description: Something broke in HyperOx or a shipped layout or mod.
 labels: [bug]
 body:
   - type: textarea
@@ -18,8 +18,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: Herdr version
-      description: Find it in Settings or run herdr-app --version.
+      label: HyperOx version
+      description: Find it in Settings or run h0x-ade --version.
     validations:
       required: true
   - type: input

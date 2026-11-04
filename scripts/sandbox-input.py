@@ -1,5 +1,5 @@
 # Fake pointer input for the sandbox's private X display (XTest). Coordinates
-# are in the Herdr window, px. Run through `scripts/sandbox`, not directly.
+# are in the HyperOx window, px. Run through `scripts/sandbox`, not directly.
 #   move x0 y0 x1 y1        glide the pointer, no buttons
 #   click x y [button]      button: 1 left (default), 3 right
 #   drag x0 y0 x1 y1        press, glide, release
@@ -8,7 +8,6 @@
 #   key <keysym> [mods...]  one key, e.g. `key Return`, `key l Control_L`
 import json
 import os
-from pathlib import Path
 import sys
 import time
 
@@ -20,7 +19,7 @@ root = d.screen().root
 
 
 def find(w):
-    if w.get_wm_name() == "Herdr":
+    if w.get_wm_name() == "HyperOx":
         return w
     for c in w.query_tree().children:
         r = find(c)
@@ -31,30 +30,16 @@ def find(w):
 
 win = find(root)
 if win is None:
-    sys.exit("no Herdr window on this display")
+    sys.exit("no HyperOx window on this display")
 pos = win.translate_coords(root, 0, 0)
 ox, oy = -pos.x, -pos.y
 
 
-cursor = "arrow"
-pointer_file = os.environ.get("HERDR_NOTES_POINTER_FILE")
-pointer = (0, 0)
-
-
-def publish_pointer():
-    if pointer_file:
-        file = Path(pointer_file)
-        temp = file.with_suffix(".new")
-        temp.write_text(json.dumps({"x": pointer[0], "y": pointer[1], "cursor": cursor}))
-        temp.replace(file)
 
 
 def to(x, y):
-    global pointer
     xtest.fake_input(d, X.MotionNotify, x=int(ox + x), y=int(oy + y))
     d.sync()
-    pointer = (int(x), int(y))
-    publish_pointer()
 
 
 def glide(x0, y0, x1, y1, steps=24):
@@ -100,15 +85,11 @@ if sys.argv[1] == "sequence":
             time.sleep(0.1)
             button(1, False)
         elif cmd in ("hold", "release"):
-            cursor = "pointer" if cmd == "hold" and "Control_L" in args else "arrow"
-            publish_pointer()
             for sym in args:
                 code = d.keysym_to_keycode(XK.string_to_keysym(sym))
                 xtest.fake_input(d, X.KeyPress if cmd == "hold" else X.KeyRelease, code)
             d.sync()
         elif cmd in ("press", "lift"):
-            cursor = "grab" if cmd == "press" else "arrow"
-            publish_pointer()
             button(1, cmd == "press")
         else:
             sys.exit(f"unknown sequence command {cmd}")

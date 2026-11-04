@@ -45,7 +45,7 @@ const generated = Bun.spawnSync([
 ], { stdout: "pipe", stderr: "inherit" });
 if (generated.exitCode !== 0) throw new Error("cargo-about failed");
 
-let text = "Herdr third-party notices\n=========================\n"
+let text = "HyperOx third-party notices\n=========================\n"
   + "Regenerate with just notices. See licenses/README.md.\n\n";
 for (const path of inputs) {
   // Normalize checkout line endings so the same check works on Windows.

@@ -2,7 +2,7 @@
 // release range; only entries shown in full here count as presented.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar } from "gpui-base";
-import { theme, props, closeOverlay, presentUpdateNotes, updates } from "herdr";
+import { theme, props, closeOverlay, presentUpdateNotes, updates } from "h0x";
 import { versionHeader, releaseItems } from "./release-notes.js";
 
 export default class WhatsNew extends View {
@@ -41,8 +41,8 @@ export default class WhatsNew extends View {
         }
       })
       .child(h_flex().flex_none().h(52).cursor_grab().pl(20).pr(12).gap(10).items_center().border_b(1).border_color(t.border)
-        .child(image("frame/welcome/herdr.png").w(24).h(24).rounded(6).flex_none())
-        .child(div().text_size(14).font_semibold().text_color(t.foreground).child("What's new in Herdr"))
+        .child(image("frame/welcome/h0x.png").w(24).h(24).rounded(6).flex_none())
+        .child(div().text_size(14).font_semibold().text_color(t.foreground).child("What's new in HyperOx"))
         .child(div().flex_1())
         .child(div().id("wn-close").size(26).rounded(7).flex().items_center().justify_center()
           .text_color(t.muted).cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))

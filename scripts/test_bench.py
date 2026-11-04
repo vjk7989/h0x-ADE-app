@@ -12,7 +12,7 @@ import bench
 
 class BenchmarkTest(unittest.TestCase):
     def test_elapsed_per_draw_uses_unrounded_draw_totals(self):
-        with tempfile.TemporaryDirectory(prefix="herdr-bench-test-") as root:
+        with tempfile.TemporaryDirectory(prefix="h0x-bench-test-") as root:
             with open(os.path.join(root, "frames.jsonl"), "w") as f:
                 f.write('{"window":100,"frame_ms":800}\n')
                 f.write('{"window":1,"frame_ms":0.02}\n')

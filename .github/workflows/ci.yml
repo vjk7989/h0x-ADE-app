@@ -1,20 +1,20 @@
 # Build and test every supported platform; release.yml handles packaging.
 #
-# Rust caches use one pinned toolchain and only master pushes save, so PR
+# Rust caches use one pinned toolchain and only main pushes save, so PR
 # caches can't evict the ones everybody restores. setup-zig caches separately.
 name: ci
 
 on:
   push:
-    branches: [master]
+    branches: [main, rebrand]
   # No paths-ignore here: CI is required to merge, so every PR needs it.
   pull_request:
 
 permissions:
   contents: read
 
-# A newer push cancels older runs, on a PR and on master: PRs were tested
-# before merging, so only master's newest commit needs a run.
+# A newer push cancels older runs, on a PR and on a branch: PRs were tested
+# before merging, so only the branch's newest commit needs a run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -28,7 +28,7 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "1"
   # Incremental state only bloats a cache: CI builds each commit once.
   CARGO_INCREMENTAL: "0"
-  SAVE_CACHES: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+  SAVE_CACHES: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
 jobs:
   platform-tests:
@@ -120,7 +120,7 @@ jobs:
         if: runner.os == 'macOS'
         timeout-minutes: 5
         env:
-          HERDR_SHOT_NATIVE_TEST: "1"
+          H0X_ADE_SHOT_NATIVE_TEST: "1"
         run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test shot_pixels
       - name: Check release packaging
         if: matrix.platform == 'linux-x86_64'

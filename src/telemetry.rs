@@ -1,5 +1,5 @@
-//! Anonymous usage data: one small report per install per UTC day, so we
-//! know how Herdr is used. Never what's in a terminal, never from the core,
+//! Anonymous usage data: one small report per install per UTC day. Never
+//! what's in a terminal, never from the core,
 //! never free text: every field is a number, a bucket, a yes/no or a name
 //! from a list the app ships (anything else is `other`).
 //!
@@ -9,11 +9,11 @@
 //! and sends it. Nothing here may affect the app: it runs off the UI thread,
 //! never waits on anything, and every error just loses data.
 //!
-//! On unless settings.json says `"telemetry": false` (that also deletes the
-//! id and anything not sent yet). `DO_NOT_TRACK`, `HERDR_TELEMETRY=0` and CI
-//! turn it off for one run. Only release builds (`HERDR_APP_RELEASE`) send,
-//! or a build pointed at a test server with `HERDR_TELEMETRY_URL`: a build
-//! from source and the sandbox collect and show, but never send.
+//! Off unless settings.json says `"telemetry": true`; turning it off deletes
+//! the id and anything not sent yet. `DO_NOT_TRACK`, `H0X_ADE_TELEMETRY=0` and
+//! CI turn it off for one run. No build sends anywhere unless
+//! `H0X_ADE_TELEMETRY_URL` names a server where the app started: without it
+//! the app collects and shows, but never builds a request.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -25,7 +25,6 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 pub const VERSION: u32 = 1;
-const ENDPOINT: &str = "https://telemetry.herdr.dev/v1/report";
 /// Frozen reports older than this are dropped unsent.
 const KEEP_DAYS: i64 = 7;
 const TICK: Duration = Duration::from_secs(30);
@@ -90,19 +89,17 @@ fn read_env_off() -> Option<&'static str> {
     if set("DO_NOT_TRACK").is_some_and(truthy) {
         return Some("DO_NOT_TRACK");
     }
-    if set("HERDR_TELEMETRY").is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no")) {
-        return Some("HERDR_TELEMETRY");
+    if set("H0X_ADE_TELEMETRY").is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no")) {
+        return Some("H0X_ADE_TELEMETRY");
     }
     const CI: &[&str] = &["CI", "GITHUB_ACTIONS", "GITLAB_CI", "CIRCLECI", "BUILDKITE", "JENKINS_URL", "TEAMCITY_VERSION"];
     CI.iter().any(|k| set(k).is_some()).then_some("CI")
 }
 
-/// Where reports go, if this build sends at all.
+/// Where reports go: only a server named by `H0X_ADE_TELEMETRY_URL`. There
+/// is no built-in host; without the variable nothing is ever sent.
 fn endpoint() -> Option<String> {
-    match std::env::var("HERDR_TELEMETRY_URL").ok().filter(|u| !u.is_empty()) {
-        Some(url) => Some(url),
-        None => option_env!("HERDR_APP_RELEASE").map(|_| ENDPOINT.to_owned()),
-    }
+    std::env::var("H0X_ADE_TELEMETRY_URL").ok().filter(|u| !u.is_empty())
 }
 
 pub fn collecting() -> bool {
@@ -303,7 +300,7 @@ fn startup_bucket(ms: u64) -> &'static str {
 
 /// A release version (`0.2.0`, `0.2.0-rc.1`), else `other`: never a free string.
 pub(crate) fn version(v: &str) -> String {
-    let v = v.trim().trim_start_matches("hc ").trim_start_matches('v');
+    let v = v.trim().trim_start_matches("h0x-core ").trim_start_matches('v');
     let number = |s: &str| !s.is_empty() && s.len() <= 4 && s.bytes().all(|b| b.is_ascii_digit());
     let (core, pre) = v.split_once('-').map_or((v, None), |(c, p)| (c, Some(p)));
     let parts: Vec<&str> = core.split('.').collect();
@@ -621,7 +618,7 @@ impl Worker {
             "setting": SETTING.load(Ordering::Relaxed),
             "off_because": env_off(),
             "sends": endpoint().is_some(),
-            "endpoint": endpoint().unwrap_or_else(|| ENDPOINT.to_owned()),
+            "endpoint": endpoint(),
             "draft": self.install.as_ref().filter(|_| on).map(|i| self.day.report(i)),
             "queued": queued,
             "last_sent": last,
@@ -711,12 +708,21 @@ mod tests {
     #[test]
     fn versions_are_releases_or_other() {
         assert_eq!(version("0.2.0"), "0.2.0");
-        assert_eq!(version("hc 0.1.5"), "0.1.5");
+        assert_eq!(version("h0x-core 0.1.5"), "0.1.5");
         assert_eq!(version("0.2.0-rc.1"), "0.2.0-rc.1");
         assert_eq!(version("0.2.0-my/secret path"), "other");
-        assert_eq!(version("hc 0.1.5-acmeclient"), "other");
+        assert_eq!(version("h0x-core 0.1.5-acmeclient"), "other");
         assert_eq!(version("0.1.5-rc.x"), "other");
         assert_eq!(version("dev"), "other");
+    }
+
+    /// The test process has no `H0X_ADE_TELEMETRY_URL`: no destination exists,
+    /// and nothing is collected until a setting turns it on.
+    #[test]
+    fn nothing_is_sent_unless_a_url_is_configured() {
+        assert_eq!(endpoint(), None);
+        assert!(!collecting());
+        assert_eq!(status(), Value::Null);
     }
 
     #[test]
@@ -730,7 +736,7 @@ mod tests {
             ..Observation::default()
         };
         day.observe(o, &["main", "terminals"]);
-        day.core = Some("hc /home/me/build".into());
+        day.core = Some("h0x-core /home/me/build".into());
         let text = day.report("0123456789abcdef0123456789abcdef").to_string();
         for leak in ["secret", "private", "/home", "my-theme", "frame-"] {
             assert!(!text.contains(leak), "{leak} leaked: {text}");

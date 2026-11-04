@@ -1,6 +1,6 @@
-# Herdr 98
+# HyperOx 98
 
-A Windows 98 layout for Herdr: `layouts/win98.json` + `themes/win98.json` +
+A Windows 98 layout for HyperOx: `layouts/win98.json` + `themes/win98.json` +
 this mod. One mod, many roles (`main.js`): taskbar, desktop, window (pane
 title bars), menu (Start menu too), dialog, mines, sol, clippy. `kit.js`
 draws the Win98 bits (bevels, buttons, title bars) in whole device pixels at
@@ -17,12 +17,12 @@ Keys (`keys.json`, section `layout:win98`): `win98.start` (Ctrl+Esc),
 `bin`, `datetime`, `logoff`, `small_fonts`, `large_fonts`.
 
 `art/` holds the icon, image and sound generators. Run with Bun and an
-optional output root (default: `/var/tmp/herdr98`):
+optional output root (default: `/var/tmp/h0x98`):
 
 ```sh
-bun defaults/mods/win98/art/generate.ts /var/tmp/herdr98
-bun defaults/mods/win98/art/sheet.ts /var/tmp/herdr98
-bun defaults/mods/win98/art/sounds.ts /var/tmp/herdr98
+bun defaults/mods/win98/art/generate.ts /var/tmp/h0x98
+bun defaults/mods/win98/art/sheet.ts /var/tmp/h0x98
+bun defaults/mods/win98/art/sounds.ts /var/tmp/h0x98
 ```
 
 Images and the contact sheet need ImageMagick (`magick`); sounds need

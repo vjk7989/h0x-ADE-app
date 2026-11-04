@@ -2,14 +2,14 @@
 
 # Commands
 
-Inspect the window with `herdr-app ls` and `herdr-app status`.
-`herdr-app commands` lists the app actions below, even without an open window.
+Inspect the window with `h0x-ade ls` and `h0x-ade status`.
+`h0x-ade commands` lists the app actions below, even without an open window.
 
-Run an action in the open window with `herdr-app do`:
+Run an action in the open window with `h0x-ade do`:
 
 ```sh
-herdr-app do pane.split --direction right
-herdr-app do pane.split '{"direction":"right"}'
+h0x-ade do pane.split --direction right
+h0x-ade do pane.split '{"direction":"right"}'
 ```
 
 Arguments can be named flags or one JSON object. Required arguments are marked below.
@@ -19,7 +19,7 @@ Mods can add their own actions, which are not listed here.
 
 ## `space.new`
 
-Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder).
+Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`h0x-core machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder).
 
 | Argument | Required |
 |---|---|
@@ -148,7 +148,7 @@ Take a terminal's pane away and disable core keep; it keeps running (a sub-agent
 
 ## `terminal.right_click`
 
-Where right-clicks in a terminal (default: the focused one) go when its program takes the mouse: "program" or "menu" (Herdr's, the default). Shift+right-click is always the menu.
+Where right-clicks in a terminal (default: the focused one) go when its program takes the mouse: "program" or "menu" (HyperOx's, the default). Shift+right-click is always the menu.
 
 | Argument | Required |
 |---|---|
@@ -157,7 +157,7 @@ Where right-clicks in a terminal (default: the focused one) go when its program 
 
 ## `terminal.pin`
 
-Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pins are kept with the terminal, so every Herdr client shows them, and end with it.
+Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pins are kept with the terminal, so every HyperOx client shows them, and end with it.
 
 | Argument | Required |
 |---|---|
@@ -462,13 +462,13 @@ Open the settings (section: look, alerts, updates).
 
 ## `app.check_updates`
 
-Look for a newer Herdr and herdr-core now.
+Look for a newer HyperOx and h0x-core now.
 
 No arguments.
 
 ## `app.update_core`
 
-Update herdr-core to its latest release of this generation; terminals keep running.
+Update h0x-core to its latest release of this generation; terminals keep running.
 
 No arguments.
 
@@ -506,7 +506,7 @@ No arguments.
 
 ## `app.update`
 
-Restart into the update Herdr downloaded (your terminals keep running).
+Restart into the update HyperOx downloaded (your terminals keep running).
 
 No arguments.
 
@@ -552,4 +552,4 @@ Maximize the window, or back.
 
 No arguments.
 
-[Back to Herdr](../README.md)
+[Back to HyperOx](../README.md)

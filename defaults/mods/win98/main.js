@@ -1,4 +1,4 @@
-// Herdr 98: the whole Windows 98 layout is this one mod, in roles.
+// HyperOx 98: the whole Windows 98 layout is this one mod, in roles.
 // The layout and overlays give each copy props { role }:
 //   taskbar  the Start button, tabs as windows, the tray and clock
 //   desktop  icons on the teal desktop: spaces as folders, games, bin
@@ -10,7 +10,7 @@
 //   clippy   the Office Assistant (a floating window)
 
 import { View, div } from "gpui-kit";
-import { props } from "herdr";
+import { props } from "h0x";
 import Taskbar from "./taskbar.js";
 import Desktop from "./desktop.js";
 import PaneWindow from "./window.js";

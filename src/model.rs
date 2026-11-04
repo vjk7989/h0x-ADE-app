@@ -1,7 +1,7 @@
 //! The app's shared world, the same for every layout: spaces, each with
 //! tabs (named pieces of work), each tab holding its terminals and
 //! how they're split. Plus which pane has focus and agent attention (done vs
-//! seen) with Herdr's rollup. Pure data; the window drives it.
+//! seen) with HyperOx's rollup. Pure data; the window drives it.
 
 use crate::layout::{Axis, Content, Node};
 use serde::{Deserialize, Serialize};
@@ -29,10 +29,10 @@ pub struct Tab {
 pub struct Space {
     pub id: String,
     /// The name someone gave it; empty: named after where its first
-    /// terminal is (Herdr's way, `Model::space_name`).
+    /// terminal is (HyperOx's way, `Model::space_name`).
     pub name: String,
     pub folder: String,
-    /// The machine its terminals run on (`hc machine ls`); None: this one.
+    /// The machine its terminals run on (`h0x-core machine ls`); None: this one.
     pub machine: Option<String>,
     pub tabs: Vec<Tab>,
     /// The selected tab.
@@ -65,7 +65,7 @@ pub struct Agent {
     pub seen: bool,
     /// Core's turn counter: goes up each time it stops working.
     pub turn: u64,
-    /// The last turn a person looked at on any client (`herdr.seen`, docs/labels.md).
+    /// The last turn a person looked at on any client (`h0x.seen`, docs/labels.md).
     /// None: no client shares it yet, so `seen` decides.
     pub seen_turn: Option<u64>,
     /// Bumped on every state change (for "most recent" ordering).
@@ -88,7 +88,7 @@ pub struct Model {
     pub folder_info: HashMap<String, FolderInfo>,
 }
 
-/// Herdr's attention priority: blocked > done > working > idle > nothing.
+/// HyperOx's attention priority: blocked > done > working > idle > nothing.
 pub fn priority(status: Option<&str>) -> u8 {
     match status {
         Some("blocked") => 4,
@@ -235,7 +235,7 @@ impl Model {
 
     /// Adds a space at the end and selects it.
     /// What a space is called: its name, else its first terminal's checkout
-    /// (a worktree's own folder; outside git its folder), as Herdr names workspaces.
+    /// (a worktree's own folder; outside git its folder), as HyperOx names workspaces.
     pub fn space_name(&self, p: &Space, home: &str) -> String {
         if !p.name.is_empty() {
             return p.name.clone();
@@ -434,7 +434,7 @@ impl Model {
         self.tabs().flat_map(|c| addresses(&c.root)).collect()
     }
 
-    /// Applies a status word from core (Herdr's seen rules).
+    /// Applies a status word from core (HyperOx's seen rules).
     pub fn set_word(&mut self, address: &str, word: Option<String>, app: Option<String>, looking: bool) -> bool {
         let a = self.agents.entry(address.to_owned()).or_insert_with(|| Agent { seen: true, ..Default::default() });
         a.app = app.or(a.app.take());
@@ -455,7 +455,7 @@ impl Model {
         true
     }
 
-    /// Herdr's attention rule for a change of 7501 word: needing you always
+    /// HyperOx's attention rule for a change of 7501 word: needing you always
     /// alerts; finishing alerts only if the person wasn't looking.
     pub fn alert(prev: Option<&str>, new: Option<&str>, looking: bool) -> Option<Alert> {
         let blocked = |w: Option<&str>| matches!(w, Some("blocked" | "error"));
@@ -571,7 +571,7 @@ pub struct FolderInfo {
 }
 
 /// A space as mods see it. `name` is what to call it; `named`: someone gave it
-/// (else it's Herdr's automatic name, which a mod may show its own way).
+/// (else it's HyperOx's automatic name, which a mod may show its own way).
 pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, home: &str) -> Value {
     let active = p.active_tab().map(|c| c.id.clone());
     let tabs: Vec<Value> = p
@@ -615,7 +615,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn folders_name_as_in_herdr_on_every_system() {
+    fn folders_name_as_in_h0x_on_every_system() {
         assert_eq!(folder_name("/home/can", "/home/can"), "~");
         assert_eq!(folder_name("/home/can/", "/home/can"), "~");
         assert_eq!(folder_name("/Users/can/Projects/herdr", "/Users/can"), "herdr");
@@ -636,7 +636,7 @@ mod tests {
         assert_eq!(m.space_name(&p, "/home/me"), "~");
         m.pane_folders.insert("x1".into(), "/src/notes".into());
         assert_eq!(m.space_name(&p, "/home/me"), "notes");
-        m.folder_info.insert("t1".into(), FolderInfo { top: "/src/herdr".into(), branch: Some("main".into()) });
+        m.folder_info.insert("t1".into(), FolderInfo { top: "/src/h0x".into(), branch: Some("main".into()) });
         assert_eq!(m.space_name(&p, "/home/me"), "herdr");
         let names: Vec<String> = p.tabs.iter().map(|c| Model::tab_name(&p, c)).collect();
         assert_eq!(names.iter().map(String::as_str).collect::<Vec<_>>(), ["1", "review", "3"]);
@@ -645,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn alerts_follow_herdr() {
+    fn alerts_follow_h0x() {
         let alert = Model::alert;
         assert_eq!(alert(Some("working"), Some("blocked"), true), Some(Alert::Blocked));
         assert_eq!(alert(Some("blocked"), Some("error"), false), None);

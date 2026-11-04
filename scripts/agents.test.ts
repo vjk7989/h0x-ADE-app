@@ -25,19 +25,19 @@ test("legacy pins migrate once listed, retaining offline pins until their labels
   agents.migratePins([local]);
   expect(writes).toEqual([["terminal.pin", { terminal: "t1", pinned: true }]]);
   expect(JSON.parse(data.get("pins")!)).toEqual(["t1", "offline/t2"]);
-  agents.migratePins([{ ...local, labels: { "herdr.pinned": "1" } }]);
+  agents.migratePins([{ ...local, labels: { "h0x.pinned": "1" } }]);
   expect(JSON.parse(data.get("pins")!)).toEqual(["offline/t2"]);
   const remote = { address: "offline/t2", state: "live", labels: {} };
   agents.migratePins([remote]);
   expect(writes).toHaveLength(2);
-  agents.migratePins([{ ...remote, labels: { "herdr.pinned": "1" } }]);
+  agents.migratePins([{ ...remote, labels: { "h0x.pinned": "1" } }]);
   expect(data.has("pins")).toBe(false);
 });
 
 test("already shared pins need no write and pending writes survive restart", () => {
   expect(harness([]).data.has("pins")).toBe(false);
   const { agents, data, writes } = harness(["t1"]);
-  agents.migratePins([{ address: "t1", state: "live", labels: { "herdr.pinned": "1" } }]);
+  agents.migratePins([{ address: "t1", state: "live", labels: { "h0x.pinned": "1" } }]);
   expect(writes).toHaveLength(0);
   expect(data.has("pins")).toBe(false);
   const retry = harness(["t2"]);
@@ -50,9 +50,9 @@ test("already shared pins need no write and pending writes survive restart", () 
 
 test("an unnamed tab's row reads its terminal's title, not the tab number", () => {
   const title = new Function("View", "localStorage", "props", "run", `${source}; return title;`)(class {}, {}, () => ({}), () => {});
-  const claude = { program: { name: "claude", key: "claude" }, title: "Herdr session names" };
-  expect(title({ name: "3", named: false }, claude)).toBe("Herdr session names");
-  expect(title({ name: "claude", named: true }, claude)).toBe("Herdr session names");
+  const claude = { program: { name: "claude", key: "claude" }, title: "HyperOx session names" };
+  expect(title({ name: "3", named: false }, claude)).toBe("HyperOx session names");
+  expect(title({ name: "claude", named: true }, claude)).toBe("HyperOx session names");
   expect(title({ name: "fix login", named: true }, claude)).toBe("fix login");
   expect(title({ name: "3", named: false }, { ...claude, title: "claude" })).toBe("3");
 });

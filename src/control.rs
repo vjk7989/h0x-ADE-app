@@ -1,6 +1,6 @@
-//! `herdr-app do <command> [--arg value ... | json]`, `herdr-app ls`, `herdr-app commands`
-//! and `herdr-app status`: drive a running window from a shell (agents, tests)
-//! over `$HERDR_APP_HOME/herdr-app.sock`, one JSON line each way.
+//! `h0x-ade do <command> [--arg value ... | json]`, `h0x-ade ls`, `h0x-ade commands`
+//! and `h0x-ade status`: drive a running window from a shell (agents, tests)
+//! over `$H0X_ADE_HOME/h0x-ade.sock`, one JSON line each way.
 
 use crate::mods::{self, Request};
 use serde_json::{Value, json};
@@ -13,14 +13,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 fn socket() -> PathBuf {
-    mods::app_dir().join("herdr-app.sock")
+    mods::app_dir().join("h0x-ade.sock")
 }
 
 /// Serves the socket for this window. A live socket means another window owns this home.
 pub fn listen(tx: async_channel::Sender<Request>) {
     let path = socket();
     if UnixStream::connect(&path).is_ok() {
-        tracing::warn!("another Herdr is serving {}; `herdr-app do` goes there", path.display());
+        tracing::warn!("another HyperOx is serving {}; `h0x-ade do` goes there", path.display());
         return;
     }
     let _ = std::fs::remove_file(&path);
@@ -28,7 +28,7 @@ pub fn listen(tx: async_channel::Sender<Request>) {
         Ok(l) => l,
         Err(e) => return tracing::warn!("cannot serve {}: {e}", path.display()),
     };
-    let _ = std::thread::Builder::new().name("herdr-app-control".into()).spawn(move || {
+    let _ = std::thread::Builder::new().name("h0x-ade-control".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
             let tx = tx.clone();
             std::thread::spawn(move || serve(stream, tx));
@@ -53,7 +53,7 @@ fn serve(stream: UnixStream, tx: async_channel::Sender<Request>) {
     let _ = (&stream).write_all(format!("{reply}\n").as_bytes());
 }
 
-/// One Herdr per home: a second launch brings the running window to the
+/// One HyperOx per home: a second launch brings the running window to the
 /// front and quits. True when one is running (even one too busy to answer:
 /// a second window would ring every alert twice).
 pub fn raise_running() -> bool {
@@ -77,7 +77,7 @@ pub fn client(args: &[String]) -> i32 {
     }
     let cmd = match args {
         [verb, rest @ ..] if verb == "shot" && rest.len() <= 1 => {
-            let path = PathBuf::from(rest.first().map(String::as_str).unwrap_or("herdr-shot.png"));
+            let path = PathBuf::from(rest.first().map(String::as_str).unwrap_or("h0x-shot.png"));
             let path = match std::path::absolute(path) {
                 Ok(path) => path,
                 Err(e) => return fail(&format!("cannot resolve screenshot path: {e}")),
@@ -94,17 +94,17 @@ pub fn client(args: &[String]) -> i32 {
             Ok(a) => json!({ "do": command, "args": a }),
             Err(e) => return fail(&e),
         },
-        _ => return fail("usage: herdr-app ls | herdr-app commands | herdr-app status | herdr-app shot [file.png] | herdr-app do <command> [--arg value ... | json]"),
+        _ => return fail("usage: h0x-ade ls | h0x-ade commands | h0x-ade status | h0x-ade shot [file.png] | h0x-ade do <command> [--arg value ... | json]"),
     };
     let mut stream = match UnixStream::connect(socket()) {
         Ok(s) => s,
         Err(_) if args.first().is_some_and(|v| v == "feedback") => {
             let body = crate::feedback::draft(&args[1], "", 0, "agent", "other");
             println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
-            eprintln!("Herdr must be open to review and send this feedback. Nothing was sent; core version and layout will reflect the open window.");
+            eprintln!("HyperOx must be open to review and send this feedback. Nothing was sent; core version and layout will reflect the open window.");
             return 1;
         }
-        Err(e) => return fail(&format!("no Herdr window at {}: {e}", socket().display())),
+        Err(e) => return fail(&format!("no HyperOx window at {}: {e}", socket().display())),
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(35)));
     let mut line = String::new();
@@ -157,7 +157,7 @@ pub fn save_shot(window: &gpui::Window, path: &std::path::Path) -> anyhow::Resul
         encoder.write_header()?.write_image_data(image.as_raw())?;
     }
     // A sibling temporary file keeps publication on the same filesystem.
-    let temporary = path.with_file_name(format!(".herdr-shot-{}.png", std::process::id()));
+    let temporary = path.with_file_name(format!(".h0x-shot-{}.png", std::process::id()));
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
     let result = (|| -> anyhow::Result<()> {
         file.write_all(&bytes)?;
@@ -173,7 +173,7 @@ pub fn save_shot(window: &gpui::Window, path: &std::path::Path) -> anyhow::Resul
 }
 
 fn fail(message: &str) -> i32 {
-    eprintln!("herdr-app: {message}");
+    eprintln!("h0x-ade: {message}");
     2
 }
 
@@ -183,9 +183,9 @@ mod tests {
 
     #[test]
     fn a_second_launch_raises_the_running_window() {
-        let dir = std::env::temp_dir().join(format!("herdr-app-raise-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("h0x-ade-raise-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("herdr-app.sock");
+        let path = dir.join("h0x-ade.sock");
         // Nothing running: this launch opens its own window.
         assert!(!raise_running_at(&path));
         // One running: it gets asked to come to the front.

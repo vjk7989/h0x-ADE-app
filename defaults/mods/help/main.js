@@ -1,9 +1,9 @@
-// The keybind list (Herdr's prefix+?), grouped, filterable by typing.
+// The keybind list (HyperOx's prefix+?), grouped, filterable by typing.
 // Reads keys.json through keys(); edit keys.json to change any of them.
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { keys, props, closeOverlay, theme } from "herdr";
+import { keys, props, closeOverlay, theme } from "h0x";
 
 const GROUPS = [
   ["spaces", /^space\./],

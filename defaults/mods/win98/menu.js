@@ -1,10 +1,10 @@
 // A Win98 popup menu: props { items, parents, start }. Hover opens
 // submenus to the right; a choice closes the whole chain and acts.
-// The Start menu (start: true) has big rows and the Herdr98 banner.
+// The Start menu (start: true) has big rows and the HyperOx98 banner.
 
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { props, closeOverlay, setShared, shared } from "herdr";
+import { props, closeOverlay, setShared, shared } from "h0x";
 import { C, ASSETS, MENU, unit, root, bevel, label, icon, perform, openMenu, etch, scale, gradient } from "./kit.js";
 
 function openMenus() {

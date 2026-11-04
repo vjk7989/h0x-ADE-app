@@ -40,28 +40,28 @@ mod window;
 use gpui::*;
 
 const HELP: &str = "\
-herdr-app: the Herdr desktop app. With no arguments it opens the window.
+h0x-ade: the HyperOx desktop app. With no arguments it opens the window.
 
 Usage:
-  herdr-app                        open the window
-  herdr-app ls                     spaces, their tabs and terminals, in the open window
-  herdr-app do <command> [args]    run a command: --name api --argv '[\"pi\"]', or one JSON object
-  herdr-app feedback <text>        draft feedback for the person to review and send
-  herdr-app commands               every command, its arguments, what it does
-  herdr-app status                 what the window shows, and any errors
-  herdr-app shot [file.png]        save the last window frame (default: herdr-shot.png)
-  herdr-app check <mod folder>     load a mod once and report what's wrong
-  herdr-app --skill                Agent Skill: driving the window, and where hc fits
-  herdr-app --version
+  h0x-ade                        open the window
+  h0x-ade ls                     spaces, their tabs and terminals, in the open window
+  h0x-ade do <command> [args]    run a command: --name api --argv '[\"pi\"]', or one JSON object
+  h0x-ade feedback <text>        draft feedback for the person to review and send
+  h0x-ade commands               every command, its arguments, what it does
+  h0x-ade status                 what the window shows, and any errors
+  h0x-ade shot [file.png]        save the last window frame (default: h0x-shot.png)
+  h0x-ade check <mod folder>     load a mod once and report what's wrong
+  h0x-ade --skill                Agent Skill: driving the window, and where h0x-core fits
+  h0x-ade --version
 
-The terminals run in herdr-core (`hc`), which keeps them alive when the
-window closes. `hc --help`: start, read, wait on and talk to terminals and
+The terminals run in h0x-core, which keeps them alive when the
+window closes. `h0x-core --help`: start, read, wait on and talk to terminals and
 agents. The app shows them and arranges them in spaces and tabs.
 
-Home: ~/.config/herdr-app (HERDR_APP_HOME picks another).
+Home: ~/.config/h0x-ade (H0X_ADE_HOME picks another).
 ";
 
-/// A Windows window app has no console: answers to `herdr-app ls` and the
+/// A Windows window app has no console: answers to `h0x-ade ls` and the
 /// like go to the terminal it was started from. Output already piped (agents,
 /// scripts) keeps its pipes.
 #[cfg(windows)]
@@ -80,7 +80,7 @@ fn main() {
     if args.len() > 1 {
         attach_console();
     }
-    // `herdr-app check <mod>` / `herdr-app types <mod>`: gpui-shell's own checker, with Herdr's module installed.
+    // `h0x-ade check <mod>` / `h0x-ade types <mod>`: gpui-shell's own checker, with HyperOx's module installed.
     if matches!(args.get(1).map(String::as_str), Some("check" | "types")) {
         mods::install_policy();
         gpui_shell::host::main_with_components(gpui_shell::FrozenComponentRegistry::default());
@@ -96,9 +96,9 @@ fn main() {
         None => {}
         Some("-h" | "--help" | "help") => return print!("{HELP}"),
         Some("--skill") => return print!("{}", include_str!("SKILL.md")),
-        Some("-V" | "--version" | "version") => return println!("herdr-app {}", env!("CARGO_PKG_VERSION")),
+        Some("-V" | "--version" | "version") => return println!("h0x-ade {}", env!("CARGO_PKG_VERSION")),
         Some(other) => {
-            eprint!("herdr-app: unknown argument {other:?}\n\n{HELP}");
+            eprint!("h0x-ade: unknown argument {other:?}\n\n{HELP}");
             std::process::exit(2);
         }
     }
@@ -107,8 +107,8 @@ fn main() {
     core_bin::fill_path();
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("HERDR_APP_LOG")
-                .unwrap_or_else(|_| "warn,herdr_app=info,gpui_shell=info".into()),
+            tracing_subscriber::EnvFilter::try_from_env("H0X_ADE_LOG")
+                .unwrap_or_else(|_| "warn,h0x_ade=info,gpui_shell=info".into()),
         )
         .init();
 
@@ -130,7 +130,7 @@ fn main() {
                 // One that can't serve this app gets the screen that fixes it.
                 Ok(core) => hc::check(&core.hello).map(|()| core).map_err(setup::Need::Fix),
                 Err(e) => {
-                    eprintln!("herdr-app: {e:#}");
+                    eprintln!("h0x-ade: {e:#}");
                     Err(setup::Need::Install)
                 }
             }
@@ -145,7 +145,7 @@ fn main() {
     telemetry::start(settings::telemetry_setting(&person));
     bench::start();
     if let Err(e) = mods::write_workspace() {
-        eprintln!("herdr-app: cannot write {}: {e}", mods::app_dir().display());
+        eprintln!("h0x-ade: cannot write {}: {e}", mods::app_dir().display());
     }
 
     gpui_platform::application()
@@ -206,17 +206,17 @@ pub fn open_main(core: std::sync::Arc<hc::Core>, requests: async_channel::Receiv
                 // macOS: always see-through, so a layout can draw its own title bar
                 // live; the app drags the window (window/titlebar.rs).
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Herdr".into()),
+                    title: Some("HyperOx".into()),
                     // Windows: hidden for good (it can't change live); the app draws it.
                     appears_transparent: cfg!(any(target_os = "macos", windows)),
                     traffic_light_position: cfg!(target_os = "macos").then(|| point(px(12.0), px(7.0))),
                 }),
                 app_owns_titlebar_drag: cfg!(target_os = "macos"),
-                // Herdr Dev and other side-by-side builds get their own dock icon.
-                app_id: Some(std::env::var("HERDR_APP_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "herdr-app".into())),
+                // HyperOx Dev and other side-by-side builds get their own dock icon.
+                app_id: Some(std::env::var("H0X_ADE_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "h0x-ade".into())),
                 ..Default::default()
             };
             cx.open_window(options, |window, cx| cx.new(|cx| window::AppWindow::new(core, requests, window, cx)))
-                .expect("cannot open the Herdr window");
+                .expect("cannot open the HyperOx window");
             cx.activate(true);
 }

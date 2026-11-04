@@ -1,6 +1,6 @@
 //! Windows' ConPTY asks its viewer for win32-input-mode (`CSI ?9001h`): key
 //! events with their modifiers, which it otherwise loses (Shift+Enter as
-//! Ghostty sends it never reaches the program). herdr-core replays the request
+//! Ghostty sends it never reaches the program). h0x-core replays the request
 //! to every new viewer. Used for Escape and modified Enter without Kitty;
 //! negotiated Kitty input stays with Ghostty's encoder.
 

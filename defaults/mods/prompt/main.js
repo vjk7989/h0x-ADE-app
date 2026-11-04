@@ -1,7 +1,7 @@
 // A text prompt. Enter saves, Esc cancels.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { run, props, closeOverlay, theme } from "herdr";
+import { run, props, closeOverlay, theme } from "h0x";
 
 export default class Prompt extends View {
   init(_props, cx) {

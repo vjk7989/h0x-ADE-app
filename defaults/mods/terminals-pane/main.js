@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, home } from "herdr";
+import { panes, props, run, home } from "h0x";
 
 
 function folder(cwd) {

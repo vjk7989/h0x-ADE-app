@@ -1,5 +1,5 @@
-Executable=/private/tmp/herdr-codesign2/Herdr.app/Contents/MacOS/Herdr
-Identifier=dev.herdr.app
+Executable=/private/tmp/h0x-codesign2/HyperOx.app/Contents/MacOS/HyperOx
+Identifier=tech.pavii.h0xade
 Format=app bundle with Mach-O thin (arm64)
 CodeDirectory v=20400 size=124710 flags=0x2(adhoc) hashes=3891+3 location=embedded
 Signature=adhoc
