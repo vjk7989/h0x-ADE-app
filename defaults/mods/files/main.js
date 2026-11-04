@@ -18,7 +18,7 @@ const BURST = 30000, LISTED = 5;
 // A file name goes into text typed at an agent: control characters (a newline would
 // submit a fake prompt line), line/paragraph separators and invisible or bidi format
 // characters (they disguise a name) are dropped and it is capped at 200 characters.
-const noteName = name => [...name.replace(/[\u0000-\u001f\u007f-\u009f​-‏ -‮⁠-⁤⁦-⁩﻿]/g, "")].slice(0, 200).join("");
+const noteName = name => [...name.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "")].slice(0, 200).join("");
 // A file is written back with the line endings it was read with: CRLF only when every line had it.
 const eol = text => /\r\n/.test(text) && !/(^|[^\r])\n/.test(text) ? "\r\n" : "\n";
 const text = doc => { const value = doc.state.value(); return doc.eol === "\r\n" ? value.replace(/\r?\n/g, "\r\n") : value; };
