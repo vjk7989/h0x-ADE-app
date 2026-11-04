@@ -137,7 +137,7 @@ fn allowed(target: &str, roots: &[String], windows: bool) -> bool {
     roots.iter().any(|root| !is_fs_root(root, windows) && within(target, root, windows))
 }
 
-/// `/`, a drive (`C:\`) or a bare share (`\server\share`).
+/// `/`, a drive (`C:\`) or a bare share (`\\server\share`).
 fn is_fs_root(path: &str, windows: bool) -> bool {
     let p = norm(path, windows);
     if !windows {
@@ -149,22 +149,22 @@ fn is_fs_root(path: &str, windows: bool) -> bool {
 /// Whether `target` is `root` or inside it.
 fn within(target: &str, root: &str, windows: bool) -> bool {
     let (target, root) = (norm(target, windows), norm(root, windows));
-    let sep = if windows { '\' } else { '/' };
+    let sep = if windows { '\\' } else { '/' };
     target == root || target.strip_prefix(&root).is_some_and(|rest| rest.starts_with(sep))
 }
 
 /// Comparable form, without a trailing separator. Windows: any case, with
-/// `\?\` and `\?\UNC\` read as the plain drive and UNC paths.
+/// `\\?\` and `\\?\UNC\` read as the plain drive and UNC paths.
 fn norm(s: &str, windows: bool) -> String {
     if !windows {
         return s.trim_end_matches('/').to_owned();
     }
     let s = s.replace('/', r"\");
-    let s = match s.strip_prefix(r"\?\UNC\") {
-        Some(rest) => format!(r"\{rest}"),
-        None => s.strip_prefix(r"\?\").unwrap_or(s.as_str()).to_owned(),
+    let s = match s.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => s.strip_prefix(r"\\?\").unwrap_or(s.as_str()).to_owned(),
     };
-    s.trim_end_matches('\').to_lowercase()
+    s.trim_end_matches('\\').to_lowercase()
 }
 
 /// Reads off the UI thread: the text, or null when absent.
@@ -308,19 +308,19 @@ mod tests {
     #[test]
     fn filesystem_roots_never_open_a_drive() {
         // A space at `G:\` (or `/`) doesn't make the drive reachable...
-        for root in [r"G:\", r"\?\G:\", "g:", r"\?\UNC\server\share\", r"\server\share"] {
+        for root in [r"G:\", r"\\?\G:\", "g:", r"\\?\UNC\server\share\", r"\\server\share"] {
             assert!(is_fs_root(root, true), "{root}");
-            assert!(!allowed(r"\?\G:\pavii-ade\a.txt", &[root.to_owned()], true), "{root}");
-            assert!(!allowed(r"\server\share\a.txt", &[root.to_owned()], true), "{root}");
+            assert!(!allowed(r"\\?\G:\pavii-ade\a.txt", &[root.to_owned()], true), "{root}");
+            assert!(!allowed(r"\\server\share\a.txt", &[root.to_owned()], true), "{root}");
         }
         assert!(is_fs_root("/", false));
         assert!(!allowed("/etc/passwd", &["/".to_owned()], false));
         // ...while the other roots still work beside it.
-        let roots = [r"G:\".to_owned(), r"\?\G:\pavii-ade".to_owned()];
-        assert!(allowed(r"\?\g:\PAVII-ADE\src\a.rs", &roots, true));
-        assert!(!allowed(r"\?\G:\other\a.rs", &roots, true));
+        let roots = [r"G:\".to_owned(), r"\\?\G:\pavii-ade".to_owned()];
+        assert!(allowed(r"\\?\g:\PAVII-ADE\src\a.rs", &roots, true));
+        assert!(!allowed(r"\\?\G:\other\a.rs", &roots, true));
         // Folders on a drive or share are not roots of it.
-        for folder in [r"G:\pavii-ade", r"\?\UNC\server\share\ana", r"\server\share\ana"] {
+        for folder in [r"G:\pavii-ade", r"\\?\UNC\server\share\ana", r"\\server\share\ana"] {
             assert!(!is_fs_root(folder, true), "{folder}");
         }
         assert!(!is_fs_root("/home/ana", false));
@@ -329,20 +329,20 @@ mod tests {
 
     #[test]
     fn windows_paths_compare_without_case_or_verbatim_prefixes() {
-        let home = r"\?\C:\Users\Ana";
-        assert!(within(r"\?\C:\Users\Ana", home, true));
+        let home = r"\\?\C:\Users\Ana";
+        assert!(within(r"\\?\C:\Users\Ana", home, true));
         assert!(within(r"C:\Users\Ana\", home, true));
-        assert!(within(r"\?\c:\users\ana\Projects\a.txt", home, true));
+        assert!(within(r"\\?\c:\users\ana\Projects\a.txt", home, true));
         assert!(within(r"C:/Users/Ana/notes.md", home, true));
         // Another drive, a sibling with the same start, UNC shares.
-        assert!(!within(r"\?\D:\Users\Ana\a.txt", home, true));
-        assert!(!within(r"\?\C:\Users\Anabel\a.txt", home, true));
-        assert!(!within(r"\?\C:\Users", home, true));
-        assert!(!within(r"\?\UNC\server\share\a.txt", home, true));
-        assert!(!within(r"\server\share\a.txt", home, true));
+        assert!(!within(r"\\?\D:\Users\Ana\a.txt", home, true));
+        assert!(!within(r"\\?\C:\Users\Anabel\a.txt", home, true));
+        assert!(!within(r"\\?\C:\Users", home, true));
+        assert!(!within(r"\\?\UNC\server\share\a.txt", home, true));
+        assert!(!within(r"\\server\share\a.txt", home, true));
         // A home on a share: both spellings are the same place.
-        assert!(within(r"\?\UNC\server\share\ana\a.txt", r"\server\share\ana", true));
-        assert!(!within(r"\?\UNC\server\other\a.txt", r"\server\share\ana", true));
+        assert!(within(r"\\?\UNC\server\share\ana\a.txt", r"\\server\share\ana", true));
+        assert!(!within(r"\\?\UNC\server\other\a.txt", r"\\server\share\ana", true));
         // Unix: exact case, component boundaries.
         assert!(within("/home/ana", "/home/ana", false));
         assert!(within("/home/ana/x", "/home/ana/", false));
