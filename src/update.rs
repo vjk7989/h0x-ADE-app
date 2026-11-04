@@ -70,9 +70,86 @@ fn target() -> String {
     format!("{os}-{}", std::env::consts::ARCH)
 }
 
+/// Environment overrides (release URLs, core dirs) count only in debug and
+/// test builds: a release build reads its releases from GitHub alone.
+pub(crate) const OVERRIDES: bool = cfg!(any(debug_assertions, test));
+
 /// A releases base URL from the environment; empty counts as unset, a trailing `/` is dropped.
 fn env_url(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.trim().is_empty()).map(|v| v.trim().trim_end_matches('/').to_owned())
+    overridden(OVERRIDES, std::env::var(key).ok())
+}
+
+fn overridden(honoured: bool, value: Option<String>) -> Option<String> {
+    value.filter(|v| honoured && !v.trim().is_empty()).map(|v| v.trim().trim_end_matches('/').to_owned())
+}
+
+/// The only hosts the app downloads from: feeds, releases and release-note media.
+const TRUSTED_HOSTS: [&str; 3] = ["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
+
+/// curl may neither start nor be redirected anywhere but https.
+pub(crate) const CURL_HTTPS: [&str; 4] = ["--proto", "=https", "--proto-redir", "=https"];
+
+/// The curl flags for `url`: https only, except the unit tests' loopback stub.
+fn curl_flags(url: &str) -> [&'static str; 4] {
+    if loopback_stub(url) { ["--proto", "=https,http", "--proto-redir", "=https"] } else { CURL_HTTPS }
+}
+
+/// Unit tests only: a plain-http release server on `http://127.0.0.1:<port>/…`.
+#[cfg(test)]
+fn loopback_stub(url: &str) -> bool {
+    url.strip_prefix("http://127.0.0.1:").and_then(|rest| rest.split(['/', '?', '#']).next()).is_some_and(|port| port.parse::<u16>().is_ok())
+}
+
+/// Release and debug builds: GitHub over https, nothing else.
+#[cfg(not(test))]
+fn loopback_stub(_url: &str) -> bool {
+    false
+}
+
+/// `https://<trusted host>/…`, the host exactly: no userinfo, no port.
+pub(crate) fn trusted_url(url: &str) -> bool {
+    if loopback_stub(url) {
+        return true;
+    }
+    let Some(rest) = url.strip_prefix("https://") else { return false };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    TRUSTED_HOSTS.contains(&authority)
+}
+
+fn untrusted(url: &str) -> String {
+    format!("{url}: not an https GitHub URL")
+}
+
+/// GitHub release files redirect to *.githubusercontent.com: curl follows at
+/// most 5 redirects and prints the URL it landed on after the body (stdout).
+pub(crate) const CURL_LANDED: [&str; 4] = ["--max-redirs", "5", "--write-out", r"\n%{url_effective}"];
+
+/// Splits curl's stdout (run with `CURL_LANDED`) at its last newline into the
+/// body and the final URL; a final URL that is not trusted is refused.
+pub(crate) fn landed(stdout: &[u8]) -> Result<&[u8], String> {
+    let at = stdout.iter().rposition(|&b| b == b'\n').ok_or("curl did not report the final URL")?;
+    let url = String::from_utf8_lossy(&stdout[at + 1..]);
+    if !trusted_url(&url) {
+        return Err(untrusted(&url));
+    }
+    Ok(&stdout[..at])
+}
+
+/// Downloads a trusted `url` into `file`, giving up after `max_time` seconds.
+/// A download that was redirected off the trusted hosts is deleted.
+pub(crate) fn download(url: &str, file: &Path, max_time: &str) -> Result<(), String> {
+    if !trusted_url(url) {
+        return Err(untrusted(url));
+    }
+    let mut curl = crate::spawn::command(system("curl"));
+    curl.args(["-fsSL", "--max-time", max_time]).args(curl_flags(url)).args(CURL_LANDED).arg("-o").arg(file).arg(url);
+    let out = curl.stdin(Stdio::null()).output().map_err(|e| format!("curl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("{url}: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    landed(&out.stdout).map(drop).inspect_err(|_| {
+        let _ = std::fs::remove_file(file);
+    })
 }
 
 fn releases() -> String {
@@ -316,7 +393,7 @@ fn check_from(root: &Path, releases: &str) -> Result<Option<String>, String> {
 /// Downloads, checks and unpacks a release into `work`; returns the app inside.
 fn unpack(url: &str, sha: &str, work: &Path) -> Result<PathBuf, String> {
     let tarball = work.join("app.tar.gz");
-    run(crate::spawn::command(system("curl")).args(["-fsSL", "--max-time", "600", "-o"]).arg(&tarball).arg(url))?;
+    download(url, &tarball, "600")?;
     let bytes = std::fs::read(&tarball).map_err(|e| e.to_string())?;
     if sha256(&bytes) != sha.to_ascii_lowercase() {
         return Err("the download is damaged (checksum mismatch)".into());
@@ -372,11 +449,16 @@ pub(crate) fn sha256(bytes: &[u8]) -> String {
 }
 
 fn curl_text(url: &str) -> Result<String, String> {
-    let out = crate::spawn::command(system("curl")).args(["-fsSL", "--max-time", "30", url]).stdin(Stdio::null()).output().map_err(|e| format!("curl: {e}"))?;
+    if !trusted_url(url) {
+        return Err(untrusted(url));
+    }
+    let mut curl = crate::spawn::command(system("curl"));
+    curl.args(["-fsSL", "--max-time", "30"]).args(curl_flags(url)).args(CURL_LANDED).arg(url);
+    let out = curl.stdin(Stdio::null()).output().map_err(|e| format!("curl: {e}"))?;
     if !out.status.success() {
         return Err(format!("{url}: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
-    String::from_utf8(out.stdout).map_err(|e| e.to_string())
+    String::from_utf8(landed(&out.stdout)?.to_vec()).map_err(|e| e.to_string())
 }
 
 fn run(cmd: &mut Command) -> Result<(), String> {
@@ -652,6 +734,141 @@ mod tests {
     }
 
     #[test]
+    fn only_https_github_urls_are_trusted() {
+        for url in [
+            "https://github.com/vjk7989/h0x-ADE-app/releases/latest/download/latest.json",
+            "https://github.com",
+            "https://objects.githubusercontent.com/github-production-release-asset/1",
+            "https://release-assets.githubusercontent.com/github-production-release-asset/1?sp=r",
+        ] {
+            assert!(trusted_url(url), "{url}");
+        }
+        for url in [
+            "",
+            " ",
+            "https://",
+            "http://github.com/vjk7989/h0x-ADE-app/releases",
+            "https://example.com/releases",
+            "https://github.com.evil.com/releases",
+            "https://evil.com/github.com/releases",
+            "https://user@github.com/releases",
+            "https://github.com:443/releases",
+            "https://github.com:8443/releases",
+            "https://api.github.com/repos",
+            "https://GitHub.com/releases",
+            "HTTPS://github.com/releases",
+            " https://github.com/releases",
+            r"https://github.com\@evil.com/",
+            "file:///C:/Users/me/app.tar.gz",
+            r"C:\Users\me\app.tar.gz",
+            "ftp://github.com/releases",
+            // The unit tests' loopback stub is exactly `http://127.0.0.1:<port>`.
+            "http://127.0.0.1.evil.com/",
+            "http://localhost/",
+            "http://127.0.0.1@evil.com/",
+            "http://127.0.0.1/",
+            "http://127.0.0.1:/",
+            "http://127.0.0.1:1@evil.com/",
+            "http://127.0.0.1:99999/",
+            "https://127.0.0.1:1/",
+        ] {
+            assert!(!trusted_url(url), "{url:?}");
+        }
+        assert_eq!(CURL_HTTPS, ["--proto", "=https", "--proto-redir", "=https"]);
+        assert_eq!(curl_flags("https://github.com/x"), CURL_HTTPS);
+        assert_eq!(curl_flags("http://127.0.0.1.evil.com/"), CURL_HTTPS);
+        // cfg(test) only: the loopback stub may be plain http, but never redirect off https.
+        for url in ["http://127.0.0.1:1", "http://127.0.0.1:8080/latest/download/latest.json"] {
+            assert!(trusted_url(url), "{url}");
+            assert_eq!(curl_flags(url), ["--proto", "=https,http", "--proto-redir", "=https"]);
+        }
+    }
+
+    #[test]
+    fn untrusted_urls_are_refused_before_curl_runs() {
+        let file = std::env::temp_dir().join(format!("h0x-ade-untrusted-{}", std::process::id()));
+        for url in ["", "http://github.com/x", "https://github.com@evil.com/x", "https://github.com:1/x"] {
+            assert_eq!(curl_text(url), Err(format!("{url}: not an https GitHub URL")));
+            assert_eq!(download(url, &file, "1"), Err(format!("{url}: not an https GitHub URL")));
+            assert_eq!(unpack(url, "", &file).unwrap_err(), format!("{url}: not an https GitHub URL"));
+        }
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn the_url_curl_landed_on_must_be_trusted_too() {
+        assert_eq!(CURL_LANDED, ["--max-redirs", "5", "--write-out", r"\n%{url_effective}"]);
+        // A release file redirects to release-assets; the body may hold newlines itself.
+        let ok = b"{\"a\":1}\nline two\n\nhttps://release-assets.githubusercontent.com/github-production-release-asset/1?sp=r";
+        assert_eq!(landed(ok), Ok(&b"{\"a\":1}\nline two\n"[..]));
+        // With `-o FILE` the body is in the file and stdout is only the newline and URL.
+        assert_eq!(landed(b"\nhttps://github.com/vjk7989/h0x-ADE-app/releases/download/v0.1.0/a.tar.gz"), Ok(&b""[..]));
+        assert_eq!(landed(b"\nhttps://objects.githubusercontent.com/x"), Ok(&b""[..]));
+        for (stdout, url) in [
+            (&b"body\nhttps://evil.com/a.tar.gz"[..], "https://evil.com/a.tar.gz"),
+            (&b"\nhttp://github.com/x"[..], "http://github.com/x"),
+            (&b"\nhttps://github.com.evil.com/x"[..], "https://github.com.evil.com/x"),
+            (&b"\nhttps://github.com@evil.com/x"[..], "https://github.com@evil.com/x"),
+            (&b"\nhttps://github.com:8443/x"[..], "https://github.com:8443/x"),
+            (&b"https://github.com/x\n"[..], ""),
+            (&b"\n"[..], ""),
+            (&b"\n\xff"[..], "\u{fffd}"),
+        ] {
+            assert_eq!(landed(stdout), Err(format!("{url}: not an https GitHub URL")), "{stdout:?}");
+        }
+        for stdout in [&b""[..], &b"https://github.com/x"[..], &b"body without a final url"[..]] {
+            assert_eq!(landed(stdout), Err("curl did not report the final URL".to_owned()), "{stdout:?}");
+        }
+    }
+
+    #[test]
+    fn env_overrides_count_only_in_debug_and_test_builds() {
+        assert!(OVERRIDES, "unit tests are built with cfg(test)");
+        let url = || Some("https://github.com/someone/fork/releases/".to_owned());
+        assert_eq!(overridden(true, url()).as_deref(), Some("https://github.com/someone/fork/releases"));
+        assert_eq!(overridden(false, url()), None, "a release build ignores the override");
+        for value in [None, Some(String::new()), Some(" ".to_owned())] {
+            assert_eq!(overridden(true, value.clone()), None);
+            assert_eq!(overridden(false, value), None);
+        }
+    }
+
+    #[test]
+    fn trusted_hosts_match_exactly_without_lookalikes() {
+        for url in [
+            "https://github.com/",
+            "https://github.com?x=1",
+            "https://github.com#x",
+            "https://objects.githubusercontent.com?sig=1",
+            "https://release-assets.githubusercontent.com#frag",
+        ] {
+            assert!(trusted_url(url), "{url}");
+        }
+        for url in [
+            "https://github.com./x",
+            "https://objects.githubusercontent.com./x",
+            "https://OBJECTS.githubusercontent.com/x",
+            "https://xn--github-9za.com/x",
+            "https://g\u{456}thub.com/x",
+            "https://\u{ff47}ithub.com/x",
+            "https://github.com%40evil.com/x",
+            "https://evil.com%2F%40github.com/x",
+            "https://evil.com%2F@github.com/x",
+            "https://github.com:/x",
+            "https:///github.com/x",
+            "https://[::1]/x",
+            "https://140.82.112.3/x",
+            "https://github.com\t.evil.com/x",
+            "https://github.com\n/x",
+            "https://github.com\\evil.com/x",
+            "https://github.com;evil.com/x",
+        ] {
+            assert!(!trusted_url(url), "{url:?}");
+            assert_eq!(curl_text(url), Err(format!("{url}: not an https GitHub URL")));
+        }
+    }
+
+    #[test]
     fn startup_applies_only_a_newer_version_and_never_relaunches_twice() {
         assert_eq!(startup_target("0.1.7", Some("0.1.8"), None), Some("0.1.8"));
         for staged in [None, Some("0.1.6"), Some("0.1.7")] {
@@ -755,8 +972,11 @@ mod tests {
             run(Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&reference).arg(PACKED)).unwrap();
             let dev = work.join(kind);
             std::fs::create_dir_all(&dev).unwrap();
-            let sha = sha256(&std::fs::read(&archive).unwrap());
-            let app = unpack(&format!("file://{}", archive.display()), &sha, &dev).unwrap();
+            // unpack() downloads over https only: these local dev builds take its steps after the download.
+            run(Command::new("tar").arg("-xzf").arg(&archive).arg("-C").arg(&dev)).unwrap();
+            let app = dev.join(PACKED);
+            let signature = Command::new("/usr/bin/codesign").arg("-dvv").arg(&app).output().unwrap();
+            prepare_macos_bundle(&app, &signature).unwrap();
             let signature = Command::new("/usr/bin/codesign").arg("-dvv").arg(&app).output().unwrap();
             assert!(signature.status.success());
             let signature = String::from_utf8_lossy(&signature.stderr);

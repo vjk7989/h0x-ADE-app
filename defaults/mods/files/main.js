@@ -15,6 +15,10 @@ const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", 
 const PER_FOLDER = 500, TOTAL = 5000;
 // Saves of one file this close together are one edit; a note lists at most LISTED files.
 const BURST = 30000, LISTED = 5;
+// A file name goes into text typed at an agent: control characters (a newline would
+// submit a fake prompt line), line/paragraph separators and invisible or bidi format
+// characters (they disguise a name) are dropped and it is capped at 200 characters.
+const noteName = name => [...name.replace(/[\u0000-\u001f\u007f-\u009f​-‏ -‮⁠-⁤⁦-⁩﻿]/g, "")].slice(0, 200).join("");
 // A file is written back with the line endings it was read with: CRLF only when every line had it.
 const eol = text => /\r\n/.test(text) && !/(^|[^\r])\n/.test(text) ? "\r\n" : "\n";
 const text = doc => { const value = doc.state.value(); return doc.eol === "\r\n" ? value.replace(/\r?\n/g, "\r\n") : value; };
@@ -227,8 +231,9 @@ ${doc.path}`, now = Date.now(), edit = this.edits.get(id);
           if (agent.status === "working" || agent.status === "blocked") continue;
           const news = [...this.edits.values()].filter(e => e.space === agent.space && !e.told.has(agent.address));
           if (!news.length) continue;
-          const more = news.length - LISTED;
-          const list = news.slice(0, LISTED).map(e => e.path).join(", ") + (more > 0 ? ` and ${more} more` : "");
+          // A name that sanitises to nothing is left out; if none is left the note says "a file".
+          const names = news.map(e => noteName(e.path)).filter(Boolean), more = names.length - LISTED;
+          const list = names.length ? names.slice(0, LISTED).join(", ") + (more > 0 ? ` and ${more} more` : "") : "a file";
           const sent = await core(["send", agent.address, `HyperOx: the user edited ${list} in the editor. Re-read before changing it.`, "--if", "idle"]).catch(() => null);
           if (sent?.code === 0) for (const e of news) e.told.add(agent.address);
         }

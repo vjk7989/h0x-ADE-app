@@ -28,6 +28,15 @@ pub fn listen(tx: async_channel::Sender<Request>) {
         Ok(l) => l,
         Err(e) => return tracing::warn!("cannot serve {}: {e}", path.display()),
     };
+    // Only this user may drive the window.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_file(&path);
+            return tracing::warn!("cannot restrict {}: {e}", path.display());
+        }
+    }
     let _ = std::thread::Builder::new().name("h0x-ade-control".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
             let tx = tx.clone();
@@ -82,7 +91,7 @@ pub fn client(args: &[String]) -> i32 {
                 Ok(path) => path,
                 Err(e) => return fail(&format!("cannot resolve screenshot path: {e}")),
             };
-            if path.extension().is_none_or(|ext| !ext.eq_ignore_ascii_case("png")) {
+            if !is_png(&path) {
                 return fail("screenshot path must end in .png");
             }
             json!({ "shot": path })
@@ -145,6 +154,17 @@ fn parse_args(rest: &[String]) -> Result<Value, String> {
     }
 }
 
+/// `shot` writes only `.png` files (any case); the window checks again, as
+/// anything this user runs can write to the socket. A `:` in the file name
+/// (an NTFS stream) and network paths (`\\server`, `//server`) are refused.
+pub fn is_png(path: &std::path::Path) -> bool {
+    let text = path.to_string_lossy();
+    !text.starts_with(r"\\")
+        && !text.starts_with("//")
+        && !text.rsplit(['/', '\\']).next().unwrap_or_default().contains(':')
+        && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+}
+
 /// Encode before opening the destination: GPU errors must not truncate a good shot.
 pub fn save_shot(window: &gpui::Window, path: &std::path::Path) -> anyhow::Result<()> {
     let image = window.render_to_image()?;
@@ -175,6 +195,50 @@ pub fn save_shot(window: &gpui::Window, path: &std::path::Path) -> anyhow::Resul
 fn fail(message: &str) -> i32 {
     eprintln!("h0x-ade: {message}");
     2
+}
+
+#[cfg(test)]
+mod shot_tests {
+    use super::is_png;
+    use std::path::Path;
+
+    #[test]
+    fn a_shot_path_must_end_in_png() {
+        assert!(!is_png(Path::new("")), "empty");
+        assert!(!is_png(Path::new("a")), "no extension");
+        assert!(!is_png(Path::new("a.png.exe")), "png is not the last extension");
+        assert!(!is_png(Path::new(".png")), "a dot file named png has no extension");
+        assert!(!is_png(Path::new("a.pngx")));
+        assert!(is_png(Path::new("a.png")));
+        assert!(is_png(Path::new("a.PNG")), "any case");
+        assert!(is_png(Path::new("/tmp/shots/a.Png")), "unix dirs");
+        assert!(is_png(Path::new(r"C:\Users\Me\My Shots\a.png")), "windows dirs");
+        assert!(!is_png(Path::new("shots.png/a")), "a .png directory does not count");
+    }
+
+    #[test]
+    fn a_shot_path_is_judged_by_its_last_extension_only() {
+        assert!(is_png(Path::new(".PNG.png")), "a dot file with a second extension");
+        assert!(is_png(Path::new("a.exe.PNG")));
+        assert!(is_png(Path::new("C:/Users/Me/shots/a.png")), "windows forward slashes");
+        assert!(!is_png(Path::new("a.png.")), "a trailing period is an empty extension");
+        assert!(!is_png(Path::new("a.png ")), "a trailing space is part of the extension");
+        assert!(!is_png(Path::new("a.png:evil")), "an NTFS stream name is part of the extension");
+        assert!(!is_png(Path::new("a.p\u{0}ng")));
+        assert!(!is_png(Path::new("a.\u{ff50}ng")), "a fullwidth letter is not png");
+    }
+
+    #[test]
+    fn a_shot_path_is_never_a_stream_or_a_network_path() {
+        assert!(!is_png(Path::new("a.exe:x.png")), "an NTFS stream of a.exe");
+        assert!(!is_png(Path::new(r"C:\a\b.exe:x.png")), "a stream inside a folder");
+        assert!(!is_png(Path::new(r"\\server\share\a.png")), "UNC");
+        assert!(!is_png(Path::new("//server/share/a.png")), "UNC with forward slashes");
+        assert!(!is_png(Path::new(r"\\?\UNC\server\share\a.png")), "verbatim UNC");
+        assert!(is_png(Path::new(r"C:\a\b.png")), "a drive letter colon is not in the file name");
+        assert!(is_png(Path::new("C:/a/b.png")));
+        assert!(is_png(Path::new("/a/b.png")), "one leading slash is local");
+    }
 }
 
 #[cfg(all(test, unix))]
