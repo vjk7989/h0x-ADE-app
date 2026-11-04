@@ -162,7 +162,7 @@ const PREVIOUS_THEMES: &[(&str, &str)] = &[
 ];
 
 pub fn install_themes() {
-    let _ = std::fs::create_dir_all(crate::mods::app_dir().join("themes"));
+    let _ = crate::mods::ensure_app_dir().and_then(|home| std::fs::create_dir_all(home.join("themes")));
     for (name, text) in THEMES {
         install_theme(&theme_path(name), name, text);
     }
