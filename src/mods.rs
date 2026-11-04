@@ -480,6 +480,18 @@ pub fn final_cleanup(core: std::sync::Arc<crate::hc::Core>, deadline: std::time:
     body();
 }
 
+/// The folders of the spaces open on this computer (`spaces()`; remote
+/// spaces' folders are on their machine). Read on the window thread.
+pub fn local_space_folders() -> Vec<PathBuf> {
+    SNAPSHOT.with(|s| {
+        s.borrow().spaces.as_array().into_iter().flatten()
+            .filter(|p| p.get("machine").and_then(Value::as_str).is_none_or(str::is_empty))
+            .filter_map(|p| p.get("folder")?.as_str().map(PathBuf::from))
+            .filter(|f| f.is_absolute())
+            .collect()
+    })
+}
+
 /// Navigation order set by the mod that lists agents, with stale entries removed and new agents appended.
 pub fn agent_order(available: Vec<String>) -> Vec<String> {
     AGENT_ORDER.with(|s| {
@@ -964,9 +976,10 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .async_function("readTextFile", |a| {
             let path = a.string(0)?.to_owned();
             let on = opt_str(a.get(1), "on");
+            let roots = if on.is_none() { crate::mod_files::allowed_roots() } else { Vec::new() };
             Ok(crate::mod_files::read_with(move || match on {
                 Some(m) => read_remote(&m, &path),
-                None => crate::mod_files::inside_home(Path::new(&path)).and_then(|_| crate::mod_files::read(Path::new(&path))),
+                None => crate::mod_files::check(Path::new(&path), &roots).and_then(|_| crate::mod_files::read(Path::new(&path))),
             }))
         })
         .async_function("writeTextFile", |a| {
@@ -1145,7 +1158,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         })
         .async_function("watchFolder", |a| {
             let path = a.string(0)?.to_owned();
-            crate::mod_files::inside_home(Path::new(&path)).map_err(HostError::new)?;
+            crate::mod_files::check(Path::new(&path), &crate::mod_files::allowed_roots()).map_err(HostError::new)?;
             Ok(async move { crate::files::next_change(path).await.map(|v| to_host(&json!(v))).map_err(HostError::new) })
         })
         .async_function("nextCommand", move |_| {

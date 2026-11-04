@@ -1,5 +1,5 @@
 //! Asynchronous text files for mods. Writes reject a stale editor snapshot.
-//! Mods reach only files inside the person's home folder (ADR-048).
+//! Mods reach only files in their allowed folders (ADR-048, `allowed_roots`).
 use gpui_shell::{HostError, HostValue};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -76,17 +76,37 @@ fn write(path: &Path, text: &str, expected: Option<&str>) -> Result<(), String> 
     result
 }
 
-/// Refuses a path outside the person's home folder, with `..` and symlinks
-/// resolved (a path that doesn't exist yet: by its nearest existing folder).
-pub fn inside_home(path: &Path) -> Result<(), String> {
-    inside(path, &crate::mods::home())
+/// Where mods may read, write and watch (ADR-048, amended): the person's home
+/// folder, HyperOx's app home, and the folders of the spaces open on this
+/// computer. Computed per call: spaces come and go.
+pub fn allowed_roots() -> Vec<String> {
+    let mut roots = vec![crate::mods::home(), crate::mods::app_dir()];
+    roots.extend(crate::mods::local_space_folders());
+    real_roots(roots)
 }
 
-fn inside(path: &Path, home: &Path) -> Result<(), String> {
-    let outside = || format!("{} is outside your home folder", path.display());
-    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+/// The roots as real paths. A filesystem root (`/`, `G:\`, a bare share)
+/// would open a whole drive, so it is left out.
+fn real_roots(roots: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
+    roots
+        .into_iter()
+        .filter_map(|root| {
+            let real = real(&root)?.to_string_lossy().into_owned();
+            if is_fs_root(&real, cfg!(windows)) {
+                tracing::warn!("{}: a filesystem root is never a folder mods may use", root.display());
+                return None;
+            }
+            Some(real)
+        })
+        .collect()
+}
+
+/// Refuses a path outside every root, with `..` and symlinks resolved (a path
+/// that doesn't exist yet: by its nearest existing folder).
+pub fn check(path: &Path, roots: &[String]) -> Result<(), String> {
+    let outside = || format!("{} is outside your home folder and your spaces", path.display());
     let target = real(path).ok_or_else(outside)?;
-    if within(&target.to_string_lossy(), &home.to_string_lossy(), cfg!(windows)) {
+    if allowed(&target.to_string_lossy(), roots, cfg!(windows)) {
         Ok(())
     } else {
         Err(outside())
@@ -111,23 +131,40 @@ fn real(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Whether the real path `target` is `home` or inside it. On Windows in any
-/// case, with `\\?\` and `\\?\UNC\` read as the plain drive and UNC paths.
-fn within(target: &str, home: &str, windows: bool) -> bool {
-    let norm = |s: &str| {
-        if !windows {
-            return s.trim_end_matches('/').to_owned();
-        }
-        let s = s.replace('/', r"\");
-        let s = match s.strip_prefix(r"\\?\UNC\") {
-            Some(rest) => format!(r"\\{rest}"),
-            None => s.strip_prefix(r"\\?\").unwrap_or(s.as_str()).to_owned(),
-        };
-        s.trim_end_matches('\\').to_lowercase()
+/// Whether the real path `target` is one of `roots` or inside one. Filesystem
+/// roots never count.
+fn allowed(target: &str, roots: &[String], windows: bool) -> bool {
+    roots.iter().any(|root| !is_fs_root(root, windows) && within(target, root, windows))
+}
+
+/// `/`, a drive (`C:\`) or a bare share (`\server\share`).
+fn is_fs_root(path: &str, windows: bool) -> bool {
+    let p = norm(path, windows);
+    if !windows {
+        return p.is_empty();
+    }
+    p.is_empty() || (p.len() == 2 && p.ends_with(':')) || p.strip_prefix(r"\\").is_some_and(|share| share.matches('\').count() <= 1)
+}
+
+/// Whether `target` is `root` or inside it.
+fn within(target: &str, root: &str, windows: bool) -> bool {
+    let (target, root) = (norm(target, windows), norm(root, windows));
+    let sep = if windows { '\' } else { '/' };
+    target == root || target.strip_prefix(&root).is_some_and(|rest| rest.starts_with(sep))
+}
+
+/// Comparable form, without a trailing separator. Windows: any case, with
+/// `\?\` and `\?\UNC\` read as the plain drive and UNC paths.
+fn norm(s: &str, windows: bool) -> String {
+    if !windows {
+        return s.trim_end_matches('/').to_owned();
+    }
+    let s = s.replace('/', r"\");
+    let s = match s.strip_prefix(r"\?\UNC\") {
+        Some(rest) => format!(r"\{rest}"),
+        None => s.strip_prefix(r"\?\").unwrap_or(s.as_str()).to_owned(),
     };
-    let (target, home) = (norm(target), norm(home));
-    let sep = if windows { '\\' } else { '/' };
-    target == home || target.strip_prefix(&home).is_some_and(|rest| rest.starts_with(sep))
+    s.trim_end_matches('\').to_lowercase()
 }
 
 /// Reads off the UI thread: the text, or null when absent.
@@ -153,10 +190,11 @@ pub fn write_text(
     text: String,
     expected: Option<String>,
 ) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send {
+    let roots = allowed_roots();
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
         let path = Path::new(&path);
-        let _ = tx.send_blocking(inside_home(path).and_then(|_| write(path, &text, expected.as_deref())));
+        let _ = tx.send_blocking(check(path, &roots).and_then(|_| write(path, &text, expected.as_deref())));
     });
     async move {
         rx.recv()
@@ -190,67 +228,121 @@ mod tests {
     }
 
     #[test]
-    fn mods_reach_only_the_home_folder() {
+    fn mods_reach_only_their_allowed_folders() {
         let root = std::env::temp_dir().join(format!(
-            "h0x-ade-home-{}",
+            "h0x-ade-roots-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
         let home = root.join("home");
+        let space = root.join("work/repo");
         std::fs::create_dir_all(home.join("project")).unwrap();
+        std::fs::create_dir_all(&space).unwrap();
         std::fs::write(home.join("project/a.txt"), "a").unwrap();
+        std::fs::write(space.join("b.txt"), "b").unwrap();
         std::fs::write(root.join("secret.txt"), "s").unwrap();
-        // Inside, existing or not yet written (its folders made on write).
-        assert_eq!(inside(&home.join("project/a.txt"), &home), Ok(()));
-        assert_eq!(inside(&home.join("project/new/deep.md"), &home), Ok(()));
-        assert_eq!(inside(&home.join("project/../project/a.txt"), &home), Ok(()));
-        // The home folder itself.
-        assert_eq!(inside(&home, &home), Ok(()));
-        // `..` out of it, existing or not.
+        std::fs::write(root.join("work/beside.txt"), "x").unwrap();
+        let roots = real_roots([home.clone(), space.clone()]);
+        assert_eq!(roots.len(), 2);
+        // Inside the home folder, existing or not yet written (its folders made on write).
+        assert_eq!(check(&home.join("project/a.txt"), &roots), Ok(()));
+        assert_eq!(check(&home.join("project/new/deep.md"), &roots), Ok(()));
+        assert_eq!(check(&home.join("project/../project/a.txt"), &roots), Ok(()));
+        assert_eq!(check(&home, &roots), Ok(()));
+        // Inside a space's folder, and the folder itself.
+        assert_eq!(check(&space.join("b.txt"), &roots), Ok(()));
+        assert_eq!(check(&space.join("src/new.rs"), &roots), Ok(()));
+        assert_eq!(check(&space, &roots), Ok(()));
+        // `..` out of the home folder or out of a space, existing or not.
         let escape = home.join("../secret.txt");
-        assert_eq!(inside(&escape, &home), Err(format!("{} is outside your home folder", escape.display())));
-        assert!(inside(&home.join("../elsewhere.txt"), &home).is_err());
-        assert!(inside(&home.join("missing/../../secret.txt"), &home).is_err());
-        assert!(inside(&root.join("secret.txt"), &home).is_err());
-        // A sibling whose name starts like the home folder's.
+        assert_eq!(check(&escape, &roots), Err(format!("{} is outside your home folder and your spaces", escape.display())));
+        assert!(check(&space.join("../beside.txt"), &roots).is_err());
+        assert!(check(&space.join("../../secret.txt"), &roots).is_err());
+        assert!(check(&home.join("../elsewhere.txt"), &roots).is_err());
+        assert!(check(&home.join("missing/../../secret.txt"), &roots).is_err());
+        // Outside every root.
+        assert!(check(&root.join("secret.txt"), &roots).is_err());
+        assert!(check(&root.join("work"), &roots).is_err());
+        // A sibling whose name starts like a root's.
         std::fs::create_dir_all(root.join("home2")).unwrap();
-        assert!(inside(&root.join("home2/x.txt"), &home).is_err());
-        // Empty and relative paths that don't exist resolve nowhere.
-        assert!(inside(Path::new(""), &home).is_err());
-        assert!(inside(Path::new("no-such-file-h0x.txt"), &home).is_err());
+        assert!(check(&root.join("home2/x.txt"), &roots).is_err());
+        // Empty and relative paths that don't exist resolve nowhere; no roots, nothing.
+        assert!(check(Path::new(""), &roots).is_err());
+        assert!(check(Path::new("no-such-file-h0x.txt"), &roots).is_err());
+        assert!(check(&home.join("project/a.txt"), &[]).is_err());
+        // A root that doesn't exist yet still counts where it will be.
+        let later = real_roots([root.join("later")]);
+        assert_eq!(check(&root.join("later/x.txt"), &later), Ok(()));
+        // The filesystem root is never a root.
+        let top = std::path::Path::new(&root).ancestors().last().unwrap().to_path_buf();
+        assert!(real_roots([top]).is_empty());
         #[cfg(unix)]
         {
             // A symlink inside home pointing out, to a folder or a missing file.
             std::os::unix::fs::symlink(&root, home.join("out")).unwrap();
-            assert!(inside(&home.join("out/secret.txt"), &home).is_err());
-            assert!(inside(&home.join("out/new.txt"), &home).is_err());
+            assert!(check(&home.join("out/secret.txt"), &roots).is_err());
+            assert!(check(&home.join("out/new.txt"), &roots).is_err());
             std::os::unix::fs::symlink(root.join("gone.txt"), home.join("dangling")).unwrap();
-            assert!(inside(&home.join("dangling"), &home).is_err());
-            // And one pointing within home is fine.
-            std::os::unix::fs::symlink(home.join("project"), home.join("in")).unwrap();
-            assert_eq!(inside(&home.join("in/a.txt"), &home), Ok(()));
+            assert!(check(&home.join("dangling"), &roots).is_err());
+            // One pointing into a space is fine.
+            std::os::unix::fs::symlink(&space, home.join("in")).unwrap();
+            assert_eq!(check(&home.join("in/b.txt"), &roots), Ok(()));
         }
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// HyperOx's app home is allowed even when it is not in the home folder
+    /// (an isolated `H0X_ADE_HOME`).
+    #[test]
+    fn the_app_home_is_an_allowed_root() {
+        let app = real(&crate::mods::app_dir()).unwrap().to_string_lossy().into_owned();
+        let roots = allowed_roots();
+        assert!(roots.contains(&app), "{app} not in {roots:?}");
+        let inside = format!("{app}{}settings.json", std::path::MAIN_SEPARATOR);
+        assert!(allowed(&inside, &roots, cfg!(windows)));
+        assert!(allowed(&inside, &[app.clone()], cfg!(windows)));
+    }
+
+    #[test]
+    fn filesystem_roots_never_open_a_drive() {
+        // A space at `G:\` (or `/`) doesn't make the drive reachable...
+        for root in [r"G:\", r"\?\G:\", "g:", r"\?\UNC\server\share\", r"\server\share"] {
+            assert!(is_fs_root(root, true), "{root}");
+            assert!(!allowed(r"\?\G:\pavii-ade\a.txt", &[root.to_owned()], true), "{root}");
+            assert!(!allowed(r"\server\share\a.txt", &[root.to_owned()], true), "{root}");
+        }
+        assert!(is_fs_root("/", false));
+        assert!(!allowed("/etc/passwd", &["/".to_owned()], false));
+        // ...while the other roots still work beside it.
+        let roots = [r"G:\".to_owned(), r"\?\G:\pavii-ade".to_owned()];
+        assert!(allowed(r"\?\g:\PAVII-ADE\src\a.rs", &roots, true));
+        assert!(!allowed(r"\?\G:\other\a.rs", &roots, true));
+        // Folders on a drive or share are not roots of it.
+        for folder in [r"G:\pavii-ade", r"\?\UNC\server\share\ana", r"\server\share\ana"] {
+            assert!(!is_fs_root(folder, true), "{folder}");
+        }
+        assert!(!is_fs_root("/home/ana", false));
+        assert!(allowed("/home/ana/x", &["/".to_owned(), "/home/ana".to_owned()], false));
+    }
+
     #[test]
     fn windows_paths_compare_without_case_or_verbatim_prefixes() {
-        let home = r"\\?\C:\Users\Ana";
-        assert!(within(r"\\?\C:\Users\Ana", home, true));
+        let home = r"\?\C:\Users\Ana";
+        assert!(within(r"\?\C:\Users\Ana", home, true));
         assert!(within(r"C:\Users\Ana\", home, true));
-        assert!(within(r"\\?\c:\users\ana\Projects\a.txt", home, true));
+        assert!(within(r"\?\c:\users\ana\Projects\a.txt", home, true));
         assert!(within(r"C:/Users/Ana/notes.md", home, true));
         // Another drive, a sibling with the same start, UNC shares.
-        assert!(!within(r"\\?\D:\Users\Ana\a.txt", home, true));
-        assert!(!within(r"\\?\C:\Users\Anabel\a.txt", home, true));
-        assert!(!within(r"\\?\C:\Users", home, true));
-        assert!(!within(r"\\?\UNC\server\share\a.txt", home, true));
-        assert!(!within(r"\\server\share\a.txt", home, true));
+        assert!(!within(r"\?\D:\Users\Ana\a.txt", home, true));
+        assert!(!within(r"\?\C:\Users\Anabel\a.txt", home, true));
+        assert!(!within(r"\?\C:\Users", home, true));
+        assert!(!within(r"\?\UNC\server\share\a.txt", home, true));
+        assert!(!within(r"\server\share\a.txt", home, true));
         // A home on a share: both spellings are the same place.
-        assert!(within(r"\\?\UNC\server\share\ana\a.txt", r"\\server\share\ana", true));
-        assert!(!within(r"\\?\UNC\server\other\a.txt", r"\\server\share\ana", true));
+        assert!(within(r"\?\UNC\server\share\ana\a.txt", r"\server\share\ana", true));
+        assert!(!within(r"\?\UNC\server\other\a.txt", r"\server\share\ana", true));
         // Unix: exact case, component boundaries.
         assert!(within("/home/ana", "/home/ana", false));
         assert!(within("/home/ana/x", "/home/ana/", false));

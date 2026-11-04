@@ -954,8 +954,10 @@ All of it is in `h0x.d.ts`. In short:
   A returned root path means refresh everything (the pending paths are bounded).
   Files also refreshes on its 10-second timer:
   `cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } })`.
-  Here, all three reach only the person's home folder (after `..` and symlinks):
-  anything else rejects with "<path> is outside your home folder".
+  Here, all three reach only the person's home folder, HyperOx's home and the
+  folders of the spaces open on this computer (after `..` and symlinks; never
+  a whole drive): anything else rejects with "<path> is outside your home
+  folder and your spaces".
 - A mod HyperOx did not ship (or a shipped one, edited) runs only after the
   person allows it in a dialog; changed code asks again (Settings, Mods).
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.
