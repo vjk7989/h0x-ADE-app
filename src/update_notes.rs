@@ -107,7 +107,7 @@ fn path(name: &str) -> std::path::PathBuf {
 
 fn save(record: &Record) {
     let result = serde_json::to_vec_pretty(record).map_err(std::io::Error::other).and_then(|bytes| {
-        std::fs::create_dir_all(crate::mods::app_dir())?;
+        crate::mods::ensure_app_dir()?;
         let file = path("update-notes.json");
         let temp = file.with_extension("json.new");
         std::fs::write(&temp, bytes)?;
