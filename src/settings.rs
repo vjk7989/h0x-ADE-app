@@ -98,7 +98,6 @@ const THEMES: &[(&str, &str)] = &[
     ("atom-one-dark", include_str!("../defaults/themes/atom-one-dark.json")),
     ("win98", include_str!("../defaults/themes/win98.json")),
 ];
-pub const SHIPPED_THEMES: &[&str] = &["atom-one-dark", "win98"];
 
 /// `themes/<name>.json`: a palette, plus `colors` overrides like settings.json's.
 #[derive(Deserialize)]
@@ -249,7 +248,6 @@ fn shipped_theme_files() {
         found.insert(name.to_owned());
     }
     assert_eq!(found, THEMES.iter().map(|(n, _)| n.to_string()).collect());
-    assert_eq!(found, SHIPPED_THEMES.iter().map(|n| n.to_string()).collect());
 }
 
 /// Whether `name` is a theme that can be shown.
@@ -383,9 +381,6 @@ pub struct Person {
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
-    /// Anonymous usage data (telemetry.rs). Off unless set to true.
-    #[serde(skip_serializing_if = "is_false")]
-    pub telemetry: bool,
     /// Allow terminal programs (including remote ones) to copy text locally.
     #[serde(skip_serializing_if = "is_true")]
     pub clipboard_write: bool,
@@ -439,10 +434,6 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
-fn is_false(b: &bool) -> bool {
-    !*b
-}
-
 impl Default for Person {
     fn default() -> Self {
         Person {
@@ -453,7 +444,6 @@ impl Default for Person {
             font_size: None,
             font_ligatures: false,
             ui_font: None,
-            telemetry: false,
             clipboard_write: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
@@ -668,18 +658,6 @@ pub fn load_person() -> Result<Person, String> {
         return Err(format!("zoom {} is outside {ZOOM_MIN}..{ZOOM_MAX}", person.zoom));
     }
     Ok(person)
-}
-
-/// The value of settings.json's own `telemetry`, read even when the file has
-/// another problem: only an explicit `true` turns it on.
-pub fn telemetry_setting(person: &Result<Person, String>) -> bool {
-    match person {
-        Ok(p) => p.telemetry,
-        Err(_) => {
-            let raw = std::fs::read_to_string(path()).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-            raw.and_then(|v| v.get("telemetry").and_then(serde_json::Value::as_bool)).unwrap_or(false)
-        }
-    }
 }
 
 pub fn write_person(person: &Person) -> std::io::Result<()> {
@@ -933,24 +911,11 @@ mod tests {
         assert_eq!(Settings::compose(&person, &win98.look, true).theme, "ink");
     }
 
-    #[test]
-    fn telemetry_is_off_unless_asked_for() {
-        assert!(!Person::default().telemetry);
-        assert!(!telemetry_setting(&Ok(Person::default())));
-        let on: Person = serde_json::from_str(r#"{"telemetry": true}"#).unwrap();
-        assert!(on.telemetry);
-        assert!(telemetry_setting(&Ok(on)));
-        let off: Person = serde_json::from_str(r#"{"telemetry": false}"#).unwrap();
-        assert!(!off.telemetry);
-        let json = serde_json::to_value(Person::default()).unwrap();
-        assert!(json.get("telemetry").is_none(), "the default isn't written: {json}");
-    }
-
     /// The guide agents read (written to the home folder) explains every
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: true, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();

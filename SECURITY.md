@@ -6,4 +6,4 @@ Include the HyperOx version, OS, what you found, steps to reproduce it, and the 
 
 Only the latest release is supported.
 
-For how HyperOx handles trusted mods, updates and telemetry, see [security and privacy](docs/security.md).
+For how HyperOx handles trusted mods, and updates, see [security and privacy](docs/security.md).

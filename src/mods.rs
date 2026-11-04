@@ -267,26 +267,6 @@ fn clone_mod_at(mods: &Path, name: &str, to: &str) -> std::io::Result<()> {
     result
 }
 
-/// Mods in use by kind, for telemetry: the shipped ones as shipped (by
-/// name), how many shipped ones were edited, how many are the person's own
-/// (never their names).
-pub fn kinds(names: &std::collections::BTreeSet<String>) -> (Vec<String>, usize, usize) {
-    let text = std::fs::read_to_string(app_dir().join("installed.json")).unwrap_or_default();
-    let installed: Installed = serde_json::from_str(&text).unwrap_or_default();
-    let shipped = |n: &str| DEFAULT_MODS.iter().any(|(p, _)| p.split('/').next() == Some(n));
-    let (mut builtin, mut edited, mut custom) = (Vec::new(), 0, 0);
-    for name in names {
-        if !shipped(name) {
-            custom += 1;
-        } else if installed.get(name).is_some_and(|files| as_shipped(&mods_dir().join(name), files)) {
-            builtin.push(name.clone());
-        } else {
-            edited += 1;
-        }
-    }
-    (builtin, edited, custom)
-}
-
 /// Exactly as installed: every file unchanged and none added.
 fn as_shipped(dir: &Path, files: &Files) -> bool {
     fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
@@ -918,7 +898,6 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             crate::update_notes::presented(&strings(a.get(0)));
             Ok(HostValue::Null)
         })
-        .function("telemetry", |_| Ok(to_host(&crate::telemetry::status())))
         .function("feedbackPreview", move |a| {
             let images = a.get(2).and_then(|v| match v { HostValue::Number(n) => Some(*n as usize), _ => None }).unwrap_or(0);
             let body = crate::feedback::draft(a.string(0)?, a.string(1)?, images, &feedback_from, &feedback_layout);

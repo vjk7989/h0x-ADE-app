@@ -23,10 +23,23 @@ pub fn draft(message: &str, email: &str, images: usize, from: &str, layout: &str
             "arch": std::env::consts::ARCH,
             "channel": "stable",
         },
-        "core": { "version": crate::update::core().version.as_deref().map(crate::telemetry::version) },
+        "core": { "version": crate::update::core().version.as_deref().map(version) },
         "layout": if crate::window::shipped_layouts().contains(&layout) { layout } else { "other" },
         "images": images,
     })
+}
+
+/// A release version (`0.2.0`, `0.2.0-rc.1`), else `other`: never a free string.
+fn version(v: &str) -> String {
+    let v = v.trim().trim_start_matches("h0x-core ").trim_start_matches('v');
+    let number = |s: &str| !s.is_empty() && s.len() <= 4 && s.bytes().all(|b| b.is_ascii_digit());
+    let (core, pre) = v.split_once('-').map_or((v, None), |(c, p)| (c, Some(p)));
+    let parts: Vec<&str> = core.split('.').collect();
+    let pre_ok = pre.is_none_or(|p| {
+        let (label, n) = p.split_once('.').map_or((p, None), |(l, n)| (l, Some(n)));
+        matches!(label, "alpha" | "beta" | "rc" | "preview") && n.is_none_or(number)
+    });
+    if parts.len() == 3 && parts.iter().all(|p| number(p)) && pre_ok { v.to_owned() } else { "other".into() }
 }
 
 /// Where the form keeps the screenshots it shows (its data folder: `image()` reads from the app home).
@@ -155,6 +168,17 @@ fn encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn versions_are_releases_or_other() {
+        assert_eq!(version("0.2.0"), "0.2.0");
+        assert_eq!(version("h0x-core 0.1.5"), "0.1.5");
+        assert_eq!(version("0.2.0-rc.1"), "0.2.0-rc.1");
+        assert_eq!(version("0.2.0-my/secret path"), "other");
+        assert_eq!(version("h0x-core 0.1.5-acmeclient"), "other");
+        assert_eq!(version("0.1.5-rc.x"), "other");
+        assert_eq!(version("dev"), "other");
+    }
+
     #[test]
     fn payload_is_text_only_and_custom_layouts_are_hidden() {
         let body = draft("  broken  ", "  ", 2, "agent", "private-layout");

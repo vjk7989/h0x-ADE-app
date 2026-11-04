@@ -574,7 +574,7 @@ The main ones:
   `layout.reset {name?}` (reset a shipped layout and its clicks),
   `layout.clone {name, as?}` (duplicate, then switch; default `<name>-copy`).
 - App: `mod.clone {name, as?}` (duplicate; default `<name>-copy`), `mod.open {name}` (again: closes it), `overlay.close {id?}`, `app.help` (again: closes it), `app.palette` (again: closes it), `app.settings {section?}`
-  (sections: `look`, `machines`, `alerts`, `updates`, `privacy`; Machines lists, updates, renames and removes ssh machines; settings edit the same files you do).
+  (sections: `look`, `machines`, `alerts`, `updates`; Machines lists, updates, renames and removes ssh machines; settings edit the same files you do).
   `app.check_updates` (only a successful check reports Up to date; a failed check clears the checked time and can be retried), `app.update_core` (a newer h0x-core of this generation, terminals kept;
   never one a package manager owns), `app.welcome`, `app.whats_new`, `app.feedback {message?, from?}` (from `"person"` or `"agent"`; opens a review window, where the person can paste up to 3 screenshots; nothing happens until the person clicks Open issue, which opens a prefilled GitHub issue in the browser), `app.reset`,
   `app.theme {name}`, `app.zoom_in`, `app.zoom_out`, `app.zoom_reset`,
@@ -685,15 +685,6 @@ What's about the user, never a look:
   `p` writes Linux primary selection. `s` is ignored; cut buffers `0`–`7`
   are treated as the system clipboard.
   Clipboard reads (`?`) are never allowed.
-- `telemetry`: `true` collects anonymous usage data (off when absent;
-  turning it off deletes what wasn't sent; Settings → Privacy shows each
-  report word for word, and `telemetry()` in mods). Nothing is sent unless
-  `H0X_ADE_TELEMETRY_URL` names a server where the app started; then once
-  a day the app sends counts: version, OS, which known agents ran, how many
-  spaces, tabs and terminals, which layouts, shipped mods and commands were
-  used. Never terminal content, names of files, folders, spaces or the
-  person's own mods; nothing from h0x-core. `DO_NOT_TRACK=1` or
-  `H0X_ADE_TELEMETRY=0` turns it off for one run.
 
 ## Programs: `programs.json`
 

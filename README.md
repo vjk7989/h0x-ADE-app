@@ -48,7 +48,7 @@ Open **Settings → Machines** and pick a host from your SSH config. HyperOx con
 
 Installed releases check GitHub Releases for new versions and tell you in the corner; the app switches on quit, and `h0x-core` updates without stopping your terminals. Source builds do not update themselves.
 
-Telemetry is off. HyperOx sends nothing unless you ask it to: update checks, network requests made by mods you install, and feedback you review before sending. See [security and privacy](docs/security.md).
+HyperOx sends no usage telemetry and nothing else unless you ask it to: update checks, network requests made by mods you install, and feedback you review before sending. See [security and privacy](docs/security.md).
 
 ## For agents
 

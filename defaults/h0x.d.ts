@@ -293,23 +293,6 @@ export function updates(): {
 /** Record only spotlight versions actually shown expanded, never collapsed headlines. */
 export function presentUpdateNotes(versions: string[]): null;
 
-/** Anonymous usage data (one report per day, never terminal content; off by default). `enabled`:
- *  collecting now; `setting`: settings.json's `telemetry`; `off_because`: an env var that turns it
- *  off for this run (DO_NOT_TRACK, H0X_ADE_TELEMETRY, CI); `sends`: true only when
- *  `H0X_ADE_TELEMETRY_URL` names a server (`endpoint`); otherwise nothing is ever sent.
- *  `draft`: today's report so far; `queued`: finished days waiting to go, exactly as they'll be
- *  sent; `last_sent`: the last one the server took (`at`: unix seconds). Null until it starts. */
-export function telemetry(): {
-  enabled: boolean;
-  setting: boolean;
-  off_because: string | null;
-  sends: boolean;
-  endpoint: string | null;
-  draft: Record<string, unknown> | null;
-  queued: Record<string, unknown>[];
-  last_sent: { at: number; report: Record<string, unknown> } | null;
-} | null;
-
 /** The explicit feedback draft. Sending is restricted to the app-owned feedback frame. */
 export function feedbackPreview(message: string, email: string, images?: number): { body: import("gpui-kit").HostValue };
 /** The clipboard's image, kept for the form (`path` for `image()`); null when it holds none. Frame-only. */

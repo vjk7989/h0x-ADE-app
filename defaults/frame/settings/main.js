@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { core, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "h0x";
+import { core, run, theme, themes, fonts, updates, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "h0x";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -12,7 +12,6 @@ const SECTIONS = [
   { id: "machines", title: "Machines", icon: "server" },
   { id: "alerts", title: "Alerts", icon: "bell" },
   { id: "updates", title: "Updates", icon: "refresh" },
-  { id: "privacy", title: "Privacy", icon: "shield" },
 ];
 
 const LOOKS = { main: "HyperOx", terminals: "Terminals", win98: "HyperOx 98" };
@@ -46,7 +45,6 @@ export default class Settings extends View {
     this.raw = null;
     this.previews = {}; // layout name -> its "preview" picture
     this.previewsOf = "";
-    this.showData = false;
     this.machineList = null;
     this.machineLoading = false;
     this.machineError = null;
@@ -745,72 +743,6 @@ export default class Settings extends View {
       .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("HyperOx looks for both every hour and tells you in the corner. h0x-core runs your terminals, so they keep running through its updates."));
   }
 
-
-  // Privacy --------------------------------------------------------------
-
-  // A report as it goes out, one line per line of JSON.
-  report(t, id, title, about, report) {
-    const lines = JSON.stringify(report, null, 2).split("\n");
-    return v_flex()
-      .w_full()
-      .pt(14)
-      .gap(4)
-      .child(div().text_size(13.5).text_color(t.foreground).child(title))
-      .when(Boolean(about), (el) => el.child(div().text_size(12.5).text_color(t.dim).child(about)))
-      .child(
-        v_flex()
-          .id(id)
-          .mt(4)
-          .w_full()
-          .p(10)
-          .rounded(8)
-          .border_1()
-          .border_color(t.border)
-          .bg(t.background)
-          .children(lines.map((l) => div().font_family(DEFAULT_FONT).text_size(12).line_height("17px").text_color(t.muted).whitespace_nowrap().child(l || " "))),
-      );
-  }
-
-  privacy(t) {
-    const s = telemetry();
-    const on = s ? s.setting : this.person.telemetry === true;
-    const at = (secs) => new Date(secs * 1000).toLocaleString();
-    const why = s?.off_because ? `Off for now: ${s.off_because} is set where HyperOx started.` : null;
-    const body = v_flex()
-      .w_full()
-      .child(this.heading(t, "Usage data"))
-      .child(
-        this.row(
-          t,
-          "Share anonymous usage data",
-          why ?? "Off by default, and nothing is sent unless H0X_ADE_TELEMETRY_URL names a server where HyperOx started. When on: once a day, which agents and features you use, how many spaces and tabs, your system and HyperOx's version. Never what's in your terminals, never names of files, folders or projects.",
-          this.toggle(t, "st-telemetry", on, (_e, cx) =>
-            this.change((p) => {
-              if (on) delete p.telemetry;
-              else p.telemetry = true;
-            }, cx),
-          ),
-        ),
-      )
-      .child(
-        this.row(
-          t,
-          "What we send",
-          s && !s.sends ? "Nothing is sent: no H0X_ADE_TELEMETRY_URL is set. You can still see what would be sent." : "Exactly what leaves your computer, word for word.",
-          this.button(t, "st-telemetry-show", this.showData ? "Hide" : "Show", (_e, cx) => {
-            this.showData = !this.showData;
-            cx.notify();
-          }),
-        ),
-      );
-    if (!this.showData) return body;
-    if (!s?.enabled) return body.child(div().pt(14).text_size(13).text_color(t.dim).child("Nothing is collected or sent while it's off."));
-    return body
-      .children(s.queued.map((r, i) => this.report(t, `st-tq-${i}`, `Waiting to send: ${r.day}`, "Sent as is, soon.", r)))
-      .when(Boolean(s.draft), (el) => el.child(this.report(t, "st-td", "Today so far", "A draft: it changes until the day ends (UTC), then goes out once.", s.draft)))
-      .when(Boolean(s.last_sent), (el) => el.child(this.report(t, "st-tl", `Last sent: ${s.last_sent.report.day}`, `Sent ${at(s.last_sent.at)}.`, s.last_sent.report)));
-  }
-
   // ----------------------------------------------------------------------
 
   render(cx) {
@@ -906,9 +838,7 @@ export default class Settings extends View {
                         ? this.machines(t)
                       : this.section === "alerts"
                         ? this.alerts(t)
-                        : this.section === "privacy"
-                          ? this.privacy(t)
-                          : this.updates(t),
+                        : this.updates(t),
                   ),
               ),
           )

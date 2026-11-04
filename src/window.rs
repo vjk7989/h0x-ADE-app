@@ -698,7 +698,6 @@ impl AppWindow {
                 let Ok(core) = this.update(cx, |this, _| this.core.clone()) else { break };
                 core.closed().await;
                 tracing::warn!("lost the core; reconnecting");
-                crate::telemetry::count("core_lost");
                 let fresh = loop {
                     cx.background_executor().timer(Duration::from_millis(1000)).await;
                     if let Ok(core) = cx.background_executor().spawn(async { Core::connect() }).await {
@@ -731,29 +730,7 @@ impl AppWindow {
         } else {
             w.update_success = crate::update_notes::changed();
         }
-        crate::telemetry::window_open();
         w
-    }
-
-    /// What telemetry.rs counts: how much is open, never what's in it.
-    fn observe(&self) {
-        if !crate::telemetry::collecting() {
-            return;
-        }
-        let m = &self.model;
-        let agents: Vec<&model::Agent> = m.agents.iter().filter(|(a, _)| self.live.contains_key(*a) && m.status(a).is_some()).map(|(_, a)| a).collect();
-        crate::telemetry::observe(crate::telemetry::Observation {
-            foreground: self.window_active,
-            agents_working: agents.iter().filter(|a| a.word.as_deref() == Some("working")).count(),
-            agents: agents.iter().map(|a| a.app.clone()).collect(),
-            spaces: m.spaces.len(),
-            tabs: m.spaces.iter().map(|p| p.tabs.len()).sum(),
-            terminals: m.spaces.iter().flat_map(|p| &p.tabs).map(|c| model::addresses(&c.root).len()).sum(),
-            layout: self.layout_name.clone(),
-            mods: self.visible().1.into_iter().map(|(_, i)| i.name).collect(),
-            theme: settings::get().theme.clone(),
-            welcome: mods::shared("frame.welcomed").and_then(|v| v.as_str().map(str::to_owned)),
-        });
     }
 
     /// After an update: unseen spotlights. Asked for: the pending range, or this version's notes.
@@ -854,7 +831,6 @@ impl AppWindow {
         let s_time = mtime(&settings::path());
         if s_time.is_none() || s_time != self.watched.settings {
             let loaded = settings::load_person();
-            crate::telemetry::set_setting(settings::telemetry_setting(&loaded));
             match loaded {
                 Ok(p) => {
                     self.person = p;
@@ -2712,9 +2688,6 @@ impl AppWindow {
         if let Some(arg) = crate::commands::missing(command, &args) {
             return json!({ "error": format!("{name} needs {arg}") });
         }
-        if person {
-            crate::telemetry::command(command.name);
-        }
         if name == "space.new" {
             let machine = new_space_machine(&args, person, &self.model);
             if !args.is_object() { args = json!({}); }
@@ -3723,9 +3696,6 @@ impl AppWindow {
         // With file events the disk is only checked now and then, in case one
         // was missed.
         self.polls += 1;
-        if self.polls.is_multiple_of(25) {
-            self.observe();
-        }
         if self.file_events.is_none() || self.polls.is_multiple_of(25) {
             self.reload_config(window, cx);
             self.check_layout_file(window, cx);

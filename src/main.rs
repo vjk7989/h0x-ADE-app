@@ -28,7 +28,6 @@ mod setup;
 mod sound;
 mod spawn;
 mod sprites;
-mod telemetry;
 mod feedback;
 mod terminal;
 mod update;
@@ -116,7 +115,6 @@ fn main() {
         return;
     }
 
-    telemetry::clock();
     // A first start sizes the app to the screen and the system's text size.
     let fresh = !settings::path().exists();
     // The core people installed; without one, the setup screen installs it.
@@ -142,7 +140,6 @@ fn main() {
         update::after_update();
     }
     update::start();
-    telemetry::start(settings::telemetry_setting(&person));
     bench::start();
     if let Err(e) = mods::write_workspace() {
         eprintln!("h0x-ade: cannot write {}: {e}", mods::app_dir().display());
@@ -172,7 +169,6 @@ fn main() {
                     }
                 }
                 mods::finish_shared();
-                telemetry::quit();
                 update::apply();
                 async {}
             })

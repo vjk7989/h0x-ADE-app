@@ -15,7 +15,7 @@ The default app home is `~/.config/h0x-ade`, including on macOS and Windows (und
 `XDG_CONFIG_HOME` changes the config root. `H0X_ADE_HOME` selects an app home directly and takes precedence.
 
 This folder holds your settings, keys, layouts, mods, generated agent guide and API types.
-It also holds mod data, shared state, window positions, this screen's focus and zoom, update notes and cached media, and telemetry while enabled.
+It also holds mod data, shared state, window positions, this screen's focus and zoom, update notes and cached media.
 Mods may store sensitive data here. HyperOx does not encrypt this folder.
 The [installed guide's file map](../defaults/AGENTS.md#the-files) explains the files.
 
@@ -42,10 +42,9 @@ On macOS the installer and updater verify certificate-signed bundles and preserv
 Apple notarization is tested separately; it is not required for publishing a release.
 Do not assume every download is notarized or signed.
 
-## Telemetry
+## What HyperOx sends
 
 HyperOx sends no usage telemetry. Nothing leaves your computer unless you ask for it: update checks (above), network requests made by mods you install, and feedback you choose to send.
-Usage data is off by default (`"telemetry": true` in settings.json turns collection on) and has no built-in destination: it is only ever sent to a server you name in `H0X_ADE_TELEMETRY_URL`.
 Feedback is drafted for you to review; sending opens a prefilled issue on the HyperOx GitHub repository in your browser, and nothing is posted by the app itself.
 
 [Back to HyperOx](../README.md)

@@ -191,8 +191,7 @@ pub fn install() -> Result<PathBuf, String> {
 }
 
 /// Updates the core to its latest release (`h0x-core update`: same generation only,
-/// terminals kept). Ok: the version it runs now. Err: what it said, e.g.
-/// "belongs to Homebrew: brew upgrade h0x-core".
+/// terminals kept). Ok: the version it runs now. Err: what it said.
 pub fn update() -> Result<String, String> {
     update_to(None)
 }
