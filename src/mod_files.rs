@@ -143,7 +143,7 @@ fn is_fs_root(path: &str, windows: bool) -> bool {
     if !windows {
         return p.is_empty();
     }
-    p.is_empty() || (p.len() == 2 && p.ends_with(':')) || p.strip_prefix(r"\\").is_some_and(|share| share.matches('\').count() <= 1)
+    p.is_empty() || (p.len() == 2 && p.ends_with(':')) || p.strip_prefix(r"\\").is_some_and(|share| share.matches('\\').count() <= 1)
 }
 
 /// Whether `target` is `root` or inside it.
