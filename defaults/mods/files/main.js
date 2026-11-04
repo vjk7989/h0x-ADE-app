@@ -2,7 +2,7 @@
 // themselves (VS Code-style auto-save); remote and truncated files are read-only previews.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window } from "h0x";
+import { spaces, panes, focused, agents, core, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window } from "h0x";
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -13,6 +13,8 @@ function location() {
 const key = () => JSON.stringify(location());
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
 const PER_FOLDER = 500, TOTAL = 5000;
+// Saves of one file this close together are one edit; a note lists at most LISTED files.
+const BURST = 30000, LISTED = 5;
 // A file is written back with the line endings it was read with: CRLF only when every line had it.
 const eol = text => /\r\n/.test(text) && !/(^|[^\r])\n/.test(text) ? "\r\n" : "\n";
 const text = doc => { const value = doc.state.value(); return doc.eol === "\r\n" ? value.replace(/\r?\n/g, "\r\n") : value; };
@@ -38,7 +40,7 @@ async function directory(path, on) {
 
 export default class Files extends View {
   init(_props, cx) {
-    this.saved = new Map(); this.drafts = new Map();
+    this.saved = new Map(); this.drafts = new Map(); this.edits = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
@@ -68,16 +70,17 @@ export default class Files extends View {
   }
 
   refresh(cx) {
-    const { cwd, on } = location(), next = key();
+    const { cwd, on, space } = location(), next = key();
     if (next !== this.context?.key) {
       if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file });
       const saved = this.saved.get(next);
-      this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
+      this.context = { key: next, cwd, on, space }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
       this.pending = new Set(); this.marks = {}; this.show(null, cx); this.watched = null; this.error = null; this.limited = false;
       this.loading = false;
       if (saved?.file) this.show(saved.file, cx);
     }
     this.check(cx);
+    this.flush(cx);
     if (!cwd || this.loading) return;
     const context = this.context;
     this.loading = true;
@@ -152,7 +155,7 @@ export default class Files extends View {
           syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
         if (on || large) { this.doc = { full, hint: on ? "read-only: remote machine" : "read-only: too large" }; return; }
         const saved = draft ? draft.saved : disk;
-        const doc = this.doc = { full, state: this.code, editable: true, saved, disk, eol: eol(saved), version: 0,
+        const doc = this.doc = { full, path, space: context.space, state: this.code, editable: true, saved, disk, eol: eol(saved), version: 0,
           dirty: Boolean(draft), conflict: draft ? disk !== saved : false, error: draft?.error ?? null };
         doc.state.on("change", (_e, cx) => {
           doc.dirty = text(doc) !== doc.saved;
@@ -184,6 +187,7 @@ export default class Files extends View {
         try {
           await writeTextFile(doc.full, next, expected);
           doc.saved = doc.disk = next; doc.conflict = false; doc.error = null;
+          this.edited(doc, cx);
         } catch (e) {
           // Stale snapshot (the disk moved on) or a failed write: the edits stay in the buffer.
           const disk = await readTextFile(doc.full).catch(() => undefined);
@@ -195,6 +199,41 @@ export default class Files extends View {
       } finally { done(); cx.notify(); }
     }));
     return doc.writing;
+  }
+
+  // A saved file: the agents in its space hear of it once per burst of saves.
+  edited(doc, cx) {
+    const id = `${doc.space}
+${doc.path}`, now = Date.now(), edit = this.edits.get(id);
+    if (edit && now - edit.at < BURST) edit.at = now;
+    else this.edits.set(id, { space: doc.space, path: doc.path, at: now, told: new Set() });
+    this.flush(cx);
+  }
+
+  // One note per agent with the files edited in its space it hasn't heard of. A working or
+  // blocked agent is skipped (typing would interrupt it or answer its dialog) and hears at a
+  // later flush; `--if idle` makes the core type nothing if it got busy meanwhile.
+  flush(cx) {
+    if (this.flushing || !this.edits.size) return;
+    this.flushing = true;
+    cx.spawn(async () => {
+      try {
+        const live = agents(), now = Date.now();
+        for (const [id, edit] of this.edits) {
+          // Closed agents are no longer listed; a space without agents has no one to tell.
+          if (now - edit.at >= BURST && live.every(a => a.space !== edit.space || edit.told.has(a.address))) this.edits.delete(id);
+        }
+        for (const agent of live) {
+          if (agent.status === "working" || agent.status === "blocked") continue;
+          const news = [...this.edits.values()].filter(e => e.space === agent.space && !e.told.has(agent.address));
+          if (!news.length) continue;
+          const more = news.length - LISTED;
+          const list = news.slice(0, LISTED).map(e => e.path).join(", ") + (more > 0 ? ` and ${more} more` : "");
+          const sent = await core(["send", agent.address, `HyperOx: the user edited ${list} in the editor. Re-read before changing it.`, "--if", "idle"]).catch(() => null);
+          if (sent?.code === 0) for (const e of news) e.told.add(agent.address);
+        }
+      } finally { this.flushing = false; }
+    });
   }
 
   // Compares the open file with the disk: unedited, it follows the disk; edited, it asks.

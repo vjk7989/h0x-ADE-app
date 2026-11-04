@@ -184,6 +184,8 @@ focus, another file opens or the panel closes (`●` marks unsaved edits);
 line endings stay as read. A file changed on disk follows the disk while
 unedited; with edits, auto-save pauses behind "Changed on disk" (Reload or
 Keep mine). Remote and over-400,000-character files stay read-only.
+After you save, agents in this space are told which files you edited
+(one note per file per burst of saves, once each agent is idle).
 
 **HyperOx's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,
