@@ -161,8 +161,9 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
 
 /// Installs the core's latest release with its own installer (into
 /// ~/.local/bin, or H0X_CORE_INSTALL_DIR), then finds it. Err: what went wrong.
-/// The script is downloaded (https, GitHub only) to a file and run as one
-/// argument; values reach it through the environment, never a command string.
+/// The script is downloaded (https, GitHub only) to a file, run only if its
+/// `.minisig` is the release key's signature, and run as one argument; values
+/// reach it through the environment, never a command string.
 pub fn install() -> Result<PathBuf, String> {
     let releases = crate::update::core_releases();
     let script = if cfg!(windows) { "install.ps1" } else { "install.sh" };

@@ -2,7 +2,8 @@
 //! macOS: `HyperOx.app`, Windows: `%LOCALAPPDATA%\Programs\h0x-ade`) checks
 //! the latest GitHub release's `latest.json` a little
 //! after it opens and every hour, downloads a newer build for this
-//! machine, checks its sha256 and unpacks it next to itself (`<install>.new`).
+//! machine, checks its sha256 and minisign signature and unpacks it next to
+//! itself (`<install>.new`).
 //! The frame then shows "Restart"; the swap happens on restart or the next
 //! quit, or before opening the next window after a crash. The first start
 //! after a swap runs `h0x-core update` for the core.
@@ -136,7 +137,8 @@ pub(crate) fn landed(stdout: &[u8]) -> Result<&[u8], String> {
 }
 
 /// Downloads a trusted `url` into `file`, giving up after `max_time` seconds.
-/// A download that was redirected off the trusted hosts is deleted.
+/// A download that was redirected off the trusted hosts, or that `<url>.minisig`
+/// does not sign with the release key, is deleted.
 pub(crate) fn download(url: &str, file: &Path, max_time: &str) -> Result<(), String> {
     if !trusted_url(url) {
         return Err(untrusted(url));
@@ -147,9 +149,47 @@ pub(crate) fn download(url: &str, file: &Path, max_time: &str) -> Result<(), Str
     if !out.status.success() {
         return Err(format!("{url}: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
-    landed(&out.stdout).map(drop).inspect_err(|_| {
-        let _ = std::fs::remove_file(file);
-    })
+    landed(&out.stdout)
+        .map(drop)
+        .and_then(|()| {
+            let bytes = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+            signed(url, &bytes)
+        })
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(file);
+        })
+}
+
+/// The public half of the key CI signs every app and core release file with (key id 29957E064EAB76C4).
+const PUBLIC_KEY: &str = "RWTEdqtOBn6VKQ/x9x3qWk/gIWUb/I1OlZXsTlHyrkp9Yq30qBki+tdt";
+
+/// Ok if `<url>.minisig` is the release key's signature of `bytes`. A test site
+/// (the unit tests' loopback stub, or a releases URL override in debug and
+/// test builds) is not signed.
+fn signed(url: &str, bytes: &[u8]) -> Result<(), String> {
+    let overrides = [env_url("H0X_ADE_RELEASES_URL"), env_url("H0X_CORE_RELEASES_URL")];
+    if loopback_stub(url) || under_override(url, overrides) {
+        return Ok(());
+    }
+    // A signature that does not download is refused below as missing.
+    let sig = fetch(&format!("{url}.minisig")).ok();
+    verify(bytes, sig.as_deref(), PUBLIC_KEY).map_err(|why| format!("{url}: not signed by the HyperOx release key: {why}"))
+}
+
+/// `url` is on one of the overridden releases sites.
+fn under_override(url: &str, overrides: [Option<String>; 2]) -> bool {
+    overrides.into_iter().flatten().any(|base| url.starts_with(&format!("{base}/")))
+}
+
+/// Checks `bytes` against the minisign signature `sig` by `key` (prehashed signatures only).
+fn verify(bytes: &[u8], sig: Option<&[u8]>, key: &str) -> Result<(), String> {
+    let key = minisign_verify::PublicKey::from_base64(key).map_err(|e| e.to_string())?;
+    let text = sig.ok_or("it has no signature")?;
+    let signature = std::str::from_utf8(text)
+        .map_err(|e| e.to_string())
+        .and_then(|text| minisign_verify::Signature::decode(text).map_err(|e| e.to_string()))
+        .map_err(|e| format!("its signature is unreadable: {e}"))?;
+    key.verify(bytes, &signature, false).map_err(|e| format!("its signature does not match: {e}"))
 }
 
 fn releases() -> String {
@@ -448,7 +488,15 @@ pub(crate) fn sha256(bytes: &[u8]) -> String {
     sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A release file's text, refused unless it is signed (see `signed`).
 fn curl_text(url: &str) -> Result<String, String> {
+    let bytes = fetch(url)?;
+    signed(url, &bytes)?;
+    String::from_utf8(bytes).map_err(|e| e.to_string())
+}
+
+/// A trusted `url`'s body, giving up after 30 seconds.
+fn fetch(url: &str) -> Result<Vec<u8>, String> {
     if !trusted_url(url) {
         return Err(untrusted(url));
     }
@@ -458,7 +506,7 @@ fn curl_text(url: &str) -> Result<String, String> {
     if !out.status.success() {
         return Err(format!("{url}: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
-    String::from_utf8(landed(&out.stdout)?.to_vec()).map_err(|e| e.to_string())
+    Ok(landed(&out.stdout)?.to_vec())
 }
 
 fn run(cmd: &mut Command) -> Result<(), String> {
@@ -793,6 +841,76 @@ mod tests {
             assert_eq!(unpack(url, "", &file).unwrap_err(), format!("{url}: not an https GitHub URL"));
         }
         assert!(!file.exists());
+    }
+
+    /// A throwaway test key pair (not the release key), its signature of
+    /// `PAYLOAD`, and the same payload signed by a second throwaway key; made
+    /// with rsign2 (`generate -W`, `sign -W`).
+    const TEST_KEY: &str = "RWRwAuiTWRHKFc9nVniDNoa4b+UqLBXWC7QunJ05dZw+XkvYJ6aaoXoK";
+    const PAYLOAD: &[u8] = b"h0x-core test release\n";
+    const SIG: &[u8] = b"untrusted comment: signature from rsign secret key
+RURwAuiTWRHKFeiB7A2s5PXfB39odODFiAf+77MxJqllRsihUgeswBruN+SLEaLI6zFdPAqRO+o0muW+5/ISjwzOHIVMxfYZUws=
+trusted comment: test
+FbefAmnfeDeGxboZTkIU3PcVBdecdQ85mQjQTOCf3nUiq0yiND8kte8+Ymv7UmzvNNb7BgVZLCS+McLnbN9oDg==
+";
+    const OTHER_KEY_SIG: &[u8] = b"untrusted comment: signature from rsign secret key
+RURaRIrUmDKGf+VfuMRCB6G+7YmOZuDtq2kGvfhr9JFuy2kWFMZ6J+L3UogLdr/J7fvVdNbKYfGvxVj6sSbZQmp4hSeTA28H6g8=
+trusted comment: test
+ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQhXnGlBg==
+";
+
+    fn refused(bytes: &[u8], sig: Option<&[u8]>, key: &str, why: &str) {
+        let err = verify(bytes, sig, key).unwrap_err();
+        assert!(err.starts_with(why), "{why}: {err}");
+    }
+
+    #[test]
+    fn a_file_signed_by_the_key_is_kept() {
+        assert_eq!(verify(PAYLOAD, Some(SIG), TEST_KEY), Ok(()));
+    }
+
+    #[test]
+    fn a_tampered_file_is_refused() {
+        refused(b"h0x-core test releasE\n", Some(SIG), TEST_KEY, "its signature does not match");
+        refused(b"", Some(SIG), TEST_KEY, "its signature does not match");
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_signature_is_refused() {
+        refused(PAYLOAD, None, TEST_KEY, "it has no signature");
+        refused(PAYLOAD, Some(b""), TEST_KEY, "its signature is unreadable");
+        refused(PAYLOAD, Some(b"\xff\xfe"), TEST_KEY, "its signature is unreadable");
+    }
+
+    #[test]
+    fn a_signature_by_another_key_is_refused() {
+        refused(PAYLOAD, Some(OTHER_KEY_SIG), TEST_KEY, "its signature does not match");
+        // The test signature does not pass for the embedded release key either.
+        refused(PAYLOAD, Some(SIG), PUBLIC_KEY, "its signature does not match");
+    }
+
+    #[test]
+    fn a_release_file_without_a_signature_is_refused_before_curl_runs() {
+        // `<url>.minisig` is not a trusted URL here, so no request is made: the signature is missing.
+        let url = "https://example.com/h0x-ade-linux-x86_64.tar.gz";
+        assert_eq!(signed(url, PAYLOAD), Err(format!("{url}: not signed by the HyperOx release key: it has no signature")));
+    }
+
+    #[test]
+    fn only_a_test_site_skips_the_signature() {
+        // The unit tests' loopback stub (cfg(test) only) is not signed.
+        assert_eq!(signed("http://127.0.0.1:1/latest/download/latest.json", b"unsigned"), Ok(()));
+        let release = "https://github.com/vjk7989/h0x-ADE-app/releases/latest/download/latest.json";
+        assert!(!under_override(release, [None, None]));
+        let fork = || Some("https://github.com/someone/fork/releases".to_owned());
+        for overrides in [[fork(), None], [None, fork()]] {
+            assert!(under_override("https://github.com/someone/fork/releases/latest/download/install.sh", overrides.clone()));
+            assert!(!under_override(release, overrides.clone()), "an override covers its own site only");
+            assert!(!under_override("https://github.com/someone/fork/releases-evil/x", overrides.clone()));
+            assert!(!under_override("https://github.com/someone/fork/releases", overrides));
+        }
+        // A release build never honours an override, so nothing it downloads skips the signature.
+        assert!(!under_override("https://github.com/someone/fork/releases/latest/download/install.sh", [overridden(false, fork()), overridden(false, fork())]));
     }
 
     #[test]
