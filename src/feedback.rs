@@ -10,6 +10,9 @@ pub const MAX_IMAGES: usize = 3;
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
 const ISSUES_URL: &str = "https://github.com/vjk7989/h0x-ADE-app/issues/new";
+/// GitHub rejects a longer new-issue link.
+const MAX_URL: usize = 8000;
+const TRUNCATED: &str = "\n\n(truncated — paste the rest into the issue)";
 
 pub fn draft(message: &str, email: &str, images: usize, from: &str, layout: &str) -> Value {
     json!({
@@ -133,7 +136,7 @@ pub async fn send(body: Value, shots: Vec<String>) -> Result<(), String> {
 }
 
 /// `ISSUES_URL?title=…&body=…`: the message's first line as the title, the
-/// whole draft in the body.
+/// whole draft in the body, cut (with a note) to keep the link under `MAX_URL`.
 fn issue_url(body: &Value) -> String {
     let message = body["message"].as_str().unwrap_or_default();
     let title: String = message.lines().next().unwrap_or_default().chars().take(80).collect();
@@ -150,7 +153,22 @@ fn issue_url(body: &Value) -> String {
         field("layout"),
         body["images"].as_u64().unwrap_or(0),
     );
-    format!("{ISSUES_URL}?title={}&body={}", encode(&title), encode(&text))
+    let url = format!("{ISSUES_URL}?title={}&body=", encode(&title));
+    let budget = MAX_URL - 1 - url.len();
+    let body = encode(&text);
+    if body.len() <= budget {
+        return url + &body;
+    }
+    let room = budget - encode(TRUNCATED).len();
+    let mut used = 0;
+    let end = text
+        .char_indices()
+        .find_map(|(i, c)| {
+            used += encode(c.encode_utf8(&mut [0; 4])).len();
+            (used > room).then_some(i)
+        })
+        .unwrap_or(text.len());
+    url + &encode(&text[..end]) + &encode(TRUNCATED)
 }
 
 /// Percent-encodes everything but unreserved characters (RFC 3986).
@@ -210,6 +228,41 @@ mod tests {
         assert!(blank.contains("email%3A%20-"), "{blank}");
         assert_eq!(encode(""), "");
         assert_eq!(encode("a b/\u{e9}"), "a%20b%2F%C3%A9");
+    }
+    #[test]
+    fn a_long_draft_is_cut_on_a_character_to_keep_the_link_short() {
+        for c in ["\u{e9}", "\u{1F600}"] {
+            let url = issue_url(&draft(&c.repeat(4000), "", 0, "person", "main"));
+            assert!(url.len() < MAX_URL, "{}", url.len());
+            assert!(url.is_ascii());
+            let body = url.split_once("&body=").unwrap().1;
+            let kept = body.strip_suffix(&encode(TRUNCATED)).expect("ends with the truncation note");
+            let one = encode(c);
+            assert!(!kept.is_empty(), "{kept}");
+            assert_eq!(kept, one.repeat(kept.len() / one.len()), "cut between characters, never inside one");
+        }
+        let short = issue_url(&draft("short", "", 0, "person", "main"));
+        assert!(!short.contains("truncated"), "{short}");
+    }
+    #[test]
+    fn the_issue_title_is_the_first_line_cut_at_80_characters() {
+        let title = |url: &str| url.split_once("?title=").unwrap().1.split_once("&body=").unwrap().0.to_owned();
+        // An empty draft still makes a well-formed link, with an empty title.
+        let empty = issue_url(&draft("", "", 0, "person", "main"));
+        assert!(empty.starts_with("https://github.com/vjk7989/h0x-ADE-app/issues/new?title=&body="), "{empty}");
+        // 80 is kept whole; 200 is cut to 80 in the title but whole in the body.
+        assert_eq!(title(&issue_url(&draft(&"a".repeat(80), "", 0, "person", "main"))), "a".repeat(80));
+        let long = issue_url(&draft(&format!("{}\nsecond line", "b".repeat(200)), "", 0, "person", "main"));
+        assert_eq!(title(&long), "b".repeat(80));
+        assert!(long.contains(&format!("&body={}%0Asecond%20line", "b".repeat(200))), "{long}");
+        // Non-ASCII is cut by character, never inside one, and fully encoded.
+        let accents = issue_url(&draft(&"\u{e9}".repeat(200), "", 0, "person", "main"));
+        assert_eq!(title(&accents), "%C3%A9".repeat(80));
+        let emoji = issue_url(&draft("\u{1F600} \u{65e5}\u{672c}", "", 0, "person", "main"));
+        assert_eq!(title(&emoji), "%F0%9F%98%80%20%E6%97%A5%E6%9C%AC");
+        assert!(emoji.is_ascii(), "{emoji}");
+        // A Windows line ending ends the first line too.
+        assert_eq!(title(&issue_url(&draft("crash\r\nat start", "", 0, "person", "main"))), "crash");
     }
 
     #[test]

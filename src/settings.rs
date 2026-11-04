@@ -829,6 +829,19 @@ mod tests {
         assert!(serde_json::from_str::<Person>(r#"{"font_ligatures":"yes"}"#).is_err());
     }
 
+    #[test]
+    fn an_old_settings_file_with_telemetry_still_loads_and_keeps_its_other_keys() {
+        for telemetry in ["true", "false", "\"garbage\"", "null", "{}"] {
+            let text = format!(r#"{{"telemetry": {telemetry}, "font_ligatures": true, "zoom": 1.25, "clipboard_write": false}}"#);
+            let person: Person = serde_json::from_str(&text).unwrap_or_else(|e| panic!("telemetry {telemetry}: {e}"));
+            assert!(person.font_ligatures, "telemetry {telemetry}");
+            assert_eq!(person.zoom, 1.25, "telemetry {telemetry}");
+            assert!(!person.clipboard_write, "telemetry {telemetry}");
+            // Saving it again drops the retired key.
+            assert!(serde_json::to_value(&person).unwrap().get("telemetry").is_none(), "telemetry {telemetry}");
+        }
+    }
+
     use super::*;
 
     #[test]

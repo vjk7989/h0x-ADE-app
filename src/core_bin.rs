@@ -35,7 +35,6 @@ pub fn path() -> PathBuf {
 
 /// Uses this core from now on, and puts its folder first on PATH so mods'
 /// `core()` and anything the app runs find the same one.
-
 pub fn use_core(bin: PathBuf) {
     if let Some(dir) = bin.parent() {
         let path = std::env::var_os("PATH").unwrap_or_default();
@@ -163,7 +162,7 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
 /// Installs the core's latest release with its own installer (into
 /// ~/.local/bin, or H0X_CORE_INSTALL_DIR), then finds it. Err: what went wrong.
 pub fn install() -> Result<PathBuf, String> {
-    let releases = std::env::var("H0X_CORE_RELEASES_URL").unwrap_or_else(|_| "https://github.com/vjk7989/h0x-ADE-core/releases".into());
+    let releases = crate::update::core_releases();
     let mut cmd = if cfg!(windows) {
         let mut c = crate::spawn::command("powershell");
         c.args(["-NoProfile", "-Command", &format!("irm {releases}/latest/download/install.ps1 | iex")]);
@@ -240,5 +239,34 @@ mod tests {
         assert_eq!(version(&real).as_deref(), Some("h0x-core 0.1.0"));
 
         assert_eq!(find(Some(real.to_str().unwrap())), Some(real));
+    }
+
+    // Fakes the binary with a shell script (committed fixtures, see above).
+    #[cfg(unix)]
+    #[test]
+    fn upstream_version_lines_and_failing_cores_are_not_accepted() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core-bin");
+        for (dir, says) in [("says-hc", "hc 0.1.0"), ("says-herdr-core", "herdr-core 0.1.0"), ("exits-1", "h0x-core 0.1.0 (exit 1)")] {
+            let bin = core_in(&fixtures.join(dir));
+            // A fixture without its exec bit would be rejected for the wrong reason.
+            assert_ne!(std::fs::metadata(&bin).unwrap().permissions().mode() & 0o111, 0, "{} must be executable", bin.display());
+            assert_eq!(version(&bin), None, "a core saying {says}");
+        }
+    }
+
+    #[test]
+    fn the_core_is_looked_for_only_as_h0x_core() {
+        let windows = core_in(Path::new(r"C:\Users\me\AppData\Local\Programs\h0x-core"));
+        assert_eq!(windows.file_name().unwrap(), format!("h0x-core{}", std::env::consts::EXE_SUFFIX).as_str());
+        assert!(windows.to_string_lossy().starts_with(r"C:\Users\me\AppData\Local\Programs\h0x-core"));
+        assert_eq!(core_in(Path::new("")), PathBuf::from(format!("h0x-core{}", std::env::consts::EXE_SUFFIX)));
+        #[cfg(windows)]
+        {
+            let dirs = usual_dirs(Path::new(r"C:\Users\me"));
+            assert!(dirs[0].ends_with(r"Programs\h0x-core"), "{}", dirs[0].display());
+            assert!(core_in(&dirs[0]).ends_with(r"Programs\h0x-core\h0x-core.exe"));
+            assert!(dirs.iter().all(|d| !d.to_string_lossy().contains("herdr")), "{dirs:?}");
+        }
     }
 }

@@ -1,0 +1,2 @@
+#!/bin/sh
+echo 'herdr-core 0.1.0'

@@ -70,12 +70,17 @@ fn target() -> String {
     format!("{os}-{}", std::env::consts::ARCH)
 }
 
-fn releases() -> String {
-    std::env::var("H0X_ADE_RELEASES_URL").unwrap_or_else(|_| "https://github.com/vjk7989/h0x-ADE-app/releases".into())
+/// A releases base URL from the environment; empty counts as unset, a trailing `/` is dropped.
+fn env_url(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.trim().is_empty()).map(|v| v.trim().trim_end_matches('/').to_owned())
 }
 
-fn core_releases() -> String {
-    std::env::var("H0X_CORE_RELEASES_URL").unwrap_or_else(|_| "https://github.com/vjk7989/h0x-ADE-core/releases".into())
+fn releases() -> String {
+    env_url("H0X_ADE_RELEASES_URL").unwrap_or_else(|| "https://github.com/vjk7989/h0x-ADE-app/releases".into())
+}
+
+pub(crate) fn core_releases() -> String {
+    env_url("H0X_CORE_RELEASES_URL").unwrap_or_else(|| "https://github.com/vjk7989/h0x-ADE-core/releases".into())
 }
 
 /// The version downloaded and waiting for a restart.
@@ -122,12 +127,12 @@ pub fn set_core(version: Option<String>, managed: Option<String>) {
 }
 
 fn checks_app() -> Option<PathBuf> {
-    root().filter(|_| option_env!("H0X_ADE_RELEASE").is_some() || std::env::var_os("H0X_ADE_RELEASES_URL").is_some())
+    root().filter(|_| checks_core())
 }
 
 /// A release build checks the core; a source build only when pointed at a test release server.
 fn checks_core() -> bool {
-    option_env!("H0X_ADE_RELEASE").is_some() || std::env::var_os("H0X_ADE_RELEASES_URL").is_some()
+    option_env!("H0X_ADE_RELEASE").is_some() || env_url("H0X_ADE_RELEASES_URL").is_some()
 }
 
 /// For the settings screen: both programs, what's waiting, when we last looked.
@@ -230,11 +235,11 @@ fn latest_core() -> Result<CoreRelease, String> {
     serde_json::from_str(&text).map_err(|e| format!("core latest.json: {e}"))
 }
 
-fn after_update_target<'a>(have: &str, latest: Option<&'a CoreRelease>, generation: u64, core_min: &'a str) -> Option<&'a str> {
-    Some(match latest {
+fn after_update_target<'a>(have: &str, latest: Option<&'a CoreRelease>, generation: u64, core_min: &'a str) -> &'a str {
+    match latest {
         Some(latest) if latest.generation == Some(generation) && newer(&latest.version, have) => &latest.version,
         _ => core_min,
-    })
+    }
 }
 
 /// `h0x-core update` (terminals keep running; the app reconnects when the core restarts).
@@ -582,7 +587,7 @@ pub fn after_update() {
         CORE.lock().unwrap().updating = true;
         let latest = latest_core().map_err(|e| tracing::warn!("core release check after app update: {e}")).ok();
         let target = after_update_target(have.trim_start_matches("h0x-core "), latest.as_ref(), crate::hc::GENERATION, crate::hc::core_min());
-        let result = crate::core_bin::update_to(target);
+        let result = crate::core_bin::update_to(Some(target));
         let mut core = CORE.lock().unwrap();
         core.updating = false;
         match result {
@@ -776,19 +781,46 @@ mod tests {
     }
 
     #[test]
+    fn release_urls_treat_empty_as_unset_and_drop_a_trailing_slash() {
+        // Only this test sets these variables inside the unit-test binary.
+        for (key, read, default) in [
+            ("H0X_ADE_RELEASES_URL", releases as fn() -> String, "https://github.com/vjk7989/h0x-ADE-app/releases"),
+            ("H0X_CORE_RELEASES_URL", core_releases as fn() -> String, "https://github.com/vjk7989/h0x-ADE-core/releases"),
+        ] {
+            unsafe { std::env::set_var(key, "https://mirror.example/releases/") };
+            assert_eq!(read(), "https://mirror.example/releases");
+            for empty in ["", " ", "\t\n"] {
+                unsafe { std::env::set_var(key, empty) };
+                assert_eq!(read(), default, "{key}={empty:?} counts as unset");
+            }
+            unsafe { std::env::remove_var(key) };
+            assert_eq!(read(), default);
+        }
+        if option_env!("H0X_ADE_RELEASE").is_none() {
+            unsafe { std::env::set_var("H0X_ADE_RELEASES_URL", " ") };
+            assert!(!checks_core(), "an empty test server URL does not turn checks on");
+            assert!(checks_app().is_none());
+            unsafe { std::env::set_var("H0X_ADE_RELEASES_URL", "https://mirror.example/releases") };
+            assert!(checks_core());
+            unsafe { std::env::remove_var("H0X_ADE_RELEASES_URL") };
+            assert!(!checks_core());
+        }
+    }
+
+    #[test]
     fn after_app_update_targets_latest_only_in_our_generation() {
         let release = |version: &str, generation| CoreRelease { version: version.into(), generation };
         let latest = release("0.1.13", Some(1));
-        assert_eq!(after_update_target("0.1.12", Some(&latest), 1, "0.1.11"), Some("0.1.13"));
+        assert_eq!(after_update_target("0.1.12", Some(&latest), 1, "0.1.11"), "0.1.13");
         for have in ["0.1.13", "0.1.14"] {
-            assert_eq!(after_update_target(have, Some(&latest), 1, "0.1.11"), Some("0.1.11"));
+            assert_eq!(after_update_target(have, Some(&latest), 1, "0.1.11"), "0.1.11");
         }
         for latest in [None, Some(release("0.2.0", Some(2))), Some(release("0.1.13", None))] {
-            assert_eq!(after_update_target("0.1.12", latest.as_ref(), 1, "0.1.11"), Some("0.1.11"));
+            assert_eq!(after_update_target("0.1.12", latest.as_ref(), 1, "0.1.11"), "0.1.11");
         }
         // Every h0x-core release has `update --version`: the first one is bumped too.
-        assert_eq!(after_update_target("0.1.0", Some(&latest), 1, "0.1.11"), Some("0.1.13"));
-        assert_eq!(after_update_target("0.1.0", None, 1, "0.1.11"), Some("0.1.11"));
+        assert_eq!(after_update_target("0.1.0", Some(&latest), 1, "0.1.11"), "0.1.13");
+        assert_eq!(after_update_target("0.1.0", None, 1, "0.1.11"), "0.1.11");
     }
 
     #[test]
