@@ -1,0 +1,273 @@
+# A release of the app: push a tag `v<version>` matching Cargo.toml. Each
+# platform builds and packs the app (scripts/package; no core inside, people
+# get the core's own release); then everything goes to a GitHub Release,
+# with latest.json last, so nobody sees a version whose files aren't up yet.
+#
+# Caches: a tag's own cache is visible only to that tag, so tags restore
+# main's. Main keeps them warm by building (without publishing) when
+# what the build depends on changes: Cargo.lock, the vendored crates, the
+# toolchain, this workflow. Let that run finish before tagging.
+#
+# The cache is the whole target/, with scripts/ci-sources keeping unchanged
+# files fresh to Cargo: the vendored crates (gpui-kit, taffy, ghostty) are
+# the slow part, and a fresh checkout would otherwise rebuild them all.
+#
+# Tests (the native screenshot test too) run only in ci.yml: a tag publishes
+# once ci.yml has passed for its commit.
+name: build and release
+# Main pushes only build (to keep the cache warm); tags publish.
+run-name: ${{ github.ref_type == 'tag' && format('release {0}', github.ref_name) || format('build {0}', github.ref_name) }}
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - vendor/**
+      - crates/**
+      - scripts/package
+      - scripts/notices.*
+      - tests/notices.rs
+      - about.toml
+      - licenses/**
+      - LICENSE
+      - THIRD-PARTY-NOTICES
+      - scripts/mac-sign
+      - scripts/macos-entitlements.plist
+      - scripts/mac-dmg
+      - distribution/macos/dmg/**
+      - scripts/ci-sources
+      - .github/workflows/release.yml
+  # Builds only; publishing needs a tag.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel: a cancelled main build saves no cache, a cancelled tag no release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: 1.95.0
+  # In the cache key: ghostty-sys can't tell when Zig changes.
+  ZIG_VERSION: 0.16.0
+  IS_TAG: ${{ github.ref_type == 'tag' }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Linux on the oldest Ubuntu we can: the app links the system's
+          # glibc, so this sets how old a distro it runs on.
+          - { target: linux-x86_64, runner: ubuntu-22.04 }
+          - { target: linux-aarch64, runner: ubuntu-22.04-arm }
+          - { target: macos-aarch64, runner: macos-15 }
+          - { target: windows-x86_64, runner: windows-2022 }
+    runs-on: ${{ matrix.runner }}
+    # Only tags can access the release environment's Apple certificate
+    # (optional: without it macOS builds are signed ad hoc).
+    environment: ${{ github.ref_type == 'tag' && 'release' || 'build' }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Restore build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: &cache-paths |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-
+            release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        # A stuck package mirror fails here in minutes, not at the job's limit.
+        timeout-minutes: 10
+        run: |
+          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          sudo apt-get $apt update
+          sudo apt-get $apt install -y --no-install-recommends \
+            pkg-config clang libclang-dev \
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libvulkan-dev libfontconfig-dev libfreetype-dev
+      # bindgen's libclang: the runner image's LLVM.
+      - name: Windows build dependencies
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+      - name: Version matches the tag
+        if: env.IS_TAG == 'true'
+        run: |
+          want="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [ "$want" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $want"; exit 1; }
+      - name: Keep unchanged sources fresh
+        run: scripts/ci-sources restore
+      # scripts/package sets H0X_ADE_RELEASE=1 itself, so the build updates.
+      - name: Build and pack
+        env:
+          APPLE_CERTIFICATE_P12: ${{ runner.os == 'macOS' && github.ref_type == 'tag' && secrets.APPLE_CERTIFICATE_P12 || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && github.ref_type == 'tag' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+        run: scripts/package
+      - name: Verify release notices
+        run: |
+          archive="dist/h0x-ade-${{ matrix.target }}.tar.gz"
+          if [[ '${{ runner.os }}' == macOS ]]; then
+            prefix=HyperOx.app/Contents/Resources
+          else
+            prefix=h0x-ade
+          fi
+          tar -xOf "$archive" "$prefix/THIRD-PARTY-NOTICES" | cmp - THIRD-PARTY-NOTICES
+          tar -xOf "$archive" "$prefix/LICENSE" | cmp - LICENSE
+      - name: Note the sources the cache was built from
+        if: github.ref == 'refs/heads/main'
+        run: scripts/ci-sources record
+      - name: Save build cache
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: *cache-paths
+          key: release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: h0x-ade-${{ matrix.target }}
+          path: dist/h0x-ade-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # ci.yml runs when the tagged commit reaches a branch; wait for its result.
+  # A newer push cancels it: rerun it and this job carries on.
+  ci-passed:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+    steps:
+      - name: Wait for ci on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          while :; do
+            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&per_page=1" \
+              --jq '.workflow_runs[0] | "\(.status) \(.conclusion) \(.id)"') || run="api error"
+            echo "ci for $GITHUB_SHA: $run"
+            case "$run" in
+              "completed success "*) exit 0 ;;
+              "completed cancelled "*) echo "cancelled by a newer push: rerun that ci run, this job keeps waiting" ;;
+              completed*) exit 1 ;;
+            esac
+            sleep 30
+          done
+
+  # A website download, never a dependency of update publishing below.
+  # scripts/mac-dmg signs and notarizes, so without the Apple secrets
+  # (unsigned releases) it is skipped and the release ships without a DMG.
+  mac-dmg:
+    needs: [build, ci-passed]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    environment: release
+    runs-on: macos-15
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: h0x-ade-macos-aarch64
+          path: dist
+      - name: Install DMG tools
+        run: brew install create-dmg jq
+      - name: Build, sign, notarize and verify DMG
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE_P12" ] || [ -z "$APPLE_API_KEY" ]; then
+            echo "no Apple signing secrets: DMG skipped"
+            exit 0
+          fi
+          tar -xzf dist/h0x-ade-macos-aarch64.tar.gz -C dist
+          scripts/mac-dmg dist/HyperOx.app dist/HyperOx.dmg
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: HyperOx-dmg
+          path: dist/HyperOx.dmg
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Tarballs and installers first, latest.json last: the updater and the
+  # installers read it. Re-running an old tag's run republishes that version.
+  release:
+    needs: [build, ci-passed, mac-dmg]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Manifest
+        env:
+          H0X_ADE_RELEASES_URL: https://github.com/vjk7989/h0x-ADE-app/releases
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          core=$(tr -d '[:space:]' < distribution/core-version)
+          python3 - "$version" "$core" <<'PY'
+          import hashlib, json, pathlib, sys, os
+          version, core = sys.argv[1], sys.argv[2]
+          base = os.environ["H0X_ADE_RELEASES_URL"]
+          targets = {}
+          for f in sorted(pathlib.Path("dist").glob("h0x-ade-*.tar.gz")):
+              t = f.name.removeprefix("h0x-ade-").removesuffix(".tar.gz")
+              targets[t] = {"url": f"{base}/download/v{version}/{f.name}", "sha256": hashlib.sha256(f.read_bytes()).hexdigest()}
+          # core_min: the oldest core this app works with.
+          doc = {"version": version, "core_min": core, "notes": f"HyperOx {version}", "targets": targets}
+          pathlib.Path("dist/latest.json").write_text(json.dumps(doc, indent=2) + "\n")
+          print(json.dumps(doc, indent=2))
+          PY
+      - name: Release notes from the changelog
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          awk -v heading="## [$version]" 'index($0, heading) == 1 { found = 1; next } found && /^## / { exit } found { print }' CHANGELOG.md > RELEASE_NOTES.md
+          [ -s RELEASE_NOTES.md ] || echo "$GITHUB_REF_NAME" > RELEASE_NOTES.md
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          name: h0x-ade ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: |
+            dist/h0x-ade-*.tar.gz
+            dist/HyperOx.dmg
+            distribution/install.sh
+            distribution/install.ps1
+            dist/latest.json
