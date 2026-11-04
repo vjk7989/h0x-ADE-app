@@ -1,7 +1,9 @@
 # A release of the app: push a tag `v<version>` matching Cargo.toml. Each
 # platform builds and packs the app (scripts/package; no core inside, people
 # get the core's own release); then everything goes to a GitHub Release,
-# with latest.json last, so nobody sees a version whose files aren't up yet.
+# each file with a minisign signature (`<file>.minisig`, secret
+# MINISIGN_SECRET_KEY) that the app checks before using it, with latest.json
+# last, so nobody sees a version whose files aren't up yet.
 #
 # Caches: a tag's own cache is visible only to that tag, so tags restore
 # main's. Main keeps them warm by building (without publishing) when
@@ -261,6 +263,23 @@ jobs:
           version=${GITHUB_REF_NAME#v}
           awk -v heading="## [$version]" 'index($0, heading) == 1 { found = 1; next } found && /^## / { exit } found { print }' CHANGELOG.md > RELEASE_NOTES.md
           [ -s RELEASE_NOTES.md ] || echo "$GITHUB_REF_NAME" > RELEASE_NOTES.md
+      - name: Sign assets
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y minisign
+          [ -n "$MINISIGN_SECRET_KEY" ] || { echo "MINISIGN_SECRET_KEY is not set" >&2; exit 1; }
+          (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key")
+          files=(dist/h0x-ade-*.tar.gz distribution/install.sh distribution/install.ps1 dist/latest.json)
+          # The DMG exists only when the Apple secrets are set.
+          if [ -f dist/HyperOx.dmg ]; then files+=(dist/HyperOx.dmg); fi
+          # The key has no password; an empty line answers a prompt if one comes.
+          for f in "${files[@]}"; do
+            printf '\n' | minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$f"
+          done
+      - name: Delete the signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/minisign.key"
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           name: h0x-ade ${{ github.ref_name }}
@@ -270,4 +289,6 @@ jobs:
             dist/HyperOx.dmg
             distribution/install.sh
             distribution/install.ps1
+            dist/*.minisig
+            distribution/*.minisig
             dist/latest.json
