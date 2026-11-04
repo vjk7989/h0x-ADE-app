@@ -81,7 +81,7 @@ fn main() {
     }
     // `h0x-ade check <mod>` / `h0x-ade types <mod>`: gpui-shell's own checker, with HyperOx's module installed.
     if matches!(args.get(1).map(String::as_str), Some("check" | "types")) {
-        mods::install_policy();
+        mods::install_check_policy();
         gpui_shell::host::main_with_components(gpui_shell::FrozenComponentRegistry::default());
         return;
     }
