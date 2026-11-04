@@ -640,6 +640,9 @@ What's about the user, never a look:
   The theme picker overrides any layout and stays on that layout.
 - `colors`: theme color overrides (`{"accent":"#ff8800"}`), with the same
   precedence as fonts.
+- `mods`: the person's answers for mods that did not ship with HyperOx,
+  `{"<mod>": {"hash": "<its code>", "allow": true}}`; given in the dialog the
+  mod brings up, changed in Settings, Mods. Changed code asks again.
 - `appearance`: `"light"` or `"dark"` always; absent, the system's. A layout
   with a light and a dark theme shows the matching one.
 - Updates: an installed app downloads them by itself and offers Restart and
@@ -951,6 +954,10 @@ All of it is in `h0x.d.ts`. In short:
   A returned root path means refresh everything (the pending paths are bounded).
   Files also refreshes on its 10-second timer:
   `cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } })`.
+  Here, all three reach only the person's home folder (after `..` and symlinks):
+  anything else rejects with "<path> is outside your home folder".
+- A mod HyperOx did not ship (or a shipped one, edited) runs only after the
+  person allows it in a dialog; changed code asks again (Settings, Mods).
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.
 - This copy: `props()`, `shared(key)` / `setShared(key, value)` (every mod
   sees it; setting re-renders all), `nextCommand()` (key commands for this

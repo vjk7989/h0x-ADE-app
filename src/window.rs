@@ -20,7 +20,7 @@ use crate::terminal::{TerminalEvent, TerminalView};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_shell::action::ShellAction;
-use gpui_shell::{ShellRoot, ShellRuntime, Watcher};
+use gpui_shell::{ShellRoot, ShellRuntime};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -283,7 +283,6 @@ struct Copy {
     /// Its number for commands (`mods::prepare_load`); 0 if it never loaded.
     id: u64,
     root: Option<Entity<ShellRoot>>,
-    _watch: Option<Watcher>,
     error: Option<String>,
 }
 
@@ -840,6 +839,7 @@ impl AppWindow {
             }
             self.watched.settings = mtime(&settings::path());
             self.apply_look(window, cx);
+            self.recheck_mods(window, cx);
         }
         let k_time = mtime(&crate::keys::path());
         if k_time.is_none() || k_time != self.watched.keys {
@@ -1559,19 +1559,27 @@ impl AppWindow {
     }
 
     fn load(&self, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
-        let mut copy = Copy { inst, id: 0, root: None, _watch: None, error: None };
+        let mut copy = Copy { inst, id: 0, root: None, error: None };
         let (Some(runtime), Some(folder)) = (&self.runtime, self.folders.get(&copy.inst.name)) else {
             copy.error = Some(format!("no mod folder ~/.config/h0x-ade/mods/{}", copy.inst.name));
             return copy;
         };
+        // A mod that didn't ship with HyperOx runs once the person allows its code (ADR-048).
+        match mods::trust(folder, &self.person.mods) {
+            mods::Trust::Allowed => {}
+            mods::Trust::Denied => {
+                copy.error = Some(format!("You did not allow the mod {} to run. Allow it in Settings, Mods.", copy.inst.name));
+                return copy;
+            }
+            mods::Trust::Ask(hash) => {
+                mods::ask(folder, hash);
+                copy.error = Some(format!("The mod {} waits for you to allow it.", copy.inst.name));
+                return copy;
+            }
+        }
         copy.id = mods::prepare_load(&copy.inst);
         match runtime.try_load(&folder.dir, window, cx) {
-            Ok(root) => {
-                if self.file_events.is_none() {
-                    copy._watch = runtime.watch(&root, window, cx).map_err(|e| tracing::warn!("{}: no hot reload: {e:#}", copy.inst.name)).ok();
-                }
-                copy.root = Some(root);
-            }
+            Ok(root) => copy.root = Some(root),
             Err(e) => {
                 tracing::warn!("mod {} failed to load: {e:#}", copy.inst.name);
                 copy.error = Some(format!("{e:#}"));
@@ -3755,6 +3763,8 @@ impl AppWindow {
         // saved code: reloading them too would start them twice.
         let loaded: BTreeSet<u64> = self.copies.values().filter(|c| c.root.is_some()).map(|c| c.id).collect();
         self.sync_folders(window, cx);
+        // Changed code of a mod that didn't ship is asked about before it runs.
+        self.recheck_mods(window, cx);
         let Some(runtime) = self.runtime.clone() else { return };
         for copy in self.copies.values_mut().filter(|c| edited.contains(&c.inst.name) && loaded.contains(&c.id)) {
             let Some(root) = &copy.root else { continue };
@@ -3764,6 +3774,27 @@ impl AppWindow {
             }
             copy.error = error;
         }
+    }
+
+    /// Mods load again when their permission may have changed (ADR-048): ones
+    /// that didn't load (perhaps waiting for it), and running ones no longer allowed.
+    fn recheck_mods(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let stale: Vec<(String, Instance)> = self.copies.iter()
+            .filter(|(_, c)| c.root.is_none() || self.folders.get(&c.inst.name).is_some_and(|f| mods::trust(f, &self.person.mods) != mods::Trust::Allowed))
+            .map(|(slot, c)| (slot.clone(), c.inst.clone()))
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        for (slot, inst) in stale {
+            self.remove_copy(&slot, window, cx);
+            // The layout's copies come back in `sync`; an overlay's in its place.
+            if self.overlays.iter().any(|o| o.slot == slot) {
+                let copy = self.load(inst, window, cx);
+                self.copies.insert(slot, copy);
+            }
+        }
+        self.sync(window, cx);
     }
 
     fn sync_folders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5123,6 +5154,9 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("mod.json"), r#"{ "place": "none" }"#).unwrap();
         std::fs::write(folder.join("main.js"), main_js).unwrap();
+        // It didn't ship, so it runs once allowed (ADR-048): the person allowed it.
+        let allow = crate::settings::ModChoice { hash: crate::mods::content_hash(&folder), allow: true };
+        crate::settings::write_person(&crate::settings::Person { mods: [(mod_name.to_owned(), allow)].into(), ..Default::default() }).unwrap();
         std::fs::create_dir_all(home.join("layouts")).unwrap();
         std::fs::write(home.join("layouts/test.json"), layout.to_string()).unwrap();
         cx.update(crate::mods::init);

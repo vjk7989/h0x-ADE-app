@@ -7,7 +7,7 @@ use gpui_shell::{Capabilities, ExecuteGrant, HostError, HostModule, HostObject, 
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::rc::{Rc, Weak};
@@ -269,21 +269,7 @@ fn clone_mod_at(mods: &Path, name: &str, to: &str) -> std::io::Result<()> {
 
 /// Exactly as installed: every file unchanged and none added.
 fn as_shipped(dir: &Path, files: &Files) -> bool {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
-        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-            if e.file_name().to_string_lossy().starts_with('.') {
-                continue;
-            }
-            let path = e.path();
-            if path.is_dir() {
-                walk(root, &path, out);
-            } else if let Ok(rel) = path.strip_prefix(root) {
-                out.push(rel.to_string_lossy().replace('\\', "/"));
-            }
-        }
-    }
-    let mut found = Vec::new();
-    walk(dir, dir, &mut found);
+    let mut found = mod_files(dir, false);
     // gpui-shell writes these editor helpers when it loads a mod.
     found.retain(|f| !matches!(f.as_str(), "gpui-kit.d.ts" | "jsconfig.json") || files.contains_key(f));
     found.len() == files.len() && found.iter().all(|f| files.contains_key(f)) && untouched(dir, files)
@@ -311,6 +297,104 @@ fn write_if_changed(path: &Path, content: impl AsRef<[u8]>) -> std::io::Result<(
         std::fs::write(path, content)?;
     }
     Ok(())
+}
+
+/// Whether a mod may run (ADR-048): HyperOx's own mods do; any other runs once
+/// the person allowed this exact code.
+#[derive(Debug, PartialEq)]
+pub enum Trust {
+    Allowed,
+    Denied,
+    /// Not decided for this code (its hash) yet.
+    Ask(String),
+}
+
+pub fn trust(found: &Found, choices: &BTreeMap<String, crate::settings::ModChoice>) -> Trust {
+    let shipped = if found.dir.parent() == Some(frame_dir().as_path()) { FRAME_MODS } else { DEFAULT_MODS };
+    if is_shipped(&found.dir, shipped) {
+        return Trust::Allowed;
+    }
+    decide(choices, &found.id, content_hash(&found.dir))
+}
+
+/// The stored answer for this mod, if it was given for this code.
+pub fn decide(choices: &BTreeMap<String, crate::settings::ModChoice>, id: &str, hash: String) -> Trust {
+    match choices.get(id) {
+        Some(c) if c.hash == hash && c.allow => Trust::Allowed,
+        Some(c) if c.hash == hash => Trust::Denied,
+        _ => Trust::Ask(hash),
+    }
+}
+
+/// Byte for byte one of the mods HyperOx ships (by folder name), none added.
+fn is_shipped(dir: &Path, shipped: &[(&str, &[u8])]) -> bool {
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else { return false };
+    let prefix = format!("{name}/");
+    let files: BTreeMap<&str, &[u8]> = shipped.iter().filter_map(|(p, bytes)| Some((p.strip_prefix(&prefix)?, *bytes))).collect();
+    if files.is_empty() {
+        return false;
+    }
+    let mut found = mod_files(dir, false);
+    // gpui-shell writes these editor helpers when it loads a mod.
+    found.retain(|f| !matches!(f.as_str(), "gpui-kit.d.ts" | "jsconfig.json") || files.contains_key(f.as_str()));
+    found.len() == files.len() && found.iter().all(|f| files.get(f.as_str()).is_some_and(|want| std::fs::read(dir.join(f)).is_ok_and(|b| b == *want)))
+}
+
+/// SHA-256 over every file of a mod (names and bytes), dot files included:
+/// the code a person's answer is for. The editor helpers don't count.
+pub fn content_hash(dir: &Path) -> String {
+    let mut all = Vec::new();
+    for f in mod_files(dir, true).into_iter().filter(|f| !matches!(f.as_str(), "gpui-kit.d.ts" | "jsconfig.json")) {
+        let bytes = std::fs::read(dir.join(&f)).unwrap_or_default();
+        all.extend_from_slice(format!("{f}\0{}\0", bytes.len()).as_bytes());
+        all.extend_from_slice(&bytes);
+    }
+    crate::update::sha256(&all)
+}
+
+/// A mod's files, `/`-separated and sorted (dot files only when asked).
+fn mod_files(dir: &Path, dots: bool) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, dots: bool, depth: u32, out: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if !dots && e.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let path = e.path();
+            if path.is_dir() {
+                // A symlink loop ends here.
+                if depth < 16 {
+                    walk(root, &path, dots, depth + 1, out);
+                }
+            } else if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, dots, 0, &mut out);
+    out.sort();
+    out
+}
+
+/// Mods asked about this run (id and hash): one prompt each.
+static ASKED: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Asks the person once whether this mod may run (the frame's consent dialog).
+pub fn ask(found: &Found, hash: String) {
+    // The dialog itself, edited, can only be allowed in settings.json.
+    if found.id == "frame-consent" {
+        return;
+    }
+    let key = (found.id.clone(), hash.clone());
+    {
+        let mut asked = ASKED.lock().unwrap();
+        if asked.contains(&key) {
+            return;
+        }
+        asked.push(key);
+    }
+    let props = json!({ "id": found.id, "folder": found.dir.to_string_lossy(), "hash": hash });
+    request(Request::OpenOverlay { id: new_overlay_id(), spec: json!({ "mod": "frame-consent", "kind": "dialog", "width": 440, "height": 230, "props": props }) });
 }
 
 /// Where a mod would like to go the first time it appears (mod.json).
@@ -882,7 +966,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             let on = opt_str(a.get(1), "on");
             Ok(crate::mod_files::read_with(move || match on {
                 Some(m) => read_remote(&m, &path),
-                None => crate::mod_files::read(Path::new(&path)),
+                None => crate::mod_files::inside_home(Path::new(&path)).and_then(|_| crate::mod_files::read(Path::new(&path))),
             }))
         })
         .async_function("writeTextFile", |a| {
@@ -1061,6 +1145,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         })
         .async_function("watchFolder", |a| {
             let path = a.string(0)?.to_owned();
+            crate::mod_files::inside_home(Path::new(&path)).map_err(HostError::new)?;
             Ok(async move { crate::files::next_change(path).await.map(|v| to_host(&json!(v))).map_err(HostError::new) })
         })
         .async_function("nextCommand", move |_| {
@@ -1336,6 +1421,103 @@ mod tests {
         std::fs::write(dir.join("mine.js"), "c").unwrap();
         assert!(!as_shipped(&dir, &files));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Built-in (ADR-048) is the shipped bytes, not the name or the folder.
+    #[test]
+    fn only_byte_identical_shipped_mods_are_built_in() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-builtin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let shipped: &[(&str, &[u8])] = &[("tool/main.js", b"export default 1;\n"), ("tool/icons/x.svg", b"<svg/>"), ("other/main.js", b"x")];
+        let dir = root.join("tool");
+        std::fs::create_dir_all(dir.join("icons")).unwrap();
+        std::fs::write(dir.join("main.js"), b"export default 1;\n").unwrap();
+        std::fs::write(dir.join("icons/x.svg"), b"<svg/>").unwrap();
+        assert!(is_shipped(&dir, shipped));
+        // The editor helpers gpui-shell writes on load don't count.
+        std::fs::write(dir.join("gpui-kit.d.ts"), "generated").unwrap();
+        std::fs::write(dir.join("jsconfig.json"), "generated").unwrap();
+        assert!(is_shipped(&dir, shipped));
+        // One byte changed: not built-in.
+        std::fs::write(dir.join("main.js"), b"export default 2;\n").unwrap();
+        assert!(!is_shipped(&dir, shipped));
+        std::fs::write(dir.join("main.js"), b"export default 1;\n").unwrap();
+        // A file missing or added: not built-in.
+        std::fs::remove_file(dir.join("icons/x.svg")).unwrap();
+        assert!(!is_shipped(&dir, shipped));
+        std::fs::write(dir.join("icons/x.svg"), b"<svg/>").unwrap();
+        std::fs::write(dir.join("extra.js"), b"").unwrap();
+        assert!(!is_shipped(&dir, shipped));
+        std::fs::remove_file(dir.join("extra.js")).unwrap();
+        assert!(is_shipped(&dir, shipped));
+        // Same code under a name HyperOx doesn't ship, or nothing shipped at all.
+        let copy = root.join("tool-copy");
+        std::fs::create_dir_all(copy.join("icons")).unwrap();
+        std::fs::write(copy.join("main.js"), b"export default 1;\n").unwrap();
+        std::fs::write(copy.join("icons/x.svg"), b"<svg/>").unwrap();
+        assert!(!is_shipped(&copy, shipped));
+        assert!(!is_shipped(&dir, &[]));
+        // An empty folder of a shipped name.
+        std::fs::create_dir_all(root.join("other")).unwrap();
+        assert!(!is_shipped(&root.join("other"), shipped));
+        std::fs::remove_dir_all(&root).unwrap();
+        // Every shipped mod, written out as shipped, is built-in.
+        let staged = std::env::temp_dir().join(format!("h0x-ade-builtin-all-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staged);
+        for (folder, files) in [("mods", DEFAULT_MODS), ("frame", FRAME_MODS)] {
+            for (path, bytes) in files {
+                let file = staged.join(folder).join(path);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, bytes).unwrap();
+            }
+            for name in files.iter().filter_map(|(p, _)| p.split('/').next()).collect::<std::collections::BTreeSet<_>>() {
+                assert!(is_shipped(&staged.join(folder).join(name), files), "{folder}/{name}");
+            }
+        }
+        std::fs::remove_dir_all(&staged).unwrap();
+    }
+
+    #[test]
+    fn a_mods_answer_holds_for_its_code_only() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-consent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("main.js"), "a").unwrap();
+        std::fs::write(root.join("lib/.helper.js"), "b").unwrap();
+        let hash = content_hash(&root);
+        assert_eq!(hash.len(), 64);
+        // gpui-shell's editor helpers don't change it; any byte, dot files included, does.
+        std::fs::write(root.join("jsconfig.json"), "{}").unwrap();
+        assert_eq!(content_hash(&root), hash);
+        std::fs::write(root.join("lib/.helper.js"), "c").unwrap();
+        assert_ne!(content_hash(&root), hash);
+        std::fs::write(root.join("lib/.helper.js"), "b").unwrap();
+        assert_eq!(content_hash(&root), hash);
+        std::fs::write(root.join("main.js"), "b").unwrap();
+        assert_ne!(content_hash(&root), hash);
+        std::fs::remove_dir_all(&root).unwrap();
+        // An empty or missing folder still has a hash (of nothing).
+        assert_eq!(content_hash(&root), crate::update::sha256(b""));
+
+        use crate::settings::ModChoice;
+        let choices: BTreeMap<String, ModChoice> = [
+            ("yes".to_owned(), ModChoice { hash: "h1".into(), allow: true }),
+            ("no".to_owned(), ModChoice { hash: "h1".into(), allow: false }),
+            ("blank".to_owned(), ModChoice::default()),
+        ].into();
+        assert_eq!(decide(&choices, "yes", "h1".into()), Trust::Allowed);
+        assert_eq!(decide(&choices, "no", "h1".into()), Trust::Denied);
+        // Changed code asks again, allowed or not before; so do unknown mods.
+        assert_eq!(decide(&choices, "yes", "h2".into()), Trust::Ask("h2".into()));
+        assert_eq!(decide(&choices, "no", "h2".into()), Trust::Ask("h2".into()));
+        assert_eq!(decide(&choices, "new", "h1".into()), Trust::Ask("h1".into()));
+        assert_eq!(decide(&BTreeMap::new(), "", String::new()), Trust::Ask(String::new()));
+        // A hand-written entry without a hash never matches real code.
+        assert_eq!(decide(&choices, "blank", "h1".into()), Trust::Ask("h1".into()));
+        // settings.json round trip, and an entry missing fields still parses.
+        let person: crate::settings::Person = serde_json::from_str(r#"{"mods":{"yes":{"hash":"h1","allow":true},"half":{"allow":true}}}"#).unwrap();
+        assert_eq!(person.mods["yes"], ModChoice { hash: "h1".into(), allow: true });
+        assert_eq!(decide(&person.mods, "half", "h1".into()), Trust::Ask("h1".into()));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Asynchronous text files for mods. Writes reject a stale editor snapshot.
+//! Mods reach only files inside the person's home folder (ADR-048).
 use gpui_shell::{HostError, HostValue};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub const LIMIT: u64 = 1024 * 1024;
@@ -75,6 +76,60 @@ fn write(path: &Path, text: &str, expected: Option<&str>) -> Result<(), String> 
     result
 }
 
+/// Refuses a path outside the person's home folder, with `..` and symlinks
+/// resolved (a path that doesn't exist yet: by its nearest existing folder).
+pub fn inside_home(path: &Path) -> Result<(), String> {
+    inside(path, &crate::mods::home())
+}
+
+fn inside(path: &Path, home: &Path) -> Result<(), String> {
+    let outside = || format!("{} is outside your home folder", path.display());
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    let target = real(path).ok_or_else(outside)?;
+    if within(&target.to_string_lossy(), &home.to_string_lossy(), cfg!(windows)) {
+        Ok(())
+    } else {
+        Err(outside())
+    }
+}
+
+/// The real path: symlinks and `..` resolved. Names that don't exist yet are
+/// kept as written; `..` after them, or no existing folder at all, is None.
+fn real(path: &Path) -> Option<PathBuf> {
+    let path = crate::persist::resolve_target(path).ok()?;
+    let mut tail = Vec::new();
+    let mut base = path.as_path();
+    loop {
+        match base.canonicalize() {
+            Ok(real) => return Some(tail.into_iter().rev().fold(real, |p, name| p.join(name))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tail.push(base.file_name()?.to_owned());
+                base = base.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Whether the real path `target` is `home` or inside it. On Windows in any
+/// case, with `\\?\` and `\\?\UNC\` read as the plain drive and UNC paths.
+fn within(target: &str, home: &str, windows: bool) -> bool {
+    let norm = |s: &str| {
+        if !windows {
+            return s.trim_end_matches('/').to_owned();
+        }
+        let s = s.replace('/', r"\");
+        let s = match s.strip_prefix(r"\\?\UNC\") {
+            Some(rest) => format!(r"\\{rest}"),
+            None => s.strip_prefix(r"\\?\").unwrap_or(s.as_str()).to_owned(),
+        };
+        s.trim_end_matches('\\').to_lowercase()
+    };
+    let (target, home) = (norm(target), norm(home));
+    let sep = if windows { '\\' } else { '/' };
+    target == home || target.strip_prefix(&home).is_some_and(|rest| rest.starts_with(sep))
+}
+
 /// Reads off the UI thread: the text, or null when absent.
 pub fn read_with(
     read: impl FnOnce() -> Result<Option<String>, String> + Send + 'static,
@@ -100,7 +155,8 @@ pub fn write_text(
 ) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
-        let _ = tx.send_blocking(write(Path::new(&path), &text, expected.as_deref()));
+        let path = Path::new(&path);
+        let _ = tx.send_blocking(inside_home(path).and_then(|_| write(path, &text, expected.as_deref())));
     });
     async move {
         rx.recv()
@@ -131,5 +187,75 @@ mod tests {
         assert!(write(&path, "stale", Some("- [ ] Task\n")).is_err());
         assert_eq!(read(&path).unwrap().unwrap(), "- [x] Task\n");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mods_reach_only_the_home_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "h0x-ade-home-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join("project")).unwrap();
+        std::fs::write(home.join("project/a.txt"), "a").unwrap();
+        std::fs::write(root.join("secret.txt"), "s").unwrap();
+        // Inside, existing or not yet written (its folders made on write).
+        assert_eq!(inside(&home.join("project/a.txt"), &home), Ok(()));
+        assert_eq!(inside(&home.join("project/new/deep.md"), &home), Ok(()));
+        assert_eq!(inside(&home.join("project/../project/a.txt"), &home), Ok(()));
+        // The home folder itself.
+        assert_eq!(inside(&home, &home), Ok(()));
+        // `..` out of it, existing or not.
+        let escape = home.join("../secret.txt");
+        assert_eq!(inside(&escape, &home), Err(format!("{} is outside your home folder", escape.display())));
+        assert!(inside(&home.join("../elsewhere.txt"), &home).is_err());
+        assert!(inside(&home.join("missing/../../secret.txt"), &home).is_err());
+        assert!(inside(&root.join("secret.txt"), &home).is_err());
+        // A sibling whose name starts like the home folder's.
+        std::fs::create_dir_all(root.join("home2")).unwrap();
+        assert!(inside(&root.join("home2/x.txt"), &home).is_err());
+        // Empty and relative paths that don't exist resolve nowhere.
+        assert!(inside(Path::new(""), &home).is_err());
+        assert!(inside(Path::new("no-such-file-h0x.txt"), &home).is_err());
+        #[cfg(unix)]
+        {
+            // A symlink inside home pointing out, to a folder or a missing file.
+            std::os::unix::fs::symlink(&root, home.join("out")).unwrap();
+            assert!(inside(&home.join("out/secret.txt"), &home).is_err());
+            assert!(inside(&home.join("out/new.txt"), &home).is_err());
+            std::os::unix::fs::symlink(root.join("gone.txt"), home.join("dangling")).unwrap();
+            assert!(inside(&home.join("dangling"), &home).is_err());
+            // And one pointing within home is fine.
+            std::os::unix::fs::symlink(home.join("project"), home.join("in")).unwrap();
+            assert_eq!(inside(&home.join("in/a.txt"), &home), Ok(()));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn windows_paths_compare_without_case_or_verbatim_prefixes() {
+        let home = r"\\?\C:\Users\Ana";
+        assert!(within(r"\\?\C:\Users\Ana", home, true));
+        assert!(within(r"C:\Users\Ana\", home, true));
+        assert!(within(r"\\?\c:\users\ana\Projects\a.txt", home, true));
+        assert!(within(r"C:/Users/Ana/notes.md", home, true));
+        // Another drive, a sibling with the same start, UNC shares.
+        assert!(!within(r"\\?\D:\Users\Ana\a.txt", home, true));
+        assert!(!within(r"\\?\C:\Users\Anabel\a.txt", home, true));
+        assert!(!within(r"\\?\C:\Users", home, true));
+        assert!(!within(r"\\?\UNC\server\share\a.txt", home, true));
+        assert!(!within(r"\\server\share\a.txt", home, true));
+        // A home on a share: both spellings are the same place.
+        assert!(within(r"\\?\UNC\server\share\ana\a.txt", r"\\server\share\ana", true));
+        assert!(!within(r"\\?\UNC\server\other\a.txt", r"\\server\share\ana", true));
+        // Unix: exact case, component boundaries.
+        assert!(within("/home/ana", "/home/ana", false));
+        assert!(within("/home/ana/x", "/home/ana/", false));
+        assert!(!within("/home/Ana/x", "/home/ana", false));
+        assert!(!within("/home/anabel", "/home/ana", false));
+        assert!(!within("/etc/passwd", "/home/ana", false));
     }
 }

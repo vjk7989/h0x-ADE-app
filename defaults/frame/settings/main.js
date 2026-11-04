@@ -11,6 +11,7 @@ const SECTIONS = [
   ...(window()?.platform === "macos" ? [{ id: "keyboard", title: "Keyboard", icon: "keyboard" }] : []),
   { id: "machines", title: "Machines", icon: "server" },
   { id: "alerts", title: "Alerts", icon: "bell" },
+  { id: "mods", title: "Mods", icon: "shield" },
   { id: "updates", title: "Updates", icon: "refresh" },
 ];
 
@@ -685,6 +686,33 @@ export default class Settings extends View {
       .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("Want your own sounds? Ask your agent to set sounds.done and sounds.blocked in settings.json to an MP3."));
   }
 
+  // Mods -----------------------------------------------------------------
+
+  // Mods that did not ship with HyperOx, as answered when they asked (ADR-048).
+  mods(t) {
+    const list = Object.entries(this.person.mods ?? {}).sort(([a], [b]) => a.localeCompare(b));
+    return v_flex()
+      .w_full()
+      .child(this.heading(t, "Mods you were asked about"))
+      .child(div().pb(6).text_size(12.5).line_height("18px").text_color(t.dim).child("Mods that did not ship with HyperOx run only once you allow them. They can run programs, read and write files in your home folder, and talk to agents. A mod whose code changes asks again."))
+      .children(
+        list.length === 0
+          ? [div().py(12).text_size(13).text_color(t.muted).child("No mod has asked yet.")]
+          : list.map(([id, choice]) =>
+              this.row(
+                t,
+                id,
+                choice?.allow ? "Allowed" : "Not allowed",
+                this.button(t, `st-mod-${id}`, choice?.allow ? "Don't allow" : "Allow", (_e, cx) =>
+                  this.change((p) => {
+                    p.mods = { ...(p.mods ?? {}), [id]: { ...(p.mods?.[id] ?? {}), allow: !choice?.allow } };
+                  }, cx),
+                ),
+              ),
+            ),
+      );
+  }
+
   // Updates --------------------------------------------------------------
 
   updates(t) {
@@ -838,6 +866,8 @@ export default class Settings extends View {
                         ? this.machines(t)
                       : this.section === "alerts"
                         ? this.alerts(t)
+                      : this.section === "mods"
+                        ? this.mods(t)
                         : this.updates(t),
                   ),
               ),
