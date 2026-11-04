@@ -63,7 +63,7 @@ export default class Consent extends View {
           .flex_1()
           .min_h(0)
           .text_color(t.muted)
-          .child("It did not ship with HyperOx. It can run programs, read and write files in your home folder, and talk to agents. Allow it only if you trust where it came from."),
+          .child("It did not ship with HyperOx. It can run programs, read and write files in your home folder and your spaces, and talk to agents. Allow it only if you trust where it came from."),
       )
       .when(Boolean(this.error), (el) => el.child(div().text_size(12).text_color(t.blocked).child(this.error ?? "")))
       .child(
