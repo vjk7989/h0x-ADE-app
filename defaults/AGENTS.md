@@ -88,6 +88,7 @@ first frame or during GPU recovery it reports an error instead of a PNG.
 Shared state is saved atomically in the background, with the latest change winning.
 If `shared.json` is invalid, HyperOx logs a warning and keeps it as
 `shared.json.corrupt-<time>` before starting empty.
+`h0x-ade check` uses empty shared state in memory and leaves this file untouched.
 
 ## The model: spaces, tabs, terminals
 
