@@ -466,10 +466,13 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let start = Instant::now();
     let staged = Staged::new();
-    for section in ["look", "alerts", "updates"] {
+    for section in ["look", "alerts", "mods", "updates"] {
         let mut p = props();
         p["section"] = json!(section);
-        describe(cx, &staged, "frame/settings", true, p, updates("current", "current"), None).unwrap();
+        let tree = describe(cx, &staged, "frame/settings", true, p, updates("current", "current"), None).unwrap();
+        if section == "mods" {
+            assert!(tree.contains("No mod has asked yet"), "an empty mods list says so: {tree}");
+        }
     }
     for app in ["source", "current", "ready"] {
         for core in ["current", "ready", "error", "managed", "updating"] {
@@ -506,6 +509,21 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
         assert!(tree.contains(if checking { "Checking" } else if succeeded { "Up to date" } else { "Check your connection" }), "check status missing: {tree}");
     }
     eprintln!("27 settings cases, each twice: {:?}", start.elapsed());
+}
+
+/// The consent dialog (ADR-048) names the mod, its folder and its powers, and
+/// offers both answers; a failed save shows why.
+#[gpui::test]
+fn consent_dialog_names_the_mod_and_both_answers(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let p = json!({"overlay":"o1","id":"my-mod","folder":"/fixture/app/mods/my-mod","hash":"abc"});
+    let tree = describe(cx, &staged, "frame/consent", true, p.clone(), updates("current", "current"), None).unwrap();
+    for want in ["my-mod", "/fixture/app/mods/my-mod", "run programs, read and write files in your home folder, and talk to agents", "consent-yes", "consent-no", "Don't allow"] {
+        assert!(tree.contains(want), "consent dialog lacks {want:?}: {tree}");
+    }
+    let tree = describe(cx, &staged, "frame/consent", true, p, updates("current", "current"), Some("this.error = 'Could not save: denied';")).unwrap();
+    assert!(tree.contains("Could not save: denied"), "a failed save shows: {tree}");
 }
 
 #[gpui::test]
