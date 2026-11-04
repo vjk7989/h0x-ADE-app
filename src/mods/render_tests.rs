@@ -787,3 +787,578 @@ fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
     assert!(tree.contains("commands"), "unbound hint still offers commands: {tree}");
     assert!(!tree.contains("Shift P"), "unbound hint must not invent a key: {tree}");
 }
+
+// The files panel's editing: the real mod under a wrapper that takes commands from the test,
+// with the disk, the writes and the core calls faked and recorded.
+#[derive(Default)]
+struct FilesDisk {
+    files: BTreeMap<String, String>,
+    fail: Option<String>,
+    send_code: i64,
+    reads: Vec<Value>,
+    writes: Vec<(String, String, Value)>,
+    sends: Vec<Vec<String>>,
+    commands: std::collections::VecDeque<String>,
+    notes: Vec<String>,
+}
+
+const FILES_SCENARIO: &str = r#"
+import Real from './mods/files/main.js';
+import { command, note } from 'fixture';
+export default class Scenario extends Real {
+  init(props, cx) {
+    super.init(props, cx);
+    cx.timer.every(50, cx => {
+      for (let c = command(); c !== null; c = command()) {
+        const at = c.indexOf(' '), verb = at < 0 ? c : c.slice(0, at), arg = c.slice(at + 1);
+        if (verb === 'open') this.show(arg, cx);
+        else if (verb === 'back') this.show(null, cx);
+        else if (verb === 'keep') this.save(cx, true);
+        else if (verb === 'reload') this.reload(cx);
+        else if (verb === 'refresh') this.refresh(cx);
+        else if (verb === 'state') {
+          const d = this.doc;
+          note(JSON.stringify({ file: this.file ?? null, value: this.code ? this.code.value() : null, editable: Boolean(d?.editable),
+            dirty: Boolean(d?.dirty), conflict: Boolean(d?.conflict), error: d?.error ?? null, hint: d?.hint ?? null }));
+        }
+        cx.notify();
+      }
+    });
+  }
+}
+"#;
+
+fn files_disk(files: &[(&str, &str)]) -> Rc<RefCell<FilesDisk>> {
+    Rc::new(RefCell::new(FilesDisk {
+        files: files.iter().map(|(p, t)| (p.to_string(), t.to_string())).collect(),
+        ..Default::default()
+    }))
+}
+
+fn files_values(agents: Value) -> BTreeMap<String, Value> {
+    let mut values = fixture(true, props(), updates("current", "current"));
+    values.insert("agents".into(), agents);
+    values
+}
+
+fn files_module(values: BTreeMap<String, Value>, disk: Rc<RefCell<FilesDisk>>) -> HostModule {
+    let mut module = HostModule::new("h0x");
+    for (name, value) in values {
+        module = module.function(name, move |_| Ok(to_host(&value)));
+    }
+    module = module.async_function("watchFolder", |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
+    module = module.async_function("exec", |_| Ok(std::future::ready(Ok(to_host(&json!({"code":0,"stdout":"","stderr":""}))))));
+    let read = disk.clone();
+    module = module.async_function("readTextFile", move |a| {
+        let path = a.string(0)?.to_owned();
+        let mut disk = read.borrow_mut();
+        disk.reads.push(json!([path, a.get(1).map(from_host).unwrap_or(Value::Null)]));
+        let text = disk.files.get(&path).cloned();
+        Ok(std::future::ready(Ok(to_host(&json!(text)))))
+    });
+    let write = disk.clone();
+    module = module.async_function("writeTextFile", move |a| {
+        let path = a.string(0)?.to_owned();
+        let text = a.string(1)?.to_owned();
+        let expected = a.get(2).map(from_host).unwrap_or(Value::Null);
+        let mut disk = write.borrow_mut();
+        disk.writes.push((path.clone(), text.clone(), expected.clone()));
+        let current = disk.files.get(&path).map_or(Value::Null, |t| json!(t));
+        let result = if current != expected {
+            Err(HostError::new("stale snapshot: the file changed on disk"))
+        } else if let Some(message) = disk.fail.clone() {
+            Err(HostError::new(message))
+        } else {
+            disk.files.insert(path, text);
+            Ok(HostValue::Null)
+        };
+        Ok(std::future::ready(result))
+    });
+    module.async_function("core", move |a| {
+        let args: Vec<String> = serde_json::from_value(a.get(0).map(from_host).unwrap_or(Value::Null)).unwrap();
+        let mut disk = disk.borrow_mut();
+        let code = disk.send_code;
+        disk.sends.push(args);
+        Ok(std::future::ready(Ok(to_host(&json!({"code":code,"stdout":"","stderr":""})))))
+    })
+}
+
+struct FilesMounted(gpui::Entity<gpui_shell::ShellRoot>);
+impl gpui::Render for FilesMounted {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        self.0.clone()
+    }
+}
+
+fn mount_files(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    values: BTreeMap<String, Value>,
+    disk: &Rc<RefCell<FilesDisk>>,
+) -> (gpui::VisualTestContext, Rc<ShellRuntime>, gpui::Entity<gpui_shell::ShellRoot>) {
+    std::fs::write(staged.0.join("main.js"), FILES_SCENARIO).unwrap();
+    let (commands, notes) = (disk.clone(), disk.clone());
+    gpui_shell::policy::set_default(
+        Policy::new()
+            .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+            .with_host_module(files_module(values, disk.clone()))
+            .unwrap()
+            .with_host_module(
+                HostModule::new("fixture")
+                    .function("command", move |_| {
+                        Ok(commands.borrow_mut().commands.pop_front().map_or(HostValue::Null, |c| to_host(&json!(c))))
+                    })
+                    .function("note", move |a| {
+                        notes.borrow_mut().notes.push(a.string(0)?.to_owned());
+                        Ok(HostValue::Null)
+                    }),
+            )
+            .unwrap(),
+    );
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| FilesMounted(runtime.try_load(&staged.0, window, cx).unwrap()));
+    let root = window.update(cx, |mounted, _, _| mounted.0.clone()).unwrap();
+    let mut visual = gpui::VisualTestContext::from_window(*window, cx);
+    visual.run_until_parked();
+    (visual, runtime, root)
+}
+
+fn files_wait(visual: &mut gpui::VisualTestContext, ms: u64) {
+    visual.executor().advance_clock(std::time::Duration::from_millis(ms));
+    visual.run_until_parked();
+}
+
+// Hands the scenario one command; its poll timer runs it within the 50 ms advanced here.
+fn files_step(visual: &mut gpui::VisualTestContext, disk: &Rc<RefCell<FilesDisk>>, command: &str) {
+    disk.borrow_mut().commands.push_back(command.into());
+    files_wait(visual, 50);
+}
+
+fn files_state(visual: &mut gpui::VisualTestContext, disk: &Rc<RefCell<FilesDisk>>) -> Value {
+    files_step(visual, disk, "state");
+    serde_json::from_str(disk.borrow().notes.last().expect("the scenario reports its state")).unwrap()
+}
+
+// Focuses the open editor with a click into its body (below the header), then types.
+fn files_type(visual: &mut gpui::VisualTestContext, text: &str) {
+    visual.update(|window, cx| {
+        window.activate_window();
+        window.draw(cx).clear(cx)
+    });
+    visual.simulate_click(gpui::point(gpui::px(300.), gpui::px(300.)), gpui::Modifiers::none());
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.simulate_input(text);
+}
+
+fn files_keys(visual: &mut gpui::VisualTestContext, keys: &str) {
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.simulate_keystrokes(keys);
+}
+
+fn files_writes(disk: &Rc<RefCell<FilesDisk>>) -> Vec<(String, String, Value)> {
+    disk.borrow().writes.clone()
+}
+
+fn files_sends(disk: &Rc<RefCell<FilesDisk>>) -> Vec<Vec<String>> {
+    disk.borrow().sends.iter().filter(|a| a.first().map(String::as_str) == Some("send")).cloned().collect()
+}
+
+fn files_note(list: &str) -> String {
+    format!("HyperOx: the user edited {list} in the editor. Re-read before changing it.")
+}
+
+fn idle_agent() -> Value {
+    json!([{"address":"idle1","space":"s1","status":"idle"}])
+}
+
+fn describe_files(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    values: BTreeMap<String, Value>,
+    disk: &Rc<RefCell<FilesDisk>>,
+    setup: &str,
+) -> String {
+    let policy = Policy::new()
+        .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+        .with_host_module(files_module(values, disk.clone()))
+        .unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let root = staged.wrapper("mods/files", setup);
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(runtime, root, policy, window, cx))
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
+    let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    tree
+}
+
+#[gpui::test]
+fn files_panel_marks_remote_and_oversized_files_read_only_and_shows_unsaved_state(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let notes = "/fixture/project/notes.txt";
+
+    let mut remote = files_values(idle_agent());
+    remote.get_mut("spaces").unwrap()[0]["machine"] = json!("remote");
+    let disk = files_disk(&[(notes, "hello\n")]);
+    let tree = describe_files(cx, &staged, remote, &disk, "this.show('notes.txt', cx);");
+    assert!(tree.contains("read-only: remote machine"), "a remote file is a read-only preview: {tree}");
+    assert!(disk.borrow().reads.contains(&json!([notes, {"on":"remote"}])), "{:?}", disk.borrow().reads);
+
+    // 400,000 characters is the largest file still edited in place.
+    for (size, readonly) in [(400_000, false), (400_001, true)] {
+        let disk = files_disk(&[("/fixture/project/big.txt", &"a".repeat(size))]);
+        let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, "this.show('big.txt', cx);");
+        assert_eq!(tree.contains("read-only: too large"), readonly, "{size} characters");
+        assert!(!tree.contains("This file is no longer available") && !tree.contains("Cannot preview"), "{size} characters");
+    }
+
+    // An empty file is still a file: editable, not "no longer available".
+    let disk = files_disk(&[(notes, "")]);
+    let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, "this.show('notes.txt', cx);");
+    assert!(
+        !tree.contains("read-only") && !tree.contains("This file is no longer available") && !tree.contains("Loading file"),
+        "{tree}"
+    );
+
+    let disk = files_disk(&[(notes, "hello\n")]);
+    let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, "this.show('notes.txt', cx);");
+    assert!(
+        tree.contains("notes.txt") && !tree.contains("● ") && !tree.contains("Changed on disk") && !tree.contains("read-only"),
+        "{tree}"
+    );
+
+    // Edits held back by a conflict come back with the file: marked unsaved, with the bar and the error.
+    let disk = files_disk(&[(notes, "theirs\n")]);
+    let tree = describe_files(
+        cx,
+        &staged,
+        files_values(idle_agent()),
+        &disk,
+        "this.drafts.set('/fixture/project/notes.txt', { saved: 'old\\n', draft: 'mine\\n', error: 'Not saved: disk full' }); this.show('notes.txt', cx);",
+    );
+    for expected in ["● notes.txt", "Changed on disk", "files-reload", "Reload", "files-keep", "Keep mine", "Not saved: disk full"] {
+        assert!(tree.contains(expected), "missing {expected}: {tree}");
+    }
+    assert!(disk.borrow().writes.is_empty(), "showing a file writes nothing");
+}
+
+#[gpui::test]
+fn files_panel_auto_saves_once_a_second_after_the_last_change(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let notes = "/fixture/project/notes.txt";
+    let disk = files_disk(&[(notes, "one\ntwo\n")]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(json!([])), &disk);
+    files_step(&mut visual, &disk, "open notes.txt");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["editable"].clone(), state["dirty"].clone(), state["hint"].clone()), (json!(true), json!(false), Value::Null), "{state}");
+
+    files_type(&mut visual, "q");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!(state["dirty"], json!(true), "an edit marks the file unsaved: {state}");
+    files_wait(&mut visual, 550);
+    files_type(&mut visual, "z");
+    // 1,550 ms after the first change, 950 ms after the second.
+    files_wait(&mut visual, 950);
+    assert!(files_writes(&disk).is_empty(), "a change within the second restarts the wait: {:?}", files_writes(&disk));
+    files_wait(&mut visual, 100);
+    let writes = files_writes(&disk);
+    assert_eq!(writes.len(), 1, "two changes, one write: {writes:?}");
+    assert_eq!(writes[0].0, notes);
+    assert_eq!(writes[0].1.replace(['q', 'z'], ""), "one\ntwo\n", "{writes:?}");
+    assert_eq!(writes[0].2, json!("one\ntwo\n"), "written over what was read");
+    assert_eq!(files_state(&mut visual, &disk)["dirty"], json!(false));
+    files_wait(&mut visual, 2000);
+    assert_eq!(files_writes(&disk).len(), 1, "a saved buffer is not written again");
+}
+
+#[gpui::test]
+fn files_panel_saves_at_once_on_ctrl_s_switch_back_blur_and_close(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (a, b) = ("/fixture/project/a.txt", "/fixture/project/b.txt");
+    let disk = files_disk(&[(a, "alpha\n"), (b, "beta\n")]);
+    let (mut visual, runtime, root) = mount_files(cx, &staged, files_values(json!([])), &disk);
+    files_step(&mut visual, &disk, "open a.txt");
+
+    files_type(&mut visual, "q");
+    files_keys(&mut visual, "ctrl-shift-s");
+    assert!(files_writes(&disk).is_empty(), "ctrl-shift-s is not save");
+    files_keys(&mut visual, "ctrl-s");
+    assert_eq!(files_writes(&disk).len(), 1, "ctrl-s saves before the second is up");
+
+    files_type(&mut visual, "z");
+    files_step(&mut visual, &disk, "open b.txt");
+    let writes = files_writes(&disk);
+    assert_eq!(writes.len(), 2, "switching files saves the one left: {writes:?}");
+    assert_eq!(writes[1].0, a);
+    assert_eq!(writes[1].1.replace(['q', 'z'], ""), "alpha\n");
+
+    files_type(&mut visual, "q");
+    files_step(&mut visual, &disk, "back");
+    let writes = files_writes(&disk);
+    assert_eq!(writes.len(), 3, "back saves: {writes:?}");
+    assert_eq!(writes[2].0, b);
+
+    files_step(&mut visual, &disk, "open b.txt");
+    files_type(&mut visual, "z");
+    visual.update(|window, cx| {
+        window.blur(cx);
+        window.draw(cx).clear(cx)
+    });
+    visual.run_until_parked();
+    let writes = files_writes(&disk);
+    assert_eq!(writes.len(), 4, "leaving the editor saves: {writes:?}");
+    assert_eq!(writes[3].1.replace(['q', 'z'], ""), "beta\n");
+
+    files_type(&mut visual, "k");
+    visual.update(|window, cx| runtime.close(&root, Instant::now() + std::time::Duration::from_secs(5), window, cx).detach());
+    visual.run_until_parked();
+    files_wait(&mut visual, 20);
+    let writes = files_writes(&disk);
+    assert_eq!(writes.len(), 5, "closing saves what is pending: {writes:?}");
+    assert!(writes[4].1.contains('k') && writes[4].1.replace(['q', 'z', 'k'], "") == "beta\n", "{writes:?}");
+}
+
+#[gpui::test]
+fn files_panel_writes_back_the_line_endings_it_read(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let cases = [("crlf.txt", "one\r\ntwo\r\n"), ("lf.txt", "one\ntwo\n"), ("mixed.txt", "one\r\ntwo\nthree"), ("empty.txt", "")];
+    let files: Vec<(String, &str)> = cases.iter().map(|(n, t)| (format!("/fixture/project/{n}"), *t)).collect();
+    let disk = files_disk(&files.iter().map(|(p, t)| (p.as_str(), *t)).collect::<Vec<_>>());
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(json!([])), &disk);
+    for (i, (name, original)) in cases.iter().enumerate() {
+        files_step(&mut visual, &disk, &format!("open {name}"));
+        files_type(&mut visual, "q");
+        files_keys(&mut visual, "ctrl-s");
+        let writes = files_writes(&disk);
+        assert_eq!(writes.len(), i + 1, "{name}: {writes:?}");
+        let (path, text, expected) = &writes[i];
+        assert_eq!(path, &format!("/fixture/project/{name}"));
+        assert_eq!(text.replace('q', ""), *original, "{name}: the line endings and the final newline are kept");
+        // An existing empty file is written over "", never created over null.
+        assert_eq!(expected, &json!(original), "{name}");
+    }
+    let crlf = &files_writes(&disk)[0].1;
+    assert_eq!(crlf.matches("\r\n").count(), crlf.matches('\n').count(), "no bare LF in a CRLF file: {crlf:?}");
+}
+
+#[gpui::test]
+fn files_panel_follows_the_disk_until_edited_then_asks(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let notes = "/fixture/project/notes.txt";
+    let disk = files_disk(&[(notes, "v1\n")]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "open notes.txt");
+
+    disk.borrow_mut().files.insert(notes.into(), "v2\n".into());
+    files_step(&mut visual, &disk, "refresh");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!(
+        (state["value"].clone(), state["dirty"].clone(), state["conflict"].clone()),
+        (json!("v2\n"), json!(false), json!(false)),
+        "an unedited file reloads silently: {state}"
+    );
+
+    files_type(&mut visual, "q");
+    disk.borrow_mut().files.insert(notes.into(), "v3\n".into());
+    files_step(&mut visual, &disk, "refresh");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["dirty"].clone(), state["conflict"].clone()), (json!(true), json!(true)), "{state}");
+    assert!(state["value"].as_str().unwrap().contains('q'), "the edits stay: {state}");
+    files_wait(&mut visual, 2000);
+    assert!(files_writes(&disk).is_empty(), "a conflict pauses auto-save: {:?}", files_writes(&disk));
+
+    files_step(&mut visual, &disk, "reload");
+    files_wait(&mut visual, 50);
+    let state = files_state(&mut visual, &disk);
+    assert_eq!(
+        (state["value"].clone(), state["dirty"].clone(), state["conflict"].clone()),
+        (json!("v3\n"), json!(false), json!(false)),
+        "reload takes the disk text: {state}"
+    );
+    assert!(files_writes(&disk).is_empty() && files_sends(&disk).is_empty());
+}
+
+#[gpui::test]
+fn files_panel_stale_write_asks_and_keep_mine_overwrites(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let notes = "/fixture/project/notes.txt";
+    let disk = files_disk(&[(notes, "v1\n")]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "open notes.txt");
+
+    files_type(&mut visual, "q");
+    disk.borrow_mut().files.insert(notes.into(), "theirs\n".into());
+    files_keys(&mut visual, "ctrl-s");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!(
+        (state["dirty"].clone(), state["conflict"].clone(), state["error"].clone()),
+        (json!(true), json!(true), Value::Null),
+        "{state}"
+    );
+    assert_eq!(disk.borrow().files[notes], "theirs\n", "the other writer's text is not overwritten");
+    assert!(files_sends(&disk).is_empty(), "a conflicted save tells no agent");
+    files_type(&mut visual, "z");
+    files_wait(&mut visual, 2000);
+    assert_eq!(files_writes(&disk).len(), 1, "no auto-save while the conflict is open: {:?}", files_writes(&disk));
+
+    files_step(&mut visual, &disk, "keep");
+    let writes = files_writes(&disk);
+    assert_eq!(writes.len(), 2, "{writes:?}");
+    assert_eq!(writes[1].2, json!("theirs\n"), "keep mine writes over the changed disk text");
+    assert_eq!(disk.borrow().files[notes].replace(['q', 'z'], ""), "v1\n");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["dirty"].clone(), state["conflict"].clone()), (json!(false), json!(false)), "{state}");
+    assert_eq!(files_sends(&disk).len(), 1, "the kept save is announced: {:?}", files_sends(&disk));
+}
+
+#[gpui::test]
+fn files_panel_keeps_edits_when_a_write_fails(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let notes = "/fixture/project/notes.txt";
+    let disk = files_disk(&[(notes, "v1\n")]);
+    disk.borrow_mut().fail = Some("disk full".into());
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "open notes.txt");
+
+    files_type(&mut visual, "q");
+    files_keys(&mut visual, "ctrl-s");
+    let state = files_state(&mut visual, &disk);
+    let error = state["error"].as_str().unwrap_or_default();
+    assert!(error.starts_with("Not saved: ") && error.contains("disk full"), "{state}");
+    assert_eq!((state["dirty"].clone(), state["conflict"].clone()), (json!(true), json!(false)), "{state}");
+    assert!(state["value"].as_str().unwrap().contains('q'), "the edits stay in the buffer: {state}");
+    assert_eq!(disk.borrow().files[notes], "v1\n");
+    assert!(files_sends(&disk).is_empty(), "a failed save tells no agent: {:?}", files_sends(&disk));
+
+    disk.borrow_mut().fail = None;
+    files_keys(&mut visual, "ctrl-s");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["dirty"].clone(), state["error"].clone()), (json!(false), Value::Null), "{state}");
+    assert_eq!(disk.borrow().files[notes].replace('q', ""), "v1\n");
+    assert_eq!(files_sends(&disk).len(), 1);
+}
+
+#[gpui::test]
+fn files_panel_leaves_remote_files_unwritten(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let notes = "/fixture/project/notes.txt";
+    let disk = files_disk(&[(notes, "remote text\n")]);
+    let mut values = files_values(idle_agent());
+    values.get_mut("spaces").unwrap()[0]["machine"] = json!("remote");
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, values, &disk);
+    files_step(&mut visual, &disk, "open notes.txt");
+    files_type(&mut visual, "q");
+    files_keys(&mut visual, "ctrl-s");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!(
+        (state["editable"].clone(), state["hint"].clone(), state["value"].clone()),
+        (json!(false), json!("read-only: remote machine"), json!("remote text\n")),
+        "{state}"
+    );
+    files_step(&mut visual, &disk, "back");
+    files_wait(&mut visual, 2000);
+    assert!(files_writes(&disk).is_empty() && files_sends(&disk).is_empty(), "{:?}", files_writes(&disk));
+    assert!(disk.borrow().reads.iter().all(|r| r[1] == json!({"on":"remote"})), "{:?}", disk.borrow().reads);
+}
+
+#[gpui::test]
+fn files_panel_tells_idle_agents_in_the_space_once_per_burst(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[("/fixture/project/notes.txt", "v1\n")]);
+    let agents = json!([
+        {"address":"idle1","space":"s1","status":"idle"},
+        {"address":"done1","space":"s1","status":"done"},
+        {"address":"busy","space":"s1","status":"working"},
+        {"address":"asking","space":"s1","status":"blocked"},
+        {"address":"elsewhere","space":"s2","status":"idle"}
+    ]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(agents), &disk);
+    files_step(&mut visual, &disk, "open notes.txt");
+    for key in ["q", "z", "k"] {
+        files_type(&mut visual, key);
+        files_keys(&mut visual, "ctrl-s");
+    }
+    assert_eq!(files_writes(&disk).len(), 3);
+    let mut sends = files_sends(&disk);
+    sends.sort();
+    let note = files_note("notes.txt");
+    assert_eq!(
+        sends,
+        vec![
+            vec!["send".to_string(), "done1".into(), note.clone(), "--if".into(), "idle".into()],
+            vec!["send".to_string(), "idle1".into(), note, "--if".into(), "idle".into()],
+        ],
+        "three saves within the burst: one note per idle agent of the space"
+    );
+}
+
+#[gpui::test]
+fn files_panel_lists_five_files_then_the_rest_and_retries_until_heard(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let files: Vec<String> = (1..=7).map(|i| format!("/fixture/project/f{i}.txt")).collect();
+    let disk = files_disk(&files.iter().map(|p| (p.as_str(), "data\n")).collect::<Vec<_>>());
+    disk.borrow_mut().send_code = 1;
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    for i in 1..=7 {
+        files_step(&mut visual, &disk, &format!("open f{i}.txt"));
+        files_type(&mut visual, "q");
+    }
+    assert_eq!(files_writes(&disk).len(), 6, "each switch saved the file left");
+    let failed = files_sends(&disk);
+    assert_eq!(failed.len(), 6, "an unheard note is offered again with the next save: {failed:?}");
+    assert_eq!(failed[1][2], files_note("f1.txt, f2.txt"));
+
+    disk.borrow_mut().send_code = 0;
+    files_step(&mut visual, &disk, "back");
+    let sends = files_sends(&disk);
+    assert_eq!(files_writes(&disk).len(), 7);
+    assert_eq!(sends.len(), 7, "{sends:?}");
+    assert_eq!(sends[6][2], files_note("f1.txt, f2.txt, f3.txt, f4.txt, f5.txt and 2 more"));
+
+    files_step(&mut visual, &disk, "refresh");
+    assert_eq!(files_sends(&disk).len(), 7, "a heard note is not repeated");
+}
+
+#[gpui::test]
+fn files_panel_keeps_windows_paths_with_spaces_unchanged(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let folder = r"C:\Users\Me\My Project";
+    let full = format!("{folder}/notes file.txt");
+    let disk = files_disk(&[(full.as_str(), "v1\r\n")]);
+    let mut values = files_values(idle_agent());
+    values.insert(
+        "window".into(),
+        json!({"platform":"windows","titlebar":"none","buttons":true,"maximized":false,"fullscreen":false,"active":true}),
+    );
+    values.get_mut("spaces").unwrap()[0]["folder"] = json!(folder);
+    values.get_mut("panes").unwrap()[0]["cwd"] = json!(folder);
+    values.get_mut("focused").unwrap()["cwd"] = json!(folder);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, values, &disk);
+    files_step(&mut visual, &disk, "open notes file.txt");
+    files_type(&mut visual, "q");
+    files_keys(&mut visual, "ctrl-s");
+    assert_eq!(disk.borrow().reads[0], json!([&full, {"on":null}]));
+    let writes = files_writes(&disk);
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(writes[0].0, full);
+    assert_eq!(writes[0].1.replace('q', ""), "v1\r\n");
+    assert_eq!(
+        files_sends(&disk),
+        vec![vec!["send".to_string(), "idle1".into(), files_note("notes file.txt"), "--if".into(), "idle".into()]],
+        "the path travels inside one argv element"
+    );
+}
