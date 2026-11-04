@@ -178,7 +178,12 @@ the title bar, panes as cards, a space picker) and `win98`
 writing a new file. The Files panel supports Windows folder paths with spaces,
 parentheses and apostrophes, and preserves Unicode file and folder names
 (including Chinese). Directory links expand as folders; their contents load
-only when expanded.
+only when expanded. A local file it opens is editable and saves itself a
+second after the last change, on Ctrl+S / Cmd+S, and when the editor loses
+focus, another file opens or the panel closes (`●` marks unsaved edits);
+line endings stay as read. A file changed on disk follows the disk while
+unedited; with edits, auto-save pauses behind "Changed on disk" (Reload or
+Keep mine). Remote and over-400,000-character files stay read-only.
 
 **HyperOx's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,

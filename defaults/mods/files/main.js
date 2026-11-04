@@ -1,7 +1,8 @@
-// A lazy file browser for the focused pane's folder, with bounded read-only previews.
+// A lazy file browser for the focused pane's folder. Local files edit in place and save
+// themselves (VS Code-style auto-save); remote and truncated files are read-only previews.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window } from "h0x";
+import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window } from "h0x";
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -12,6 +13,9 @@ function location() {
 const key = () => JSON.stringify(location());
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
 const PER_FOLDER = 500, TOTAL = 5000;
+// A file is written back with the line endings it was read with: CRLF only when every line had it.
+const eol = text => /\r\n/.test(text) && !/(^|[^\r])\n/.test(text) ? "\r\n" : "\n";
+const text = doc => { const value = doc.state.value(); return doc.eol === "\r\n" ? value.replace(/\r?\n/g, "\r\n") : value; };
 
 async function directory(path, on) {
   if (!on && window()?.platform === "windows") {
@@ -34,7 +38,7 @@ async function directory(path, on) {
 
 export default class Files extends View {
   init(_props, cx) {
-    this.saved = new Map();
+    this.saved = new Map(); this.drafts = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
@@ -69,10 +73,11 @@ export default class Files extends View {
       if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file });
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
-      this.pending = new Set(); this.marks = {}; this.show(null); this.watched = null; this.error = null; this.limited = false;
+      this.pending = new Set(); this.marks = {}; this.show(null, cx); this.watched = null; this.error = null; this.limited = false;
       this.loading = false;
       if (saved?.file) this.show(saved.file, cx);
     }
+    this.check(cx);
     if (!cwd || this.loading) return;
     const context = this.context;
     this.loading = true;
@@ -122,23 +127,103 @@ export default class Files extends View {
   }
 
   show(path, cx) {
-    this.code?.release(); this.code = null; this.file = path; this.fileError = null;
+    const prev = this.doc;
+    if (prev && cx) {
+      // Leaving a file saves it; edits held back by a disk conflict wait for its reopening.
+      if (prev.conflict && text(prev) !== prev.saved) { prev.draft = text(prev); this.drafts.set(prev.full, prev); }
+      this.save(cx);
+    }
+    prev?.timer?.cancel();
+    this.code?.release(); this.code = null; this.doc = null; this.file = path; this.fileError = null;
     if (!path || !cx) return;
-    const context = this.context, root = this.root, on = this.on;
+    const context = this.context, root = this.root, on = this.on, full = `${root}/${path}`;
     cx.spawn(async cx => {
       try {
-        const text = await readTextFile(`${root}/${path}`, { on });
+        const disk = await readTextFile(full, { on });
         if (this.file !== path || !this.current(context)) return;
-        if (text === null) { this.fileError = "This file is no longer available"; return; }
-        if (text.includes("\0")) { this.fileError = "Binary file · no text preview"; return; }
+        if (disk === null) { this.fileError = "This file is no longer available"; return; }
+        if (disk.includes("\0")) { this.fileError = "Binary file · no text preview"; return; }
         const t = theme(), ext = path.includes(".") ? path.split(".").pop() : "txt";
-        this.code = EditorState.new({ language: LANG[ext] ?? ext, readonly: true,
-          value: text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text,
+        const large = disk.length > 400000, draft = on || large ? null : this.drafts.get(full);
+        this.drafts.delete(full);
+        this.code = EditorState.new({ language: LANG[ext] ?? ext, readonly: Boolean(on) || large,
+          value: large ? disk.slice(0, 400000) + "\n… (file truncated)" : draft ? draft.draft : disk,
           font_family: settings().font_family, font_size: 12,
           syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
+        if (on || large) { this.doc = { full, hint: on ? "read-only: remote machine" : "read-only: too large" }; return; }
+        const saved = draft ? draft.saved : disk;
+        const doc = this.doc = { full, state: this.code, editable: true, saved, disk, eol: eol(saved), version: 0,
+          dirty: Boolean(draft), conflict: draft ? disk !== saved : false, error: draft?.error ?? null };
+        doc.state.on("change", (_e, cx) => {
+          doc.dirty = text(doc) !== doc.saved;
+          doc.timer?.cancel();
+          doc.timer = doc.dirty && !doc.conflict ? cx.timer.after(1000, cx => { if (this.doc === doc) this.save(cx); }) : null;
+          cx.notify();
+        });
+        doc.state.on("blur", (_e, cx) => { if (this.doc === doc) this.save(cx); });
       } catch { if (this.file === path && this.current(context)) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
       finally { cx.notify(); }
     });
+  }
+
+  // The one save site: writes the open file's edits over what it last read or wrote
+  // (keep: over the changed disk text instead). Resolves when the write is done.
+  save(cx, keep = false) {
+    const doc = this.doc;
+    if (!doc?.editable) return null;
+    doc.timer?.cancel(); doc.timer = null;
+    const next = text(doc);
+    if (!keep && (doc.conflict || next === doc.saved)) return null;
+    const before = doc.writing;
+    doc.writing = new Promise(done => cx.spawn(async cx => {
+      try {
+        await before;
+        if (!keep && (doc.conflict || next === doc.saved)) return;
+        const expected = keep ? doc.disk : doc.saved;
+        doc.busy = true; doc.version++;
+        try {
+          await writeTextFile(doc.full, next, expected);
+          doc.saved = doc.disk = next; doc.conflict = false; doc.error = null;
+        } catch (e) {
+          // Stale snapshot (the disk moved on) or a failed write: the edits stay in the buffer.
+          const disk = await readTextFile(doc.full).catch(() => undefined);
+          if (disk !== undefined && disk !== expected) { doc.conflict = true; doc.disk = disk; }
+          else doc.error = `Not saved: ${e?.message ?? e}`;
+          if (this.doc !== doc) { doc.draft = next; this.drafts.set(doc.full, doc); }
+        } finally { doc.busy = false; }
+        if (this.doc === doc) doc.dirty = text(doc) !== doc.saved;
+      } finally { done(); cx.notify(); }
+    }));
+    return doc.writing;
+  }
+
+  // Compares the open file with the disk: unedited, it follows the disk; edited, it asks.
+  check(cx) {
+    const doc = this.doc;
+    if (!doc?.editable || doc.checking || doc.busy) return;
+    doc.checking = true;
+    const version = doc.version;
+    cx.spawn(async cx => {
+      try {
+        const disk = await readTextFile(doc.full);
+        if (this.doc !== doc || doc.busy || doc.version !== version || (doc.conflict && disk === doc.disk)) return;
+        if (disk === doc.saved) { doc.conflict = false; return; }
+        if (doc.dirty || disk === null || disk.includes("\0") || disk.length > 400000) {
+          doc.conflict = true; doc.disk = disk; doc.timer?.cancel(); doc.timer = null;
+        } else {
+          doc.saved = doc.disk = disk; doc.eol = eol(disk); doc.state.set_value(disk);
+        }
+      } catch { /* unreadable now; the next refresh looks again */ }
+      finally { doc.checking = false; cx.notify(); }
+    });
+  }
+
+  // Takes the disk text, dropping the edits.
+  reload(cx) {
+    const doc = this.doc;
+    if (!doc) return;
+    doc.timer?.cancel(); doc.state.release(); this.code = null; this.doc = null;
+    this.show(this.file, cx);
   }
 
   rows(prefix, depth, out, t) {
@@ -159,15 +244,35 @@ export default class Files extends View {
 
   render(cx) {
     if (key() !== this.context?.key) this.refresh(cx);
-    const t = theme();
+    const t = theme(), doc = this.doc;
+    const button = (id, label, click) => div().id(id).px(8).py(2).rounded(5).cursor_pointer().border_1().border_color(t.border).hover(s => s.bg(t.hover)).on_click(click).child(label);
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
-        .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted).on_click((_e, cx) => { this.show(null); cx.notify(); }).child("←")))
+        .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted).on_click((_e, cx) => { this.show(null, cx); cx.notify(); }).child("←")))
         .child(div().font_semibold().child("Files"))
-        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? "")))
+        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ? (doc?.dirty ? "● " : "") + this.file : this.root?.split(/[\\/]/).pop() ?? "")))
       .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
-      .when(Boolean(this.file), el => el.child(this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
+      .when(Boolean(doc?.conflict), el => el.child(h_flex().flex_none().px(12).py(6).gap(8).items_center().border_b(1).border_color(t.border).text_size(12)
+        .child(div().flex_1().min_w(0).truncate().text_color(t.blocked).child("Changed on disk"))
+        .child(button("files-reload", "Reload", (_e, cx) => { this.reload(cx); cx.notify(); }))
+        .child(button("files-keep", "Keep mine", (_e, cx) => { this.save(cx, true); cx.notify(); }))))
+      .when(Boolean(doc?.error), el => el.child(div().flex_none().px(12).py(4).truncate().text_size(12).text_color(t.ansi1).child(doc.error)))
+      .when(Boolean(doc?.hint), el => el.child(div().flex_none().px(12).py(4).text_size(12).text_color(t.dim).child(doc.hint)))
+      .when(Boolean(this.file), el => el.child(this.code
+        ? v_flex().id("files-editor").flex_1().min_h(0)
+          // Ctrl+S / Cmd+S saves now; the key travels up from the focused editor.
+          .on_key_down((e, cx) => {
+            if (e.key !== "s" || !(e.modifiers.control || e.modifiers.platform) || e.modifiers.shift || e.modifiers.alt) return;
+            this.save(cx); cx.stop_propagation(); cx.notify();
+          })
+          .child(Editor.new(this.code).flex_1().min_h(0))
+        : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
+  }
+
+  // The panel or the app closes: write what's pending (bounded by the host's close budget).
+  async close(cx) {
+    await this.save(cx);
   }
 }
