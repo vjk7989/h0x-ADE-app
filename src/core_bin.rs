@@ -86,8 +86,8 @@ pub fn find(configured: Option<&str>) -> Option<PathBuf> {
     if let Some(found) = pick(configured.map(|c| vec![expand(c, &home)]).unwrap_or_default()) {
         return Some(found);
     }
-    // Tests: H0X_CORE_DIRS replaces every place HyperOx would look.
-    if let Some(dirs) = std::env::var_os("H0X_CORE_DIRS") {
+    // Tests (debug and test builds only): H0X_CORE_DIRS replaces every place HyperOx would look.
+    if let Some(dirs) = std::env::var_os("H0X_CORE_DIRS").filter(|_| crate::update::OVERRIDES) {
         return pick(std::env::split_paths(&dirs).map(|d| core_in(&d)).collect());
     }
     // The quick places first; the login shell (slow) only if they have none.
@@ -161,22 +161,18 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
 
 /// Installs the core's latest release with its own installer (into
 /// ~/.local/bin, or H0X_CORE_INSTALL_DIR), then finds it. Err: what went wrong.
+/// The script is downloaded (https, GitHub only) to a file and run as one
+/// argument; values reach it through the environment, never a command string.
 pub fn install() -> Result<PathBuf, String> {
     let releases = crate::update::core_releases();
-    let mut cmd = if cfg!(windows) {
-        let mut c = crate::spawn::command("powershell");
-        c.args(["-NoProfile", "-Command", &format!("irm {releases}/latest/download/install.ps1 | iex")]);
-        c
-    } else {
-        let mut c = crate::spawn::command("sh");
-        c.args(["-c", &format!("curl -fsSL {releases}/latest/download/install.sh | sh")]);
-        c
-    };
-    let out = cmd.env("H0X_CORE_RELEASES_URL", &releases).stdin(Stdio::null()).output().map_err(|e| format!("cannot run the installer: {e}"))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
-        return Err(if err.is_empty() { "the installer failed".into() } else { err });
-    }
+    let script = if cfg!(windows) { "install.ps1" } else { "install.sh" };
+    let work = crate::mods::app_dir().join(format!("core-install-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+    let file = work.join(script);
+    let result = crate::update::download(&format!("{releases}/latest/download/{script}"), &file, "120").and_then(|()| run_installer(&file, &releases));
+    let _ = std::fs::remove_dir_all(&work);
+    result?;
     let home = crate::mods::home();
     let dir = std::env::var_os("H0X_CORE_INSTALL_DIR").map(PathBuf::from).unwrap_or_else(|| {
         if cfg!(windows) {
@@ -187,6 +183,26 @@ pub fn install() -> Result<PathBuf, String> {
     });
     let bin = core_in(&dir);
     version(&bin).map(|_| bin).ok_or_else(|| "installed, but h0x-core doesn't run".into())
+}
+
+fn run_installer(file: &Path, releases: &str) -> Result<(), String> {
+    let mut cmd = if cfg!(windows) {
+        // Absolute: a powershell.exe earlier on PATH must not run the installer.
+        let root = std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?;
+        let mut c = crate::spawn::command(PathBuf::from(root).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe"));
+        c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]).arg(file);
+        c
+    } else {
+        let mut c = crate::spawn::command("/bin/sh");
+        c.arg(file);
+        c
+    };
+    let out = cmd.env("H0X_CORE_RELEASES_URL", releases).stdin(Stdio::null()).output().map_err(|e| format!("cannot run the installer: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        return Err(if err.is_empty() { "the installer failed".into() } else { err });
+    }
+    Ok(())
 }
 
 /// Updates the core to its latest release (`h0x-core update`: same generation only,
