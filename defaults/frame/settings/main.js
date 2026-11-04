@@ -694,7 +694,7 @@ export default class Settings extends View {
     return v_flex()
       .w_full()
       .child(this.heading(t, "Mods you were asked about"))
-      .child(div().pb(6).text_size(12.5).line_height("18px").text_color(t.dim).child("Mods that did not ship with HyperOx run only once you allow them. They can run programs, read and write files in your home folder, and talk to agents. A mod whose code changes asks again."))
+      .child(div().pb(6).text_size(12.5).line_height("18px").text_color(t.dim).child("Mods that did not ship with HyperOx run only once you allow them. They can run programs, read and write files in your home folder and your spaces, and talk to agents. A mod whose code changes asks again."))
       .children(
         list.length === 0
           ? [div().py(12).text_size(13).text_color(t.muted).child("No mod has asked yet.")]

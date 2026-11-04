@@ -519,7 +519,7 @@ fn consent_dialog_names_the_mod_and_both_answers(cx: &mut TestAppContext) {
     let staged = Staged::new();
     let p = json!({"overlay":"o1","id":"my-mod","folder":"/fixture/app/mods/my-mod","hash":"abc"});
     let tree = describe(cx, &staged, "frame/consent", true, p.clone(), updates("current", "current"), None).unwrap();
-    for want in ["my-mod", "/fixture/app/mods/my-mod", "run programs, read and write files in your home folder, and talk to agents", "consent-yes", "consent-no", "Don't allow"] {
+    for want in ["my-mod", "/fixture/app/mods/my-mod", "run programs, read and write files in your home folder and your spaces, and talk to agents", "consent-yes", "consent-no", "Don't allow"] {
         assert!(tree.contains(want), "consent dialog lacks {want:?}: {tree}");
     }
     let tree = describe(cx, &staged, "frame/consent", true, p, updates("current", "current"), Some("this.error = 'Could not save: denied';")).unwrap();
