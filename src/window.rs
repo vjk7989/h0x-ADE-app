@@ -4515,9 +4515,16 @@ fn needs_model_pane(name: &str, args: &Value) -> bool {
 }
 
 fn new_space_machine(args: &Value, person: bool, model: &Model) -> Option<String> {
-    args.get("machine").and_then(Value::as_str)
-        .or_else(|| if person { model.active_space().and_then(|s| s.machine.as_deref()) } else { None })
-        .filter(|m| !m.is_empty()).map(str::to_owned)
+    let here = if person { model.active_space().and_then(|s| s.machine.as_deref()) } else { None };
+    // A program started from a remote space runs on that machine: there,
+    // `""` (this machine) only goes with a plain shell.
+    let program = args.get("argv").is_some_and(|a| !a.is_null());
+    match args.get("machine").and_then(Value::as_str) {
+        Some("") if program && here.is_some() => here,
+        Some(m) => Some(m),
+        None => here,
+    }
+    .filter(|m| !m.is_empty()).map(str::to_owned)
 }
 
 fn home() -> String {
@@ -4897,6 +4904,14 @@ mod tests {
         assert_eq!(super::new_space_machine(&json!({}), true, &model), None);
         model.active = Some("remote".into());
         assert_eq!(super::new_space_machine(&json!({}), true, &model).as_deref(), Some("second"));
+        // A program started from a remote space (a remote mod's props) never runs here.
+        let program = json!({"machine": "", "argv": ["sh", "-c", "id"]});
+        assert_eq!(super::new_space_machine(&program, true, &model).as_deref(), Some("second"));
+        assert_eq!(super::new_space_machine(&json!({"machine": "other", "argv": ["sh"]}), true, &model).as_deref(), Some("other"));
+        assert_eq!(super::new_space_machine(&json!({"machine": "", "argv": null}), true, &model), None);
+        assert_eq!(super::new_space_machine(&program, false, &model), None);
+        model.active = Some("local".into());
+        assert_eq!(super::new_space_machine(&program, true, &model), None);
     }
 
     #[gpui::test]
