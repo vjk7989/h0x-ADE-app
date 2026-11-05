@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Note {
@@ -141,8 +141,21 @@ pub fn has(version: &str) -> bool {
     all().iter().any(|note| note.version == version)
 }
 
+/// Parsed once per process: the status poll reads the notes every 400 ms.
+fn bundled() -> &'static [Note] {
+    static BUNDLED: OnceLock<Vec<Note>> = OnceLock::new();
+    BUNDLED.get_or_init(|| {
+        #[cfg(test)]
+        BUNDLED_PARSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        parse(include_str!("../CHANGELOG.md"))
+    })
+}
+
+#[cfg(test)]
+static BUNDLED_PARSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn all() -> Vec<Note> {
-    let mut notes = parse(include_str!("../CHANGELOG.md"));
+    let mut notes = bundled().to_vec();
     let fetched = FETCHED.lock().unwrap().get_or_insert_with(|| {
         std::fs::read_to_string(path("update-notes-cache.md")).map(|s| parse(&s)).unwrap_or_default()
     }).clone();
@@ -280,6 +293,24 @@ mod tests {
         assert!(has("99.0.0"));
         assert!(!has("99.0.1"));
         *FETCHED.lock().unwrap() = previous;
+    }
+    #[test]
+    fn bundled_changelog_is_parsed_once() {
+        let calls = 1000;
+        let start = std::time::Instant::now();
+        for _ in 0..calls {
+            std::hint::black_box(parse(include_str!("../CHANGELOG.md")));
+            std::hint::black_box(crate::update::status());
+        }
+        let parsing = start.elapsed();
+        let start = std::time::Instant::now();
+        for _ in 0..calls {
+            std::hint::black_box(crate::update::status());
+        }
+        let cached = start.elapsed();
+        println!("update::status() x{calls}: parsing each call {parsing:?}, cached {cached:?}");
+        assert_eq!(BUNDLED_PARSES.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(std::ptr::eq(bundled(), bundled()));
     }
     #[test]
     fn first_install_only_welcomes() {
