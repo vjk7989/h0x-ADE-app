@@ -1525,6 +1525,37 @@ struct SessionsHost {
     execs: Vec<Value>,
     effects: Vec<(String, Vec<Value>)>,
     shared: BTreeMap<String, Value>,
+    // panes, terminals and tree; tab.new and terminal.open add a pane ("rp<n>") as the app would.
+    live: BTreeMap<String, Value>,
+    made: usize,
+    focus: Option<String>,
+    // The app never shows the panes it is asked for (a restore that times out).
+    stuck: bool,
+}
+
+impl SessionsHost {
+    fn apply(&mut self, command: &str, args: &Value) {
+        let tab = match command {
+            "pane.focus" => {
+                self.focus = args["pane"].as_str().map(str::to_owned);
+                return;
+            }
+            "tab.new" => None,
+            "terminal.open" if args["place"] != "tab" => {
+                let panes = self.live.get("panes").and_then(Value::as_array).cloned().unwrap_or_default();
+                panes.iter().find(|p| p["pane"].as_str() == self.focus.as_deref()).map(|p| p["tab"].clone())
+            }
+            _ => return,
+        };
+        if self.stuck {
+            return;
+        }
+        self.made += 1;
+        let n = self.made;
+        let pane = json!({"pane":format!("rp{n}"), "terminal":format!("ra{n}"), "tab":tab.unwrap_or_else(|| json!(format!("rt{n}"))), "cwd":args["folder"]});
+        self.live.entry("panes".into()).or_insert_with(|| json!([])).as_array_mut().unwrap().push(pane);
+        self.focus = Some(format!("rp{n}"));
+    }
 }
 
 fn sessions_host(replies: &[(&str, Value)], shared: &[(&str, Value)]) -> Rc<RefCell<SessionsHost>> {
@@ -1551,8 +1582,14 @@ fn sessions_values(machine: Value, folder: &str, platform: &str) -> BTreeMap<Str
     values
 }
 
-fn sessions_module(values: BTreeMap<String, Value>, host: Rc<RefCell<SessionsHost>>) -> HostModule {
+fn sessions_module(mut values: BTreeMap<String, Value>, host: Rc<RefCell<SessionsHost>>) -> HostModule {
     let mut module = HostModule::new("h0x");
+    for name in ["panes", "terminals", "tree"] {
+        let value = values.remove(name).unwrap_or(Value::Null);
+        host.borrow_mut().live.entry(name.into()).or_insert(value);
+        let h = host.clone();
+        module = module.function(name, move |_| Ok(to_host(&h.borrow().live[name])));
+    }
     for (name, value) in values {
         module = module.function(name, move |_| Ok(to_host(&value)));
     }
@@ -1570,6 +1607,7 @@ fn sessions_module(values: BTreeMap<String, Value>, host: Rc<RefCell<SessionsHos
             if name == "run" {
                 let command = crate::commands::find(a.string(0)?).unwrap_or_else(|| panic!("unknown command {args:?}"));
                 crate::commands::validate_args(command, args.get(1).unwrap_or(&Value::Null)).unwrap();
+                h.borrow_mut().apply(args[0].as_str().unwrap_or_default(),args.get(1).unwrap_or(&Value::Null));
             }
             h.borrow_mut().effects.push((name.into(), args));
             Ok(if name == "openOverlay" || name == "notify" { "fixture-overlay".into() } else { HostValue::Null })
@@ -1617,6 +1655,11 @@ fn describe_sessions(
         .unwrap()
         .unwrap();
     cx.run_until_parked();
+    // Long enough for a restore that waits for panes to give up (200 × 50 ms).
+    for _ in 0..210 {
+        cx.executor().advance_clock(std::time::Duration::from_millis(50));
+        cx.run_until_parked();
+    }
     let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
     tree
@@ -1886,4 +1929,267 @@ fn sessions_menu_dialog_and_space_count_render(cx: &mut TestAppContext) {
     let host = sessions_host(&[], &[("sessions.count", counts)]);
     let tree = describe_sessions(cx, &staged, "mods/spaces", fixture(true, props(), updates("current", "current")), &host, "");
     assert!(tree.contains("space-sessions-s1") && !tree.contains("space-sessions-s2"), "{tree}");
+}
+
+fn block(pane: &str, terminal: &str) -> Value {
+    json!({"id":pane, "type":"block", "content":{"terminal":terminal}})
+}
+
+// Space s1 as tree() gives it: "Agents" is t1 beside (t2 over t3); the second tab is t4 beside a mod pane.
+fn layout_values(machine: Value, folder: &str, platform: &str, cwd: &str) -> BTreeMap<String, Value> {
+    let mut values = sessions_values(machine, folder, platform);
+    values.insert("tree".into(), json!({"id":"s1", "tabs":[
+        {"id":"tb1", "name":"Agents", "root":{"id":"c1", "type":"row", "children":[block("p1", "t1"), {"id":"c2", "type":"column", "children":[block("p2", "t2"), block("p3", "t3")]}]}},
+        {"id":"tb2", "name":"", "root":{"id":"c3", "type":"row", "children":[block("p4", "t4"), {"id":"p5", "type":"block", "content":{"mod":"files", "props":{}}}]}}
+    ]}));
+    values.insert("panes".into(), json!([
+        {"pane":"p1", "terminal":"t1", "tab":"tb1", "cwd":cwd}, {"pane":"p2", "terminal":"t2", "tab":"tb1", "cwd":cwd},
+        {"pane":"p3", "terminal":"t3", "tab":"tb1", "cwd":"/fixture/project/web"}, {"pane":"p4", "terminal":"t4", "tab":"tb2", "cwd":null},
+        {"pane":"p5", "terminal":null, "mod":"files", "tab":"tb2"}
+    ]));
+    values.insert("terminals".into(), json!([
+        {"address":"t1", "argv":["claude"], "labels":{"h0x.agent":"claude"}, "state":"live"},
+        {"address":"t2", "argv":["claude", "--model", "opus"], "labels":{"h0x.agent":"claude"}, "state":"live"},
+        {"address":"t3", "argv":["bash"], "labels":{}, "state":"live"},
+        {"address":"t4", "argv":["bash"], "labels":{}, "state":"live"}
+    ]));
+    values
+}
+
+fn saved_layout(cwd: &str) -> Value {
+    json!({"tabs":[
+        {"name":"Agents", "root":{"split":"right", "children":[
+            {"agent":"claude", "session":"a2", "argv":["claude"], "cwd":cwd},
+            {"split":"down", "children":[{"agent":"claude", "session":"a1", "argv":["claude", "--model", "opus"], "cwd":cwd}, {"cwd":"/fixture/project/web"}]}
+        ]}},
+        {"name":"", "root":{"cwd":null}}
+    ]})
+}
+
+fn session_list() -> Value {
+    let now = now_ms();
+    core_ok(json!({"sessions":[
+        {"agent":"claude", "id":"a2", "title":"New", "last_used":now - MINUTE, "path":"/p/a2.jsonl"},
+        {"agent":"codex", "id":"c1", "title":"Codex", "last_used":now - 2 * MINUTE, "path":"/p/c1.jsonl"},
+        {"agent":"claude", "id":"a1", "title":"Old", "last_used":now - 3 * MINUTE, "path":"/p/a1.jsonl"}
+    ]}))
+}
+
+fn runs(host: &Rc<RefCell<SessionsHost>>) -> Vec<Value> {
+    host.borrow().effects.iter().filter(|(n, _)| n == "run").map(|(_, a)| json!(a)).collect()
+}
+
+fn toasts(host: &Rc<RefCell<SessionsHost>>) -> Vec<Value> {
+    host.borrow().effects.iter().filter(|(n, _)| n == "notify").map(|(_, a)| a[0]["title"].clone()).collect()
+}
+
+#[gpui::test]
+fn sessions_save_layout_keeps_tabs_splits_and_each_agents_newest_unused_session(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mark = json!({ json!([null, "/fixture/project", "claude", "a1"]).to_string(): {"pinned":true} });
+    for (machine, folder, platform, cwd, list) in [
+        (Value::Null, "/fixture/project", "linux", "/fixture/project", vec!["session", "list", "--json", "--", "/fixture/project"]),
+        (json!("cloud"), "", "windows", "C:\\Users\\me\\my project", vec!["session", "list", "--json", "--on", "cloud", "--", "C:\\Users\\me\\my project"]),
+    ] {
+        let host = sessions_host(&[("list", session_list())], &[("sessions", mark.clone())]);
+        describe_sessions(cx, &staged, "mods/sessions", layout_values(machine.clone(), folder, platform, cwd), &host, "this.named('Work', cx);");
+        let h = host.borrow();
+        let key = json!([machine, folder]).to_string();
+        let mut expected = mark.clone();
+        expected[&key] = json!({"layouts":{"Work":saved_layout(cwd)}});
+        assert_eq!(h.shared["sessions"], expected, "{machine}");
+        assert_eq!(h.cores.iter().filter(|a| **a == list).count(), 1 + usize::from(machine.is_null()), "one list per folder: {:?}", h.cores);
+        assert!(h.cores.iter().all(|a| a[1] == "list"), "saving resumes nothing: {:?}", h.cores);
+        drop(h);
+        assert_eq!(toasts(&host), vec![json!("Saved layout “Work”")]);
+    }
+
+    // An older core lists nothing: the layout is kept, its agents without sessions.
+    let host = sessions_host(&[("list", core_error("usage"))], &[]);
+    describe_sessions(cx, &staged, "mods/sessions", layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, "this.named('Work', cx);");
+    let mut expected = saved_layout("/fixture/project");
+    expected["tabs"][0]["root"]["children"][0]["session"] = Value::Null;
+    expected["tabs"][0]["root"]["children"][1]["children"][0]["session"] = Value::Null;
+    assert_eq!(host.borrow().shared["sessions"][json!([null, "/fixture/project"]).to_string()]["layouts"]["Work"], expected);
+}
+
+#[gpui::test]
+fn sessions_save_layout_of_an_empty_space_saves_nothing(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for tree in [
+        json!({"id":"s1", "tabs":[]}),
+        json!({"id":"s1", "tabs":[{"id":"tb1", "name":"", "root":{"id":"p5", "type":"block", "content":{"mod":"files"}}}]}),
+        json!({"id":"s1", "tabs":[{"id":"tb1", "name":"", "root":{"id":"c1", "type":"row", "children":[]}}]}),
+        Value::Null,
+    ] {
+        let mut values = sessions_values(Value::Null, "/fixture/project", "linux");
+        values.insert("tree".into(), tree.clone());
+        let host = sessions_host(&[("list", session_list())], &[]);
+        describe_sessions(cx, &staged, "mods/sessions", values, &host, "this.named('Work', cx); this.named('', cx);");
+        assert!(!host.borrow().shared.contains_key("sessions"), "{tree}");
+        let expected = if tree.is_null() { vec![] } else { vec![json!("Nothing to save")] };
+        assert_eq!(toasts(&host), expected, "{tree}");
+    }
+}
+
+#[gpui::test]
+fn sessions_save_layout_under_a_taken_name_asks_before_replacing(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let key = json!([null, "/fixture/project"]).to_string();
+    let old = json!({ key.clone(): {"layouts":{"Work":{"tabs":[]}, "Other":{"tabs":[]}}} });
+    let host = sessions_host(&[("list", session_list())], &[("sessions", old.clone())]);
+    describe_sessions(cx, &staged, "mods/sessions", layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, "this.named('Work', cx);");
+    let h = host.borrow();
+    assert_eq!(h.shared["sessions"], old, "nothing replaced before the answer");
+    let (_, open) = h.effects.iter().find(|(n, _)| n == "openOverlay").expect("the confirm dialog");
+    assert_eq!(open[0]["mod"], "confirm");
+    assert_eq!(open[0]["props"]["command"], json!({"name":"sessions.overwrite"}));
+    drop(h);
+
+    let host = sessions_host(&[("list", session_list())], &[("sessions", old.clone())]);
+    describe_sessions(cx, &staged, "mods/sessions", layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, "this.named('Work', cx); this.command('overwrite', cx); this.command('overwrite', cx);");
+    let expected = json!({ key: {"layouts":{"Work":saved_layout("/fixture/project"), "Other":{"tabs":[]}}} });
+    assert_eq!(host.borrow().shared["sessions"], expected);
+    assert_eq!(toasts(&host).len(), 1, "a second overwrite without a name does nothing: {:?}", toasts(&host));
+}
+
+#[gpui::test]
+fn sessions_layout_restore_rebuilds_tabs_and_splits_resuming_each_session_once(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let key = json!([null, "/fixture/project"]).to_string();
+    let mut layout = saved_layout("/fixture/project");
+    // Both agents saved with one session: the second starts fresh.
+    layout["tabs"][0]["root"]["children"][1]["children"][0]["session"] = json!("a2");
+    let argv = json!(["claude", "--resume", "a2"]);
+    let host = sessions_host(&[("list", session_list()), ("resume", core_ok(json!({"argv":argv})))], &[("sessions", json!({ key: {"layouts":{"Work":layout}} }))]);
+    let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "this.restore('Work', cx);");
+    assert_eq!(runs(&host), vec![
+        json!(["tab.new", {"space":"s1", "name":"Agents", "folder":"/fixture/project", "argv":argv}]),
+        json!(["pane.focus", {"pane":"rp1"}]),
+        json!(["terminal.open", {"folder":"/fixture/project", "argv":["claude", "--model", "opus"], "place":"right"}]),
+        json!(["pane.focus", {"pane":"rp2"}]),
+        json!(["terminal.open", {"folder":"/fixture/project/web", "place":"down"}]),
+        json!(["tab.new", {"space":"s1", "folder":"/fixture/project"}]),
+    ]);
+    let h = host.borrow();
+    assert_eq!(h.cores.iter().filter(|a| a[1] == "resume").cloned().collect::<Vec<_>>(), vec![vec!["session", "resume", "--json", "--", "claude", "a2"]]);
+    assert!(toasts(&host).is_empty(), "{:?}", h.effects);
+    assert!(tree.contains("Save layout…") && tree.contains("layout-0") && tree.contains("Work"), "{tree}");
+}
+
+#[gpui::test]
+fn sessions_layout_restore_starts_a_missing_session_fresh_and_never_stops(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let key = json!([null, "/fixture/project"]).to_string();
+    let layout = json!({"tabs":[{"name":"", "root":{"split":"right", "children":[
+        {"agent":"claude", "session":"gone", "argv":["claude"], "cwd":"/fixture/project"}, {"cwd":"/fixture/project"}
+    ]}}]});
+    let plain = json!({"code":2, "stdout":"", "stderr":"error: unrecognized subcommand 'session'\n"});
+    for answer in [core_error("not_found"), core_error("usage"), plain] {
+        let host = sessions_host(&[("list", session_list()), ("resume", answer.clone())], &[("sessions", json!({ key.clone(): {"layouts":{"Work":layout.clone()}} }))]);
+        describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "this.restore('Work', cx);");
+        assert_eq!(runs(&host), vec![
+            json!(["tab.new", {"space":"s1", "folder":"/fixture/project", "argv":["claude"]}]),
+            json!(["pane.focus", {"pane":"rp1"}]),
+            json!(["terminal.open", {"folder":"/fixture/project", "place":"right"}]),
+        ], "{answer}");
+        assert!(toasts(&host).is_empty(), "{answer}");
+    }
+}
+
+#[gpui::test]
+fn sessions_layout_restore_on_another_machine_asks_it_and_starts_at_its_home(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let key = json!(["cloud", ""]).to_string();
+    let layout = json!({"tabs":[{"name":"", "root":{"agent":"codex", "session":"c1", "argv":["codex"], "cwd":null}}]});
+    let argv = json!(["codex", "resume", "c1"]);
+    let host = sessions_host(&[("list", session_list()), ("resume", core_ok(json!({"argv":argv})))], &[("sessions", json!({ key: {"layouts":{"Work":layout}} }))]);
+    describe_sessions(cx, &staged, "mods/sessions", sessions_values(json!("cloud"), "", "linux"), &host, "this.restore('Work', cx);");
+    assert_eq!(runs(&host), vec![json!(["tab.new", {"space":"s1", "argv":argv}])]);
+    assert!(host.borrow().cores.contains(&vec!["session".into(), "resume".into(), "--json".into(), "--on".into(), "cloud".into(), "--".into(), "codex".into(), "c1".into()]));
+}
+
+#[gpui::test]
+fn sessions_layout_restore_that_never_sees_its_pane_stops_with_a_toast(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let key = json!([null, "/fixture/project"]).to_string();
+    let host = sessions_host(&[("list", session_list())], &[("sessions", json!({ key: {"layouts":{"Work":saved_layout("/fixture/project")}} }))]);
+    host.borrow_mut().stuck = true;
+    describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "this.restore('Work', cx); this.restore('Work', cx);");
+    let runs = runs(&host);
+    assert_eq!(runs.len(), 1, "one restore at a time, and none past a missing pane: {runs:?}");
+    assert_eq!(toasts(&host), vec![json!("Couldn't restore the layout")]);
+}
+
+#[gpui::test]
+fn sessions_layout_delete_forgets_only_that_layout(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let key = json!([null, "/fixture/project"]).to_string();
+    let other = json!(["cloud", "/fixture/project"]).to_string();
+    let mark = json!([null, "/fixture/project", "claude", "a1"]).to_string();
+    let all = json!({ key.clone(): {"layouts":{"Work":{"tabs":[]}, "Old":{"tabs":[]}}}, other.clone(): {"layouts":{"Old":{"tabs":[]}}}, mark.clone(): {"pinned":true} });
+    for (forget, expected) in [
+        ("this.forget('Old');", json!({ key.clone(): {"layouts":{"Work":{"tabs":[]}}}, other.clone(): {"layouts":{"Old":{"tabs":[]}}}, mark.clone(): {"pinned":true} })),
+        ("this.forget('Old'); this.forget('Work');", json!({ other.clone(): {"layouts":{"Old":{"tabs":[]}}}, mark.clone(): {"pinned":true} })),
+        ("this.forget('Missing');", all.clone()),
+    ] {
+        let host = sessions_host(&[("list", session_list())], &[("sessions", all.clone())]);
+        let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, forget);
+        assert_eq!(host.borrow().shared["sessions"], expected, "{forget}");
+        assert!(tree.contains("layout-delete-0") || forget.contains("Work"), "{tree}");
+    }
+}
+
+#[gpui::test]
+fn sessions_resume_all_agents_replaces_each_stale_agent_pane_once_per_session(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let shell = json!({"key":"shell", "agent":false, "shell":true});
+    let agent = json!({"key":"claude", "agent":true, "shell":false});
+    let mut values = sessions_values(Value::Null, "C:\\Users\\me\\proj", "windows");
+    values.insert("spaces".into(), json!([{"id":"s1","index":1,"name":"Here","named":true,"folder":"C:\\Users\\me\\proj","machine":null,"branch":null,"active":true,"status":null,"tabs":[{"id":"tb1"}]}]));
+    values.insert("panes".into(), json!([
+        {"pane":"p1", "terminal":"t1", "tab":"tb1", "cwd":"C:\\Users\\me\\proj"},
+        {"pane":"p2", "terminal":"t2", "tab":"tb1", "cwd":"C:\\Users\\me\\proj"},
+        {"pane":"p3", "terminal":"t3", "tab":"tb1", "cwd":null},
+        {"pane":"p4", "terminal":"t4", "tab":"tb1", "cwd":null},
+        {"pane":"p9", "terminal":"t9", "tab":"elsewhere", "cwd":"C:\\Users\\me\\proj"}
+    ]));
+    values.insert("terminals".into(), json!([
+        {"address":"t1", "argv":["claude"], "labels":{"h0x.agent":"claude"}, "state":"live", "program":shell},
+        {"address":"t2", "argv":["claude"], "labels":{"h0x.agent":"claude"}, "state":"live", "program":agent},
+        {"address":"t3", "argv":["claude"], "labels":{"h0x.agent":"claude"}, "state":"exited", "program":agent},
+        {"address":"t4", "argv":["pwsh"], "labels":{}, "state":"live", "program":shell},
+        {"address":"t9", "argv":["claude"], "labels":{"h0x.agent":"claude"}, "state":"live", "program":shell}
+    ]));
+    let argv = json!(["claude", "--resume", "x"]);
+    let host = sessions_host(&[("list", session_list()), ("resume", core_ok(json!({"argv":argv})))], &[]);
+    let tree = describe_sessions(cx, &staged, "mods/sessions", values.clone(), &host, "this.resumeAll(cx);");
+    assert!(tree.contains("Resume all agents"), "{tree}");
+    assert_eq!(runs(&host), vec![
+        json!(["pane.split", {"direction":"right", "pane":"p1", "argv":argv}]),
+        json!(["pane.close", {"pane":"p1"}]),
+        json!(["pane.split", {"direction":"right", "pane":"p3", "argv":argv}]),
+        json!(["pane.close", {"pane":"p3"}]),
+    ]);
+    let h = host.borrow();
+    let resumes: Vec<_> = h.cores.iter().filter(|a| a[1] == "resume").map(|a| a[a.len() - 1].clone()).collect();
+    assert_eq!(resumes, vec!["a2", "a1"], "newest unused first, each once");
+    assert!(h.cores.iter().filter(|a| a[1] == "list").all(|a| a.last().map(String::as_str) == Some("C:\\Users\\me\\proj")), "{:?}", h.cores);
+    drop(h);
+
+    // No stale pane: no button, nothing run.
+    values.insert("terminals".into(), json!([{"address":"t2", "argv":["claude"], "labels":{"h0x.agent":"claude"}, "state":"live", "program":agent}]));
+    let host = sessions_host(&[("list", session_list())], &[]);
+    let tree = describe_sessions(cx, &staged, "mods/sessions", values, &host, "this.resumeAll(cx);");
+    assert!(!tree.contains("Resume all agents"), "{tree}");
+    assert!(runs(&host).is_empty());
 }
