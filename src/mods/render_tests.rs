@@ -1595,7 +1595,7 @@ fn sessions_module(values: BTreeMap<String, Value>, host: Rc<RefCell<SessionsHos
         });
     }
     module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
-    for name in ["nextCommand", "watchFolder"] {
+    for name in ["nextCommand", "watchFolder", "readTextFile", "writeTextFile"] {
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     }
     let h = host.clone();
@@ -1928,4 +1928,57 @@ fn sessions_menu_dialog_and_space_count_render(cx: &mut TestAppContext) {
     let host = sessions_host(&[], &[("sessions.count", counts)]);
     let tree = describe_sessions(cx, &staged, "mods/spaces", fixture(true, props(), updates("current", "current")), &host, "");
     assert!(tree.contains("space-sessions-s1") && !tree.contains("space-sessions-s2"), "{tree}");
+}
+
+#[gpui::test]
+fn tab_bar_adds_sessions_to_a_stored_panel_list_once(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // The tab bar shown once over `stored`: its description and the shared values after.
+    fn tabs(cx: &mut TestAppContext, staged: &Staged, stored: &[(&str, Value)]) -> (String, BTreeMap<String, Value>) {
+        let host = sessions_host(&[], stored);
+        let tree = describe_sessions(cx, staged, "mods/tabs", fixture(true, props(), updates("current", "current")), &host, "");
+        let shared = host.borrow().shared.clone();
+        (tree, shared)
+    }
+    let added = json!(["sessions"]);
+    for (before, after) in [
+        (json!(["files", "changes"]), json!(["files", "changes", "sessions"])),
+        // The welcome's "nothing picked yet".
+        (json!([]), json!(["sessions"])),
+        (json!(["sessions", "files"]), json!(["sessions", "files"])),
+    ] {
+        let (tree, shared) = tabs(cx, &staged, &[("workspace.panels", before.clone())]);
+        assert_eq!(shared["workspace.panels"], after, "{before}");
+        assert_eq!(shared["workspace.panels.added"], added, "{before}");
+        assert!(tree.contains("panel-sessions"), "{before}: {tree}");
+        // Shown again with what it stored: nothing changes.
+        let (_, again) = tabs(cx, &staged, &[("workspace.panels", after.clone()), ("workspace.panels.added", added.clone())]);
+        assert_eq!(again, shared, "{before}");
+    }
+
+    // Turned off after it was added: stays off.
+    for off in [json!(["files", "changes"]), json!([])] {
+        let (tree, shared) = tabs(cx, &staged, &[("workspace.panels", off.clone()), ("workspace.panels.added", added.clone())]);
+        assert_eq!(shared["workspace.panels"], off);
+        assert_eq!(shared["workspace.panels.added"], added);
+        assert!(!tree.contains("panel-sessions"), "{off}: {tree}");
+    }
+
+    // A fresh install stores nothing and shows all three.
+    let (tree, shared) = tabs(cx, &staged, &[]);
+    assert!(shared.is_empty(), "{shared:?}");
+    assert!(tree.contains("panel-files") && tree.contains("panel-changes") && tree.contains("panel-sessions"), "{tree}");
+
+    // The welcome's own list already offers Sessions: the tab bar adds nothing to it.
+    let host = sessions_host(&[], &[]);
+    let tree = describe_sessions(cx, &staged, "frame/welcome", fixture(true, props(), updates("current", "current")), &host, "this.page = 3;");
+    assert!(tree.contains("Choose your panels") && tree.contains("Sessions"), "{tree}");
+    let welcome = host.borrow().shared.clone();
+    assert_eq!(welcome.get("workspace.panels"), Some(&json!([])));
+    assert_eq!(welcome.get("workspace.panels.added"), Some(&added));
+    let picked: Vec<(&str, Value)> = vec![("workspace.panels", json!(["files"])), ("workspace.panels.added", added.clone())];
+    let (tree, shared) = tabs(cx, &staged, &picked);
+    assert_eq!(shared["workspace.panels"], json!(["files"]));
+    assert!(!tree.contains("panel-sessions"), "{tree}");
 }
