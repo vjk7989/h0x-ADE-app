@@ -115,6 +115,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
             &json!({"available":true,"body":{"message":a.string(0)?,"email":a.string(1)?}}),
         ))
     });
+    module = module.function("busyVerb", busy_verb_call);
     let shared = calls.clone();
     module = module.function("shared", move |a| {
         Ok(shared.borrow().shared.get(a.string(0)?).map(to_host).unwrap_or(HostValue::Null))
@@ -829,6 +830,81 @@ fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
     let tree = describe_with_values(cx, &staged, "mods/workspace-status", unbound, None).unwrap();
     assert!(tree.contains("commands"), "unbound hint still offers commands: {tree}");
     assert!(!tree.contains("Shift P"), "unbound hint must not invent a key: {tree}");
+}
+
+#[test]
+fn busy_verbs_are_24_and_never_herd() {
+    assert_eq!(BUSY_VERBS.len(), 24);
+    assert_eq!(BUSY_VERBS.iter().collect::<BTreeSet<_>>().len(), 24, "no verb twice");
+    for verb in BUSY_VERBS {
+        assert!(!verb.to_lowercase().contains("herd"), "{verb}");
+        assert!(!verb.is_empty() && verb.ends_with("ing"), "{verb}");
+    }
+    assert_eq!(BUSY_VERBS[0], "Oxygenating");
+    assert_eq!(BUSY_VERBS[23], "Pondering");
+}
+
+#[test]
+fn busy_verb_rotates_every_four_seconds() {
+    let since = 1_700_000_000_000.0;
+    let at = |ms: f64| busy_verb("t1", Some(since), since + ms);
+    // "t1" hashes to 21: it starts on the 22nd verb.
+    assert_eq!(at(0.0), "Assembling\u{2026}");
+    assert_eq!(at(3999.0), "Assembling\u{2026}", "same verb inside one 4 s step");
+    assert_eq!(at(4000.0), "Noodling\u{2026}");
+    assert_eq!(at(8000.0), "Pondering\u{2026}");
+    assert_eq!(at(12000.0), "Oxygenating\u{2026}", "wraps after the last verb");
+    assert_eq!(at(24.0 * 4000.0), at(0.0), "a full turn is 24 steps");
+    for step in 0..24u32 {
+        let verb = at(f64::from(step) * 4000.0);
+        assert!(BUSY_VERBS.iter().any(|v| verb == format!("{v}\u{2026}")), "{verb}");
+        assert_ne!(verb, at(f64::from(step + 1) * 4000.0), "step {step} moves on");
+    }
+    // A clock behind working_since shows the first step, not a panic.
+    assert_eq!(at(-5000.0), at(0.0));
+}
+
+#[test]
+fn busy_verb_differs_between_panes_deterministically() {
+    let since = Some(1_700_000_000_000.0);
+    let now = 1_700_000_123_456.0;
+    assert_ne!(busy_verb("t1", since, now), busy_verb("t2", since, now));
+    assert_eq!(busy_verb("t1", since, now), busy_verb("t1", since, now));
+    assert_eq!(busy_verb("t2", since, since.unwrap()), "Noodling\u{2026}");
+    // Remote addresses and Windows-looking ids hash too.
+    assert_ne!(busy_verb("vps/t7", since, now), busy_verb("vps/t8", since, now));
+    assert!(busy_verb("C:\\work\\t1", since, now).ends_with('\u{2026}'));
+}
+
+#[test]
+fn busy_verb_without_working_since_uses_the_id_alone() {
+    for now in [0.0, 1_700_000_000_000.0, 1_700_000_004_000.0, f64::NAN] {
+        assert_eq!(busy_verb("t1", None, now), "Assembling\u{2026}");
+    }
+    assert_eq!(busy_verb("", None, 0.0), "Oxygenating\u{2026}", "an empty id is the first verb");
+}
+
+#[gpui::test]
+fn busy_verb_shows_only_while_working(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let verbs = |tree: &str| BUSY_VERBS.iter().filter(|v| tree.contains(&format!("{v}\u{2026}"))).count();
+    for status in ["working", "blocked", "done", "idle"] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        for list in ["panes", "agents", "terminals"] {
+            values.get_mut(list).unwrap()[0]["status"] = json!(status);
+        }
+        for entry in ["mods/peek", "mods/pane", "mods/agents"] {
+            let tree = describe_with_values(cx, &staged, entry, values.clone(), None).unwrap();
+            let shown = verbs(&tree);
+            if status == "working" {
+                assert_eq!(shown, 1, "{entry}: one verb for the one working agent: {tree}");
+            } else {
+                assert_eq!(shown, 0, "{entry}: no verb while {status}: {tree}");
+            }
+            assert!(!tree.to_lowercase().contains("herding"), "{entry}: {tree}");
+        }
+    }
 }
 
 // The files panel's editing: the real mod under a wrapper that takes commands from the test,

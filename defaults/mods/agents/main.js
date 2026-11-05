@@ -3,7 +3,7 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "h0x";
+import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, busyVerb } from "h0x";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -84,6 +84,8 @@ export default class Agents extends View {
     if (!this.pendingPins.length) localStorage.removeItem("pins");
     this.migratingPins = new Set();
     cx.timer.every(30000, (cx) => cx.notify());
+    // The busy verbs rotate while an agent works.
+    cx.timer.every(1000, (cx) => { if (agents().some((a) => a.status === "working")) cx.notify(); });
   }
 
   // Stamps agents whose state changed. Done and idle count as one: looking at a
@@ -280,7 +282,9 @@ export default class Agents extends View {
     // otherwise read the same.
     // Read the pane snapshot once: every host read copies the whole list into JS.
     const leads = leadPanes(panes());
-    const tabLabels = new Map(spaces().flatMap(s => s.tabs).map(tab => [tab.id, title(tab, leads.get(tab.id))]));
+    const tabs = spaces().flatMap(s => s.tabs);
+    const tabLabels = new Map(tabs.map(tab => [tab.id, title(tab, leads.get(tab.id))]));
+    const workingSince = new Map(tabs.map(tab => [tab.id, tab.working_since]));
     const labels = new Map(list.map(a => [a.address, tabLabels.get(a.tab) ?? (a.title || a.program?.name || "")]));
     const label = (a) => labels.get(a.address);
     const detail = new Map(list.map(a => [a.address, /^\d+$/.test(label(a)) ? null : label(a)]));
@@ -361,6 +365,7 @@ export default class Agents extends View {
         .when(Boolean(machine), el => el.child(div().text_size(10).text_color(t.dim).child(machine)))
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))
+        .when(a.status === "working", el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(busyVerb(a.address, workingSince.get(a.tab) ?? null, now))))
         .when(this.hovered !== a.address && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
         .child(this.status(t, a, byPriority && !isPinned));
     };
