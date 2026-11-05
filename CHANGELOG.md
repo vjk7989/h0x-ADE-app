@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-06
+
+### Changed
+
+- Lower idle CPU: hidden Files and Changes panels stop polling git, panels redraw only when something changed, and the Sessions panel reuses its rows.
+
 ## [0.1.6] - 2026-11-05
 
 ### New
