@@ -74,11 +74,14 @@ fn rpc_error(error: anyhow::Error) -> Outcome {
 fn read(core: &Core, machine: &str, timeout: Duration) -> Result<(Document, u64), Outcome> {
     let on = (!machine.is_empty()).then_some(machine);
     let result = core.call_timeout("doc.get", json!({"name":"h0x-ade", "on":on}), timeout).map_err(rpc_error)?;
-    let document = if result["value"].is_null() {
+    let mut document = if result["value"].is_null() {
         Document::default()
     } else {
         serde_json::from_value(result["value"].clone()).map_err(|e| Outcome::Undecodable(format!("Cannot read this machine's layout: {e}")))?
     };
+    if on.is_some() {
+        document.drop_remote_mods();
+    }
     let version = result["version"].as_u64().ok_or_else(|| Outcome::Undecodable("Layout document has no version".into()))?;
     Ok((document, version))
 }
