@@ -440,6 +440,8 @@ pub struct AppWindow {
     /// The downloaded update the frame's pill offers, and the one closed for now.
     /// What's waiting, in words (`update_label`).
     update_ready: Option<String>,
+    /// The app and core versions `update_ready` was worded from.
+    update_versions: (Option<String>, Option<String>),
     update_dismissed: Option<String>,
     update_success: bool,
     update_status: String,
@@ -525,6 +527,7 @@ impl AppWindow {
             file_events: crate::files::watch(&mods::app_dir()),
             polls: 0,
             update_ready: None,
+            update_versions: (None, None),
             update_dismissed: None,
             update_success: false,
             update_status: String::new(),
@@ -3692,9 +3695,10 @@ impl AppWindow {
 
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.flush_documents(false, window, cx);
-        let ready = Self::update_label();
-        if ready != self.update_ready {
-            self.update_ready = ready;
+        let versions = Self::update_versions();
+        if versions != self.update_versions {
+            self.update_ready = Self::update_label(&versions);
+            self.update_versions = versions;
             cx.notify();
         }
         // The settings screen shows versions and progress: redraw mods when they move.
@@ -4289,15 +4293,19 @@ const UPDATE_PILL_HEIGHT: f32 = 34.0;
 impl AppWindow {
     /// "HyperOx 0.2.0 is ready · Restart": the frame's, so no layout or mod can hide it.
     /// What's waiting, in words: the pill shows it until clicked or dismissed.
-    fn update_label() -> Option<String> {
-        let core = crate::update::core();
-        let core = core.ready.filter(|_| !core.updating);
-        match (crate::update::ready(), core) {
+    fn update_label(versions: &(Option<String>, Option<String>)) -> Option<String> {
+        match versions {
             (Some(a), Some(c)) => Some(format!("HyperOx {a} and h0x-core {c} are ready")),
             (Some(a), None) => Some(format!("HyperOx {a} is ready")),
             (None, Some(c)) => Some(format!("h0x-core {c} is ready")),
             (None, None) => None,
         }
+    }
+
+    /// The app and core versions downloaded and waiting for a restart.
+    fn update_versions() -> (Option<String>, Option<String>) {
+        let core = crate::update::core();
+        (crate::update::ready(), core.ready.filter(|_| !core.updating))
     }
 
     fn render_update_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
