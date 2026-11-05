@@ -1,5 +1,5 @@
 // Context menus (HyperOx's items). Opened as a popup with
-// props { tab: "pane" | "tab" | "space" | "global", target }.
+// props { tab: "pane" | "tab" | "space" | "session" | "global", target }.
 // ↑/↓ move, Enter runs, Esc closes. An item is [label, command, args];
 // a command "worktree" opens the worktree dialog instead.
 
@@ -60,6 +60,17 @@ function items(p, git) {
         ...(git === "linked" ? [["Remove worktree", "worktree", { space: tg.id, action: "remove" }]] : []),
         ["Close", "space.close", { id: tg.id }],
       ];
+    // The sessions panel's ⋯: it remembers which session, so these carry no args.
+    case "session":
+      return [
+        ["Resume", "sessions.resume", {}],
+        ["Resume in new tab", "sessions.resume-tab", {}],
+        tg.pinned ? ["Unpin", "sessions.unpin", {}] : ["Pin", "sessions.pin", {}],
+        ["Rename", "sessions.rename", {}],
+        ["Copy resume command", "sessions.copy", {}],
+        ...(tg.local ? [["Show file", "sessions.reveal", {}]] : []),
+        ["Delete", "sessions.delete", {}],
+      ];
     default:
       return [
         ["New space", "space.new", {}],
@@ -73,7 +84,7 @@ function items(p, git) {
 }
 
 function menuIcon(command) {
-  const name = command.endsWith(".close") ? "x" : command.endsWith(".rename") ? "square-pen" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "app.theme" ? "settings" : command === "pane.split" ? "panel-right" : command === "pane.zoom" ? "square" : "terminal";
+  const name = command.endsWith(".close") || command === "sessions.delete" ? "x" : command === "sessions.pin" ? "pin" : command === "sessions.unpin" ? "pin-off" : command === "sessions.reveal" ? "folder" : command === "sessions.copy" ? "file-text" : command.endsWith(".rename") ? "square-pen" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "app.theme" ? "settings" : command === "pane.split" ? "panel-right" : command === "pane.zoom" ? "square" : "terminal";
   return `mods/workspace-chrome/${name}.svg`;
 }
 
@@ -131,7 +142,7 @@ export default class Menu extends View {
       .children(
         list.map((it, i) =>
           v_flex()
-            .when(i > 0 && (it[1].endsWith(".close") || it[1] === "app.help" || (it[1] === "app.theme" && list[i - 1][1] !== "app.theme")), el => el.child(div().mx(7).my(4).h(1).bg(t.border)))
+            .when(i > 0 && (it[1].endsWith(".close") || it[1] === "sessions.delete" || it[1] === "app.help" || (it[1] === "app.theme" && list[i - 1][1] !== "app.theme")), el => el.child(div().mx(7).my(4).h(1).bg(t.border)))
             .child(h_flex()
             .id(`mi-${i}`)
             .h(31)

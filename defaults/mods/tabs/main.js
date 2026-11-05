@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings } from "h0x";
+import { spaces, panes, run, openOverlay, theme, window, shared, setShared, layout, settings } from "h0x";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -9,6 +9,20 @@ function find(node, id) {
     if (found) return found;
   }
   return null;
+}
+
+// The panels with a tab bar button. A list the welcome stored before Sessions
+// existed gains it once (shared "workspace.panels.added" remembers), so a
+// person who turns it off afterwards keeps it off.
+function enabledPanels() {
+  const stored = shared("workspace.panels");
+  if (!Array.isArray(stored)) return ["files", "changes", "sessions"];
+  const added = Array.isArray(shared("workspace.panels.added")) ? shared("workspace.panels.added") : [];
+  if (added.includes("sessions")) return stored;
+  const next = stored.includes("sessions") ? stored : [...stored, "sessions"];
+  if (next !== stored) setShared("workspace.panels", next);
+  setShared("workspace.panels.added", [...added, "sessions"]);
+  return next;
 }
 
 export default class Tabs extends View {
@@ -77,7 +91,7 @@ export default class Tabs extends View {
       ? Math.max(10, (root.traffic_lights[0] + 64) / settings().zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
-    const enabled = shared("workspace.panels") ?? ["files", "changes"];
+    const enabled = enabledPanels();
     this.syncPanel(space, panel, body, enabled);
     const panelButton = (id, label, icon) => {
       const on = panel && !panel.hidden && body?.active === id;
@@ -96,6 +110,7 @@ export default class Tabs extends View {
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
+      .when(enabled.includes("sessions"), el => el.child(panelButton("sessions", "Sessions", "mods/workspace-chrome/clock.svg")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));

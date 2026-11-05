@@ -434,7 +434,16 @@ pub(super) fn into_js<'js>(ctx: &Ctx<'js>, value: HostValue) -> JsResult<Value<'
         HostValue::Object(fields) => {
             let object = Object::new(ctx.clone())?;
             for (key, value) in fields {
-                object.set(key, into_js(ctx, value)?)?;
+                // HyperOx: own-property keys (ADR-056). `set` runs [[Set]]: a key named
+                // after a frozen Object.prototype member ("constructor") throws, and
+                // "__proto__" would replace the prototype instead of being a key.
+                object.prop(
+                    key.as_str(),
+                    rquickjs::object::Property::from(into_js(ctx, value)?)
+                        .writable()
+                        .enumerable()
+                        .configurable(),
+                )?;
             }
             object.into_value()
         }
@@ -468,6 +477,31 @@ mod tests {
             assert!(
                 message.contains("array") && message.contains("limit"),
                 "{message}"
+            );
+        });
+    }
+
+    // HyperOx: own-property keys (ADR-056).
+    #[test]
+    fn host_object_keys_named_like_prototype_members_stay_own_keys() {
+        let runtime = JsRuntime::new().expect("runtime");
+        let context = JsContext::full(&runtime).expect("context");
+        context.with(|ctx| {
+            ctx.eval::<(), _>("Object.freeze(Object.prototype)").expect("freeze");
+            let fields = ["constructor", "toString", "__proto__"]
+                .map(|k| (k.to_owned(), HostValue::Str(format!("v-{k}"))))
+                .to_vec();
+            let value = into_js(&ctx, HostValue::Object(fields)).expect("into_js");
+            ctx.globals().set("probe", value).expect("global");
+            let seen: String = ctx
+                .eval(
+                    "JSON.stringify([Object.keys(probe), probe.constructor, probe.toString, \
+                     Object.getPrototypeOf(probe) === Object.prototype])",
+                )
+                .expect("probe");
+            assert_eq!(
+                seen,
+                r#"[["constructor","toString","__proto__"],"v-constructor","v-toString",true]"#
             );
         });
     }

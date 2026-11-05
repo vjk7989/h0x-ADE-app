@@ -221,6 +221,11 @@ export function setAgentOrder(addresses: string[]): null;
  *  `program` (see Program). Live. */
 export function terminals(): any[];
 
+/** The shown space's tabs as arranged, or null: each tab's `root` is a layout node
+ *  ("row" | "column" | "stack" with `children`, or a "block" whose `content` is
+ *  `{ terminal }` or `{ mod, props? }`), ids as panes() names them. Live. */
+export function tree(): { id: string; tabs: { id: string; name: string; root: any }[] } | null;
+
 /** Actual terminal/pane focus. `space` and `tab` are the current window context.
  *  Clicking a visible layout terminal block, or pane.focus {terminal}, focuses that block:
  *  `terminal` and `cwd` describe it; `pane` and `shown` are null, not its source pane.
