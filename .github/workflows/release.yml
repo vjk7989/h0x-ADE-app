@@ -258,10 +258,13 @@ jobs:
           pathlib.Path("dist/latest.json").write_text(json.dumps(doc, indent=2) + "\n")
           print(json.dumps(doc, indent=2))
           PY
+      # changelog.md is this version's CHANGELOG section with its heading
+      # (`## [<version>] - <date>`): the app reads it as the update's notes.
       - name: Release notes from the changelog
         run: |
           version=${GITHUB_REF_NAME#v}
-          awk -v heading="## [$version]" 'index($0, heading) == 1 { found = 1; next } found && /^## / { exit } found { print }' CHANGELOG.md > RELEASE_NOTES.md
+          awk -v heading="## [$version]" 'index($0, heading) == 1 { found = 1; print; next } found && /^## / { exit } found { print }' CHANGELOG.md > dist/changelog.md
+          tail -n +2 dist/changelog.md > RELEASE_NOTES.md
           [ -s RELEASE_NOTES.md ] || echo "$GITHUB_REF_NAME" > RELEASE_NOTES.md
       - name: Sign assets
         env:
@@ -270,7 +273,7 @@ jobs:
           sudo apt-get update -q && sudo apt-get install -y minisign
           [ -n "$MINISIGN_SECRET_KEY" ] || { echo "MINISIGN_SECRET_KEY is not set" >&2; exit 1; }
           (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key")
-          files=(dist/h0x-ade-*.tar.gz distribution/install.sh distribution/install.ps1 dist/latest.json)
+          files=(dist/h0x-ade-*.tar.gz distribution/install.sh distribution/install.ps1 dist/changelog.md dist/latest.json)
           # The DMG exists only when the Apple secrets are set.
           if [ -f dist/HyperOx.dmg ]; then files+=(dist/HyperOx.dmg); fi
           # The key has no password; an empty line answers a prompt if one comes.
@@ -289,6 +292,7 @@ jobs:
             dist/HyperOx.dmg
             distribution/install.sh
             distribution/install.ps1
+            dist/changelog.md
             dist/*.minisig
             distribution/*.minisig
             dist/latest.json
