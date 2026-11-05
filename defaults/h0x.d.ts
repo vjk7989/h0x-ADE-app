@@ -42,6 +42,10 @@ export function pickFolder(options?: { prompt?: string }): Promise<string | null
  *  file (absolute, or relative to ~/.config/h0x-ade). */
 export function playSound(sound: string): null;
 
+/** What a working agent is doing, for people: "Brewing…". The next of 24 verbs every 4 s since
+ *  `workingSince` (ms; a tab's `working_since`), offset per terminal `id`; null: the id alone picks it. */
+export function busyVerb(id: string, workingSince: number | null, now: number): string;
+
 /**
  * Runs a command, the same ones keys.json binds (`h0x-ade commands` lists them all with their
  * arguments). Structural commands fail while their machine's layout is unavailable.
