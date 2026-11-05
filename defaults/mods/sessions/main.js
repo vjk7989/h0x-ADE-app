@@ -77,7 +77,7 @@ export function ago(ms, now) {
 }
 
 // Rows drawn before "Show N more".
-const LIMIT = 100;
+const LIMIT = 50;
 
 // Its words as a person would type them.
 const shell = (argv) => argv.map((w) => (w === "" || /[\s"'$`\\]/.test(w) ? JSON.stringify(w) : w)).join(" ");
@@ -532,9 +532,9 @@ export default class Sessions extends View {
     if (s) this.setLayout(where(s), name, null);
   }
 
-  // Text size and color come from the list.
-  row(x, i, t, now) {
-    const p = this.program(x);
+  // Text size and color come from the list; `programs` by key, made once per list.
+  row(x, i, t, now, programs) {
+    const p = programs.get(x.agent);
     const title = x.mine.name || x.title || `${p?.name ?? x.agent} session`;
     const icon = p?.icon ? (p.tint ? svg(p.icon).size(14).flex_none().text_color(t.muted) : image(p.icon).size(14).flex_none()) : div().size(14).flex_none();
     const name = this.renaming === x.mark
@@ -558,13 +558,14 @@ export default class Sessions extends View {
   // "Show N more" raises it.
   listView(rows, t) {
     const now = Date.now();
+    const programs = new Map(this.programs.map((p) => [p.key, p]));
     this.hovers = { row: (s) => s.bg(t.hover), more: (s) => s.bg(t.raised).text_color(t.foreground) };
     const limit = this.limit ?? LIMIT;
     let others = 0;
     const shown = rows.filter((x) => x.mine.pinned || others++ < limit);
     const left = rows.length - shown.length;
     return v_flex().gap(1).text_size(12.8).text_color(t.foreground)
-      .children(shown.map((x, i) => this.row(x, i, t, now)))
+      .children(shown.map((x, i) => this.row(x, i, t, now, programs)))
       .when(left > 0, (el) => el.child(h_flex().id("sessions-show-more").h(28).px(8).items_center().rounded(7).text_size(12).text_color(t.muted)
         .hover(this.hovers.row).on_click((_e, cx) => { this.limit = limit + LIMIT; cx.notify(); }).child(`Show ${left} more`)));
   }

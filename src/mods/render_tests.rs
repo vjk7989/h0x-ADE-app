@@ -2316,9 +2316,9 @@ fn sessions_panel_renders_five_hundred_sessions(cx: &mut TestAppContext) {
         .collect();
     let host = sessions_host(&[("list", core_ok(json!({ "sessions": sessions })))], &[]);
     let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "");
-    // ADR-056 addendum: a frame draws the newest 100 rows, then "Show N more".
-    assert!(tree.contains("session-more-99") && tree.contains("Session number 99") && !tree.contains("session-more-100") && !tree.contains("Session number 100"), "the newest 100");
-    assert!(tree.contains("Show 400 more") && tree.contains("text \"500\""), "the rest stays reachable, and the count is all of them");
+    // ADR-056 addendum: a frame draws the newest 50 rows, then "Show N more".
+    assert!(tree.contains("session-more-49") && tree.contains("Session number 49") && !tree.contains("session-more-50") && !tree.contains("Session number 50"), "the newest 50");
+    assert!(tree.contains("Show 450 more") && tree.contains("text \"500\""), "the rest stays reachable, and the count is all of them");
     let h = host.borrow();
     assert_eq!(h.cores.len(), 1, "one list for all of them: {:?}", h.cores);
     assert_eq!(h.shared["sessions.count"], json!({ json!([null, "/fixture/project"]).to_string(): 500 }));
@@ -2546,15 +2546,15 @@ fn sessions_panel_beyond_its_row_limit_offers_the_rest_and_keeps_pins(cx: &mut T
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let now = now_ms();
-    // ADR-056 addendum: pinned rows plus the newest 100.
+    // ADR-056 addendum: pinned rows plus the newest 50.
     let sessions: Vec<Value> = (0..103u64)
         .map(|i| json!({"agent":"claude", "id":format!("s{i}"), "title":format!("Row {i} end"), "last_used":now - i * MINUTE, "path":"/p/s.jsonl"}))
         .collect();
     let pinned = json!({ json!([null, "/fixture/project", "claude", "s102"]).to_string(): {"pinned":true} });
     let host = sessions_host(&[("list", core_ok(json!({ "sessions": sessions })))], &[("sessions", pinned)]);
     let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "");
-    assert!(tree.contains("Row 102 end") && tree.contains("Row 99 end") && !tree.contains("Row 100 end") && !tree.contains("Row 101 end"), "the pin, then the newest 100");
-    assert!(tree.contains("Show 2 more"), "the rest stays reachable");
+    assert!(tree.contains("Row 102 end") && tree.contains("Row 49 end") && !tree.contains("Row 50 end") && !tree.contains("Row 101 end"), "the pin, then the newest 50");
+    assert!(tree.contains("Show 52 more"), "the rest stays reachable");
     assert_eq!(host.borrow().shared["sessions.count"], json!({ json!([null, "/fixture/project"]).to_string(): 103 }), "the count is every shown session");
 }
 
