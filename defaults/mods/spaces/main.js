@@ -383,6 +383,8 @@ export default class Spaces extends View {
     const colors = shared("space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
     const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
+    // Its folder's agent sessions, as the sessions panel last counted them.
+    const sessions = (shared("sessions.count") ?? {})[JSON.stringify([w.machine ?? null, w.folder])] ?? 0;
     return v_flex()
       .relative()
       .id(`space-${w.id}`)
@@ -430,7 +432,8 @@ export default class Spaces extends View {
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?")))
           .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(w.name))
-          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
+          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1())
+          .when(sessions > 0, el => el.child(div().id(`space-sessions-${w.id}`).flex_none().text_size(11).text_color(t.dim).child(String(sessions)))),
       );
   }
 

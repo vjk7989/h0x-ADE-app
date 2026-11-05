@@ -171,6 +171,10 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                 "core" if first.as_array().and_then(|a| a.first()).and_then(Value::as_str) == Some("run") => {
                     Some(json!({"code":0,"stdout":"{\"address\":\"t-setup\"}","stderr":""}))
                 }
+                // The sessions panel lists the shown space's folder.
+                "core" if first.as_array().and_then(|a| a.first()).and_then(Value::as_str) == Some("session") => {
+                    Some(json!({"code":0,"stdout":"{\"sessions\":[]}","stderr":""}))
+                }
                 // The files panel lists a folder with sh: kind and name pairs.
                 "exec" if first == "sh" && a.get(1).map(from_host).and_then(|v| v.get(2).cloned()) == Some(json!("files")) => {
                     Some(json!({"code":0,"stdout":"d\u{0}src\u{0}f\u{0}README.md\u{0}","stderr":""}))
@@ -1511,4 +1515,375 @@ fn files_panel_note_leaves_out_a_name_that_sanitises_to_nothing(cx: &mut TestApp
     assert_eq!(files_writes(&disk).len(), 2);
     assert_eq!(sends.len(), 2, "{sends:?}");
     assert_eq!(sends[1][2], files_note("b.txt"), "the unheard edit with no name is not listed");
+}
+
+#[derive(Default)]
+struct SessionsHost {
+    // `h0x-core session <verb>` answers, by verb; anything else fails with code 1.
+    replies: BTreeMap<String, Value>,
+    cores: Vec<Vec<String>>,
+    execs: Vec<Value>,
+    effects: Vec<(String, Vec<Value>)>,
+    shared: BTreeMap<String, Value>,
+}
+
+fn sessions_host(replies: &[(&str, Value)], shared: &[(&str, Value)]) -> Rc<RefCell<SessionsHost>> {
+    Rc::new(RefCell::new(SessionsHost {
+        replies: replies.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+        shared: shared.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+        ..Default::default()
+    }))
+}
+
+fn core_ok(stdout: Value) -> Value {
+    json!({"code":0, "stdout":stdout.to_string(), "stderr":""})
+}
+
+fn core_error(kind: &str) -> Value {
+    json!({"code":1, "stdout":"", "stderr":json!({"error":{"kind":kind, "message":format!("fixture {kind}"), "hint":""}}).to_string()})
+}
+
+// One active space on `machine` (null: this computer) in `folder`.
+fn sessions_values(machine: Value, folder: &str, platform: &str) -> BTreeMap<String, Value> {
+    let mut values = fixture(false, props(), updates("current", "current"));
+    values.insert("spaces".into(), json!([{"id":"s1","index":1,"name":"Here","named":true,"folder":folder,"machine":machine,"branch":null,"active":true,"status":null,"tabs":[]}]));
+    values.insert("window".into(), json!({"platform":platform,"titlebar":"none","buttons":true,"maximized":false,"fullscreen":false,"active":true}));
+    values
+}
+
+fn sessions_module(values: BTreeMap<String, Value>, host: Rc<RefCell<SessionsHost>>) -> HostModule {
+    let mut module = HostModule::new("h0x");
+    for (name, value) in values {
+        module = module.function(name, move |_| Ok(to_host(&value)));
+    }
+    let h = host.clone();
+    module = module.function("shared", move |a| Ok(h.borrow().shared.get(a.string(0)?).map(to_host).unwrap_or(HostValue::Null)));
+    let h = host.clone();
+    module = module.function("setShared", move |a| {
+        h.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
+        Ok(HostValue::Null)
+    });
+    for name in ["run", "openOverlay", "closeOverlay", "notify"] {
+        let h = host.clone();
+        module = module.function(name, move |a| {
+            let args: Vec<Value> = (0..2).filter_map(|i| a.get(i).map(from_host)).collect();
+            if name == "run" {
+                let command = crate::commands::find(a.string(0)?).unwrap_or_else(|| panic!("unknown command {args:?}"));
+                crate::commands::validate_args(command, args.get(1).unwrap_or(&Value::Null)).unwrap();
+            }
+            h.borrow_mut().effects.push((name.into(), args));
+            Ok(if name == "openOverlay" || name == "notify" { "fixture-overlay".into() } else { HostValue::Null })
+        });
+    }
+    module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
+    for name in ["nextCommand", "watchFolder"] {
+        module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
+    }
+    let h = host.clone();
+    module = module.async_function("exec", move |a| {
+        h.borrow_mut().execs.push(json!([a.get(0).map(from_host), a.get(1).map(from_host)]));
+        Ok(std::future::ready(Ok(to_host(&json!({"code":1,"stdout":"","stderr":""})))))
+    });
+    module.async_function("core", move |a| {
+        let args: Vec<String> = serde_json::from_value(a.get(0).map(from_host).unwrap_or(Value::Null)).unwrap();
+        let mut h = host.borrow_mut();
+        let verb = if args.first().map(String::as_str) == Some("session") { args.get(1).cloned() } else { None };
+        let reply = verb.and_then(|v| h.replies.get(&v).cloned()).unwrap_or_else(|| json!({"code":1,"stdout":"","stderr":"fixture: no reply"}));
+        h.cores.push(args);
+        Ok(std::future::ready(Ok(to_host(&reply))))
+    })
+}
+
+// Loads `entry` (with `setup` run after its init), lets its tasks finish, then describes it.
+fn describe_sessions(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    entry: &str,
+    values: BTreeMap<String, Value>,
+    host: &Rc<RefCell<SessionsHost>>,
+    setup: &str,
+) -> String {
+    static NEXT_STORE: AtomicU64 = AtomicU64::new(0);
+    let policy = Policy::new()
+        .with_storage_path(staged.0.join(format!("sessions-store-{}.json", NEXT_STORE.fetch_add(1, Ordering::Relaxed))))
+        .with_capabilities(Capabilities::new().storage(true).clipboard_write(true).read_roots([staged.0.clone()]))
+        .with_host_module(sessions_module(values, host.clone()))
+        .unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let root = staged.wrapper(entry, setup);
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(runtime, root, policy, window, cx))
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
+    let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    tree
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+// A session as the panel holds it, for scenarios that act on one directly.
+fn session_target(on: Option<&str>, folder: &str, agent: &str, id: &str, path: &str) -> String {
+    let mark = json!([on, folder, agent, id]).to_string();
+    format!(
+        "this.target = {{ agent: {}, id: {}, path: {}, title: 'Fixture', mark: {}, mine: {{}} }}; this.space = {{ id: 's1', on: {}, folder: {} }};",
+        json!(agent), json!(id), json!(path), json!(mark), json!(on), json!(folder)
+    )
+}
+
+const MINUTE: u64 = 60_000;
+
+#[gpui::test]
+fn sessions_panel_puts_pinned_first_hides_hidden_and_counts_what_it_shows(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let now = now_ms();
+    let long = "Refactor the whole renderer ".repeat(20);
+    let list = json!({"sessions":[
+        {"agent":"claude","id":"a1","title":"Fix the build","last_used":now - 2 * 60 * MINUTE - MINUTE,"path":"/fixture/.claude/projects/p/a1.jsonl"},
+        {"agent":"claude","id":"a2","title":"","last_used":now - 25 * 60 * MINUTE,"path":"/fixture/.claude/projects/p/a2.jsonl"},
+        {"agent":"codex","id":"c1","title":null,"last_used":now - 3 * 24 * 60 * MINUTE - MINUTE,"path":"/fixture/.codex/sessions/c1.jsonl"},
+        {"agent":"opencode","id":"ses_1","title":long,"last_used":now - 4 * 24 * 60 * MINUTE,"path":"/fixture/opencode.db"}
+    ]});
+    let mark = |agent: &str, id: &str| json!([null, "/fixture/project", agent, id]).to_string();
+    let marks = json!({ mark("codex", "c1"): {"pinned":true, "name":"My codex"}, mark("opencode", "ses_1"): {"hidden":true} });
+    let host = sessions_host(&[("list", core_ok(list))], &[("sessions", marks.clone())]);
+    let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "");
+    let h = host.borrow();
+    assert_eq!(h.cores, vec![vec!["session", "list", "--json", "--", "/fixture/project"]]);
+    let (pinned, first, untitled) = (tree.find("My codex"), tree.find("Fix the build"), tree.find("claude session"));
+    assert!(pinned.is_some() && first.is_some() && untitled.is_some(), "{tree}");
+    assert!(pinned < first && first < untitled, "pinned first, then newest first: {tree}");
+    assert!(!tree.contains("Refactor the whole renderer"), "hidden sessions are not shown: {tree}");
+    assert!(tree.contains("2h") && tree.contains("1d") && tree.contains("3d"), "{tree}");
+    assert!(tree.contains("session-more-2") && !tree.contains("session-more-3"), "{tree}");
+    assert_eq!(h.shared["sessions.count"], json!({ json!([null, "/fixture/project"]).to_string(): 3 }));
+    assert_eq!(h.shared["sessions"], marks, "showing never writes the marks");
+}
+
+#[gpui::test]
+fn sessions_panel_with_an_older_core_asks_once_and_says_to_update(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let plain = json!({"code":2, "stdout":"", "stderr":"error: unrecognized subcommand 'session'\n"});
+    for reply in [core_error("usage"), plain] {
+        let host = sessions_host(&[("list", reply)], &[]);
+        let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "");
+        assert!(tree.contains("Update h0x-core to see sessions"), "{tree}");
+        assert!(!tree.contains("fixture usage") && !tree.contains("unrecognized"), "no raw error: {tree}");
+        let h = host.borrow();
+        assert_eq!(h.cores.len(), 1, "asked once, not in a loop: {:?}", h.cores);
+        assert!(!h.shared.contains_key("sessions.count"), "no count without a list");
+        assert!(h.effects.is_empty(), "no toasts: {:?}", h.effects);
+    }
+}
+
+#[gpui::test]
+fn sessions_panel_shows_an_empty_folder_and_a_failed_list(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = sessions_host(&[("list", core_ok(json!({"sessions":[]})))], &[]);
+    let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/empty", "linux"), &host, "");
+    assert!(tree.contains("No agent sessions in this folder yet"), "{tree}");
+    assert_eq!(host.borrow().shared["sessions.count"], json!({ json!([null, "/fixture/empty"]).to_string(): 0 }));
+
+    let host = sessions_host(&[("list", core_error("unreachable"))], &[]);
+    let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(json!("cloud"), "/srv/app", "linux"), &host, "");
+    assert!(tree.contains("fixture unreachable") && !tree.contains("Update h0x-core"), "{tree}");
+    assert_eq!(host.borrow().cores.len(), 1);
+
+    // Output that isn't JSON is an error, not a crash or an empty list.
+    let host = sessions_host(&[("list", json!({"code":0,"stdout":"not json","stderr":""}))], &[]);
+    let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "");
+    assert!(tree.contains("unreadable") && !tree.contains("No agent sessions"), "{tree}");
+}
+
+#[gpui::test]
+fn sessions_panel_asks_the_spaces_machine_and_folder(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let empty = core_ok(json!({"sessions":[]}));
+    for (machine, folder, expected) in [
+        (json!("cloud"), "", vec!["session", "list", "--json", "--on", "cloud"]),
+        (json!("cloud"), "/srv/app", vec!["session", "list", "--json", "--on", "cloud", "--", "/srv/app"]),
+        (Value::Null, "", vec!["session", "list", "--json", "--", "/fixture"]),
+        (Value::Null, "C:\\Users\\me\\my project", vec!["session", "list", "--json", "--", "C:\\Users\\me\\my project"]),
+        (Value::Null, "-odd", vec!["session", "list", "--json", "--", "-odd"]),
+    ] {
+        let host = sessions_host(&[("list", empty.clone())], &[]);
+        describe_sessions(cx, &staged, "mods/sessions", sessions_values(machine.clone(), folder, "windows"), &host, "");
+        let h = host.borrow();
+        assert_eq!(h.cores, vec![expected], "{machine}/{folder}");
+        assert_eq!(h.shared["sessions.count"], json!({ json!([machine, folder]).to_string(): 0 }), "counted under the space's own folder");
+    }
+}
+
+#[gpui::test]
+fn sessions_panel_resumes_beside_the_pane_or_in_a_new_tab(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let argv = json!(["claude", "--resume", "a1"]);
+    let replies = [("list", core_ok(json!({"sessions":[]}))), ("resume", core_ok(json!({"argv": argv})))];
+    let host = sessions_host(&replies, &[]);
+    let setup = format!("{} this.command('resume', cx); this.command('resume-tab', cx);", session_target(None, "/fixture/project", "claude", "a1", "/p/a1.jsonl"));
+    describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, &setup);
+    let h = host.borrow();
+    let resumes: Vec<_> = h.cores.iter().filter(|a| a[1] == "resume").cloned().collect();
+    assert_eq!(resumes, vec![vec!["session", "resume", "--json", "--", "claude", "a1"]; 2]);
+    let runs: Vec<_> = h.effects.iter().filter(|(n, _)| n == "run").map(|(_, a)| a.clone()).collect();
+    assert!(runs.contains(&vec![json!("terminal.open"), json!({"argv": argv, "folder":"/fixture/project", "place":"right"})]), "{runs:?}");
+    assert!(runs.contains(&vec![json!("tab.new"), json!({"space":"s1", "folder":"/fixture/project", "argv": argv})]), "{runs:?}");
+
+    // A remote space's home: --on, and no folder (its terminals start at home).
+    let host = sessions_host(&replies, &[]);
+    let setup = format!("{} this.command('resume-tab', cx);", session_target(Some("cloud"), "", "codex", "c1", "/p/c1.jsonl"));
+    describe_sessions(cx, &staged, "mods/sessions", sessions_values(json!("cloud"), "", "linux"), &host, &setup);
+    let h = host.borrow();
+    assert!(h.cores.contains(&vec!["session".into(), "resume".into(), "--json".into(), "--on".into(), "cloud".into(), "--".into(), "codex".into(), "c1".into()]), "{:?}", h.cores);
+    assert!(h.effects.contains(&("run".into(), vec![json!("tab.new"), json!({"space":"s1", "argv": argv})])), "{:?}", h.effects);
+
+    // No argv: a toast, never a terminal.
+    let host = sessions_host(&[("list", core_ok(json!({"sessions":[]}))), ("resume", core_error("not_found"))], &[]);
+    let setup = format!("{} this.command('resume', cx);", session_target(None, "/fixture/project", "claude", "gone", "/p/gone.jsonl"));
+    describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, &setup);
+    let h = host.borrow();
+    assert!(!h.effects.iter().any(|(n, _)| n == "run"), "{:?}", h.effects);
+    assert!(h.effects.iter().any(|(n, a)| n == "notify" && a[0]["level"] == "error" && a[0]["body"] == "fixture not_found"), "{:?}", h.effects);
+}
+
+#[gpui::test]
+fn sessions_panel_copies_the_resume_command_quoted(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let replies = [("list", core_ok(json!({"sessions":[]}))), ("resume", core_ok(json!({"argv":["opencode", "--session", "ses 1"]})))];
+    let host = sessions_host(&replies, &[]);
+    let setup = format!("{} this.command('copy', cx);", session_target(None, "/fixture/project", "opencode", "ses 1", "/p/db"));
+    describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, &setup);
+    assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("opencode --session \"ses 1\""));
+    assert!(host.borrow().effects.iter().any(|(n, a)| n == "notify" && a[0]["body"] == "opencode --session \"ses 1\""));
+}
+
+#[gpui::test]
+fn sessions_panel_pins_hides_and_forgets_marks_per_machine_and_folder(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let list = core_ok(json!({"sessions":[]}));
+    let local = json!([null, "/fixture/project", "claude", "a1"]).to_string();
+    let other = json!(["cloud", "/fixture/project", "claude", "a1"]).to_string();
+    let kept = json!({ other.clone(): {"pinned":true} });
+    for (commands, expected) in [
+        ("this.command('pin', cx);", json!({ other.clone(): {"pinned":true}, local.clone(): {"pinned":true} })),
+        ("this.command('pin', cx); this.command('unpin', cx);", kept.clone()),
+        ("this.command('hide', cx);", json!({ other.clone(): {"pinned":true}, local.clone(): {"hidden":true} })),
+    ] {
+        let host = sessions_host(&[("list", list.clone())], &[("sessions", kept.clone())]);
+        let setup = format!("{} {commands}", session_target(None, "/fixture/project", "claude", "a1", "/p/a1.jsonl"));
+        describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, &setup);
+        assert_eq!(host.borrow().shared["sessions"], expected, "{commands}");
+    }
+}
+
+#[gpui::test]
+fn sessions_panel_delete_asks_three_ways_and_trash_handles_each_answer(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let list = core_ok(json!({"sessions":[]}));
+    for (platform, machine, bin) in [("linux", None, "the Trash"), ("windows", None, "the Recycle Bin"), ("linux", Some("cloud"), "the Recycle Bin or Trash on cloud")] {
+        let host = sessions_host(&[("list", list.clone())], &[]);
+        let setup = format!("{} this.command('delete', cx);", session_target(machine, "/fixture/project", "claude", "a1", "/p/a1.jsonl"));
+        describe_sessions(cx, &staged, "mods/sessions", sessions_values(json!(machine), "/fixture/project", platform), &host, &setup);
+        let h = host.borrow();
+        let (_, open) = h.effects.iter().find(|(n, _)| n == "openOverlay").expect("the delete dialog");
+        assert_eq!(open[0]["mod"], "confirm");
+        assert!(open[0]["props"]["detail"].as_str().unwrap().contains(&format!("moves its files to {bin}.")), "{open:?}");
+        assert_eq!(open[0]["props"]["buttons"], json!([
+            {"label":"Remove from HyperOx", "command":{"name":"sessions.hide"}, "primary":true},
+            {"label":"Delete completely", "command":{"name":"sessions.trash"}}
+        ]));
+    }
+
+    let local = json!([null, "/fixture/project", "opencode", "ses_1"]).to_string();
+    let marks = json!({ local.clone(): {"pinned":true} });
+    for (answer, forgotten, toast) in [
+        (core_ok(json!({"trashed":["/p/a.jsonl"]})), true, None),
+        (core_error("not_found"), true, None),
+        (core_error("unsupported"), false, Some("This session can only be removed from HyperOx")),
+        (core_error("invalid_params"), false, Some("Couldn't delete the session")),
+    ] {
+        let host = sessions_host(&[("list", list.clone()), ("trash", answer.clone())], &[("sessions", marks.clone())]);
+        let setup = format!("{} this.command('trash', cx);", session_target(None, "/fixture/project", "opencode", "ses_1", "/p/db"));
+        describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, &setup);
+        let h = host.borrow();
+        assert!(h.cores.contains(&vec!["session".into(), "trash".into(), "--json".into(), "--".into(), "opencode".into(), "ses_1".into()]), "{:?}", h.cores);
+        assert_eq!(h.cores.iter().filter(|a| a[1] == "list").count(), 2, "listed again after: {:?}", h.cores);
+        assert_eq!(h.shared["sessions"], if forgotten { json!({}) } else { marks.clone() }, "{answer}");
+        let toasts: Vec<_> = h.effects.iter().filter(|(n, _)| n == "notify").map(|(_, a)| a[0]["title"].clone()).collect();
+        assert_eq!(toasts, toast.map(|t| vec![json!(t)]).unwrap_or_default(), "{answer}");
+    }
+
+    // A remote session goes to that machine's trash.
+    let host = sessions_host(&[("list", list.clone()), ("trash", core_ok(json!({"trashed":[]})))], &[]);
+    let setup = format!("{} this.command('trash', cx);", session_target(Some("cloud"), "/srv/app", "claude", "a1", "/p/a1.jsonl"));
+    describe_sessions(cx, &staged, "mods/sessions", sessions_values(json!("cloud"), "/srv/app", "linux"), &host, &setup);
+    assert!(host.borrow().cores.contains(&vec!["session".into(), "trash".into(), "--json".into(), "--on".into(), "cloud".into(), "--".into(), "claude".into(), "a1".into()]));
+}
+
+#[gpui::test]
+fn sessions_panel_shows_the_file_in_this_computers_file_manager(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let list = core_ok(json!({"sessions":[]}));
+    for (platform, path, expected) in [
+        ("windows", "C:/Users/me/.claude/projects/p/a1.jsonl", json!(["explorer", ["/select,C:\\Users\\me\\.claude\\projects\\p\\a1.jsonl"]])),
+        ("windows", "C:\\Users\\me\\.codex\\c1.jsonl", json!(["explorer", ["/select,C:\\Users\\me\\.codex\\c1.jsonl"]])),
+        ("macos", "/Users/me/.claude/projects/p/a1.jsonl", json!(["open", ["-R", "/Users/me/.claude/projects/p/a1.jsonl"]])),
+        ("linux", "/home/me/.claude/projects/p/a1.jsonl", json!(["xdg-open", ["/home/me/.claude/projects/p"]])),
+    ] {
+        let host = sessions_host(&[("list", list.clone())], &[]);
+        let setup = format!("{} this.command('reveal', cx);", session_target(None, "/fixture/project", "claude", "a1", path));
+        describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", platform), &host, &setup);
+        let h = host.borrow();
+        assert_eq!(h.execs, vec![expected], "{platform}");
+        assert!(h.effects.is_empty(), "explorer's exit code 1 is not an error: {:?}", h.effects);
+    }
+}
+
+#[gpui::test]
+fn sessions_menu_dialog_and_space_count_render(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (target, shown, hidden) in [
+        (json!({"pinned":false, "local":true}), ["Resume", "Resume in new tab", "Pin", "Rename", "Copy resume command", "Show file", "Delete"], "Unpin"),
+        (json!({"pinned":true, "local":false}), ["Resume", "Resume in new tab", "Unpin", "Rename", "Copy resume command", "Delete", "Delete"], "Show file"),
+    ] {
+        let mut p = props();
+        p.as_object_mut().unwrap().extend(json!({"tab":"session", "target":target}).as_object().unwrap().clone());
+        let tree = describe(cx, &staged, "mods/menu", true, p, updates("current", "current"), None).unwrap();
+        for label in shown {
+            assert!(tree.contains(label), "{label}: {tree}");
+        }
+        assert!(!tree.contains(hidden), "{hidden}: {tree}");
+    }
+
+    let mut p = props();
+    p.as_object_mut().unwrap().extend(json!({"title":"Delete session?", "detail":"Fixture detail", "buttons":[
+        {"label":"Remove from HyperOx", "command":{"name":"sessions.hide"}, "primary":true},
+        {"label":"Delete completely", "command":{"name":"sessions.trash"}}
+    ]}).as_object().unwrap().clone());
+    let tree = describe(cx, &staged, "mods/confirm", true, p, updates("current", "current"), None).unwrap();
+    for label in ["Cancel", "Remove from HyperOx", "Delete completely", "choice-0", "choice-1"] {
+        assert!(tree.contains(label), "{label}: {tree}");
+    }
+    assert!(!tree.contains("Confirm"), "{tree}");
+    let tree = describe(cx, &staged, "mods/confirm", true, props(), updates("current", "current"), None).unwrap();
+    assert!(tree.contains("Confirm") && tree.contains("Cancel") && !tree.contains("choice-0"), "Yes/No stays the default: {tree}");
+
+    let counts = json!({ json!([null, "/fixture/project"]).to_string(): 4, json!(["remote", "/remote/project"]).to_string(): 0 });
+    let host = sessions_host(&[], &[("sessions.count", counts)]);
+    let tree = describe_sessions(cx, &staged, "mods/spaces", fixture(true, props(), updates("current", "current")), &host, "");
+    assert!(tree.contains("space-sessions-s1") && !tree.contains("space-sessions-s2"), "{tree}");
 }

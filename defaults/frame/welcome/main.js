@@ -18,6 +18,7 @@ const APPEARANCES = [
 const PANELS = [
   { id: "files", icon: "files", title: "Files", about: "The folder you're in as a tree. Open a file to read it, highlighted." },
   { id: "changes", icon: "git-compare", title: "Changes", about: "What your agents changed: every file with its diff, and a commit box." },
+  { id: "sessions", icon: "clock", title: "Sessions", about: "Your agents' past sessions in this folder. Resume, pin, rename or delete one." },
 ];
 
 // The key bound to a command, as people press it: "Ctrl+Shift+P".

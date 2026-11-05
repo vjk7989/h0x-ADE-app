@@ -160,6 +160,13 @@
                       "content": {
                         "mod": "changes"
                       }
+                    },
+                    {
+                      "id": "sessions",
+                      "type": "block",
+                      "content": {
+                        "mod": "sessions"
+                      }
                     }
                   ]
                 }
