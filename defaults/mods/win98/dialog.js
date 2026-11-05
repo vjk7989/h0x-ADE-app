@@ -475,7 +475,7 @@ export default class Dialog {
               .gap(u(2))
               .child("HyperOx 98")
               .child(`Version ${up?.app?.version ?? "4.10.1998"} Second Edition`)
-              .child("Copyright \u00a9 1981-2026 The Herd Corp.")
+              .child("Copyright \u00a9 1981-2026 HyperOx Corp.")
               .child(div().h(u(6)))
               .child("This product is licensed to:")
               .child(div().pl(u(12)).child(userName()))

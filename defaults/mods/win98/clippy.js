@@ -9,7 +9,7 @@ import { agents, run, shared, setShared, placement } from "h0x";
 import { C, ASSETS, unit, root, button, label, sfx, own } from "./kit.js";
 
 const TIPS = [
-  "It looks like you're herding agents.\n\nDid you know? Ctrl+Esc opens the Start menu.",
+  "It looks like you're juggling agents.\n\nDid you know? Ctrl+Esc opens the Start menu.",
   "Click a tab's taskbar button while it's\nshown to minimize it (HyperOx settles it).\nClick again to bring it back.",
   "Ctrl+Shift+Esc opens Close Program:\nevery terminal HyperOx runs, and End Task.",
   "Right-click a folder on the desktop to\nrename or close that space.",
