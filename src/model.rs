@@ -618,7 +618,7 @@ mod tests {
     fn folders_name_as_in_h0x_on_every_system() {
         assert_eq!(folder_name("/home/can", "/home/can"), "~");
         assert_eq!(folder_name("/home/can/", "/home/can"), "~");
-        assert_eq!(folder_name("/Users/can/Projects/herdr", "/Users/can"), "herdr");
+        assert_eq!(folder_name("/Users/me/Projects/h0x", "/Users/me"), "h0x");
         assert_eq!(folder_name("/", "/home/can"), "/");
         assert_eq!(folder_name("", "/home/can"), "~");
         assert_eq!(folder_name(r"C:\Users\can\src\api", r"C:\Users\can"), "api");
