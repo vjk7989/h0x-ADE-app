@@ -186,8 +186,8 @@
       ]
     },
     {
-      "name": "Herdr logo artwork",
-      "source": "Ram path adapted from https://github.com/herdrdev/herdr/blob/HEAD/assets/logo.svg (Apache-2.0). HyperOx 98 artwork is drawn by defaults/mods/win98/art/generate.ts, under the app's Apache-2.0 license.",
+      "name": "HyperOx logo artwork",
+      "source": "Pixel redraw of the HyperOx mark, HyperOx's own artwork. HyperOx 98 artwork is drawn by defaults/mods/win98/art/generate.ts, under the app's Apache-2.0 license.",
       "files": [
         "LICENSE"
       ]

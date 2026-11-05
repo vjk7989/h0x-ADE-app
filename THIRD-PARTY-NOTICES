@@ -28,7 +28,7 @@ Input-SHA256: f8ac2c75e7f629a87565c80d61ff9fe5aa15cdea0bda997d52a4dc13fdbd19cb l
 Input-SHA256: 5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177 licenses/Zig.txt
 Input-SHA256: d25e82e26acd42ca3ccc9993622631163425b869b9e16284226d534cff6470f2 licenses/highway-BSD3.txt
 Input-SHA256: 43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1 licenses/highway.txt
-Input-SHA256: 25dc034df519aeb822ada1a1edc1b8338f84270081ecb19c69342aaaa54734b4 licenses/inventory.json
+Input-SHA256: 49bcfc86775f45cfa81274f062fabc72f6af4e7a8d846c08e8f19ed21e25459f licenses/inventory.json
 Input-SHA256: f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af licenses/musl.txt
 Input-SHA256: 204bbed08ddeeecb362b4da36d3479a0167b7356a9d6024a24f9833affbe228a licenses/simdutf-TH.txt
 Input-SHA256: fc8dbc04e03ad4efc08a647ffe7f995b811a95bc04c0e85a56d5277c6593fa5f licenses/simdutf.txt
@@ -21505,8 +21505,8 @@ Creative Commons may be contacted at creativecommons.org.
 
 
 ----------------------------------------------------------------------
-Herdr logo artwork
-Ram path adapted from https://github.com/herdrdev/herdr/blob/HEAD/assets/logo.svg (Apache-2.0). HyperOx 98 artwork is drawn by defaults/mods/win98/art/generate.ts, under the app's Apache-2.0 license.
+HyperOx logo artwork
+Pixel redraw of the HyperOx mark, HyperOx's own artwork. HyperOx 98 artwork is drawn by defaults/mods/win98/art/generate.ts, under the app's Apache-2.0 license.
 
 --- LICENSE ---
 Apache License
