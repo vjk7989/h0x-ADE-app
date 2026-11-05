@@ -1,6 +1,6 @@
 //! Machine-owned layout documents and this screen's private view.
 use crate::{
-    layout::{Content, Kind, Node},
+    layout::{Content, Header, HeaderContent, Kind, Node},
     model::{Agent, Model, Recent, Space, Tab},
 };
 use serde::{Deserialize, Serialize};
@@ -86,7 +86,56 @@ fn map_node(node: &mut Node, map: &impl Fn(&str) -> String) {
     }
 }
 
+/// The only mods another machine's layout may place: they never run,
+/// exec, call core or send, so a remote document cannot start a program here.
+const REMOTE_MODS: &[&str] = &["help"];
+
+fn remote_mod(name: &str) -> bool {
+    REMOTE_MODS.contains(&name)
+}
+
+fn remote_content(content: &Content) -> bool {
+    !matches!(content, Content::Mod { name, .. } if !remote_mod(name))
+}
+
+/// A header mod from another machine falls back to the built-in header.
+fn remote_header(header: &mut Option<Header>) {
+    if let Some(Header { content: HeaderContent::Mod { name, .. }, .. }) = header
+        && !remote_mod(name)
+    {
+        *header = None;
+    }
+}
+
+fn strip_node(node: &mut Node) {
+    node.floating.retain(|f| remote_content(&f.content));
+    match &mut node.kind {
+        Kind::Block { content: Content::Context { pane: Some(pane), .. } } => remote_header(&mut pane.header),
+        Kind::Stack { header, .. } => remote_header(header),
+        _ => {}
+    }
+    if let Some(children) = node.children_mut() {
+        children.retain(|c| !matches!(&c.kind, Kind::Block { content } if !remote_content(content)));
+        for child in children {
+            strip_node(child);
+        }
+    }
+}
+
 impl Document {
+    /// Another machine's layout: mod blocks and header mods it placed are
+    /// dropped (their props could name a program to run here).
+    pub fn drop_remote_mods(&mut self) {
+        for tab in self.spaces.iter_mut().flat_map(|s| &mut s.tabs) {
+            if let Kind::Block { content } = &tab.root.kind
+                && !remote_content(content)
+            {
+                tab.root = Node::container(tab.root.id.clone(), crate::layout::Axis::Row, vec![]);
+            }
+            strip_node(&mut tab.root);
+        }
+    }
+
     pub fn capture(model: &Model, machine: Option<&str>) -> Self {
         let map = |s: &str| local(s, machine).to_owned();
         Self {
@@ -319,6 +368,51 @@ mod tests {
         assert_eq!(m.spaces.last().unwrap().id, "z/s");
         doc.replace(&mut m, Some("a"));
         assert_eq!(m.spaces.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s2", "s", "a/s", "z/s"]);
+    }
+    fn layout_with(root: serde_json::Value) -> Document {
+        serde_json::from_value(serde_json::json!({"spaces":[{"id":"s","tabs":[{"id":"t","root":root}]}]})).unwrap()
+    }
+    fn root(doc: &Document) -> &Node {
+        &doc.spaces[0].tabs[0].root
+    }
+    #[test]
+    fn remote_layouts_lose_mods_that_could_run_programs() {
+        let block = |id: &str, content: serde_json::Value| serde_json::json!({"id":id,"type":"block","content":content});
+        let confirm = block("c", serde_json::json!({"mod":"confirm","props":{"command":{"name":"space.new","args":{"machine":"","argv":["sh","-c","id"]}}}}));
+        let mut doc = layout_with(serde_json::json!({"id":"r","type":"row",
+            "children":[block("p", serde_json::json!({"terminal":"t1"})), confirm.clone(), block("f", serde_json::json!({"mod":"frame-settings"})), block("h", serde_json::json!({"mod":"help"}))],
+            "floating":[{"id":"fl","content":{"mod":"worktree","props":{"argv":["evil"]}}}, {"id":"ft","content":{"terminal":"t2"}}]}));
+        let local = doc.clone();
+        doc.drop_remote_mods();
+        let ids = |n: &Node| n.children().iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(root(&doc)), ["p", "h"]);
+        assert_eq!(root(&doc).floating.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["ft"]);
+        // A local document is imported as it is.
+        let mut m = Model::default();
+        local.replace(&mut m, None);
+        assert_eq!(Document::capture(&m, None), local);
+        // A mod as a tab's only pane leaves an empty tab.
+        let mut doc = layout_with(confirm);
+        doc.drop_remote_mods();
+        assert!(matches!(root(&doc).kind, Kind::Row { .. }));
+        assert!(root(&doc).children().is_empty());
+        assert_eq!(root(&doc).id, "c");
+        let mut doc = layout_with(block("f", serde_json::json!({"mod":"frame-consent"})));
+        doc.drop_remote_mods();
+        assert!(matches!(root(&doc).kind, Kind::Row { .. }));
+        assert!(root(&doc).children().is_empty());
+    }
+    #[test]
+    fn remote_header_mods_fall_back_to_the_builtin_header() {
+        let mut doc = layout_with(serde_json::json!({"id":"st","type":"stack","children":[{"id":"p","type":"block","content":{"terminal":"t1"}}],
+            "header":{"content":{"mod":"frame-palette","props":{"argv":["evil"]}}}}));
+        doc.drop_remote_mods();
+        assert!(matches!(&root(&doc).kind, Kind::Stack { header: None, .. }));
+        assert_eq!(root(&doc).children().len(), 1);
+        let mut doc = layout_with(serde_json::json!({"id":"st","type":"stack","children":[],"header":{"content":"tabs"}}));
+        let before = doc.clone();
+        doc.drop_remote_mods();
+        assert_eq!(doc, before);
     }
     #[test]
     fn fresh_ids_are_not_a_per_screen_counter() {
