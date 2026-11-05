@@ -295,6 +295,25 @@ fn brand_leaves_room_for_macos_traffic_lights_only_outside_full_screen(cx: &mut 
 }
 
 #[gpui::test]
+fn brand_shows_beta_pill_only_when_expanded(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (platform, width, shown) in [("linux", 268, true), ("macos", 268, true), ("windows", 160, true), ("linux", 159, false), ("linux", 44, false), ("macos", 76, false)] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("window".into(), json!({"platform":platform,"titlebar":"none","fullscreen":false,"buttons":false}));
+        values.get_mut("layout").unwrap()["children"][0]["size"]["px"] = json!(width);
+        let tree = describe_with_values(cx, &staged, "mods/workspace-chrome", values, None).unwrap();
+        assert_eq!(tree.contains("brand-beta"), shown, "{platform}/{width}: {tree}");
+        assert_eq!(tree.contains("Beta"), shown, "{platform}/{width}: {tree}");
+        assert_eq!(tree.contains("HyperOx"), shown, "the pill goes with the brand: {platform}/{width}: {tree}");
+        if shown {
+            let (brand, pill, search) = (tree.find("HyperOx").unwrap(), tree.find("brand-beta").unwrap(), tree.find("search").unwrap());
+            assert!(brand < pill && pill < search, "the pill sits right after the name, before the search button: {tree}");
+        }
+    }
+}
+
+#[gpui::test]
 fn tabs_leave_room_for_macos_traffic_lights(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
