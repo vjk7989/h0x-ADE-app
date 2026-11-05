@@ -443,6 +443,7 @@ pub struct AppWindow {
     update_dismissed: Option<String>,
     update_success: bool,
     update_status: String,
+    update_status_key: Option<crate::update::StatusKey>,
     focus: FocusHandle,
     _tasks: Vec<Task<()>>,
     /// Gives the keyboard back when what had it leaves the screen (`restore_focus`).
@@ -527,6 +528,7 @@ impl AppWindow {
             update_dismissed: None,
             update_success: false,
             update_status: String::new(),
+            update_status_key: None,
             focus: cx.focus_handle(),
             _tasks: Vec::new(),
             _focus_lost: None,
@@ -3696,10 +3698,14 @@ impl AppWindow {
             cx.notify();
         }
         // The settings screen shows versions and progress: redraw mods when they move.
-        let status = crate::update::status().to_string();
-        if status != self.update_status {
-            self.update_status = status;
-            self.refresh_mods(cx);
+        let key = Some(crate::update::status_key());
+        if key != self.update_status_key {
+            self.update_status_key = key;
+            let status = crate::update::status().to_string();
+            if status != self.update_status {
+                self.update_status = status;
+                self.refresh_mods(cx);
+            }
         }
         if let Some(r) = &self.runtime {
             crate::bench::note_mods(&r.read_metrics());
