@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-05
+
+### New
+
+- New icon: the HyperOx mark on a white rounded tile, so it shows on dark taskbars, docks and the welcome screen.
+
+### Fixed
+
+- Lower idle CPU: the update status is rebuilt only when something changes.
+- Requires h0x-core 0.1.3 (faster terminal output).
+
 ## [0.1.2] - 2026-11-05
 
 ### Fixed
