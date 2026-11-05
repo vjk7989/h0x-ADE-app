@@ -1336,6 +1336,52 @@ mod tests {
         assert!(exec_limit(Some(&HostObject::new().field("timeout", "30").into())).is_err());
     }
 
+    #[test]
+    fn exec_timeout_boundaries_and_non_number_values() {
+        let options = |v: HostValue| HostObject::new().field("timeout", v).into();
+        assert_eq!(exec_limit(Some(&options(HostValue::Number(500.0)))).unwrap(), Duration::from_millis(500));
+        assert_eq!(exec_limit(Some(&options(HostValue::Number(600_000.0)))).unwrap(), EXEC_MAX);
+        assert_eq!(exec_limit(Some(&options(HostValue::Number(f64::MAX)))).unwrap(), EXEC_MAX);
+        assert!(exec_limit(Some(&options(HostValue::Number(f64::MIN_POSITIVE)))).unwrap() <= Duration::from_millis(1));
+        for v in [
+            HostValue::Number(-0.0),
+            HostValue::Number(f64::NEG_INFINITY),
+            HostValue::Number(-600_000.0),
+            HostValue::Bool(true),
+            HostValue::Str(String::new()),
+            HostValue::Array(vec![HostValue::Number(1000.0)]),
+            HostValue::Object(vec![("ms".into(), HostValue::Number(1000.0))]),
+        ] {
+            let error = exec_limit(Some(&options(v.clone()))).unwrap_err();
+            assert!(format!("{error:?}").contains("timeout must be a positive number of milliseconds"), "{v:?}: {error:?}");
+        }
+        // Options that are not an object carry no timeout: the default applies.
+        assert_eq!(exec_limit(Some(&HostValue::Number(5.0))).unwrap(), EXEC_LIMIT);
+        assert_eq!(exec_limit(Some(&HostObject::new().field("cwd", "/tmp").into())).unwrap(), EXEC_LIMIT);
+    }
+
+    #[test]
+    fn check_mode_shared_store_stays_in_memory() {
+        std::thread::spawn(|| {
+            install_check_policy();
+            // Asserted before any write: a writable store here would be the person's own file.
+            with_shared(|store| {
+                assert!(!store.writable);
+                assert!(store.values.is_empty());
+                assert!(store.writer.is_none());
+            });
+            with_shared(|store| {
+                assert!(store.set("u3-check".into(), json!(1)));
+                assert!(!store.set("u3-check".into(), json!(1)));
+                assert_eq!(store.values.get("u3-check"), Some(&json!(1)));
+                assert!(store.writer.is_none());
+            });
+            finish_shared();
+        })
+        .join()
+        .unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn exec_uses_the_requested_deadline_and_reports_it() {

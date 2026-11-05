@@ -353,6 +353,42 @@ mod tests {
         assert!(argv[2].contains("[Console]::OutputEncoding"));
     }
 
+    #[test]
+    fn powershell_quote_doubles_straight_and_curly_quotes() {
+        for (word, quoted) in [
+            ("", "''"),
+            ("claude", "'claude'"),
+            ("'", "''''"),
+            ("\u{2019}", "'\u{2019}\u{2019}'"),
+            ("\u{2018}x\u{2019}", "'\u{2018}\u{2018}x\u{2019}\u{2019}'"),
+            ("\u{201A}\u{201B}", "'\u{201A}\u{201A}\u{201B}\u{201B}'"),
+            ("'\u{2019}", "'''\u{2019}\u{2019}'"),
+            // Single-quoted PowerShell strings are verbatim: no expansion, escapes or line ends.
+            ("$(calc)", "'$(calc)'"),
+            ("`n`$x", "'`n`$x'"),
+            ("a\nb", "'a\nb'"),
+            ("\"x\"", "'\"x\"'"),
+            (r"C:\Program Files\a b.exe", r"'C:\Program Files\a b.exe'"),
+        ] {
+            assert_eq!(powershell_quote(word), quoted, "{word:?}");
+            assert_eq!(powershell_words(&powershell_line(&[word.to_owned()])), Some(vec![word.to_owned()]), "{word:?}");
+        }
+    }
+
+    #[test]
+    fn remote_agent_checks_pass_names_as_arguments_not_source() {
+        assert!(installed(&[], Some("remote-host")).is_empty());
+        let commands = ["claude".to_owned(), "x'; rm -rf ~".to_owned(), r"C:\Tools\a b.exe".to_owned()];
+        let argv = crate::remote_shell::check(&commands);
+        assert_eq!(argv[..2], ["sh", "-c"]);
+        assert_eq!(argv[3], "sh");
+        assert_eq!(argv[4..], commands);
+        assert!(!argv[2].contains("rm -rf") && !argv[2].contains("Tools"));
+        // The fallback for a remote Windows machine without sh: names stay quoted literals.
+        let fallback = installed_powershell(&commands);
+        assert!(fallback[2].contains(r"@('claude','x''; rm -rf ~','C:\Tools\a b.exe')"), "{}", fallback[2]);
+    }
+
     #[cfg(windows)]
     #[test]
     fn powershell_finds_installed_commands() {
