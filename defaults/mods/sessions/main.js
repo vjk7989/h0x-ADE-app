@@ -8,7 +8,22 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { spaces, core, exec, home, knownAgents, run, openOverlay, notify, nextCommand, shared, setShared, theme, window } from "h0x";
+import { spaces, core, exec, home, knownAgents, run, openOverlay, notify, nextCommand, shared, setShared, theme, window, layout } from "h0x";
+
+const placed = (n) => n?.content?.mod === "sessions" || (n?.children ?? []).some(placed);
+
+// Whether the layout shows this panel: no hidden node on the way, and the
+// selected child of each stack. Not in the layout (an overlay, a pane): shown.
+function shown(root) {
+  const walk = (n) => {
+    if (!n || n.hidden) return false;
+    if (n.content?.mod === "sessions") return true;
+    const children = (n.children ?? []).filter((c) => !c.hidden);
+    if (n.type === "stack") return walk(children.find((c) => c.id === n.active) ?? children[0]);
+    return children.some(walk);
+  };
+  return !placed(root) || walk(root);
+}
 
 // A space's folder as the spaces list keys its count.
 const where = (s) => JSON.stringify([s.machine ?? null, s.folder]);
@@ -58,7 +73,7 @@ export default class Sessions extends View {
     this.list = [];
     this.state = "loading"; // "ready" | "old" (core without `session`) | "error"
     this.programs = [];
-    this.refresh(cx);
+    this.check(cx);
     cx.spawn(async (cx) => {
       this.programs = await knownAgents().catch(() => []);
       cx.notify();
@@ -74,12 +89,20 @@ export default class Sessions extends View {
   }
 
   // Another space, or the window back in front: ask again.
+  // Hidden (another panel tab, a closed panel): asks nothing until shown again.
   check(cx) {
     const s = spaces().find((x) => x.active);
     const active = Boolean(window()?.active);
     const back = active && this.active === false;
     this.active = active;
-    if ((s ? where(s) : null) !== this.key || back) this.refresh(cx);
+    if (!shown(layout())) {
+      this.missed ||= back;
+      return;
+    }
+    if ((s ? where(s) : null) !== this.key || back || this.missed) {
+      this.missed = false;
+      this.refresh(cx);
+    }
   }
 
   refresh(cx) {

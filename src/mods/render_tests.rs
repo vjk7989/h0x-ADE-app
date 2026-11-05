@@ -1548,7 +1548,26 @@ fn sessions_values(machine: Value, folder: &str, platform: &str) -> BTreeMap<Str
     let mut values = fixture(false, props(), updates("current", "current"));
     values.insert("spaces".into(), json!([{"id":"s1","index":1,"name":"Here","named":true,"folder":folder,"machine":machine,"branch":null,"active":true,"status":null,"tabs":[]}]));
     values.insert("window".into(), json!({"platform":platform,"titlebar":"none","buttons":true,"maximized":false,"fullscreen":false,"active":true}));
+    values.insert("layout".into(), panel_layout(false, "sessions"));
     values
+}
+
+// The shipped layout with its side panel shown or hidden, on its `active` tab.
+fn panel_layout(hidden: bool, active: &str) -> Value {
+    fn walk(n: &mut Value, hidden: bool, active: &str) {
+        if n["id"] == "panel" {
+            n["hidden"] = json!(hidden);
+        }
+        if n["id"] == "panel-body" {
+            n["active"] = json!(active);
+        }
+        for c in n.get_mut("children").and_then(Value::as_array_mut).into_iter().flatten() {
+            walk(c, hidden, active);
+        }
+    }
+    let mut layout: Value = serde_json::from_str(include_str!("../../defaults/layouts/main.json")).unwrap();
+    walk(&mut layout, hidden, active);
+    layout
 }
 
 fn sessions_module(values: BTreeMap<String, Value>, host: Rc<RefCell<SessionsHost>>) -> HostModule {
@@ -1679,6 +1698,29 @@ fn sessions_panel_with_an_older_core_asks_once_and_says_to_update(cx: &mut TestA
         assert_eq!(h.cores.len(), 1, "asked once, not in a loop: {:?}", h.cores);
         assert!(!h.shared.contains_key("sessions.count"), "no count without a list");
         assert!(h.effects.is_empty(), "no toasts: {:?}", h.effects);
+    }
+}
+
+#[gpui::test]
+fn sessions_panel_asks_core_only_while_it_is_shown(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let elsewhere = json!({"id":"root", "type":"block", "content":{"terminal":"t1"}});
+    for (layout, asks) in [
+        (panel_layout(true, "sessions"), false),
+        (panel_layout(false, "files"), false),
+        (panel_layout(false, "sessions"), true),
+        // Not in the layout (an overlay or a pane): shown while it runs.
+        (elsewhere, true),
+    ] {
+        let mut values = sessions_values(Value::Null, "/fixture/project", "linux");
+        values.insert("layout".into(), layout.clone());
+        let host = sessions_host(&[("list", core_ok(json!({"sessions":[]})))], &[]);
+        describe_sessions(cx, &staged, "mods/sessions", values, &host, "");
+        let h = host.borrow();
+        let expected: Vec<Vec<String>> = if asks { vec![vec!["session".into(), "list".into(), "--json".into(), "--".into(), "/fixture/project".into()]] } else { vec![] };
+        assert_eq!(h.cores, expected, "{}", layout["id"]);
+        assert_eq!(h.shared.contains_key("sessions.count"), asks, "the count waits for a list");
     }
 }
 
