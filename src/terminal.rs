@@ -1,7 +1,7 @@
 //! A pane showing one core terminal: bytes in from the core, frames drawn
 //! with GPUI, keys and mouse encoded by libghostty-vt and sent back.
 
-use crate::hc::{Core, Stream};
+use crate::core_link::{Core, Stream};
 use crate::vt::{self, CursorShape, Rgb, Select, Vt};
 use ghostty_sys::*;
 use gpui::prelude::FluentBuilder as _;
@@ -277,7 +277,7 @@ impl TerminalView {
 
     fn attached(
         &mut self,
-        attached: anyhow::Result<crate::hc::Attached>,
+        attached: anyhow::Result<crate::core_link::Attached>,
         attached_size: (u16, u16),
         announce_end: bool,
         cx: &mut Context<Self>,
@@ -303,13 +303,13 @@ impl TerminalView {
                 Some(attached.stream)
             }
             // Gone for good (removed, finished, unknown) versus a connection problem.
-            Err(e) if crate::hc::error_kind(&e) == Some("unavailable") || format!("{e:#}").contains("lost the core") || format!("{e:#}").contains("no reply") => {
+            Err(e) if crate::core_link::error_kind(&e) == Some("unavailable") || format!("{e:#}").contains("lost the core") || format!("{e:#}").contains("no reply") => {
                 self.lost = true;
                 None
             }
             // It ended between being listed and being attached: its pane goes,
             // like one whose program exits while shown.
-            Err(e) if crate::hc::error_kind(&e) == Some("finished") => {
+            Err(e) if crate::core_link::error_kind(&e) == Some("finished") => {
                 self.ended = Some("finished".into());
                 cx.emit(TerminalEvent::Ended);
                 None
@@ -1640,7 +1640,7 @@ mod tests {
         }
         cx.update(gpui_base::init);
         let (root, cx) = cx.add_window_view(|_, cx| Root {
-            terminal: cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx)),
+            terminal: cx.new(|cx| super::TerminalView::attach(crate::core_link::offline(), "t1".into(), (40, 5), cx)),
             text: cx.new(|cx| TextViewState::markdown("Move the pointer over this selectable text.", cx)),
         });
         cx.run_until_parked();
