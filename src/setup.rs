@@ -7,7 +7,7 @@
 //! - a newer generation than this app speaks: update the app.
 //! Then the main window opens.
 
-use crate::hc::{Core, Mismatch};
+use crate::core_link::{Core, Mismatch};
 use crate::mods::Request;
 use crate::settings::{self, color as c};
 use gpui::prelude::FluentBuilder as _;
@@ -63,7 +63,7 @@ impl Setup {
     /// opens the main one, else says what's still needed.
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match Core::connect() {
-            Ok(core) => match crate::hc::check(&core.hello) {
+            Ok(core) => match crate::core_link::check(&core.hello) {
                 Ok(()) => {
                     let Some(requests) = self.requests.take() else { return };
                     window.remove_window();

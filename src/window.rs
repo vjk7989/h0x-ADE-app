@@ -4,7 +4,7 @@
 //! terminal is a mod. Commands (commands.rs) are the one way to change
 //! anything: keys, mods, menus and agents all run them.
 
-use crate::hc::Core;
+use crate::core_link::Core;
 mod floats;
 mod movable;
 mod pane_drag;
@@ -610,7 +610,7 @@ impl AppWindow {
             // send no events, are asked now and then.
             let mut subscription = None;
             let mut subscribed_generation = u64::MAX;
-            let mut event_lines = crate::hc::EventLines::default();
+            let mut event_lines = crate::core_link::EventLines::default();
             let (mut tick, mut relist) = (0u64, false);
             loop {
                 let Ok((core, generation)) = this.update(cx, |this, _| {
@@ -618,7 +618,7 @@ impl AppWindow {
                 }) else { break };
                 if generation != subscribed_generation {
                     drop(subscription.take());
-                    event_lines = crate::hc::EventLines::default();
+                    event_lines = crate::core_link::EventLines::default();
                     subscribed_generation = generation;
                     let local_core = core.clone();
                     let (sub, result) = cx.background_executor().spawn(async move {
@@ -629,7 +629,7 @@ impl AppWindow {
                         (sub, result)
                     }).await;
                     subscription = sub.map(|(channel, events, snapshot)| {
-                        event_lines = crate::hc::EventLines::new(&snapshot);
+                        event_lines = crate::core_link::EventLines::new(&snapshot);
                         (channel, events)
                     });
                     (tick, relist) = (0, true);
@@ -648,14 +648,14 @@ impl AppWindow {
                     let mut sub = subscription;
                     let (mut refresh, mut terminals) = (false, relisting);
                     if sub.is_none() && let Ok((channel, events, snapshot)) = core.subscribe() {
-                        event_lines = crate::hc::EventLines::new(&snapshot);
+                        event_lines = crate::core_link::EventLines::new(&snapshot);
                         sub = Some((channel, events));
                         (refresh, terminals) = (true, true);
                     }
                     let mut closed = false;
                     if let Some((channel, events)) = &sub {
                         while let Ok(event) = events.try_recv() {
-                            if let crate::hc::Stream::Data(bytes) = event {
+                            if let crate::core_link::Stream::Data(bytes) = event {
                                 let pushed = event_lines.push(&bytes);
                                 refresh |= pushed.docs;
                                 terminals |= pushed.terminals;
@@ -2435,7 +2435,7 @@ impl AppWindow {
             let closed = cx.background_executor().spawn(async move {
                 missing.into_iter().filter(|(_, addr)| match core.call("terminal.get", json!({"terminal":addr})) {
                     Ok(v) => matches!(v["reason"].as_str(), Some("exited" | "killed")),
-                    Err(e) => crate::hc::error_kind(&e) == Some("not_found"),
+                    Err(e) => crate::core_link::error_kind(&e) == Some("not_found"),
                 }).collect::<Vec<_>>()
             }).await;
             let _ = this.update_in(cx, |this, window, cx| {
@@ -5170,7 +5170,7 @@ mod tests {
         std::env::var("H0X_ADE_TEST_WINDOW").as_deref() == Ok(name)
     }
 
-    /// The window on a core that's never there (`hc::offline`), showing
+    /// The window on a core that's never there (`core_link::offline`), showing
     /// `layout` with `mod_name` (its `main.js`) in the home, past the first-run
     /// welcome (it lists machines through the core). No other mods: the
     /// shipped ones run programs on threads of their own, which the test
@@ -5192,7 +5192,7 @@ mod tests {
         let requests = crate::mods::install_policy();
         crate::mods::set_shared("layout".into(), json!("test"));
         crate::mods::set_shared("frame.welcomed".into(), json!("test"));
-        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::new(crate::hc::offline(), requests, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::new(crate::core_link::offline(), requests, window, cx));
         assert_eq!(view.update(cx, |this, _| this.layout_name.clone()), "test");
         (view, cx)
     }

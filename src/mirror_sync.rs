@@ -1,6 +1,6 @@
 //! Latest-state CAS flushing, with one request per machine and no operation queue.
 use crate::{
-    hc::{self, Core},
+    core_link::{self, Core},
     mirror::Document,
 };
 use serde_json::json;
@@ -65,7 +65,7 @@ pub enum Outcome {
 
 fn rpc_error(error: anyhow::Error) -> Outcome {
     let reason = format!("{error:#}");
-    match hc::error_kind(&error) {
+    match core_link::error_kind(&error) {
         Some("needs_update" | "needs_login") => Outcome::Blocked(reason),
         _ => Outcome::Unavailable(reason),
     }
@@ -99,7 +99,7 @@ pub fn round_timeout(core: &Core, work: Work, timeout: Duration) -> (String, Out
                 Some(version) => Outcome::Written(document, version),
                 None => Outcome::Undecodable("Layout write returned no version".into()),
             },
-            Err(e) if hc::error_kind(&e) == Some("conflict") => match read(core, &work.machine, deadline.saturating_duration_since(std::time::Instant::now())) {
+            Err(e) if core_link::error_kind(&e) == Some("conflict") => match read(core, &work.machine, deadline.saturating_duration_since(std::time::Instant::now())) {
                 Ok((d, v)) => Outcome::Conflict(d, v),
                 Err(e) => e,
             },
@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn login_and_update_errors_keep_the_real_reason_and_hint() {
         for kind in ["needs_login", "needs_update"] {
-            let error = anyhow::Error::new(hc::RpcError(json!({"message":"cannot use machine", "data":{"kind":kind,"hint":"run h0x-core machine login"}})));
+            let error = anyhow::Error::new(core_link::RpcError(json!({"message":"cannot use machine", "data":{"kind":kind,"hint":"run h0x-core machine login"}})));
             let Outcome::Blocked(reason) = rpc_error(error) else { panic!("must not retry this error on a timer") };
             assert!(reason.contains("cannot use machine"));
             assert!(reason.contains("run h0x-core machine login"));

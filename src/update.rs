@@ -360,7 +360,7 @@ fn check_core() -> Result<(), String> {
         return Ok(());
     }
     let latest = latest_core()?;
-    let same = latest.generation == Some(crate::hc::GENERATION);
+    let same = latest.generation == Some(crate::core_link::GENERATION);
     CORE.lock().unwrap().ready = (same && newer(&latest.version, &have)).then_some(latest.version);
     Ok(())
 }
@@ -745,7 +745,7 @@ pub fn after_update() {
         let have = crate::core_bin::version(&crate::core_bin::path()).unwrap_or_default();
         CORE.lock().unwrap().updating = true;
         let latest = latest_core().map_err(|e| tracing::warn!("core release check after app update: {e}")).ok();
-        let target = after_update_target(have.trim_start_matches("h0x-core "), latest.as_ref(), crate::hc::GENERATION, crate::hc::core_min());
+        let target = after_update_target(have.trim_start_matches("h0x-core "), latest.as_ref(), crate::core_link::GENERATION, crate::core_link::core_min());
         let result = crate::core_bin::update_to(Some(target));
         let mut core = CORE.lock().unwrap();
         core.updating = false;

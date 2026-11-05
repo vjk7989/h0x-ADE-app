@@ -486,12 +486,12 @@ pub enum Request {
 static REQUESTS: OnceLock<async_channel::Sender<Request>> = OnceLock::new();
 
 thread_local! {
-    static FINAL_KILLS: RefCell<Option<(std::sync::Arc<crate::hc::Core>, std::time::Instant)>> = const { RefCell::new(None) };
+    static FINAL_KILLS: RefCell<Option<(std::sync::Arc<crate::core_link::Core>, std::time::Instant)>> = const { RefCell::new(None) };
 }
 
 /// The event loop stops before queued commands run at quit. Send final terminal
 /// kills to the core now, bounded by the same deadline as the mod's cleanup.
-pub fn final_cleanup(core: std::sync::Arc<crate::hc::Core>, deadline: std::time::Instant, body: impl FnOnce()) {
+pub fn final_cleanup(core: std::sync::Arc<crate::core_link::Core>, deadline: std::time::Instant, body: impl FnOnce()) {
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) { FINAL_KILLS.with_borrow_mut(|slot| { slot.take(); }); }
