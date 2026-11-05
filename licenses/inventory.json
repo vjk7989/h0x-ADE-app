@@ -171,7 +171,7 @@
       ]
     },
     {
-      "name": "Pixelated MS Sans Serif fonts (Herdr 98)",
+      "name": "Pixelated MS Sans Serif fonts (HyperOx 98)",
       "source": "https://github.com/jdan/98.css; unchanged font conversion.",
       "files": [
         "defaults/mods/win98/fonts/LICENSE-MSSansSerif.txt",
@@ -179,7 +179,7 @@
       ]
     },
     {
-      "name": "PxPlus IBM VGA font (Herdr 98)",
+      "name": "PxPlus IBM VGA font (HyperOx 98)",
       "source": "https://int10h.org/oldschool-pc-fonts/",
       "files": [
         "defaults/mods/win98/fonts/LICENSE-PxPlus.txt"
@@ -187,7 +187,7 @@
     },
     {
       "name": "Herdr logo artwork",
-      "source": "Ram path adapted from https://github.com/herdrdev/herdr/blob/HEAD/assets/logo.svg (Apache-2.0). Herdr 98 artwork is drawn by defaults/mods/win98/art/generate.ts, under the app's Apache-2.0 license.",
+      "source": "Ram path adapted from https://github.com/herdrdev/herdr/blob/HEAD/assets/logo.svg (Apache-2.0). HyperOx 98 artwork is drawn by defaults/mods/win98/art/generate.ts, under the app's Apache-2.0 license.",
       "files": [
         "LICENSE"
       ]
