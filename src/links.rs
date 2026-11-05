@@ -97,7 +97,7 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
     };
     let full = if expanded.is_absolute() { expanded } else { cwd?.join(expanded) };
     // Checking a share path for existence already reaches out to that machine.
-    if network(&full) {
+    if network(Path::new(link)) || network(&full) {
         tracing::warn!("refusing network path link {full:?}");
         return None;
     }
@@ -116,10 +116,20 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
     Path::new(bare).exists().then(|| Target::File(PathBuf::from(bare)))
 }
 
-/// UNC and `//host` paths, which name another machine.
+/// UNC, `//host`, device and NT object paths (`\??\UNC\host\…`) in any slash
+/// mix, which can name another machine. On Windows any prefix but a drive
+/// letter is refused too.
 fn network(path: &Path) -> bool {
-    let path = path.as_os_str().to_string_lossy();
-    ["\\\\", "//", "\\/", "/\\"].into_iter().any(|p| path.starts_with(p))
+    let text = path.as_os_str().to_string_lossy();
+    let slash = ['/', '\\'];
+    let unc_or_nt = text
+        .strip_prefix(slash)
+        .is_some_and(|rest| rest.starts_with(slash) || rest.strip_prefix("??").is_some_and(|rest| rest.starts_with(slash)));
+    #[cfg(windows)]
+    if let Some(std::path::Component::Prefix(prefix)) = path.components().next() {
+        return unc_or_nt || !matches!(prefix.kind(), std::path::Prefix::Disk(_));
+    }
+    unc_or_nt
 }
 
 /// Only web and mail links reach the system opener: any other scheme can name
@@ -129,7 +139,10 @@ fn web_or_mail(url: &str) -> bool {
     let hidden = |c: char| {
         matches!(c, '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
     };
-    if url.chars().any(|c| c.is_whitespace() || c.is_control() || hidden(c)) {
+    // Explorer splits its argument on commas; a properly encoded URL carries
+    // these only percent-encoded.
+    let unencoded = |c: char| matches!(c, ',' | '"' | '\\' | '`');
+    if url.chars().any(|c| c.is_whitespace() || c.is_control() || hidden(c) || unencoded(c)) {
         return false;
     }
     url.split_once(':').is_some_and(|(scheme, rest)| {
@@ -513,6 +526,52 @@ mod tests {
             for link in ["a.txt", "src/main.rs:42", "$PWD/a.txt"] {
                 assert_eq!(resolve(link, Some(Path::new(cwd))), None, "{cwd} {link}");
             }
+        }
+    }
+
+    #[test]
+    fn nt_object_paths_are_refused() {
+        for path in [
+            r"\??\UNC\host\share\x",
+            "/??/UNC/host/x",
+            r"\??\GLOBALROOT\Device\x",
+            r"/??\UNC\host\share\x",
+            r"\??/UNC/host/share/x",
+            r"\??\C:\x",
+        ] {
+            assert!(network(Path::new(path)), "{path}");
+            assert_eq!(opener_args(&Target::File(PathBuf::from(path))), None, "{path}");
+            assert_eq!(resolve(path, None), None, "{path}");
+            assert_eq!(resolve(path, Some(&std::env::temp_dir())), None, "{path}");
+            // A remote pane's POSIX folder: the link replaces it whole on Windows.
+            assert_eq!(resolve(path, Some(Path::new("/home/u"))), None, "{path}");
+            assert!(network(&Path::new("/home/u").join(path)) || cfg!(not(windows)), "{path}");
+        }
+        // Lookalikes that are ordinary names stay local.
+        for path in ["/home/u/??/x", "??/x", "/?/x", r"\?x", "/home/u/src/a.rs", "src/a.rs"] {
+            assert!(!network(Path::new(path)), "{path}");
+        }
+        assert!(!network(&Path::new("/home/u").join("src/a.rs")));
+        #[cfg(windows)]
+        {
+            for path in [r"C:\x\y.txt", "C:/x", "C:x", r"\x\y"] {
+                assert!(!network(Path::new(path)), "{path}");
+            }
+            for path in [r"\\?\C:\x", r"\\?\UNC\host\share\x", r"\\.\C:\x", r"\\?\GLOBALROOT\Device\x", r"\\host\share\x"] {
+                assert!(network(Path::new(path)), "{path}");
+            }
+        }
+    }
+
+    #[test]
+    fn urls_explorer_would_split_are_refused() {
+        for url in ["https://x/,C:/a.cmd", "https://x/\"a", r"https://x/a\b", "https://x/`a`", "mailto:a@b.c,d@e.f"] {
+            assert!(!web_or_mail(url), "{url}");
+            assert_eq!(opener_args(&Target::Url(url.into())), None, "{url}");
+        }
+        for url in ["https://x/%2CC:/a.cmd", "https://x/%22a", "https://x/a%5Cb"] {
+            assert!(web_or_mail(url), "{url}");
+            assert_eq!(opener_args(&Target::Url(url.into())), Some(vec![url.to_owned()]), "{url}");
         }
     }
 
