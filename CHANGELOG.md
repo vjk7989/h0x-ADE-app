@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-05
+
+### Fixed
+
+- Security: a remote machine's layout can no longer place panels that start programs on this computer.
+- Terminal links refuse Windows network-object paths and URLs with characters Windows Explorer splits on.
+- Update signatures are tied to the exact file they sign.
+- Update notes now load (releases publish a signed changelog).
+- Requires h0x-core 0.1.2, which fixes remote-machine boundaries.
+
 ## [0.1.1] - 2026-11-05
 
 ### New
