@@ -2,7 +2,21 @@
 // themselves (VS Code-style auto-save); remote and truncated files are read-only previews.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { spaces, panes, focused, agents, core, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window } from "h0x";
+import { spaces, panes, focused, agents, core, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, layout } from "h0x";
+
+// Whether the layout shows this panel (as the sessions panel asks): no hidden
+// node on the way, and the selected child of each stack. Not in the layout: shown.
+const placed = (n) => n?.content?.mod === "files" || (n?.children ?? []).some(placed);
+function shown(root) {
+  const walk = (n) => {
+    if (!n || n.hidden) return false;
+    if (n.content?.mod === "files") return true;
+    const children = (n.children ?? []).filter((c) => !c.hidden);
+    if (n.type === "stack") return walk(children.find((c) => c.id === n.active) ?? children[0]);
+    return children.some(walk);
+  };
+  return !placed(root) || walk(root);
+}
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -53,7 +67,20 @@ export default class Files extends View {
     this.saved = new Map(); this.drafts = new Map(); this.edits = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.refresh(cx);
-    cx.timer.every(10000, cx => this.refresh(cx));
+    cx.timer.every(1000, cx => this.tick(cx));
+  }
+
+  // Every 10 s while shown. Hidden (another panel tab, a closed panel): no
+  // listing or git until shown again, then at once; unsent notes still go out.
+  tick(cx) {
+    this.ticks = ((this.ticks ?? 0) + 1) % 10;
+    if (!shown(layout())) {
+      this.missed = true;
+      if (!this.ticks) this.flush(cx);
+    } else if (!this.ticks || this.missed) {
+      this.missed = false;
+      this.refresh(cx);
+    }
   }
 
   watch(root, cx) {

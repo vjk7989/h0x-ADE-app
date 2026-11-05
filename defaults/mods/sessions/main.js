@@ -217,11 +217,16 @@ export default class Sessions extends View {
     });
   }
 
-  // Shown ones, pinned first, each with its HyperOx-side state as `mine`.
+  // Shown ones, pinned first, each with its HyperOx-side state as `mine`; made
+  // again only when the list or the marks changed.
   rows() {
     const marks = plain(shared("sessions"));
-    const shown = this.list.map((x) => ({ ...x, mine: plain(own(marks, x.mark)) ?? {} })).filter((x) => !x.mine.hidden);
-    return [...shown.filter((x) => x.mine.pinned), ...shown.filter((x) => !x.mine.pinned)];
+    const seen = JSON.stringify(marks);
+    if (this.made?.list !== this.list || this.made.seen !== seen) {
+      const shown = this.list.map((x) => ({ ...x, mine: plain(own(marks, x.mark)) ?? {} })).filter((x) => !x.mine.hidden);
+      this.made = { list: this.list, seen, rows: [...shown.filter((x) => x.mine.pinned), ...shown.filter((x) => !x.mine.pinned)] };
+    }
+    return this.made.rows;
   }
 
   // Merges into (null: forgets) a session's HyperOx-side state.

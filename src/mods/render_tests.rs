@@ -1679,7 +1679,7 @@ fn panel_layout(hidden: bool, active: &str) -> Value {
 
 fn sessions_module(mut values: BTreeMap<String, Value>, host: Rc<RefCell<SessionsHost>>) -> HostModule {
     let mut module = HostModule::new("h0x");
-    for name in ["panes", "terminals", "tree"] {
+    for name in ["panes", "terminals", "tree", "layout"] {
         let value = values.remove(name).unwrap_or(Value::Null);
         host.borrow_mut().live.entry(name.into()).or_insert(value);
         let h = host.clone();
@@ -1695,7 +1695,7 @@ fn sessions_module(mut values: BTreeMap<String, Value>, host: Rc<RefCell<Session
         h.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "openOverlay", "closeOverlay", "notify"] {
+    for name in ["run", "openOverlay", "closeOverlay", "notify", "setAgentOrder"] {
         let h = host.clone();
         module = module.function(name, move |a| {
             let args: Vec<Value> = (0..2).filter_map(|i| a.get(i).map(from_host)).collect();
@@ -1708,6 +1708,7 @@ fn sessions_module(mut values: BTreeMap<String, Value>, host: Rc<RefCell<Session
             Ok(if name == "openOverlay" || name == "notify" { "fixture-overlay".into() } else { HostValue::Null })
         });
     }
+    module = module.function("busyVerb", busy_verb_call);
     module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     for name in ["nextCommand", "watchFolder", "readTextFile", "writeTextFile"] {
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
@@ -1720,11 +1721,46 @@ fn sessions_module(mut values: BTreeMap<String, Value>, host: Rc<RefCell<Session
     module.async_function("core", move |a| {
         let args: Vec<String> = serde_json::from_value(a.get(0).map(from_host).unwrap_or(Value::Null)).unwrap();
         let mut h = host.borrow_mut();
-        let verb = if args.first().map(String::as_str) == Some("session") { args.get(1).cloned() } else { None };
+        // Other commands answer by their first word (`machine`).
+        let verb = if args.first().map(String::as_str) == Some("session") { args.get(1).cloned() } else { args.first().cloned() };
         let reply = verb.and_then(|v| h.replies.get(&v).cloned()).unwrap_or_else(|| json!({"code":1,"stdout":"","stderr":"fixture: no reply"}));
         h.cores.push(args);
         Ok(std::future::ready(Ok(to_host(&reply))))
     })
+}
+
+// Loads `entry` (with `setup` run after its init) and lets its tasks finish; it keeps running.
+fn load_sessions(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    entry: &str,
+    values: BTreeMap<String, Value>,
+    host: &Rc<RefCell<SessionsHost>>,
+    setup: &str,
+) -> (gpui::WindowHandle<Empty>, DescriptionSession) {
+    static NEXT_STORE: AtomicU64 = AtomicU64::new(0);
+    let policy = Policy::new()
+        .with_storage_path(staged.0.join(format!("sessions-store-{}.json", NEXT_STORE.fetch_add(1, Ordering::Relaxed))))
+        .with_capabilities(Capabilities::new().storage(true).clipboard_write(true).read_roots([staged.0.clone()]))
+        .with_host_module(sessions_module(values, host.clone()))
+        .unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let root = staged.wrapper(entry, setup);
+    let window = cx.add_window(|_, _| Empty);
+    let session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(runtime, root, policy, window, cx))
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
+    (window, session)
+}
+
+// Moves the clock `ms` forward in 50 ms steps, letting every task finish at each.
+fn advance(cx: &mut TestAppContext, ms: u64) {
+    for _ in 0..ms / 50 {
+        cx.executor().advance_clock(std::time::Duration::from_millis(50));
+        cx.run_until_parked();
+    }
 }
 
 // Loads `entry` (with `setup` run after its init), lets its tasks finish, then describes it.
@@ -1736,25 +1772,9 @@ fn describe_sessions(
     host: &Rc<RefCell<SessionsHost>>,
     setup: &str,
 ) -> String {
-    static NEXT_STORE: AtomicU64 = AtomicU64::new(0);
-    let policy = Policy::new()
-        .with_storage_path(staged.0.join(format!("sessions-store-{}.json", NEXT_STORE.fetch_add(1, Ordering::Relaxed))))
-        .with_capabilities(Capabilities::new().storage(true).clipboard_write(true).read_roots([staged.0.clone()]))
-        .with_host_module(sessions_module(values, host.clone()))
-        .unwrap();
-    let runtime = ShellRuntime::new_isolated().unwrap();
-    let root = staged.wrapper(entry, setup);
-    let window = cx.add_window(|_, _| Empty);
-    let mut session = window
-        .update(cx, |_, window, cx| DescriptionSession::load(runtime, root, policy, window, cx))
-        .unwrap()
-        .unwrap();
-    cx.run_until_parked();
+    let (window, mut session) = load_sessions(cx, staged, entry, values, host, setup);
     // Long enough for a restore that waits for panes to give up (200 × 50 ms).
-    for _ in 0..210 {
-        cx.executor().advance_clock(std::time::Duration::from_millis(50));
-        cx.run_until_parked();
-    }
+    advance(cx, 210 * 50);
     let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
     tree
@@ -1841,6 +1861,148 @@ fn sessions_panel_asks_core_only_while_it_is_shown(cx: &mut TestAppContext) {
         assert_eq!(h.cores, expected, "{}", layout["id"]);
         assert_eq!(h.shared.contains_key("sessions.count"), asks, "the count waits for a list");
     }
+}
+
+// The cx a view is given, with each notify through it (or through the cx its
+// tasks and timers get) reported to `seen`.
+const COUNTED: &str = r#"
+const counted = (c, seen) => ({
+  ...c,
+  notify: (...a) => { seen(); return c.notify(...a); },
+  spawn: (f, o) => c.spawn((t) => f(counted(t, seen)), o),
+  timer: {
+    ...c.timer,
+    every: (ms, f, o) => c.timer.every(ms, (t) => f(counted(t, seen)), o),
+    after: (ms, f, o) => c.timer.after(ms, (t) => f(counted(t, seen)), o),
+  },
+});
+"#;
+
+// Entry "probe": `body` (a `class Probe extends Real`, Real being the shipped
+// `entry`) reports what it saw with setShared("probe", ...).
+fn write_probe(staged: &Staged, entry: &str, body: &str) {
+    std::fs::create_dir_all(staged.0.join("probe")).unwrap();
+    std::fs::write(
+        staged.0.join("probe").join("main.js"),
+        format!("import Real from '../{entry}/main.js';\nimport {{ setShared }} from 'h0x';\n{COUNTED}\n{body}"),
+    )
+    .unwrap();
+}
+
+#[gpui::test]
+fn spaces_draw_again_only_when_the_machine_list_changed(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    write_probe(&staged, "mods/spaces", r#"
+export default class Probe extends Real {
+  init(props, cx) {
+    super.init(props, cx);
+    cx.timer.after(1000, (cx) => this.refreshMachines(cx));
+    cx.timer.after(2000, (cx) => this.refreshMachines(cx));
+  }
+  refreshMachines(cx) {
+    super.refreshMachines(counted(cx, () => setShared("probe", (this.drawn = (this.drawn ?? 0) + 1))));
+  }
+}
+"#);
+    let ls = vec!["machine".to_string(), "ls".into(), "--json".into()];
+    for (reply, drawn) in [
+        // The first answer is new; the same answer twice more draws nothing.
+        (core_ok(json!({"machines":[{"name":"remote","state":"online"}]})), Some(json!(1))),
+        // No answer: the empty list it had stays, nothing to draw.
+        (core_error("unreachable"), None),
+    ] {
+        let host = sessions_host(&[("machine", reply)], &[]);
+        describe_sessions(cx, &staged, "probe", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "");
+        let h = host.borrow();
+        assert_eq!(h.cores.iter().filter(|a| **a == ls).count(), 3, "{:?}", h.cores);
+        assert_eq!(h.shared.get("probe"), drawn.as_ref(), "{:?}", h.cores);
+    }
+}
+
+#[gpui::test]
+fn files_and_changes_ask_nothing_while_hidden_and_refresh_when_shown(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (name, other) in [("files", "changes"), ("changes", "files")] {
+        let host = sessions_host(&[], &[]);
+        let mut values = sessions_values(Value::Null, "/fixture/project", "linux");
+        values.insert("layout".into(), panel_layout(true, name));
+        let (window, _session) = load_sessions(cx, &staged, &format!("mods/{name}"), values, &host, "");
+        let started = host.borrow().execs.len();
+        // Hidden (the panel closed, then another of its tabs), past two 10 s refreshes each.
+        for layout in [panel_layout(true, name), panel_layout(false, other)] {
+            host.borrow_mut().live.insert("layout".into(), layout);
+            advance(cx, 21_000);
+            let h = host.borrow();
+            assert_eq!(h.execs.len(), started, "{name}: nothing runs while hidden: {:?}", h.execs);
+        }
+        // Shown again: a refresh at once, not at the next 10 s.
+        host.borrow_mut().live.insert("layout".into(), panel_layout(false, name));
+        advance(cx, 1000);
+        let execs = host.borrow().execs[started..].to_vec();
+        assert!(!execs.is_empty(), "{name}: shown again, it refreshes");
+        if name == "changes" {
+            assert_eq!(execs[0], json!(["git", ["rev-parse", "--show-toplevel"]]));
+        }
+        window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    }
+}
+
+#[gpui::test]
+fn agents_list_redraws_its_times_only_with_agents(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    write_probe(&staged, "mods/agents", r#"
+export default class Probe extends Real {
+  init(props, cx) {
+    super.init(props, counted(cx, () => setShared("probe", (this.drawn = (this.drawn ?? 0) + 1))));
+  }
+}
+"#);
+    let idle = json!([{"address":"a1","pane":"p1","space":"s1","space_name":"Here","tab":"tab1","tab_index":1,"tab_name":"One","status":"idle","app":"pi","program":null,"title":"One","seq":1,"focused":false}]);
+    // Over 30 s: no agent, nothing to draw; one (not working), its time once.
+    for (list, drawn) in [(json!([]), None), (idle, Some(json!(1)))] {
+        let host = sessions_host(&[], &[]);
+        let mut values = sessions_values(Value::Null, "/fixture/project", "linux");
+        values.insert("agents".into(), list);
+        let (window, _session) = load_sessions(cx, &staged, "probe", values, &host, "");
+        advance(cx, 31_000);
+        assert_eq!(host.borrow().shared.get("probe"), drawn.as_ref());
+        window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    }
+}
+
+#[gpui::test]
+fn sessions_rows_are_made_again_only_when_the_list_or_the_marks_change(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    write_probe(&staged, "mods/sessions", r#"
+export default class Probe extends Real {
+  init(props, cx) {
+    super.init(props, cx);
+    cx.timer.after(2000, () => {
+      const a = this.rows(), b = this.rows();
+      this.setMark(a[1], { pinned: true });
+      const c = this.rows(), d = this.rows();
+      this.list = [...this.list];
+      const e = this.rows();
+      setShared("probe", { reused: a === b, pinned: c !== b, first: c[0].id, again: c === d, relisted: e !== d });
+    });
+  }
+}
+"#);
+    let now = now_ms();
+    let list = json!({"sessions":[
+        {"agent":"claude","id":"a1","title":"One","last_used":now - MINUTE,"path":"/fixture/.claude/projects/p/a1.jsonl"},
+        {"agent":"claude","id":"a2","title":"Two","last_used":now - 2 * MINUTE,"path":"/fixture/.claude/projects/p/a2.jsonl"}
+    ]});
+    let host = sessions_host(&[("list", core_ok(list))], &[]);
+    describe_sessions(cx, &staged, "probe", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "");
+    assert_eq!(
+        host.borrow().shared["probe"],
+        json!({"reused":true, "pinned":true, "first":"a2", "again":true, "relisted":true})
+    );
 }
 
 #[gpui::test]
