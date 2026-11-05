@@ -202,9 +202,73 @@ fn base(s: &str) -> &str {
 /// PowerShell's single quotes, which include the curly ones.
 const PS_QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
 
-/// `& 'prog' 'arg 1'`: a command for PowerShell's `-Command`, each word quoted.
+/// What `powershell_line` puts before the program.
+const PS_START: &str = "& { $PSNativeCommandArgumentPassing = 'Legacy'; $p = ";
+/// What `powershell_line` puts after the arguments: `.cmd`/`.bat` targets run in
+/// cmd.exe, which ends a command line at the first line break.
+const PS_END: &str = r"); if ((Get-Command $p -ErrorAction Ignore | Select-Object -First 1).Extension -in '.cmd', '.bat') { $a = $a -replace '\r?\n', ' ' }; & $p @a }";
+
+/// A command for PowerShell's `-Command`: `prog` then its arguments, each word
+/// quoted. PowerShell hands a native program its arguments joined into one
+/// command line, and in Windows PowerShell (and pwsh's `Legacy` mode, set here
+/// so every version behaves alike) it does not escape an inner `"`: so each
+/// argument goes in already quoted for that command line.
 pub fn powershell_line(cmd: &[String]) -> String {
-    format!("& {}", cmd.iter().map(|w| powershell_quote(w)).collect::<Vec<_>>().join(" "))
+    let (prog, args) = cmd.split_first().map_or(("", &[][..]), |(p, a)| (p.as_str(), a));
+    let args = args.iter().map(|a| powershell_quote(&windows_arg(a))).collect::<Vec<_>>().join(", ");
+    format!("{PS_START}{}; $a = @({args}{PS_END}", powershell_quote(prog))
+}
+
+/// One argument of a Windows command line, as C runtimes since 2008 read it.
+/// A `"` inside quotes is written `""`, which keeps cmd.exe in quotes (`&`,
+/// `|`, `>` stay text) and Windows PowerShell from quoting it again.
+fn windows_arg(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '\u{0B}', '"']) {
+        return arg.to_owned();
+    }
+    let mut s = String::from('"');
+    let mut slashes = 0;
+    for ch in arg.chars() {
+        match ch {
+            '\\' => {
+                slashes += 1;
+                continue;
+            }
+            // Backslashes before a quote are doubled.
+            '"' => s.extend(std::iter::repeat_n('\\', 2 * slashes).chain(['"', '"'])),
+            _ => s.extend(std::iter::repeat_n('\\', slashes).chain([ch])),
+        }
+        slashes = 0;
+    }
+    s.extend(std::iter::repeat_n('\\', 2 * slashes));
+    s + "\""
+}
+
+/// The argument back from `windows_arg`.
+fn windows_unquote(arg: &str) -> String {
+    let (mut s, mut quoted, mut slashes) = (String::new(), false, 0);
+    let mut chars = arg.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            slashes += 1;
+            continue;
+        }
+        if ch == '"' {
+            s.extend(std::iter::repeat_n('\\', slashes / 2));
+            if slashes % 2 == 1 {
+                s.push('"');
+            } else if quoted && chars.peek() == Some(&'"') {
+                s.push(chars.next().unwrap_or(ch));
+            } else {
+                quoted = !quoted;
+            }
+        } else {
+            s.extend(std::iter::repeat_n('\\', slashes).chain([ch]));
+        }
+        slashes = 0;
+    }
+    s.extend(std::iter::repeat_n('\\', slashes));
+    s
 }
 
 fn powershell_quote(word: &str) -> String {
@@ -220,29 +284,39 @@ fn powershell_quote(word: &str) -> String {
 
 /// The words back from `powershell_line`.
 fn powershell_words(line: &str) -> Option<Vec<String>> {
-    let mut chars = line.strip_prefix("& ")?.chars().peekable();
-    let mut words = Vec::new();
-    while let Some(c) = chars.next() {
-        if c == ' ' {
-            continue;
+    let rest = line.strip_prefix(PS_START)?.strip_suffix(PS_END)?;
+    let (prog, rest) = powershell_word(rest)?;
+    let mut rest = rest.strip_prefix("; $a = @(")?;
+    let mut words = vec![prog];
+    while !rest.is_empty() {
+        if words.len() > 1 {
+            rest = rest.strip_prefix(", ")?;
         }
-        if !PS_QUOTES.contains(&c) {
-            return None;
-        }
-        let mut w = String::new();
-        while let Some(ch) = chars.next() {
-            if PS_QUOTES.contains(&ch) {
-                if chars.peek().is_some_and(|n| PS_QUOTES.contains(n)) {
-                    w.push(chars.next().unwrap_or(ch));
-                    continue;
-                }
-                break;
-            }
-            w.push(ch);
-        }
-        words.push(w);
+        let (arg, after) = powershell_word(rest)?;
+        words.push(windows_unquote(&arg));
+        rest = after;
     }
     Some(words)
+}
+
+/// The quoted word `s` starts with, and what follows it.
+fn powershell_word(s: &str) -> Option<(String, &str)> {
+    let mut chars = s.char_indices().peekable();
+    if !chars.next().is_some_and(|(_, c)| PS_QUOTES.contains(&c)) {
+        return None;
+    }
+    let mut w = String::new();
+    while let Some((i, ch)) = chars.next() {
+        if PS_QUOTES.contains(&ch) {
+            match chars.next_if(|(_, n)| PS_QUOTES.contains(n)) {
+                Some((_, n)) => w.push(n),
+                None => return Some((w, &s[i + ch.len_utf8()..])),
+            }
+            continue;
+        }
+        w.push(ch);
+    }
+    None
 }
 
 fn find<'a>(t: &'a Table, name: &str) -> Option<(&'a str, &'a Entry)> {
@@ -270,7 +344,7 @@ fn resolve(t: &Table, app: Option<&str>, argv: &[String]) -> Value {
     {
         return resolve(t, None, &argv[4..]);
     }
-    // On Windows: `pwsh -NoExit -Command "& 'codex' ..."`.
+    // On Windows: `pwsh -NoExit -Command <powershell_line>`.
     if argv.len() == 4
         && t.shells.iter().any(|s| s == base(&argv[0]))
         && argv[1] == "-NoExit"
@@ -341,8 +415,80 @@ mod tests {
     fn powershell_words_survive_quotes() {
         let words: Vec<String> = ["pi", "it's \u{2019}fine\u{2019}", "", "a  b"].map(String::from).to_vec();
         let line = powershell_line(&words);
-        assert_eq!(line, "& 'pi' 'it''s \u{2019}\u{2019}fine\u{2019}\u{2019}' '' 'a  b'");
+        assert_eq!(line, format!("{PS_START}'pi'; $a = @('\"it''s \u{2019}\u{2019}fine\u{2019}\u{2019}\"', '\"\"', '\"a  b\"'){PS_END}"));
         assert_eq!(powershell_words(&line), Some(words));
+        assert_eq!(powershell_line(&["pi".into()]), format!("{PS_START}'pi'; $a = @({PS_END}"));
+        assert_eq!(powershell_words(&powershell_line(&["pi".into()])), Some(vec!["pi".to_owned()]));
+        assert_eq!(powershell_words("& 'pi' 'x'"), None);
+    }
+
+    /// Tasks given to an agent at its start: quotes, line breaks and PowerShell
+    /// syntax are text, never code.
+    const TASKS: [&str; 12] = [
+        "a \"- [ ] \" b",
+        "Fix these:\n- [ ] \"one\"\r\n- [ ] two\n",
+        "it's \u{2018}curly\u{2019} \u{201C}double\u{201D} $(x) `$y $env:PATH %PATH% & calc | x > y; exit",
+        "a trailing backslash \\",
+        "C:\\dir\\",
+        "a\\\"b c \\\\\"d\"",
+        "\"",
+        "\"\"",
+        "'",
+        "$(x)",
+        "-",
+        "",
+    ];
+
+    #[test]
+    fn powershell_line_quotes_arguments_for_the_windows_command_line() {
+        // An inner `"` is `""` inside quotes: Windows PowerShell passes it unchanged.
+        assert_eq!(powershell_line(&["claude".into(), TASKS[0].into()]), format!("{PS_START}'claude'; $a = @('\"a \"\"- [ ] \"\" b\"'){PS_END}"));
+        for (arg, quoted) in [
+            ("plain", "plain"),
+            ("", "\"\""),
+            ("\"", "\"\"\"\""),
+            ("a\nb", "\"a\nb\""),
+            ("$(x)", "$(x)"),
+            ("C:\\dir\\", "C:\\dir\\"),
+            ("a trailing backslash \\", "\"a trailing backslash \\\\\""),
+            ("a\\\"b c", "\"a\\\\\"\"b c\""),
+            ("C:\\a b\\x", "\"C:\\a b\\x\""),
+        ] {
+            assert_eq!(windows_arg(arg), quoted, "{arg:?}");
+        }
+        for task in TASKS {
+            assert_eq!(windows_unquote(&windows_arg(task)), task, "{task:?}");
+            let cmd = vec!["claude".to_owned(), "--flag".to_owned(), task.to_owned()];
+            let line = powershell_line(&cmd);
+            assert_eq!(powershell_words(&line), Some(cmd), "{line}");
+        }
+        // PowerShell code in a task stays inside single quotes.
+        assert!(powershell_line(&["claude".into(), "$(x)".into()]).contains("@('$(x)')"));
+        assert!(powershell_line(&["claude".into(), "it's".into()]).contains("@('it''s')"));
+    }
+
+    /// Runs PowerShell on `powershell_line` for this test binary (filtered to
+    /// this test) with every task: the child checks each arrives intact.
+    #[cfg(windows)]
+    #[test]
+    fn powershell_line_reaches_a_native_program_intact() {
+        const NAME: &str = "programs::tests::powershell_line_reaches_a_native_program_intact";
+        let want = serde_json::to_string(&TASKS).unwrap();
+        if let Ok(sent) = std::env::var("H0X_ADE_TEST_ARGS") {
+            // The child: after `--` come this test's name, then the tasks.
+            let got: Vec<String> = std::env::args().skip_while(|a| a != "--").skip(2).collect();
+            assert_eq!(serde_json::to_string(&got).unwrap(), sent);
+            return;
+        }
+        let mut cmd: Vec<String> = [&*std::env::current_exe().unwrap().to_string_lossy(), "--exact", "--nocapture", "--test-threads=1", "--", NAME].map(String::from).to_vec();
+        cmd.extend(TASKS.map(String::from));
+        let out = std::process::Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &powershell_line(&cmd)])
+            .env("H0X_ADE_TEST_ARGS", &want)
+            .output()
+            .unwrap();
+        let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && log.contains("1 passed"), "{log}");
     }
 
     #[test]
