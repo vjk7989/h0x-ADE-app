@@ -217,7 +217,7 @@ pub fn ready() -> Option<String> {
 }
 
 /// The core the app runs, from its `server.status`, and a newer release waiting.
-#[derive(Clone, Default, serde::Serialize)]
+#[derive(Clone, Default, PartialEq, serde::Serialize)]
 pub struct CoreInfo {
     pub version: Option<String>,
     /// A package manager that owns it (homebrew, nix, mise): never updated by the app.
@@ -259,6 +259,21 @@ fn checks_app() -> Option<PathBuf> {
 /// A release build checks the core; a source build only when pointed at a test release server.
 fn checks_core() -> bool {
     option_env!("H0X_ADE_RELEASE").is_some() || env_url("H0X_ADE_RELEASES_URL").is_some()
+}
+
+/// Everything `status` reads that can change while the app runs: the poll
+/// rebuilds the status only when this moves.
+pub type StatusKey = (Option<String>, CoreInfo, Option<u64>, bool, bool, u64);
+
+pub fn status_key() -> StatusKey {
+    (
+        ready(),
+        core(),
+        *CHECKED.lock().unwrap(),
+        RUNNING.load(Ordering::Relaxed),
+        CHECKING.load(Ordering::Relaxed),
+        crate::update_notes::generation(),
+    )
 }
 
 /// For the settings screen: both programs, what's waiting, when we last looked.
