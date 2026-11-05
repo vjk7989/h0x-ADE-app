@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-05
+
+### New
+
+- Includes the herdr-app 0.1.13 improvements: find in a terminal's screen and scrollback, a draggable scrollbar on terminal panes, and terminal.scroll for mods and agents.
+
+### Fixed
+
+- The command palette keeps scrolling past group titles and shows ⌘ only on macOS.
+- Sidebar rail items sit centred on one line, and the changes list fills the panel and scrolls through every changed file.
+- The settings dialog draws its rounded background, and long theme names stay inside their cards.
+- Escape reaches the program when the terminal has focus, and the keyboard returns to the focused pane when a stack shows its tab again.
+- Faster agent and worktree rendering.
+- Windows terminal links open in the default browser or mail app, still limited to web and mail addresses.
+- Requires h0x-core 0.1.4.
+
 ## [0.1.4] - 2026-11-05
 
 ### Fixed
