@@ -5,7 +5,7 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { agents, terminals, panes, run, theme, props, closeOverlay } from "h0x";
+import { agents, terminals, panes, spaces, run, theme, props, closeOverlay, busyVerb } from "h0x";
 
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 // The icon from the app's program table: a one-color glyph or a picture.
@@ -13,10 +13,12 @@ function icon(p, size, color) {
   if (!p?.icon) return null;
   return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
 }
-const WORDS = { working: "working", blocked: "needs you", done: "finished", idle: "idle" };
+const WORDS = { blocked: "needs you", done: "finished", idle: "idle" };
 
 export default class Peek extends View {
   init(_props, cx) {
+    // The busy verb rotates while the agent works.
+    cx.timer.every(1000, (cx) => { if (this.status() === "working") cx.notify(); });
   }
 
   term() {
@@ -49,6 +51,9 @@ export default class Peek extends View {
     const pic = icon(k?.program, 14, t.foreground);
     const parent = k?.parent ? terminals().find((p) => p.address === k.parent) : null;
     const home = panes().some((p) => p.terminal === terminal);
+    const tab = agents().find((a) => a.address === terminal)?.tab;
+    const since = spaces().flatMap((s) => s.tabs).find((x) => x.id === tab)?.working_since ?? null;
+    const word = st === "working" ? busyVerb(terminal ?? "", since, Date.now()) : WORDS[st] ?? st;
     const glyph = st === "working" ? SPIN[0] : st === "idle" ? "○" : st ? "●" : "·";
     return h_flex()
       .size_full()
@@ -62,7 +67,7 @@ export default class Peek extends View {
       .child(div().w(12).flex_none().text_color(t[st] ?? t.dim).when(st === "working", (el) => el.frames(SPIN, 90)).child(glyph))
       .when(Boolean(pic), (el) => el.child(pic))
       .child(div().truncate().font_semibold().text_color(t.foreground).child(k?.name || k?.template || k?.program?.name || terminal || ""))
-      .when(Boolean(st), (el) => el.child(div().flex_none().text_color(t[st] ?? t.dim).child(WORDS[st] ?? st)))
+      .when(Boolean(st), (el) => el.child(div().flex_none().text_color(t[st] ?? t.dim).child(word)))
       .when(Boolean(parent), (el) => el.child(div().truncate().text_color(t.dim).child(`from ${parent.name || parent.address}`)))
       .child(div().flex_1())
       .child(

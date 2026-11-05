@@ -6,7 +6,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, theme, home } from "h0x";
+import { panes, spaces, props, run, theme, home, busyVerb } from "h0x";
 
 function icon(p, size, color) {
   if (!p?.icon) return null;
@@ -20,7 +20,11 @@ function folder(cwd) {
 }
 
 export default class Pane extends View {
-  init() { this.hovered = false; }
+  init(_props, cx) {
+    this.hovered = false;
+    // The busy verb rotates while the agent works.
+    cx.timer.every(1000, (cx) => { if (this.me()?.status === "working") cx.notify(); });
+  }
 
   me() {
     return panes().find((p) => p.pane === props()?.pane);
@@ -63,6 +67,7 @@ export default class Pane extends View {
       .when(Boolean(pic), (el) => el.child(pic))
       .child(div().flex_none().truncate().max_w(260).font_medium().text_color(t.foreground).child(name))
       .child(div().flex_1().truncate().text_color(t.dim).child(folder(p.cwd)))
+      .when(st === "working", el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(busyVerb(p.terminal ?? pane, spaces().flatMap((s) => s.tabs).find((x) => x.id === p.tab)?.working_since ?? null, Date.now()))))
       .when(st === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
       .when(st === "blocked", el => el.child(div().flex_none().px(6).h(18).flex().items_center().rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).child("Needs you")))
       .when(st === "done", el => el.child(div().size(7).flex_none().rounded(4).bg(t.done)))

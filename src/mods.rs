@@ -843,6 +843,27 @@ pub fn from_host(v: &HostValue) -> Value {
 
 pub const DECLARATIONS: &str = include_str!("../defaults/h0x.d.ts");
 
+/// What a working agent is doing, for people (the runtime shows the same list).
+pub const BUSY_VERBS: [&str; 24] = [
+    "Oxygenating", "Hyperthinking", "Catalyzing", "Combusting", "Ionizing", "Bubbling", "Fizzing", "Distilling",
+    "Synthesizing", "Crystallizing", "Percolating", "Kindling", "Smelting", "Forging", "Tinkering", "Conjuring",
+    "Calibrating", "Untangling", "Brewing", "Sparking", "Weaving", "Assembling", "Noodling", "Pondering",
+];
+
+/// The busy verb for terminal `id`: the next one every 4 s since `working_since` (ms),
+/// offset by a hash of the id so neighbours differ. Without `working_since`, the hash alone.
+pub fn busy_verb(id: &str, working_since: Option<f64>, now: f64) -> String {
+    let n = BUSY_VERBS.len() as u64;
+    let step = working_since.map_or(0, |since| ((now - since).max(0.0) / 4000.0) as u64);
+    let hash = id.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b.into()));
+    format!("{}\u{2026}", BUSY_VERBS[((step % n + hash % n) % n) as usize])
+}
+
+/// `busyVerb(id, workingSince, now)` for mods.
+fn busy_verb_call(a: &gpui_shell::HostArguments) -> gpui_shell::HostResult {
+    Ok(busy_verb(a.string(0)?, a.get(1).and_then(HostValue::as_number), a.number(2)?).into())
+}
+
 fn strings(v: Option<&HostValue>) -> Vec<String> {
     v.and_then(HostValue::as_array).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_owned)).collect()).unwrap_or_default()
 }
@@ -1021,6 +1042,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             Ok(crate::mod_files::write_text(a.string(0)?.to_owned(), a.string(1)?.to_owned(), expected))
         })
         .async_function("core", |a| Ok(exec_future("h0x-core".into(), strings(a.get(0)), None, None, EXEC_LIMIT)))
+        .function("busyVerb", busy_verb_call)
         .function("home", |_| Ok(home().to_string_lossy().into_owned().into()))
         .function("appHome", |_| Ok(app_dir().to_string_lossy().into_owned().into()))
         .function("fonts", |_| Ok(to_host(&json!(*FONTS.lock().unwrap()))))
