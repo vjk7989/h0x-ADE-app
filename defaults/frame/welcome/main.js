@@ -18,6 +18,7 @@ const APPEARANCES = [
 const PANELS = [
   { id: "files", icon: "files", title: "Files", about: "The folder you're in as a tree. Open a file to read it, highlighted." },
   { id: "changes", icon: "git-compare", title: "Changes", about: "What your agents changed: every file with its diff, and a commit box." },
+  { id: "sessions", icon: "clock", title: "Sessions", about: "Your agents' past sessions in this folder. Resume, pin, rename or delete one." },
 ];
 
 // The key bound to a command, as people press it: "Ctrl+Shift+P".
@@ -392,7 +393,11 @@ export default class Welcome extends View {
   pageThree(t) {
     // The first look at this page asks: nothing is picked yet (skipping the
     // welcome leaves both on).
-    if (shared("workspace.panels") === undefined || shared("workspace.panels") === null) setShared("workspace.panels", []);
+    // The list it makes already offers Sessions: the tab bar adds it to no one's choice.
+    if (shared("workspace.panels") === undefined || shared("workspace.panels") === null) {
+      setShared("workspace.panels", []);
+      setShared("workspace.panels.added", ["sessions"]);
+    }
     return v_flex()
       .gap(14)
       .child(this.title(t, "Choose your panels", "HyperOx comes with a couple of panels. Turn one on and it appears beside your terminals. Drag this window aside to see it. Later, the buttons in the tab bar open and close them."))

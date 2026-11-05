@@ -1,6 +1,7 @@
 // Asks before something destructive, e.g. "Close space?". Opened as a
 // dialog with props { title, detail, command: { name, args } }.
-// Enter confirms (runs the command), Esc cancels.
+// Enter confirms (runs the command), Esc cancels. `buttons`: [{ label,
+// command, primary? }] in place of Confirm; Enter runs the primary one.
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -12,22 +13,27 @@ export default class Confirm extends View {
     this.handle.focus();
   }
 
-  yes() {
-    const p = props();
-    closeOverlay(p.overlay);
-    run(p.command.name, p.command.args ?? {});
+  choices() {
+    const p = props() ?? {};
+    return p.buttons ?? [{ id: "yes", label: "Confirm", command: p.command, primary: true }];
+  }
+
+  choose(b) {
+    closeOverlay(props().overlay);
+    run(b.command.name, b.command.args ?? {});
   }
 
   render(cx) {
     const t = theme();
     const p = props() ?? {};
     const button = (id, label, bg, fg, onClick) =>
-      h_flex().id(id).h(32).px(14).items_center().rounded(8).border_1().border_color(id === "no" ? t.input : bg).bg(bg).text_color(fg).cursor_pointer().hover((s) => s.opacity(0.88)).on_click(onClick).child(label);
+      h_flex().id(id).h(32).px(14).items_center().rounded(8).border_1().border_color(bg === t.raised ? t.input : bg).bg(bg).text_color(fg).cursor_pointer().hover((s) => s.opacity(0.88)).on_click(onClick).child(label);
     return v_flex()
       .id("confirm")
       .track_focus(this.handle)
       .on_key_down((e, cx) => {
-        if (e.key === "enter") this.yes();
+        const primary = this.choices().find((b) => b.primary);
+        if (e.key === "enter" && primary) this.choose(primary);
         else if (e.key === "escape") closeOverlay(props().overlay);
         else return;
         cx.stop_propagation();
@@ -46,7 +52,7 @@ export default class Confirm extends View {
           .gap(8)
           .text_size(12)
           .child(button("no", "Cancel", t.raised, t.foreground, () => closeOverlay(props().overlay)))
-          .child(button("yes", "Confirm", t.solid, t.solid_foreground, () => this.yes())),
+          .children(this.choices().map((b, i) => button(b.id ?? `choice-${i}`, b.label, b.primary ? t.solid : t.raised, b.primary ? t.solid_foreground : t.foreground, () => this.choose(b)))),
       );
   }
 }

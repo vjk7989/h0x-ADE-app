@@ -172,8 +172,9 @@ through them, `layout.switch {name}` picks one; `shared("layout")` is the
 shown one's name. HyperOx ships `main` ("HyperOx": spaces by machine and the
 agents list on the left, `workspace-chrome`; tabs as pills with a + menu
 that starts a terminal or any installed agent, `new-menu`; panes as cards
-with a header; Files and Changes panels on the right, `files` and
-`changes`, opened from the tab bar and remembered per space (which ones:
+with a header; Files, Changes and Sessions panels on the right, `files`,
+`changes` and `sessions` (agent sessions in the space's folder; pinned,
+hidden and renamed in shared `"sessions"`), opened from the tab bar and remembered per space (which ones:
 shared `"workspace.panels"`, set by the welcome); a status bar,
 `workspace-status`), and as examples `terminals` ("Terminals": tabs in
 the title bar, panes as cards, a space picker) and `win98`
