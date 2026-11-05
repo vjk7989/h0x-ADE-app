@@ -30,10 +30,18 @@ function shown(root) {
 // A space's folder as the spaces list keys its count.
 const where = (s) => JSON.stringify([s.machine ?? null, s.folder]);
 
+// Stored maps (shared values people's files can hold anything in): only a
+// plain object counts, and only its own keys ("constructor" is a name too).
+const plain = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : null);
+const has = (o, k) => Boolean(plain(o)) && Object.prototype.hasOwnProperty.call(o, k);
+const own = (o, k) => (has(o, k) ? o[k] : undefined);
+// Sets an own key, "__proto__" included.
+const put = (o, k, v) => Object.defineProperty(o, k, { value: v, enumerable: true, writable: true, configurable: true });
+
 // One `h0x-core session <verb>`: its JSON, or { error: { kind, message } }.
 // An older core without `session` answers kind "usage".
 async function ask(on, verb, rest) {
-  const args = ["session", verb, "--json", ...(on ? ["--on", on] : []), ...(rest.length ? ["--", ...rest] : [])];
+  const args = ["session", verb, "--json", ...(on ? (on.startsWith("-") ? [`--on=${on}`] : ["--on", on]) : []), ...(rest.length ? ["--", ...rest] : [])];
   let r;
   try {
     r = await core(args);
@@ -57,6 +65,7 @@ async function ask(on, verb, rest) {
 
 // "now", "5m", "3h", "2d", "4mo", "1y".
 export function ago(ms, now) {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return "";
   const m = Math.floor(Math.max(0, now - ms) / 60000);
   if (m < 1) return "now";
   if (m < 60) return `${m}m`;
@@ -66,6 +75,9 @@ export function ago(ms, now) {
   if (d < 30) return `${d}d`;
   return d < 365 ? `${Math.floor(d / 30)}mo` : `${Math.floor(d / 365)}y`;
 }
+
+// Rows drawn before "Show N more".
+const LIMIT = 500;
 
 // Its words as a person would type them.
 const shell = (argv) => argv.map((w) => (w === "" || /[\s"'$`\\]/.test(w) ? JSON.stringify(w) : w)).join(" ");
@@ -77,6 +89,20 @@ function shape(node, leaf) {
   const children = (node?.children ?? []).map((c) => shape(c, leaf)).filter(Boolean);
   if (children.length < 2) return children[0] ?? null;
   return { split: node.type === "column" ? "down" : "right", children };
+}
+
+// A saved node as restore can use it, else null: bad parts are left out.
+function sound(node) {
+  if (!plain(node)) return null;
+  if (Array.isArray(node.children)) {
+    const children = node.children.map(sound).filter(Boolean);
+    if (children.length < 2) return children[0] ?? null;
+    return { split: node.split === "down" ? "down" : "right", children };
+  }
+  const cwd = typeof node.cwd === "string" ? node.cwd : null;
+  if (typeof node.agent !== "string" || !node.agent) return { cwd };
+  const argv = Array.isArray(node.argv) && node.argv.every((w) => typeof w === "string") ? node.argv : [];
+  return { agent: node.agent, session: typeof node.session === "string" ? node.session : null, argv, cwd };
 }
 
 const first = (node) => (node.children ? first(node.children[0]) : node);
@@ -193,17 +219,17 @@ export default class Sessions extends View {
 
   // Shown ones, pinned first, each with its HyperOx-side state as `mine`.
   rows() {
-    const marks = shared("sessions") ?? {};
-    const shown = this.list.map((x) => ({ ...x, mine: marks[x.mark] ?? {} })).filter((x) => !x.mine.hidden);
+    const marks = plain(shared("sessions"));
+    const shown = this.list.map((x) => ({ ...x, mine: plain(own(marks, x.mark)) ?? {} })).filter((x) => !x.mine.hidden);
     return [...shown.filter((x) => x.mine.pinned), ...shown.filter((x) => !x.mine.pinned)];
   }
 
   // Merges into (null: forgets) a session's HyperOx-side state.
   setMark(x, change) {
-    const all = { ...(shared("sessions") ?? {}) };
-    const next = change && { ...(all[x.mark] ?? {}), ...change };
+    const all = { ...plain(shared("sessions")) };
+    const next = change && { ...plain(own(all, x.mark)), ...change };
     for (const k of Object.keys(next ?? {})) if (!next[k]) delete next[k];
-    if (next && Object.keys(next).length) all[x.mark] = next;
+    if (next && Object.keys(next).length) put(all, x.mark, next);
     else delete all[x.mark];
     setShared("sessions", all);
   }
@@ -321,16 +347,17 @@ export default class Sessions extends View {
   // The shown space's saved layouts, by name.
   layouts() {
     const s = spaces().find((x) => x.active);
-    return (s && shared("sessions")?.[where(s)]?.layouts) ?? {};
+    return (s && plain(own(own(shared("sessions"), where(s)), "layouts"))) || {};
   }
 
   // Stores (null: forgets) one of a space's layouts.
   setLayout(key, name, layout) {
-    const all = { ...(shared("sessions") ?? {}) };
-    const layouts = { ...(all[key]?.layouts ?? {}) };
-    if (layout) layouts[name] = layout;
+    const all = { ...plain(shared("sessions")) };
+    const entry = plain(own(all, key));
+    const layouts = { ...plain(own(entry, "layouts")) };
+    if (layout) put(layouts, name, layout);
     else delete layouts[name];
-    if (Object.keys(layouts).length) all[key] = { ...all[key], layouts };
+    if (Object.keys(layouts).length) put(all, key, { ...entry, layouts });
     else delete all[key];
     setShared("sessions", all);
   }
@@ -349,7 +376,7 @@ export default class Sessions extends View {
   // A name taken here already is replaced only after asking.
   named(name, cx) {
     if (!name) return;
-    if (!this.layouts()[name]) return this.save(name, cx);
+    if (!has(this.layouts(), name)) return this.save(name, cx);
     this.pending = name;
     openOverlay({
       mod: "confirm",
@@ -390,8 +417,8 @@ export default class Sessions extends View {
   // Its tabs as new tabs in the shown space, each agent resumed in its session.
   restore(name, cx) {
     const s = spaces().find((x) => x.active);
-    const layout = this.layouts()[name];
-    if (!s || !layout || this.restoring) return;
+    const layout = own(this.layouts(), name);
+    if (!s || !plain(layout) || this.restoring) return;
     this.restoring = true;
     const on = s.machine ?? null;
     const started = new Set();
@@ -401,10 +428,16 @@ export default class Sessions extends View {
       return { ...(folder ? { folder } : {}), ...(argv ? { argv } : {}) };
     };
     cx.spawn(async (cx) => {
-      const done = await this.rebuild(s.id, layout.tabs ?? [], start, cx);
-      this.restoring = false;
-      if (!done) this.fail("Couldn't restore the layout", `“${name}” stopped before all its panes started.`);
-      cx.notify();
+      try {
+        const tabs = (Array.isArray(layout.tabs) ? layout.tabs : []).flatMap((t) => {
+          const root = sound(plain(t)?.root);
+          return root ? [{ name: typeof t.name === "string" ? t.name : "", root }] : [];
+        });
+        if (!(await this.rebuild(s.id, tabs, start, cx))) this.fail("Couldn't restore the layout", `“${name}” stopped before all its panes started.`);
+      } finally {
+        this.restoring = false;
+        cx.notify();
+      }
     });
   }
 
@@ -499,10 +532,11 @@ export default class Sessions extends View {
     if (s) this.setLayout(where(s), name, null);
   }
 
+  // Text size and color come from the list.
   row(x, i, t, now) {
     const p = this.program(x);
-    const title = this.title(x);
-    const icon = p?.icon ? (p.tint ? svg(p.icon).size(14).text_color(t.muted) : image(p.icon).size(14)) : div().size(14);
+    const title = x.mine.name || x.title || `${p?.name ?? x.agent} session`;
+    const icon = p?.icon ? (p.tint ? svg(p.icon).size(14).flex_none().text_color(t.muted) : image(p.icon).size(14).flex_none()) : div().size(14).flex_none();
     const name = this.renaming === x.mark
       ? div().flex_1().min_w(0)
           .on_key_down((e, cx) => {
@@ -513,15 +547,26 @@ export default class Sessions extends View {
           })
           .child(Input.new(this.input).h(24).px(6).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(12.5))
       : div().flex_1().min_w(0).truncate().child(title);
-    return h_flex().id(`session-${i}`).h(30).px(8).gap(8).flex_none().items_center().rounded(7).text_size(12.8).text_color(t.foreground)
-      .hover((s) => s.bg(t.hover))
-      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.menu(x); })
-      .child(div().flex_none().child(icon))
-      .child(name)
-      .when(Boolean(x.mine.pinned), (el) => el.child(svg("mods/workspace-chrome/pin.svg").size(12).flex_none().text_color(t.dim)))
-      .child(div().flex_none().text_size(11).text_color(t.dim).child(ago(x.last_used, now)))
-      .child(div().id(`session-more-${i}`).flex_none().px(4).rounded(4).text_color(t.dim).hover((s) => s.bg(t.raised).text_color(t.foreground))
-        .on_click((_e, cx) => { cx.stop_propagation(); this.menu(x); }).child("⋯"));
+    const menu = (_e, cx) => { cx.stop_propagation(); this.menu(x); };
+    let el = h_flex().id(`session-${i}`).h(30).px(8).gap(8).items_center().rounded(7).hover(this.hovers.row).on_mouse_down("right", menu).child(icon).child(name);
+    if (x.mine.pinned) el = el.child(svg("mods/workspace-chrome/pin.svg").size(12).flex_none().text_color(t.dim));
+    return el.child(div().flex_none().text_size(11).text_color(t.dim).child(ago(x.last_used, now)))
+      .child(div().id(`session-more-${i}`).flex_none().px(4).rounded(4).text_color(t.dim).hover(this.hovers.more).on_click(menu).child("⋯"));
+  }
+
+  // Pinned rows and the newest `limit` others (a frame has a time budget);
+  // "Show N more" raises it.
+  listView(rows, t) {
+    const now = Date.now();
+    this.hovers = { row: (s) => s.bg(t.hover), more: (s) => s.bg(t.raised).text_color(t.foreground) };
+    const limit = this.limit ?? LIMIT;
+    let others = 0;
+    const shown = rows.filter((x) => x.mine.pinned || others++ < limit);
+    const left = rows.length - shown.length;
+    return v_flex().gap(1).text_size(12.8).text_color(t.foreground)
+      .children(shown.map((x, i) => this.row(x, i, t, now)))
+      .when(left > 0, (el) => el.child(h_flex().id("sessions-show-more").h(28).px(8).items_center().rounded(7).text_size(12).text_color(t.muted)
+        .hover(this.hovers.row).on_click((_e, cx) => { this.limit = limit + LIMIT; cx.notify(); }).child(`Show ${left} more`)));
   }
 
   render() {
@@ -529,8 +574,8 @@ export default class Sessions extends View {
     const rows = this.rows();
     // The spaces list's count, written only when it changes.
     if (this.state === "ready" && this.key) {
-      const counts = shared("sessions.count") ?? {};
-      if (counts[this.key] !== rows.length) setShared("sessions.count", { ...counts, [this.key]: rows.length });
+      const counts = plain(shared("sessions.count"));
+      if (own(counts, this.key) !== rows.length) setShared("sessions.count", put({ ...counts }, this.key, rows.length));
     }
     const note = (text) => div().px(12).py(10).text_size(12.5).text_color(t.dim).child(text);
     const body =
@@ -538,7 +583,7 @@ export default class Sessions extends View {
       : this.state === "error" ? note(this.error || "Couldn't list sessions")
       : this.state === "loading" ? note("Loading…")
       : !rows.length ? note("No agent sessions in this folder yet")
-      : v_flex().gap(1).children(rows.map((x, i) => this.row(x, i, t, Date.now())));
+      : this.listView(rows, t);
     return v_flex().id("sessions").size_full().min_h(0).bg(t.chrome)
       .child(h_flex().h(34).flex_none().px(12).items_center().text_size(11.5).text_color(t.dim).child(div().flex_1().child("Sessions"))
         .when(this.state === "ready" && rows.length > 0, (el) => el.child(String(rows.length))))
