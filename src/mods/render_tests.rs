@@ -2316,7 +2316,9 @@ fn sessions_panel_renders_five_hundred_sessions(cx: &mut TestAppContext) {
         .collect();
     let host = sessions_host(&[("list", core_ok(json!({ "sessions": sessions })))], &[]);
     let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "");
-    assert!(tree.contains("session-more-499") && tree.contains("Session number 499") && tree.contains("text \"500\""), "every row and the count");
+    // ADR-056 addendum: a frame draws the newest 100 rows, then "Show N more".
+    assert!(tree.contains("session-more-99") && tree.contains("Session number 99") && !tree.contains("session-more-100") && !tree.contains("Session number 100"), "the newest 100");
+    assert!(tree.contains("Show 400 more") && tree.contains("text \"500\""), "the rest stays reachable, and the count is all of them");
     let h = host.borrow();
     assert_eq!(h.cores.len(), 1, "one list for all of them: {:?}", h.cores);
     assert_eq!(h.shared["sessions.count"], json!({ json!([null, "/fixture/project"]).to_string(): 500 }));
@@ -2544,15 +2546,16 @@ fn sessions_panel_beyond_its_row_limit_offers_the_rest_and_keeps_pins(cx: &mut T
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let now = now_ms();
-    let sessions: Vec<Value> = (0..503u64)
+    // ADR-056 addendum: pinned rows plus the newest 100.
+    let sessions: Vec<Value> = (0..103u64)
         .map(|i| json!({"agent":"claude", "id":format!("s{i}"), "title":format!("Row {i} end"), "last_used":now - i * MINUTE, "path":"/p/s.jsonl"}))
         .collect();
-    let pinned = json!({ json!([null, "/fixture/project", "claude", "s502"]).to_string(): {"pinned":true} });
+    let pinned = json!({ json!([null, "/fixture/project", "claude", "s102"]).to_string(): {"pinned":true} });
     let host = sessions_host(&[("list", core_ok(json!({ "sessions": sessions })))], &[("sessions", pinned)]);
     let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "");
-    assert!(tree.contains("Row 502 end") && tree.contains("Row 499 end") && !tree.contains("Row 500 end") && !tree.contains("Row 501 end"), "the pin, then the newest 500");
+    assert!(tree.contains("Row 102 end") && tree.contains("Row 99 end") && !tree.contains("Row 100 end") && !tree.contains("Row 101 end"), "the pin, then the newest 100");
     assert!(tree.contains("Show 2 more"), "the rest stays reachable");
-    assert_eq!(host.borrow().shared["sessions.count"], json!({ json!([null, "/fixture/project"]).to_string(): 503 }), "the count is every shown session");
+    assert_eq!(host.borrow().shared["sessions.count"], json!({ json!([null, "/fixture/project"]).to_string(): 103 }), "the count is every shown session");
 }
 
 #[gpui::test]
@@ -2597,6 +2600,24 @@ fn sessions_save_layout_over_non_object_stored_values_keeps_no_junk(cx: &mut Tes
         expected[&key] = json!({"layouts":{"Work":saved_layout("/fixture/project")}});
         assert_eq!(host.borrow().shared["sessions"], expected, "{stored}");
     }
+}
+
+// ADR-056: a stored map whose keys are named like Object.prototype members reaches a mod as own keys.
+#[gpui::test]
+fn sessions_layouts_named_like_prototype_members_round_trip(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let key = json!([null, "/fixture/project"]).to_string();
+    let layout = json!({"tabs":[{"name":"", "root":{"cwd":"/fixture/project"}}]});
+    let stored = json!({ key.clone(): {"layouts":{"constructor":layout, "toString":layout, "__proto__":layout}} });
+    let host = sessions_host(&[("list", session_list())], &[("sessions", stored.clone())]);
+    let setup = "this.forget('toString'); this.restore('__proto__', cx);";
+    let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, setup);
+    assert!(tree.contains("constructor") && tree.contains("__proto__") && !tree.contains("toString") && tree.contains("layout-1"), "{tree}");
+    let mut expected = stored;
+    expected[&key]["layouts"].as_object_mut().unwrap().remove("toString");
+    assert_eq!(host.borrow().shared["sessions"], expected);
+    assert_eq!(runs(&host), vec![json!(["tab.new", {"space":"s1", "folder":"/fixture/project"}])]);
 }
 
 #[gpui::test]

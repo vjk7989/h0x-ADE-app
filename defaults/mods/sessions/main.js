@@ -77,7 +77,7 @@ export function ago(ms, now) {
 }
 
 // Rows drawn before "Show N more".
-const LIMIT = 500;
+const LIMIT = 100;
 
 // Its words as a person would type them.
 const shell = (argv) => argv.map((w) => (w === "" || /[\s"'$`\\]/.test(w) ? JSON.stringify(w) : w)).join(" ");
