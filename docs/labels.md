@@ -60,6 +60,13 @@ client's usual order.
 In the desktop app, mods pin with `terminal.pin {terminal, pinned}` and
 read `pinned` from `agents()`; they never write the label themselves.
 
+## `h0x.agent=<key>`: the agent a terminal was started for
+
+Set once when a client starts a terminal for a known agent: its key in
+the programs table (`claude`, `codex`, ...), read from the command as
+asked for, not from the shell it runs in. Plain shells and other
+programs get no label.
+
 ## Adding more
 
 Labels suit small values that change at human speed. Use the `h0x.`

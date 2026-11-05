@@ -183,6 +183,15 @@ pub fn of(app: Option<&str>, argv: &[String]) -> Value {
     TABLE.with(|t| resolve(&t.borrow(), app, argv))
 }
 
+/// The agent `argv` starts (its key; an entry people can start), else none.
+pub fn agent(argv: &[String]) -> Option<String> {
+    TABLE.with(|t| {
+        let t = t.borrow();
+        let key = resolve(&t, None, argv)["key"].as_str()?.to_owned();
+        t.programs.get(&key).filter(|e| !e.run.is_empty()).map(|_| key)
+    })
+}
+
 /// How the app calls an agent ("Kiro finished"), from its 7501 `app`: the
 /// name `of` shows for it (the person's `programs.json` included), else the `app`.
 pub fn name(app: &str) -> String {
