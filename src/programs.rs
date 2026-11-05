@@ -415,7 +415,7 @@ mod tests {
     fn powershell_words_survive_quotes() {
         let words: Vec<String> = ["pi", "it's \u{2019}fine\u{2019}", "", "a  b"].map(String::from).to_vec();
         let line = powershell_line(&words);
-        assert_eq!(line, format!("{PS_START}'pi'; $a = @('\"it''s \u{2019}\u{2019}fine\u{2019}\u{2019}\"', '\"\"', '\"a  b\"'){PS_END}"));
+        assert_eq!(line, format!("{PS_START}'pi'; $a = @('\"it''s \u{2019}\u{2019}fine\u{2019}\u{2019}\"', '\"\"', '\"a  b\"'{PS_END}"));
         assert_eq!(powershell_words(&line), Some(words));
         assert_eq!(powershell_line(&["pi".into()]), format!("{PS_START}'pi'; $a = @({PS_END}"));
         assert_eq!(powershell_words(&powershell_line(&["pi".into()])), Some(vec!["pi".to_owned()]));
@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn powershell_line_quotes_arguments_for_the_windows_command_line() {
         // An inner `"` is `""` inside quotes: Windows PowerShell passes it unchanged.
-        assert_eq!(powershell_line(&["claude".into(), TASKS[0].into()]), format!("{PS_START}'claude'; $a = @('\"a \"\"- [ ] \"\" b\"'){PS_END}"));
+        assert_eq!(powershell_line(&["claude".into(), TASKS[0].into()]), format!("{PS_START}'claude'; $a = @('\"a \"\"- [ ] \"\" b\"'{PS_END}"));
         for (arg, quoted) in [
             ("plain", "plain"),
             ("", "\"\""),
