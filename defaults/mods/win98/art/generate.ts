@@ -114,7 +114,7 @@ for(const [name,rows]of Object.entries(controls)){const p=new Pix(rows[0].length
 function cmd(args:string[]){const s=spawnSync('magick',args,{stdio:'inherit'});if(s.status)throw Error('magick failed');}
 const regular=fileURLToPath(new URL('../fonts/PixelatedMSSansSerif-Regular.ttf',import.meta.url)),bold=fileURLToPath(new URL('../fonts/PixelatedMSSansSerif-Bold.ttf',import.meta.url));
 // Pixel lettering is rendered before rotation so the banner remains sharp.
-cmd(['-size','110x21','xc:none','+antialias','-font',bold,'-pointsize','16','-fill','white','-annotate','+2+17','HyperOx','-font',regular,'-fill','#dfdfdf','-annotate','+53+17','98','-rotate','-90',`${base}/img/banner.png`]);
+cmd(['-size','110x21','xc:none','+antialias','-font',bold,'-pointsize','16','-fill','white','-annotate','+2+17','HyperOx','-font',regular,'-fill','#dfdfdf','-annotate','+76+17','98','-rotate','-90',`${base}/img/banner.png`]);
 cmd([`${base}/img/banner.png`,'-filter','point','-resize','200%',`${base}/img/banner@2x.png`]);
 const largeLogo=new Pix(48,32);largeLogo.ascii(mark32,16,0);for(const[x,y,c]of [[0,9,'R'],[6,6,'R'],[12,3,'G'],[3,17,'b'],[9,14,'b'],[14,11,'G'],[0,25,'b'],[7,23,'Y'],[13,21,'Y']]as const)largeLogo.rect(x,y,4,4,c);writeFileSync(`${art}/logo.svg`,largeLogo.svg());
 cmd(['-size','356x80','gradient:white-#a4d2ee','(','-background','none',`${art}/logo.svg`,'-filter','point','-resize','96x64',')','-geometry','+12+8','-composite','+antialias','-font',bold,'-pointsize','32','-fill','black','-annotate','+117+51','HyperOx','-font',regular,'-pointsize','32','-annotate','+258+51','98',`${base}/img/about.png`]);
