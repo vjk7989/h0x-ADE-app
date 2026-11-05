@@ -6,7 +6,7 @@ mod commands;
 mod control;
 mod core_bin;
 mod files;
-mod hc;
+mod core_link;
 mod keys;
 mod layout;
 mod layout_sync;
@@ -120,13 +120,13 @@ fn main() {
     // The core people installed; without one, the setup screen installs it.
     let person = settings::load_person();
     let configured = person.as_ref().ok().and_then(|p| p.core.clone());
-    let core: Result<std::sync::Arc<hc::Core>, setup::Need> = match core_bin::find(configured.as_deref()) {
+    let core: Result<std::sync::Arc<core_link::Core>, setup::Need> = match core_bin::find(configured.as_deref()) {
         None => Err(setup::Need::Install),
         Some(bin) => {
             core_bin::use_core(bin);
-            match hc::Core::connect() {
+            match core_link::Core::connect() {
                 // One that can't serve this app gets the screen that fixes it.
-                Ok(core) => hc::check(&core.hello).map(|()| core).map_err(setup::Need::Fix),
+                Ok(core) => core_link::check(&core.hello).map(|()| core).map_err(setup::Need::Fix),
                 Err(e) => {
                     eprintln!("h0x-ade: {e:#}");
                     Err(setup::Need::Install)
@@ -194,7 +194,7 @@ fn main() {
 }
 
 /// The main window, on a connected core.
-pub fn open_main(core: std::sync::Arc<hc::Core>, requests: async_channel::Receiver<mods::Request>, cx: &mut App) {
+pub fn open_main(core: std::sync::Arc<core_link::Core>, requests: async_channel::Receiver<mods::Request>, cx: &mut App) {
             let (window_bounds, display_id) = place::initial(cx);
             let options = WindowOptions {
                 window_bounds: Some(window_bounds),
