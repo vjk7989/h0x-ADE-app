@@ -2348,10 +2348,11 @@ impl AppWindow {
     /// Starts a terminal for `space`, on `on` (another machine) or here. An
     /// empty `cwd`: the machine's home. With no argv, that machine's core
     /// picks its own shell.
-    fn spawn(&mut self, argv: Option<Vec<String>>, cwd: String, follow: bool, space: &str, ctx: &str, on: Option<&str>, size: Option<(u16, u16)>, window: &Window) -> Result<(String, String), String> {
+    /// `program`: the argv as asked for, before `agent_argv` wraps it in a shell.
+    fn spawn(&mut self, argv: Option<Vec<String>>, program: &[String], cwd: String, follow: bool, space: &str, ctx: &str, on: Option<&str>, size: Option<(u16, u16)>, window: &Window) -> Result<(String, String), String> {
         let argv = argv.unwrap_or_default();
         self.require_document(on)?;
-        let labels = json!({ "h0x.space": crate::mirror::local(space, on), "h0x.tab": crate::mirror::local(ctx, on), "h0x.seen": "0" });
+        let labels = spawn_labels(space, ctx, on, program);
         let (addr, cwd) = run_following_folder(cwd, follow, on, |cwd| match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on, size, crate::terminal::initial_display(window)) {
             // An agent on a machine without `sh` (Windows): in its PowerShell instead.
             Err(e) if on.is_some() && argv.first().map(String::as_str) == Some("sh") && format!("{e:#}").contains("not found") => {
@@ -2406,7 +2407,8 @@ impl AppWindow {
         let folder = folder.or_else(here).unwrap_or_else(|| if on.is_some() { String::new() } else { home() });
         let (space, ctx, pane) = (self.model.fresh_id_on("sp", on), self.model.fresh_id_on("tb", on), self.model.fresh_id_on("p", on));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
-        let (addr, folder) = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), folder, follow, &space, &ctx, on, size, window)?;
+        let program = argv.clone().unwrap_or_default();
+        let (addr, folder) = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), &program, folder, follow, &space, &ctx, on, size, window)?;
         let ctx_name = ctx_name.map(str::trim).unwrap_or_default();
         self.model.add_space(&space, name.trim(), &folder, Tab::new(&ctx, ctx_name, &pane, &addr));
         if let Some(p) = self.model.space_mut(&space) {
@@ -2426,7 +2428,8 @@ impl AppWindow {
         let on = self.machine_of(&space);
         let (ctx, pane) = (self.model.fresh_id_on("tb", on.as_deref()), self.model.fresh_id_on("p", on.as_deref()));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
-        let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, follow, &space, &ctx, on.as_deref(), size, window)?;
+        let program = argv.clone().unwrap_or_default();
+        let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), &program, folder, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.model.add_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr));
         self.model.active = Some(space.clone());
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
@@ -2463,7 +2466,8 @@ impl AppWindow {
         root.split(&target, axis, Node::block(new.clone(), Content::Terminal { terminal: String::new() }), "initial-size".into());
         let size = self.model.active_tab().filter(|tab| tab.id == ctx)
             .and_then(|_| self.initial_size(&root, &new, window));
-        let (addr, _) = self.spawn(argv, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
+        let program = argv.clone().unwrap_or_default();
+        let (addr, _) = self.spawn(argv, &program, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.model.split(&target, axis, &new, &addr);
         Ok(json!({ "pane": new, "terminal": addr }))
     }
@@ -4721,6 +4725,15 @@ fn adoptable(record: &Value, space: &str, tab: Option<&str>, machine: Option<&st
         && labeled_tab == tab.map(|t| crate::mirror::local(t, machine))
 }
 
+/// A new terminal's labels (docs/labels.md): `h0x.agent` when `program` starts a known agent.
+fn spawn_labels(space: &str, tab: &str, on: Option<&str>, program: &[String]) -> Value {
+    let mut labels = json!({ "h0x.space": crate::mirror::local(space, on), "h0x.tab": crate::mirror::local(tab, on), "h0x.seen": "0" });
+    if let Some(agent) = crate::programs::agent(program) {
+        labels["h0x.agent"] = agent.into();
+    }
+    labels
+}
+
 fn program_of(report: &Value, argv: Option<&Value>) -> Value {
     let app = report.get("app").and_then(Value::as_str);
     let argv: Vec<String> = argv.and_then(Value::as_array).into_iter().flatten().filter_map(|a| a.as_str().map(str::to_owned)).collect();
@@ -5145,6 +5158,33 @@ mod tests {
                 assert_eq!(run[2], expected);
             }
         }
+    }
+
+    #[test]
+    fn spawn_labels_name_the_agent_a_terminal_starts() {
+        use serde_json::json;
+        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let agent = |program: &[String]| super::spawn_labels("sp1", "tb1", None, program).get("h0x.agent").cloned();
+        assert_eq!(agent(&argv(&["claude", "fix it"])), Some(json!("claude")));
+        assert_eq!(agent(&argv(&["cursor-agent"])), Some(json!("cursor")));
+        assert_eq!(agent(&argv(&[r"C:\Tools\codex.exe"])), Some(json!("codex")));
+        // Shells, other programs and no argv (the core's own shell): no label.
+        assert_eq!(agent(&argv(&["/bin/zsh"])), None);
+        assert_eq!(agent(&argv(&["pwsh.exe"])), None);
+        assert_eq!(agent(&argv(&["nvim", "x.rs"])), None);
+        assert_eq!(agent(&[]), None);
+        assert_eq!(agent(&argv(&[""])), None);
+        // The shell an agent starts in still names the agent.
+        let cmd = argv(&["codex", "a task"]);
+        let pwsh = argv(&["pwsh.exe", "-NoExit", "-Command", &crate::programs::powershell_line(&cmd)]);
+        assert_eq!(agent(&pwsh), Some(json!("codex")));
+        assert_eq!(agent(&super::unix_agent_argv("/bin/zsh".into(), cmd.clone(), false)), Some(json!("codex")));
+        assert_eq!(agent(&crate::remote_shell::launch(cmd.clone())), Some(json!("codex")));
+        // A shell running a plain command is not an agent.
+        assert_eq!(agent(&super::unix_agent_argv("/bin/bash".into(), argv(&["ls"]), false)), None);
+        // The other labels stay as before, local to the machine.
+        let labels = super::spawn_labels("mac/sp1", "mac/tb1", Some("mac"), &argv(&["/bin/zsh"]));
+        assert_eq!(labels, json!({ "h0x.space": "sp1", "h0x.tab": "tb1", "h0x.seen": "0" }));
     }
 
     #[test]
