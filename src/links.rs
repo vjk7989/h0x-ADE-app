@@ -641,4 +641,46 @@ mod tests {
         assert_eq!(opener_args(&Target::File(PathBuf::from("C:/x/y.exe"))), Some(vec![r#"/select,"C:\x\y.exe""#.to_owned()]));
         assert_eq!(opener_args(&Target::File(PathBuf::from("C:/My Files/a b.txt"))), Some(vec![r#"/select,"C:\My Files\a b.txt""#.to_owned()]));
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_checked_web_and_mail_links_reach_the_windows_shell_handler() {
+        for url in ["https://a.com/?a=1&b=2", "HTTP://A.COM", "mailto:a@b.c"] {
+            assert!(matches!(opener(&Target::Url(url.into())), Some(Opener::Shell(u)) if u == url), "{url}");
+        }
+        for url in [
+            "",
+            "file:///C:/Windows/System32/calc.exe",
+            "FILE://server/share/a.exe",
+            r"C:\Windows\System32\calc.exe",
+            "C:/x/y.exe",
+            r"\\server\share\a.bat",
+            r"\\?\C:\x.exe",
+            r"\\.\PIPE\x",
+            r"\??\C:\x.exe",
+            "ms-settings:",
+            "https://x/,C:/a.cmd",
+            "https://a.com/\u{202E}gpj.exe",
+        ] {
+            assert!(opener(&Target::Url(url.into())).is_none(), "{url:?}");
+        }
+        // A file, even one named like a link, is only shown selected by explorer.
+        for (path, select) in [
+            (r"C:\x\y.exe", r#"/select,"C:\x\y.exe""#),
+            ("C:/x/https:/a.com", r#"/select,"C:\x\https:\a.com""#),
+            (r"C:\x\mailto:a@b.c", r#"/select,"C:\x\mailto:a@b.c""#),
+        ] {
+            match opener(&Target::File(PathBuf::from(path))) {
+                Some(Opener::Command(c)) => {
+                    assert_eq!(c.get_program(), std::ffi::OsStr::new("explorer.exe"), "{path}");
+                    let args: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+                    assert_eq!(args, [select.to_owned()], "{path}");
+                }
+                _ => panic!("{path}: not shown in its folder"),
+            }
+        }
+        for path in [r"\\server\share\a.bat", r"\\?\C:\x.exe", r"\\.\C:\x", r"\\.\COM1", r"\??\C:\x", r"\\?\GLOBALROOT\Device\x"] {
+            assert!(opener(&Target::File(PathBuf::from(path))).is_none(), "{path}");
+        }
+    }
 }
