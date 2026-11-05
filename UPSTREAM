@@ -1,0 +1,17 @@
+repo: herdrdev/herdr-app (https://github.com/herdrdev/herdr-app)
+base: 9059879 (draw plain quads with a small shader on windows, #424)
+synced-to: e77f112
+date: 2026-11-05
+
+Ported or adapted (commit subjects start with "upstream: <hash>"):
+ef0445a 045bfce 05c0530 467bc3a 5a6cd23 59936ac 7235b1e a3d96ba f524898
+836f424 5b37363 2fb4ea4 fa5f3d9 66d755a 933b671 b9ec933 c281f52 71ddd21
+0581652 d5edc01 86bee56 a58ad8b 5cce632 df2d998 9532072 e4906d2 1926540
+e77f112 ab360f6 0b7e1f2 a8c25ce b501b3b f92d0f1
+
+Skipped:
+b8d4db8 upstream's regenerated third-party notices; ours follow our own procedure (Cargo.lock unchanged by this sync)
+9a6e031 macOS independent core bundle; we ship no macOS core bundle (ADR-034)
+fe29715 macOS core bundle lookup; needs 9a6e031
+816d205 macOS core bundle install beside the resolved core; needs 9a6e031
+93b097f upstream release 0.1.13 (version, changelog, lockfile); we version ourselves
