@@ -509,7 +509,12 @@ pub fn system(name: &str) -> PathBuf {
 
 pub(crate) fn sha256(bytes: &[u8]) -> String {
     use sha2::Digest;
-    sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write;
+    let mut hex = String::with_capacity(64);
+    for b in sha2::Sha256::digest(bytes) {
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
 }
 
 /// A release file's text, refused unless it is signed (see `signed`).
