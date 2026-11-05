@@ -384,7 +384,11 @@ export default class Spaces extends View {
     const color = colors[w.id] ?? "ansi6";
     const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
     // Its folder's agent sessions, as the sessions panel last counted them.
-    const sessions = (shared("sessions.count") ?? {})[JSON.stringify([w.machine ?? null, w.folder])] ?? 0;
+    // Only a number it wrote counts (the store is a file people can edit).
+    const counts = shared("sessions.count");
+    const at = JSON.stringify([w.machine ?? null, w.folder]);
+    const n = counts && typeof counts === "object" && Object.prototype.hasOwnProperty.call(counts, at) ? counts[at] : 0;
+    const sessions = typeof n === "number" && Number.isFinite(n) ? n : 0;
     return v_flex()
       .relative()
       .id(`space-${w.id}`)

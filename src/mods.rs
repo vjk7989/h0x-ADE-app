@@ -664,6 +664,8 @@ pub struct Snapshot {
     /// Every pane: { pane, terminal, tab, title, cwd, branch, status, app, focused, zoomed }.
     pub panes: Value,
     pub terminals: Value,
+    /// The shown space's tabs as arranged: { id, tabs: [{ id, name, root }] }.
+    pub tree: Value,
     pub focused: Value,
     /// Floating blocks by id: { edge, align, vertical }.
     pub floats: Value,
@@ -674,7 +676,7 @@ pub struct Snapshot {
 impl Default for Snapshot {
     /// Lists start empty, never null, so mods can map over them right away.
     fn default() -> Self {
-        Snapshot { layout: Value::Null, spaces: json!([]), machines: json!([]), agents: json!([]), panes: json!([]), terminals: json!([]), focused: Value::Null, floats: json!({}), window: Value::Null }
+        Snapshot { layout: Value::Null, spaces: json!([]), machines: json!([]), agents: json!([]), panes: json!([]), terminals: json!([]), tree: Value::Null, focused: Value::Null, floats: json!({}), window: Value::Null }
     }
 }
 
@@ -705,6 +707,9 @@ pub fn publish_agents(v: Value) -> bool {
 }
 pub fn publish_panes(v: Value) -> bool {
     publish("panes", |s| (std::mem::replace(&mut s.panes, v.clone()), v))
+}
+pub fn publish_tree(v: Value) -> bool {
+    publish("tree", |s| (std::mem::replace(&mut s.tree, v.clone()), v))
 }
 pub fn publish_terminals(v: Value) -> bool {
     publish("terminals", |s| (std::mem::replace(&mut s.terminals, v.clone()), v))
@@ -1132,6 +1137,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             Ok(HostValue::Null)
         })
         .function("terminals", reader(reads.clone(), "terminals", |s| &s.terminals))
+        .function("tree", reader(reads.clone(), "tree", |s| &s.tree))
         .function("focused", reader(reads.clone(), "focused", |s| &s.focused))
         .function("layout", reader(reads.clone(), "layout", |s| &s.layout))
         .function("layouts", |_| Ok(to_host(&json!(crate::window::layout_names()))))
