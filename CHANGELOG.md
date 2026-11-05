@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-05
+
+### New
+
+- Sessions panel: browse past Claude Code, Codex and OpenCode sessions for each space. The ⋯ menu offers Resume, Resume in new tab, Pin, Rename, Copy resume command, Show file and Delete (Remove from HyperOx, or move to the Recycle Bin/Trash). Spaces show a count badge.
+- Save a layout and restore it together with its agents; "Resume all agents" brings them back after a reboot.
+- Rotating HyperOx busy words while an agent works.
+- Windows 98 theme: HyperOx wording, logo and banner.
+
+### Fixed
+
+- Tasks with quotes or several lines reach the agent intact on Windows.
+- Requires h0x-core 0.1.5.
+
 ## [0.1.5] - 2026-11-05
 
 ### New
