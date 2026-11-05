@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -100,6 +101,12 @@ impl Launch {
 static LAUNCH: Mutex<Option<Launch>> = Mutex::new(None);
 static FETCHED: Mutex<Option<Vec<Note>>> = Mutex::new(None);
 static MEDIA: LazyLock<Mutex<MediaCache>> = LazyLock::new(|| Mutex::new(MediaCache::default()));
+/// Moves whenever `notes` may change (launch range, fetched notes, a downloaded media file).
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::Relaxed)
+}
 
 fn path(name: &str) -> std::path::PathBuf {
     crate::mods::app_dir().join(name)
@@ -124,6 +131,7 @@ pub fn started(first_install: bool) {
     let state = Launch::new(record, env!("CARGO_PKG_VERSION"), first_install);
     save(&state.record);
     *launch = Some(state);
+    GENERATION.fetch_add(1, Ordering::Relaxed);
     std::thread::spawn(|| fetch_media(&all()));
 }
 
@@ -131,6 +139,7 @@ pub fn cache(text: &str) {
     let notes = parse(text);
     if notes.is_empty() { return; }
     *FETCHED.lock().unwrap() = Some(notes.clone());
+    GENERATION.fetch_add(1, Ordering::Relaxed);
     std::thread::spawn(move || fetch_media(&notes));
     if let Err(e) = std::fs::write(path("update-notes-cache.md"), text) {
         tracing::warn!("update notes cache: {e}");
@@ -191,6 +200,7 @@ fn fetch_media(notes: &[Note]) {
             && std::fs::rename(&temp, &file).is_ok()
         {
             MEDIA.lock().unwrap().0.remove(&file);
+            GENERATION.fetch_add(1, Ordering::Relaxed);
         }
         let _ = std::fs::remove_file(temp);
     }
