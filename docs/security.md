@@ -33,8 +33,11 @@ Installed releases check GitHub Releases, download an update, and check its SHA-
 The app switches to the downloaded version on quit. Source builds do not update themselves.
 Core updates are handled separately by the core's updater.
 
-A checksum from the same service detects a damaged download; it is not an independent signature on the manifest.
-The app does not verify a separate cryptographic signature on update manifests.
+Every release file the app reads (the manifest, the update, its notes, the core installer) has a minisign signature beside it (`<file>.minisig`).
+The app checks it against the release public key built into it (key id `29957E064EAB76C4`) and refuses a file whose signature is missing, unreadable or by another key.
+The signature must also name the file it was made for (`file:<name>` in its trusted comment), so one signed file cannot be served in place of another.
+Downloads go over HTTPS only, to GitHub's release hosts (`github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`); a redirect anywhere else is refused.
+An older signed manifest can still be served in place of the newest one; the app then sees no newer version, it never installs an older one.
 
 The release pipeline supports Apple Developer ID signing on macOS and Azure artifact signing on Windows when their credentials are configured.
 Without them, packages can be unsigned or ad hoc signed.

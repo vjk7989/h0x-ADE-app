@@ -173,7 +173,8 @@ fn signed(url: &str, bytes: &[u8]) -> Result<(), String> {
     }
     // A signature that does not download is refused below as missing.
     let sig = fetch(&format!("{url}.minisig")).ok();
-    verify(bytes, sig.as_deref(), PUBLIC_KEY).map_err(|why| format!("{url}: not signed by the HyperOx release key: {why}"))
+    let name = url.rsplit('/').next().unwrap_or(url);
+    verify(bytes, sig.as_deref(), PUBLIC_KEY, name).map_err(|why| format!("{url}: not signed by the HyperOx release key: {why}"))
 }
 
 /// `url` is on one of the overridden releases sites.
@@ -181,15 +182,23 @@ fn under_override(url: &str, overrides: [Option<String>; 2]) -> bool {
     overrides.into_iter().flatten().any(|base| url.starts_with(&format!("{base}/")))
 }
 
-/// Checks `bytes` against the minisign signature `sig` by `key` (prehashed signatures only).
-fn verify(bytes: &[u8], sig: Option<&[u8]>, key: &str) -> Result<(), String> {
+/// Checks `bytes` against the minisign signature `sig` by `key` (prehashed signatures only),
+/// made for the release file `name` (its trusted comment's `file:`, so one signed file
+/// cannot stand in for another).
+fn verify(bytes: &[u8], sig: Option<&[u8]>, key: &str, name: &str) -> Result<(), String> {
     let key = minisign_verify::PublicKey::from_base64(key).map_err(|e| e.to_string())?;
     let text = sig.ok_or("it has no signature")?;
     let signature = std::str::from_utf8(text)
         .map_err(|e| e.to_string())
         .and_then(|text| minisign_verify::Signature::decode(text).map_err(|e| e.to_string()))
         .map_err(|e| format!("its signature is unreadable: {e}"))?;
-    key.verify(bytes, &signature, false).map_err(|e| format!("its signature does not match: {e}"))
+    key.verify(bytes, &signature, false).map_err(|e| format!("its signature does not match: {e}"))?;
+    let file_field = format!("file:{name}");
+    if signature.trusted_comment().split('\t').any(|f| f == file_field) {
+        Ok(())
+    } else {
+        Err(format!("its signature is for another file, not {name}"))
+    }
 }
 
 fn releases() -> String {
@@ -845,13 +854,21 @@ mod tests {
 
     /// A throwaway test key pair (not the release key), its signature of
     /// `PAYLOAD`, and the same payload signed by a second throwaway key; made
-    /// with rsign2 (`generate -W`, `sign -W`).
-    const TEST_KEY: &str = "RWRwAuiTWRHKFc9nVniDNoa4b+UqLBXWC7QunJ05dZw+XkvYJ6aaoXoK";
+    /// with rsign2 (`generate -W`, `sign -W -t`), trusted comments the way
+    /// `minisign -S` writes them.
+    const TEST_KEY: &str = "RWSdBj3+m1kau24wxYnVraQxNX7fJSNwEU8cGRBq0f/kLy3T7o02KkXn";
     const PAYLOAD: &[u8] = b"h0x-core test release\n";
+    const NAME: &str = "h0x-ade-linux-x86_64.tar.gz";
     const SIG: &[u8] = b"untrusted comment: signature from rsign secret key
-RURwAuiTWRHKFeiB7A2s5PXfB39odODFiAf+77MxJqllRsihUgeswBruN+SLEaLI6zFdPAqRO+o0muW+5/ISjwzOHIVMxfYZUws=
-trusted comment: test
-FbefAmnfeDeGxboZTkIU3PcVBdecdQ85mQjQTOCf3nUiq0yiND8kte8+Ymv7UmzvNNb7BgVZLCS+McLnbN9oDg==
+RUSdBj3+m1kau6scpo4XTeSCqu0PwKULSaApRgvM+/R9RCh20ab58L4jXvM9uh70A7tsOeIF1jDHl4Ch7518nSr1zu2TDwzEaA4=
+trusted comment: timestamp:1\tfile:h0x-ade-linux-x86_64.tar.gz\thashed
+FcW0YJpp95DgHgZOwtuZhHgRcakK8Nl78hPlfsAKdi7XIDIQPKqgggzZRyHRdYw/r0kESrOGH0czLnUH9XJDAQ==
+";
+    /// The same payload and key, signed as `other.json`.
+    const OTHER_FILE_SIG: &[u8] = b"untrusted comment: signature from rsign secret key
+RUSdBj3+m1kau3QihUJUf+OsaCwPgkweY7RF8K/MIFS7iw+5ecagISnHW5/uLpyPa6fOEebWMehn+AD8NEwLp53f7iUv0zjXGw8=
+trusted comment: timestamp:1\tfile:other.json\thashed
+8lddDBJQHhcebqIZK4ImVgWxj59QJalPUfEcK8Us9XmBfDEf5Yse5HH2tXST2QsmgHBg8amXtME4togIKoREBA==
 ";
     const OTHER_KEY_SIG: &[u8] = b"untrusted comment: signature from rsign secret key
 RURaRIrUmDKGf+VfuMRCB6G+7YmOZuDtq2kGvfhr9JFuy2kWFMZ6J+L3UogLdr/J7fvVdNbKYfGvxVj6sSbZQmp4hSeTA28H6g8=
@@ -860,13 +877,23 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
 ";
 
     fn refused(bytes: &[u8], sig: Option<&[u8]>, key: &str, why: &str) {
-        let err = verify(bytes, sig, key).unwrap_err();
+        let err = verify(bytes, sig, key, NAME).unwrap_err();
         assert!(err.starts_with(why), "{why}: {err}");
     }
 
     #[test]
     fn a_file_signed_by_the_key_is_kept() {
-        assert_eq!(verify(PAYLOAD, Some(SIG), TEST_KEY), Ok(()));
+        assert_eq!(verify(PAYLOAD, Some(SIG), TEST_KEY, NAME), Ok(()));
+    }
+
+    #[test]
+    fn a_signature_made_for_another_file_is_refused() {
+        refused(PAYLOAD, Some(OTHER_FILE_SIG), TEST_KEY, "its signature is for another file, not h0x-ade-linux-x86_64.tar.gz");
+        // `file:` must name the release file whole, not just begin with its name.
+        assert_eq!(
+            verify(PAYLOAD, Some(SIG), TEST_KEY, "h0x-ade-linux-x86_64.tar"),
+            Err("its signature is for another file, not h0x-ade-linux-x86_64.tar".to_owned())
+        );
     }
 
     #[test]
