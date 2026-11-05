@@ -60,20 +60,27 @@ export default class Settings extends View {
       if (this.section === "machines") await this.loadMachines();
       cx.notify();
     });
-    // After "Check now": follow the look (the answer comes from the app), then
-    // "Up to date" for a moment.
-    cx.timer.every(300, (cx) => {
-      if (!this.asked) return;
-      if (updates().checking) this.asked = Date.now();
-      else if (Date.now() - this.asked >= 3000) this.asked = null;
-      cx.notify();
-    });
     cx.timer.every(3000, (cx) => {
       if (this.section !== "machines") return;
       cx.spawn(async (cx) => {
         await this.loadMachines();
         cx.notify();
       });
+    });
+  }
+
+  // After "Check now": follow the look (the answer comes from the app), then
+  // "Up to date" for a moment; the timer runs only until then.
+  follow(cx) {
+    this.following?.cancel();
+    this.following = cx.timer.every(300, (cx) => {
+      if (updates().checking) this.asked = Date.now();
+      else if (Date.now() - this.asked >= 3000) {
+        this.asked = null;
+        this.following.cancel();
+        this.following = null;
+      }
+      cx.notify();
     });
   }
 
@@ -740,6 +747,7 @@ export default class Settings extends View {
             ? div().px(12).py(5).text_size(13).text_color(t.ansi2).child("\u2713 Up to date")
             : this.button(t, id, "Check now", (_e, cx) => {
                 this.asked = Date.now();
+                this.follow(cx);
                 run("app.check_updates");
                 cx.notify();
               });

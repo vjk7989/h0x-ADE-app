@@ -83,7 +83,8 @@ export default class Agents extends View {
     this.pendingPins = JSON.parse(localStorage.getItem("pins") ?? "[]");
     if (!this.pendingPins.length) localStorage.removeItem("pins");
     this.migratingPins = new Set();
-    cx.timer.every(30000, (cx) => cx.notify());
+    // Relative times move only for agents that are shown.
+    cx.timer.every(30000, (cx) => { if (agents().length) cx.notify(); });
     // The busy verbs rotate while an agent works.
     cx.timer.every(1000, (cx) => { if (agents().some((a) => a.status === "working")) cx.notify(); });
   }

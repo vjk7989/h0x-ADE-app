@@ -76,9 +76,14 @@ export default class Spaces extends View {
 
   checkNew(cx) {
     const now = Date.now();
-    const sp = spaces();
+    const sp = spaces(), ps = panes();
+    // Nothing new since the last look (the same spaces, panes, machines and
+    // focus, every space shown) and no clock due: nothing to check.
+    const look = JSON.stringify([sp, ps, machines(), window().active]);
+    if (look === this.look && now < this.wake && sp.every((s) => this.shown.has(s.id)) && !this.orderingDue(now)) return;
+    this.look = look;
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
-    const due = this.due(now, sp, panes());
+    const due = this.due(now, sp, ps);
     if (due.size) this.refreshGit(due, cx);
     if (sp.some((s) => !this.shown.has(s.id)) || this.orderingDue(now)) cx.notify();
   }
@@ -108,9 +113,11 @@ export default class Spaces extends View {
       if (ready && this.ready[m.name] === false) for (const k of keys) if (JSON.parse(k)[0] === m.name) due.add(k);
       this.ready[m.name] = ready;
     }
+    this.wake = Infinity; // the next fallback
     if (window().active) {
       for (const k of keys) {
         const asks = this.git[k] || this.unsure.has(k);
+        if (asks) this.wake = Math.min(this.wake, (this.checked[k] ?? 0) + FALLBACK);
         if (asks && !this.folded.has(JSON.parse(k)[0]) && now - (this.checked[k] ?? 0) > FALLBACK) due.add(k);
       }
     }
@@ -125,7 +132,11 @@ export default class Spaces extends View {
 
   refreshMachines(cx) {
     cx.spawn(async cx => {
-      try { const r = await core(["machine", "ls", "--json"]); if (r.code === 0) this.machines = (JSON.parse(r.stdout).machines ?? []).filter((m) => !m.temporary); } catch {}
+      let list = this.machines;
+      try { const r = await core(["machine", "ls", "--json"]); if (r.code === 0) list = (JSON.parse(r.stdout).machines ?? []).filter((m) => !m.temporary); } catch {}
+      // Every 15 s: drawn again only when the list changed.
+      if (JSON.stringify(list) === JSON.stringify(this.machines)) return;
+      this.machines = list;
       cx.notify();
     });
   }
@@ -191,6 +202,7 @@ export default class Spaces extends View {
       const used = new Set(Object.values(this.git).filter(Boolean).map((g) => JSON.parse(g.repo)).filter(([on]) => !on).map(([, repo]) => repo));
       for (const repo of this.watching) if (!used.has(repo)) this.watching.delete(repo);
       this.refreshing = false;
+      this.look = null; // its answers can make more due
       cx.notify();
     });
   }

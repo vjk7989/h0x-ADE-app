@@ -1,6 +1,20 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings } from "h0x";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, layout } from "h0x";
+
+// Whether the layout shows this panel (as the sessions panel asks): no hidden
+// node on the way, and the selected child of each stack. Not in the layout: shown.
+const placed = (n) => n?.content?.mod === "changes" || (n?.children ?? []).some(placed);
+function shown(root) {
+  const walk = (n) => {
+    if (!n || n.hidden) return false;
+    if (n.content?.mod === "changes") return true;
+    const children = (n.children ?? []).filter((c) => !c.hidden);
+    if (n.type === "stack") return walk(children.find((c) => c.id === n.active) ?? children[0]);
+    return children.some(walk);
+  };
+  return !placed(root) || walk(root);
+}
 
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
@@ -41,7 +55,18 @@ export default class Changes extends View {
     this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.refresh(cx);
-    cx.timer.every(10000, (cx) => this.refresh(cx));
+    cx.timer.every(1000, (cx) => this.tick(cx));
+  }
+
+  // Every 10 s while shown. Hidden (another panel tab, a closed panel): no git
+  // until shown again, then at once.
+  tick(cx) {
+    this.ticks = ((this.ticks ?? 0) + 1) % 10;
+    if (!shown(layout())) this.missed = true;
+    else if (!this.ticks || this.missed) {
+      this.missed = false;
+      this.refresh(cx);
+    }
   }
 
   watch(root, cx) {
