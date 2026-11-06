@@ -186,7 +186,7 @@ export default class Agents extends View {
     });
   }
 
-  subRow(t, s, shown, compact) {
+  subRow(t, s, shown, compact, since, now) {
     const k = s.t;
     const st = kidStatus(k, this.listed);
     const pic = icon(k.program, 14, t.foreground);
@@ -203,12 +203,14 @@ export default class Agents extends View {
       .text_size(12.5)
       .when(on, (el) => el.bg(t.raised))
       .hover((s) => s.bg(t.hover))
-      .on_click(() => this.peek(k.address))
+      .on_click(() => (this.listed.has(k.address) ? run("pane.focus", { terminal: k.address }) : this.peek(k.address)))
       .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()
         .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
       .when(Boolean(pic), el => el.child(div().mr(8).child(pic)))
       .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))
+      // A pinned kept sub-agent has a row of its own, and that row says it is busy.
+      .when(st === "working" && !this.ownRow.has(k.address), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).mr(6).child(busyVerb(k.address, since.get(k.tab) ?? null, now))))
       .child(this.status(t, { status: st }, compact));
   }
 
@@ -236,6 +238,11 @@ export default class Agents extends View {
     const now = Date.now();
     this.track(list, now);
     this.hold(list);
+    // A kept sub-agent (one with a pane) is in agents() too: where a tree shows
+    // it, it gets no row of its own, unless it's pinned.
+    const nested = new Set(collapsed ? [] : list.flatMap((a) => this.tree(all, a.address).map((s) => s.t.address)));
+    list = list.filter((a) => a.pinned || !nested.has(a.address));
+    this.ownRow = new Set(list.map((a) => a.address));
     const byPriority = sort.id === "priority";
     const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0))]));
     const rankOf = (a) => urgency.get(a.address);
@@ -249,7 +256,7 @@ export default class Agents extends View {
       const subs = collapsed ? [] : this.tree(all, a.address);
       const r = row(a, i, subs);
       if (this.folded.has(a.address)) return [r];
-      return [r, ...subs.map((s) => this.subRow(t, s, shown, byPriority))];
+      return [r, ...subs.map((s) => this.subRow(t, s, shown, byPriority, workingSince, now))];
     };
 
     // The fold chevron; folded, the count too, colored by the most urgent one.
