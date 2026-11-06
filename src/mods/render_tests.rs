@@ -965,10 +965,26 @@ fn a_kept_working_sub_agent_is_listed_once_under_its_parent_with_one_busy_verb(c
             assert_eq!(verbs(&tree), 2, "one verb per working row: {tree}");
         } else {
             assert!(!tree.contains(":id[Str(\"ag-t3\")]"), "no second row for the sub-agent: {tree}");
-            assert_eq!(verbs(&tree), 1, "only the parent's row carries a verb: {tree}");
+            assert_eq!(verbs(&tree), 2, "the parent's row and the sub-agent's sub-row carry one verb each: {tree}");
         }
         assert!(!tree.to_lowercase().contains("herding"), "{tree}");
     }
+}
+
+#[gpui::test]
+fn a_working_kept_sub_agent_under_an_idle_parent_shows_one_busy_verb_on_its_sub_row(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let verbs = |tree: &str| BUSY_VERBS.iter().map(|v| tree.matches(&format!("{v}\u{2026}")).count()).sum::<usize>();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    let program = values["agents"][0]["program"].clone();
+    values.get_mut("agents").unwrap().as_array_mut().unwrap()[0]["status"] = json!("idle");
+    values.get_mut("agents").unwrap().as_array_mut().unwrap().push(json!({"address":"t3","pane":"p3","space":"s1","space_name":"Local","tab":"tab1","tab_index":1,"tab_name":"Build","status":"working","app":"pi","program":program,"title":"Helper","seq":3,"focused":false,"pinned":false}));
+    values.get_mut("panes").unwrap().as_array_mut().unwrap().push(json!({"pane":"p3","terminal":"t3","tab":"tab1","title":"Helper","cwd":"/fixture/project","branch":"main","status":"working","app":"pi","program":program,"focused":false,"zoomed":false}));
+    values.get_mut("terminals").unwrap().as_array_mut().unwrap().push(json!({"address":"t3","name":"Helper","title":"Helper","argv":["pi"],"parent":"t1","labels":{},"state":"live","status":"working","report":{"app":"pi"},"program":program,"cwd":"/fixture/project"}));
+    let tree = describe_with_values(cx, &staged, "mods/agents", values, None).unwrap();
+    assert!(tree.contains(":id[Str(\"sub-t3\")]") && !tree.contains(":id[Str(\"ag-t3\")]"), "{tree}");
+    assert_eq!(verbs(&tree), 1, "only the working sub-agent has a verb: {tree}");
 }
 
 // The files panel's editing: the real mod under a wrapper that takes commands from the test,
