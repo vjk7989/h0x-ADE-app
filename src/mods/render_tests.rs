@@ -403,6 +403,28 @@ fn confirm_dialog_background_follows_the_frame_corners(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn confirm_dialog_with_its_own_buttons_or_none_keeps_the_rounded_corners(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let two = json!([
+        {"label":"Remove from HyperOx", "command":{"name":"sessions.hide"}, "primary":true},
+        {"label":"Delete completely", "command":{"name":"sessions.trash"}}
+    ]);
+    for (buttons, choices) in [(two, 2), (json!([]), 0)] {
+        let mut p = props();
+        p["title"] = json!("Delete session?");
+        p["buttons"] = buttons;
+        let tree = describe(cx, &staged, "mods/confirm", true, p, updates("current", "current"), None).unwrap();
+        let root = tree.lines().find(|l| l.contains(":id[Str(\"confirm\")]")).unwrap();
+        assert!(root.contains(".rounded[Number(8.0)]"), "{choices} choices: {root}");
+        assert!(tree.contains(":id[Str(\"no\")]"), "Cancel is always there: {tree}");
+        let shown = (0..3).filter(|i| tree.contains(&format!(":id[Str(\"choice-{i}\")]"))).count();
+        assert_eq!(shown, choices, "the buttons given, no Confirm added: {tree}");
+        assert!(!tree.contains(":id[Str(\"yes\")]"), "{tree}");
+    }
+}
+
+#[gpui::test]
 fn check_materializes_retained_elements_in_a_rendered_view(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
@@ -920,6 +942,32 @@ fn busy_verb_shows_only_while_working(cx: &mut TestAppContext) {
             }
             assert!(!tree.to_lowercase().contains("herding"), "{entry}: {tree}");
         }
+    }
+}
+
+#[gpui::test]
+fn a_kept_working_sub_agent_is_listed_once_under_its_parent_with_one_busy_verb(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let verbs = |tree: &str| BUSY_VERBS.iter().map(|v| tree.matches(&format!("{v}\u{2026}")).count()).sum::<usize>();
+    // t3 was started by t1 (working, in the fixture) and then given a pane of its own.
+    for pinned in [false, true] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        let program = values["agents"][0]["program"].clone();
+        values.get_mut("agents").unwrap().as_array_mut().unwrap().push(json!({"address":"t3","pane":"p3","space":"s1","space_name":"Local","tab":"tab1","tab_index":1,"tab_name":"Build","status":"working","app":"pi","program":program,"title":"Helper","seq":3,"focused":false,"pinned":pinned}));
+        values.get_mut("panes").unwrap().as_array_mut().unwrap().push(json!({"pane":"p3","terminal":"t3","tab":"tab1","title":"Helper","cwd":"/fixture/project","branch":"main","status":"working","app":"pi","program":program,"focused":false,"zoomed":false}));
+        values.get_mut("terminals").unwrap().as_array_mut().unwrap().push(json!({"address":"t3","name":"Helper","title":"Helper","argv":["pi"],"parent":"t1","labels":{},"state":"live","status":"working","report":{"app":"pi"},"program":program,"cwd":"/fixture/project"}));
+        let tree = describe_with_values(cx, &staged, "mods/agents", values, None).unwrap();
+        assert!(tree.contains(":id[Str(\"ag-t1\")]") && tree.contains(":id[Str(\"sub-t3\")]"), "pinned {pinned}: {tree}");
+        if pinned {
+            // A pinned one keeps its own row too, and that row says it is busy.
+            assert!(tree.contains(":id[Str(\"ag-t3\")]"), "{tree}");
+            assert_eq!(verbs(&tree), 2, "one verb per working row: {tree}");
+        } else {
+            assert!(!tree.contains(":id[Str(\"ag-t3\")]"), "no second row for the sub-agent: {tree}");
+            assert_eq!(verbs(&tree), 1, "only the parent's row carries a verb: {tree}");
+        }
+        assert!(!tree.to_lowercase().contains("herding"), "{tree}");
     }
 }
 
@@ -1986,6 +2034,31 @@ export default class Probe extends Real {
 }
 
 #[gpui::test]
+fn agents_list_ticks_every_second_while_a_kept_sub_agent_works(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    write_probe(&staged, "mods/agents", r#"
+export default class Probe extends Real {
+  init(props, cx) {
+    super.init(props, counted(cx, () => setShared("probe", (this.drawn = (this.drawn ?? 0) + 1))));
+  }
+}
+"#);
+    // The parent is idle; only its kept sub-agent (no row of its own, under the parent) works.
+    let agent = |address: &str, status: &str, seq: i64| json!({"address":address,"pane":format!("p-{address}"),"space":"s1","space_name":"Here","tab":"tab1","tab_index":1,"tab_name":"One","status":status,"app":"pi","program":null,"title":address,"seq":seq,"focused":false});
+    let live = |address: &str, parent: Value, status: &str| json!({"address":address,"name":address,"title":address,"argv":["pi"],"parent":parent,"labels":{},"state":"live","status":status,"report":{"app":"pi"},"program":null,"cwd":"/fixture/project"});
+    let host = sessions_host(&[], &[]);
+    let mut values = sessions_values(Value::Null, "/fixture/project", "linux");
+    values.insert("agents".into(), json!([agent("a1", "idle", 1), agent("a2", "working", 2)]));
+    values.insert("terminals".into(), json!([live("a1", Value::Null, "idle"), live("a2", json!("a1"), "working")]));
+    let (window, _session) = load_sessions(cx, &staged, "probe", values, &host, "");
+    advance(cx, 31_000);
+    let drawn = host.borrow().shared.get("probe").and_then(Value::as_f64).unwrap_or(0.0);
+    assert!((30.0..=33.0).contains(&drawn),"a working agent redraws its verb once a second: {drawn}");
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+}
+
+#[gpui::test]
 fn sessions_rows_are_made_again_only_when_the_list_or_the_marks_change(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
@@ -2349,6 +2422,29 @@ fn sessions_save_layout_under_a_taken_name_asks_before_replacing(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn sessions_confirm_dialogs_keep_their_own_size_now_that_the_default_one_fits_its_content(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // A dialog with a height is not content-fitted; ours size themselves for their longer text.
+    let host = sessions_host(&[("list", core_ok(json!({"sessions":[]})))], &[]);
+    let setup = format!("{} this.command('delete', cx);", session_target(None, "C:\\Users\\me\\project", "claude", "a1", "C:\\Users\\me\\.claude\\a1.jsonl"));
+    describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "C:\\Users\\me\\project", "windows"), &host, &setup);
+    let h = host.borrow();
+    let (_, open) = h.effects.iter().find(|(n, _)| n == "openOverlay").expect("the delete dialog");
+    assert_eq!((open[0]["kind"].clone(), open[0]["width"].clone(), open[0]["height"].clone()), (json!("dialog"), json!(460), json!(210)), "{open:?}");
+    assert_eq!(open[0]["props"]["buttons"].as_array().map(Vec::len), Some(2), "{open:?}");
+    drop(h);
+
+    let key = json!([null, "/fixture/project"]).to_string();
+    let host = sessions_host(&[("list", session_list())], &[("sessions", json!({ key: {"layouts":{"Work":{"tabs":[]}}} }))]);
+    describe_sessions(cx, &staged, "mods/sessions", layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, "this.named('Work', cx);");
+    let h = host.borrow();
+    let (_, open) = h.effects.iter().find(|(n, _)| n == "openOverlay").expect("the replace dialog");
+    assert_eq!((open[0]["width"].clone(), open[0]["height"].clone()), (json!(420), json!(180)), "{open:?}");
+    assert!(open[0]["props"].get("buttons").is_none(), "Replace keeps the default Confirm: {open:?}");
+}
+
+#[gpui::test]
 fn sessions_layout_restore_rebuilds_tabs_and_splits_resuming_each_session_once(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
@@ -2673,6 +2769,66 @@ fn sessions_menu_without_a_target_and_a_dialog_without_buttons_render(cx: &mut T
     p.as_object_mut().unwrap().extend(json!({"title":"Delete session?", "detail":"Fixture detail", "buttons":[]}).as_object().unwrap().clone());
     let tree = describe(cx, &staged, "mods/confirm", true, p, updates("current", "current"), None).unwrap();
     assert!(tree.contains("Cancel") && !tree.contains("Confirm") && !tree.contains("choice-0"), "{tree}");
+}
+
+#[gpui::test]
+fn terminal_menu_offers_pane_items_only_for_a_pane_in_a_tab_and_never_on_a_session_row(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let pane_items = ["Split right", "Split down", "Zoom", "Close pane"];
+    let items = |tree: &str| (0..8).filter(|i| tree.contains(&format!(":id[Str(\"mi-{i}\")]"))).count();
+    let menu = |cx: &mut TestAppContext, populated: bool, target: Value, kept: bool| {
+        let mut p = props();
+        p["tab"] = json!("pane");
+        p["target"] = target;
+        let mut values = fixture(populated, p, updates("current", "current"));
+        if kept {
+            // A kept sub-agent of t1, shown in a window: no pane of its own in any tab.
+            values.get_mut("terminals").unwrap().as_array_mut().unwrap().push(json!({"address":"t3","name":"Helper","title":"Helper","argv":["pi"],"parent":"t1","labels":{},"state":"live","status":"working","report":{"app":"pi"},"program":null,"cwd":"/fixture/project"}));
+        }
+        describe_with_values(cx, &staged, "mods/menu", values, None).unwrap()
+    };
+
+    // A pane in a tab, local or on the remote machine: every pane item.
+    for (pane, terminal) in [("p1", "t1"), ("p2", "t2")] {
+        let tree = menu(cx, true, json!({"pane":pane, "terminal":terminal}), false);
+        for label in pane_items.iter().chain(["Send right-clicks to pane"].iter()) {
+            assert!(tree.contains(label), "{pane}: {label}: {tree}");
+        }
+        assert_eq!(items(&tree), 5, "{pane}: {tree}");
+    }
+
+    // A terminal block in a layout or a window: its pane is the block's id, in no tab.
+    let tree = menu(cx, true, json!({"pane":"term-block", "terminal":"t1"}), false);
+    for label in pane_items {
+        assert!(!tree.contains(label), "{label}: {tree}");
+    }
+    assert!(tree.contains("Send right-clicks to pane"), "the terminal's own item stays: {tree}");
+    assert_eq!(items(&tree), 1, "{tree}");
+
+    // A kept sub-agent in a window still goes back under its parent.
+    let tree = menu(cx, true, json!({"pane":"w1:term", "terminal":"t3"}), true);
+    assert!(tree.contains("Send back to Build") && !tree.contains("Close pane") && !tree.contains("Zoom"), "{tree}");
+    assert_eq!(items(&tree), 2, "{tree}");
+
+    // No panes at all, no terminal, no pane id: nothing to offer, and it still renders.
+    for target in [json!({"pane":"p1", "terminal":"missing"}), json!({})] {
+        let tree = menu(cx, false, target.clone(), false);
+        assert_eq!(items(&tree), 0, "{target}: {tree}");
+        assert!(tree.contains(":id[Str(\"menu\")]"), "{tree}");
+    }
+
+    // The sessions row menu has no pane, and none of the pane items.
+    let mut p = props();
+    p["tab"] = json!("session");
+    p["target"] = json!({"pinned":false, "local":true});
+    let tree = describe(cx, &staged, "mods/menu", true, p, updates("current", "current"), None).unwrap();
+    for label in pane_items {
+        assert!(!tree.contains(label), "{label}: {tree}");
+    }
+    for label in ["Resume", "Resume in new tab", "Pin", "Rename", "Copy resume command", "Show file", "Delete"] {
+        assert!(tree.contains(label), "{label}: {tree}");
+    }
 }
 
 #[gpui::test]
