@@ -206,9 +206,63 @@ pub fn write_text(
     }
 }
 
+/// Deletes one file inside the app home (a file already gone is fine).
+fn remove(path: &Path, roots: &[String]) -> Result<(), String> {
+    check(path, roots)?;
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+        _ => Ok(()),
+    }
+}
+
+pub fn remove_app_file(path: String) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send {
+    let roots = real_roots([crate::mods::app_dir()]);
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(remove(Path::new(&path), &roots));
+    });
+    async move {
+        rx.recv()
+            .await
+            .map_err(|e| HostError::new(e.to_string()))?
+            .map_err(HostError::new)?;
+        Ok(HostValue::Null)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_deletes_only_inside_the_app_home() {
+        let base = std::env::temp_dir().join(format!(
+            "h0x-ade-remove-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = base.join("home");
+        let other = base.join("other");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let roots = real_roots([home.clone()]);
+        let inside = home.join("t.tmp");
+        std::fs::write(&inside, "x").unwrap();
+        remove(&inside, &roots).unwrap();
+        assert!(!inside.exists());
+        remove(&inside, &roots).unwrap();
+        let outside = other.join("keep.txt");
+        std::fs::write(&outside, "x").unwrap();
+        let dotdot = home.join("..").join("other").join("keep.txt");
+        for path in [outside.clone(), dotdot, PathBuf::from(r"Z:\elsewhere\t.tmp"), PathBuf::from("/nowhere/t.tmp")] {
+            assert!(remove(&path, &roots).is_err(), "{}", path.display());
+        }
+        assert!(outside.exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[test]
     fn creates_updates_and_rejects_stale_text() {
         let root = std::path::PathBuf::from("/var/tmp").join(format!(
