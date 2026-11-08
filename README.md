@@ -4,13 +4,15 @@ HyperOx is a desktop app for terminals and coding agents. Spaces hold your proje
 
 ## Install
 
+HyperOx is in Beta: expect rough edges and breaking changes between releases.
+
 ### Linux and macOS
 
 ```sh
 curl -fsSL https://github.com/vjk7989/h0x-ADE-app/releases/latest/download/install.sh | sh
 ```
 
-Linux needs a desktop session and a Vulkan-capable GPU driver. macOS builds are for Apple Silicon; the installer puts `HyperOx.app` in `~/Applications`.
+Linux needs a desktop session and a Vulkan-capable GPU driver; `h0x-ade` goes into `~/.local/bin`, so make sure that is on your PATH. macOS builds are for Apple Silicon; the installer puts `HyperOx.app` in `~/Applications`.
 
 ### Windows
 
@@ -18,9 +20,42 @@ Linux needs a desktop session and a Vulkan-capable GPU driver. macOS builds are 
 irm https://github.com/vjk7989/h0x-ADE-app/releases/latest/download/install.ps1 | iex
 ```
 
-The app lands in `%LOCALAPPDATA%\Programs\h0x-ade`.
+The app lands in `%LOCALAPPDATA%\Programs\h0x-ade` and is added to your PATH. No admin needed; open a new terminal afterwards.
 
-On every platform the installer also installs `h0x-core`, the runtime that runs your terminals. The app's own files live in `~/.config/h0x-ade`.
+On every platform the installer also installs `h0x-core`, the runtime that runs your terminals, if there is none yet. The app's own files live in `~/.config/h0x-ade`.
+
+### Manual download
+
+Pick the file for your platform from the [latest release](https://github.com/vjk7989/h0x-ADE-app/releases/latest):
+
+| Platform | Asset |
+|---|---|
+| Linux x86_64 / aarch64 | `h0x-ade-linux-x86_64.tar.gz` / `h0x-ade-linux-aarch64.tar.gz` |
+| macOS Apple Silicon | `h0x-ade-macos-aarch64.tar.gz` |
+| Windows x86_64 | `h0x-ade-windows-x86_64.tar.gz` |
+
+Prefer the installers: they also place the launcher, menu entry and `h0x-core`.
+
+### Verify a download
+
+Every release file has a [minisign](https://jedisct1.github.io/minisign/) signature beside it (`<file>.minisig`, same folder). The public key is:
+
+```text
+RWTEdqtOBn6VKQ/x9x3qWk/gIWUb/I1OlZXsTlHyrkp9Yq30qBki+tdt
+```
+
+```sh
+base=https://github.com/vjk7989/h0x-ADE-app/releases/latest/download
+curl -fsSLO $base/h0x-ade-linux-x86_64.tar.gz
+curl -fsSLO $base/h0x-ade-linux-x86_64.tar.gz.minisig
+minisign -Vm h0x-ade-linux-x86_64.tar.gz -P RWTEdqtOBn6VKQ/x9x3qWk/gIWUb/I1OlZXsTlHyrkp9Yq30qBki+tdt
+```
+
+The installers and the in-app updater check these signatures themselves.
+
+## Get started
+
+Run `h0x-ade` (or open HyperOx from the Start menu or Applications folder). The app installs `h0x-core` on first run if it is missing. Add a space for a project folder, then open a tab and start your agent or a shell in it.
 
 ## Find your work
 
@@ -71,6 +106,10 @@ h0x-ade do tab.new --name "fix login" --argv '["claude"]'
 ```
 
 Starting, reading and waiting on terminals is `h0x-core`'s job: `h0x-core --skill` prints its manual.
+
+## Remote control
+
+`h0x-core` can let a paired chat account see and drive your terminals while you are away. See [Remote control (bridge)](https://github.com/vjk7989/h0x-ADE-core/blob/main/docs/bridge.md).
 
 ## Build from source
 
