@@ -32,7 +32,9 @@ const BURST = 30000, LISTED = 5;
 // A file name goes into text typed at an agent: control characters (a newline would
 // submit a fake prompt line), line/paragraph separators and invisible or bidi format
 // characters (they disguise a name) are dropped and it is capped at 200 characters.
-const noteName = name => [...name.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "")].slice(0, 200).join("");
+// At most 120 UTF-16 units of the error; a character the cut would split is dropped whole.
+const reason = e => { const s = String((e !== null && typeof e === "object" ? e.message : e) || "unknown error").slice(0, 120); return /[\ud800-\udbff]$/.test(s) ? s.slice(0, -1) : s; };
+const noteName =name => [...name.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "")].slice(0, 200).join("");
 // A file is written back with the line endings it was read with: CRLF only when every line had it.
 const eol = text => /\r\n/.test(text) && !/(^|[^\r])\n/.test(text) ? "\r\n" : "\n";
 const text = doc => { const value = doc.state.value(); return doc.eol === "\r\n" ? value.replace(/\r?\n/g, "\r\n") : value; };
@@ -201,7 +203,7 @@ export default class Files extends View {
           cx.notify();
         });
         doc.state.on("blur", (_e, cx) => { if (this.doc === doc) this.save(cx); });
-      } catch { if (this.file === path && this.current(context)) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
+      } catch (e) { if (this.file === path && this.current(context)) this.fileError = `Cannot preview this file: ${reason(e)}`; }
       finally { cx.notify(); }
     });
   }

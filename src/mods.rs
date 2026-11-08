@@ -516,6 +516,21 @@ pub fn local_space_folders() -> Vec<PathBuf> {
     })
 }
 
+/// The live folders of the terminals open on this computer (`panes()`, plus
+/// the `focused()` terminal, which a floating block terminal or a shown agent
+/// makes a non-pane): the Files panel lists the focused terminal's folder,
+/// which can differ from its space's. Read on the window thread.
+pub fn local_pane_folders() -> Vec<PathBuf> {
+    SNAPSHOT.with(|s| {
+        let s = s.borrow();
+        s.panes.as_array().into_iter().flatten().chain(std::iter::once(&s.focused))
+            .filter(|p| p.get("terminal").and_then(Value::as_str).is_some_and(|t| !t.is_empty() && !t.contains('/')))
+            .filter_map(|p| p.get("cwd")?.as_str().map(PathBuf::from))
+            .filter(|f| f.is_absolute())
+            .collect()
+    })
+}
+
 /// Navigation order set by the mod that lists agents, with stale entries removed and new agents appended.
 pub fn agent_order(available: Vec<String>) -> Vec<String> {
     AGENT_ORDER.with(|s| {

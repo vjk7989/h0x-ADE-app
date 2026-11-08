@@ -77,11 +77,12 @@ fn write(path: &Path, text: &str, expected: Option<&str>) -> Result<(), String> 
 }
 
 /// Where mods may read, write and watch (ADR-048, amended): the person's home
-/// folder, HyperOx's app home, and the folders of the spaces open on this
-/// computer. Computed per call: spaces come and go.
+/// folder, HyperOx's app home, and the folders of the spaces and terminals open
+/// on this computer. Computed per call: spaces come and go.
 pub fn allowed_roots() -> Vec<String> {
     let mut roots = vec![crate::mods::home(), crate::mods::app_dir()];
     roots.extend(crate::mods::local_space_folders());
+    roots.extend(crate::mods::local_pane_folders());
     real_roots(roots)
 }
 
@@ -349,5 +350,248 @@ mod tests {
         assert!(!within("/home/Ana/x", "/home/ana", false));
         assert!(!within("/home/anabel", "/home/ana", false));
         assert!(!within("/etc/passwd", "/home/ana", false));
+    }
+
+    /// A folder on another drive is a root like any other: whatever the case,
+    /// slashes or `\\?\` prefix of the path asked about, and nothing beside it.
+    #[test]
+    fn a_folder_on_another_drive_is_a_root() {
+        for (root, inside, outside) in [
+            (r"\\?\G:\proj", r"g:/PROJ/notes/a.txt", r"G:\proj2\a.txt"),
+            (r"\\?\G:\test-claude-makes-app", r"G:\test-claude-makes-app/solana.txt", r"G:\other\solana.txt"),
+            (r"D:\x", r"\\?\d:\X\a.txt", r"D:\xy\a.txt"),
+        ] {
+            let roots = [root.to_owned()];
+            assert!(!is_fs_root(root, true), "{root}");
+            assert!(allowed(inside, &roots, true), "{inside}");
+            assert!(allowed(root, &roots, true), "{root}");
+            assert!(!allowed(outside, &roots, true), "{outside}");
+            assert!(!allowed(r"C:\Windows\win.ini", &roots, true));
+        }
+        // The drive itself is still no root.
+        assert!(!allowed(r"G:\proj\a.txt", &[r"G:\".to_owned()], true));
+    }
+
+    /// The Files panel lists the focused terminal's live folder, so that folder
+    /// is a root too (local terminals only), and the file in it reads as text
+    /// whatever its extension.
+    #[test]
+    fn a_local_terminals_folder_is_a_root_and_any_extension_reads_as_text() {
+        let dir = std::env::temp_dir().join(format!("h0x-ade-pane-{}", std::process::id()));
+        let far = std::env::temp_dir().join(format!("h0x-ade-far-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&far).unwrap();
+        for name in ["a.txt", "b.log", "README"] {
+            std::fs::write(dir.join(name), "plain\n").unwrap();
+        }
+        std::fs::write(far.join("c.txt"), "x").unwrap();
+        crate::mods::publish_panes(serde_json::json!([
+            {"pane": "p1", "terminal": "t1", "cwd": dir},
+            {"pane": "p2", "terminal": "vps/t2", "cwd": far},
+            {"pane": "p3", "terminal": null, "cwd": far},
+            {"pane": "p4", "terminal": "t4", "cwd": "relative/dir"},
+        ]));
+        assert_eq!(crate::mods::local_pane_folders(), vec![dir.clone()]);
+        let roots = allowed_roots();
+        for name in ["a.txt", "b.log", "README"] {
+            assert_eq!(check(&dir.join(name), &roots), Ok(()), "{name}");
+            assert_eq!(read(&dir.join(name)).unwrap().as_deref(), Some("plain\n"), "{name}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(far).unwrap();
+    }
+
+    /// A terminal at `/` or a drive, or with no usable folder, opens nothing.
+    #[test]
+    fn a_terminal_at_a_filesystem_root_or_without_a_folder_adds_no_root() {
+        let top = std::env::temp_dir().ancestors().last().unwrap().to_path_buf();
+        crate::mods::publish_panes(serde_json::json!([
+            {"pane": "p1", "terminal": "t1", "cwd": top},
+            {"pane": "p2", "terminal": "t2", "cwd": "/"},
+            {"pane": "p3", "terminal": "t3", "cwd": r"C:\"},
+            {"pane": "p4", "terminal": "t4", "cwd": r"G:\"},
+            {"pane": "p5", "terminal": "t5", "cwd": r"C:relative"},
+            {"pane": "p6", "terminal": "t6", "cwd": ""},
+            {"pane": "p7", "terminal": "t7", "cwd": null},
+            {"pane": "p8", "terminal": "t8"},
+            {"pane": "p9", "terminal": "t9", "cwd": 42},
+            {"pane": "p10", "cwd": top},
+        ]));
+        let roots = real_roots(crate::mods::local_pane_folders());
+        assert!(roots.is_empty(), "{roots:?}");
+        // No panes at all, or no list: nothing.
+        crate::mods::publish_panes(serde_json::json!([]));
+        assert!(crate::mods::local_pane_folders().is_empty());
+        crate::mods::publish_panes(serde_json::Value::Null);
+        assert!(crate::mods::local_pane_folders().is_empty());
+    }
+
+    /// Every local terminal's folder is a root while its pane is open: written
+    /// with `..`, not created yet, or joined with `/` the way the Files panel
+    /// does on Windows too. Closing the pane takes its folder away.
+    #[test]
+    fn terminal_roots_follow_the_panes_snapshot() {
+        let base = std::env::temp_dir().join(format!(
+            "h0x-ade-pane-roots-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (one, two) = (base.join("one"), base.join("two"));
+        std::fs::create_dir_all(one.join("sub")).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        std::fs::write(one.join("a.txt"), "a").unwrap();
+        std::fs::write(two.join("b.txt"), "b").unwrap();
+        std::fs::write(base.join("beside.txt"), "x").unwrap();
+        let one_pane = serde_json::json!({"pane": "p1", "terminal": "t1", "cwd": one.join("sub").join("..")});
+        crate::mods::publish_panes(serde_json::json!([
+            one_pane,
+            {"pane": "p2", "terminal": "t2", "cwd": two},
+            {"pane": "p3", "terminal": "t3", "cwd": base.join("gone")},
+        ]));
+        let roots = real_roots(crate::mods::local_pane_folders());
+        assert_eq!(roots.len(), 3, "{roots:?}");
+        assert_eq!(check(&one.join("a.txt"), &roots), Ok(()));
+        assert_eq!(check(&two.join("b.txt"), &roots), Ok(()));
+        // A folder that no longer exists still counts where it was.
+        assert_eq!(check(&base.join("gone").join("new.txt"), &roots), Ok(()));
+        // `root/path`, as the Files panel joins them, with mixed separators on Windows.
+        assert_eq!(check(Path::new(&format!("{}/a.txt", one.display())), &roots), Ok(()));
+        assert_eq!(check(Path::new(&format!("{}/sub/../a.txt", one.display())), &roots), Ok(()));
+        // Beside and above the terminals' folders, nothing.
+        assert!(check(&base.join("beside.txt"), &roots).is_err());
+        assert!(check(&base, &roots).is_err());
+        assert!(check(&one.join("..").join("beside.txt"), &roots).is_err());
+        assert!(check(Path::new(&format!("{}/../beside.txt", two.display())), &roots).is_err());
+        // The second terminal closes: its folder is no root any more.
+        crate::mods::publish_panes(serde_json::json!([one_pane]));
+        let roots = real_roots(crate::mods::local_pane_folders());
+        assert_eq!(roots.len(), 1, "{roots:?}");
+        assert_eq!(check(&one.join("a.txt"), &roots), Ok(()));
+        assert!(check(&two.join("b.txt"), &roots).is_err());
+        crate::mods::publish_panes(serde_json::json!([]));
+        assert!(real_roots(crate::mods::local_pane_folders()).is_empty());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A terminal whose folder is a link: the link's target is the root, and a
+    /// link inside it that points out reaches nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_a_terminals_folder_does_not_reach_outside_it() {
+        let base = std::env::temp_dir().join(format!(
+            "h0x-ade-pane-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (pane, outside) = (base.join("pane"), base.join("outside"));
+        std::fs::create_dir_all(&pane).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        std::os::unix::fs::symlink(&outside, pane.join("out")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), pane.join("secret.txt")).unwrap();
+        std::os::unix::fs::symlink(&pane, base.join("alias")).unwrap();
+        crate::mods::publish_panes(serde_json::json!([{"pane": "p1", "terminal": "t1", "cwd": base.join("alias")}]));
+        let roots = real_roots(crate::mods::local_pane_folders());
+        assert_eq!(roots, vec![pane.canonicalize().unwrap().to_string_lossy().into_owned()]);
+        assert_eq!(check(&base.join("alias").join("new.txt"), &roots), Ok(()));
+        assert!(check(&pane.join("out").join("secret.txt"), &roots).is_err());
+        assert!(check(&pane.join("out").join("new.txt"), &roots).is_err());
+        assert!(check(&pane.join("secret.txt"), &roots).is_err());
+        crate::mods::publish_panes(serde_json::json!([]));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A UNC folder is a terminal folder on Windows only (elsewhere it is a
+    /// relative name), and as a root it opens that folder, never the share.
+    /// Pure: no network lookup.
+    #[test]
+    fn a_unc_terminal_folder_never_opens_its_share() {
+        crate::mods::publish_panes(serde_json::json!([{"pane": "p1", "terminal": "t1", "cwd": r"\\server\share\x"}]));
+        let expected = if cfg!(windows) { vec![PathBuf::from(r"\\server\share\x")] } else { Vec::new() };
+        assert_eq!(crate::mods::local_pane_folders(), expected);
+        crate::mods::publish_panes(serde_json::json!([]));
+        let roots = [r"\\?\UNC\server\share\x".to_owned()];
+        assert!(allowed(r"\\server\share\x\a.txt", &roots, true));
+        assert!(allowed(r"\\?\UNC\SERVER\share\X/sub/b.txt", &roots, true));
+        assert!(allowed(r"//server/share/x/a.txt", &roots, true));
+        assert!(!allowed(r"\\server\share\y.txt", &roots, true));
+        assert!(!allowed(r"\\server\share", &roots, true));
+        assert!(!allowed(r"\\server\share\xy\a.txt", &roots, true));
+        assert!(!allowed(r"\\other\share\x\a.txt", &roots, true));
+    }
+
+    /// The focused terminal (a floating block or a shown agent, in no pane) is
+    /// a root by the same rules as a pane's terminal; an empty address is never
+    /// local, in a pane or focused.
+    #[test]
+    fn the_focused_terminal_folder_is_a_root_by_the_same_rules_as_a_pane() {
+        let base = std::env::temp_dir().join(format!(
+            "h0x-ade-focused-roots-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (pane, block) = (base.join("pane"), base.join("block"));
+        std::fs::create_dir_all(&pane).unwrap();
+        std::fs::create_dir_all(&block).unwrap();
+        std::fs::write(pane.join("p.txt"), "p").unwrap();
+        std::fs::write(block.join("a.txt"), "a").unwrap();
+        crate::mods::publish_panes(serde_json::json!([{"pane": "p1", "terminal": "t1", "cwd": pane}]));
+        crate::mods::publish_focused(serde_json::json!(
+            {"space": "s1", "tab": "tab1", "pane": null, "terminal": "blk", "cwd": block}
+        ));
+        assert_eq!(crate::mods::local_pane_folders(), vec![pane.clone(), block.clone()]);
+        let roots = real_roots(crate::mods::local_pane_folders());
+        assert_eq!(check(&block.join("a.txt"), &roots), Ok(()));
+        assert_eq!(check(&pane.join("p.txt"), &roots), Ok(()));
+        assert!(check(&base, &roots).is_err());
+
+        // Remote, mod, empty address, relative, missing folder, filesystem root, nothing focused.
+        let top = std::env::temp_dir().ancestors().last().unwrap().to_path_buf();
+        for focused in [
+            serde_json::json!({"terminal": "vps/blk", "cwd": block}),
+            serde_json::json!({"terminal": "", "cwd": block}),
+            serde_json::json!({"terminal": null, "cwd": block}),
+            serde_json::json!({"cwd": block}),
+            serde_json::json!({"terminal": "blk", "cwd": "relative/dir"}),
+            serde_json::json!({"terminal": "blk", "cwd": ""}),
+            serde_json::json!({"terminal": "blk", "cwd": null}),
+            serde_json::json!({"terminal": "blk"}),
+            serde_json::json!({"terminal": "blk", "cwd": top}),
+            serde_json::json!({"terminal": "blk", "cwd": "/"}),
+            serde_json::json!({"terminal": "blk", "cwd": r"C:\"}),
+            serde_json::Value::Null,
+        ] {
+            crate::mods::publish_focused(focused.clone());
+            let roots = real_roots(crate::mods::local_pane_folders());
+            assert_eq!(roots.len(), 1, "{focused}: {roots:?}");
+            assert!(check(&block.join("a.txt"), &roots).is_err(), "{focused}");
+            assert_eq!(check(&pane.join("p.txt"), &roots), Ok(()), "{focused}");
+        }
+
+        // The focused terminal is a pane's: its folder is that one root.
+        crate::mods::publish_focused(serde_json::json!(
+            {"space": "s1", "tab": "tab1", "pane": "p1", "terminal": "t1", "cwd": pane}
+        ));
+        let folders = crate::mods::local_pane_folders();
+        assert!(!folders.is_empty() && folders.iter().all(|f| f == &pane), "{folders:?}");
+        let roots = real_roots(folders);
+        assert_eq!(check(&pane.join("p.txt"), &roots), Ok(()));
+        assert!(check(&block.join("a.txt"), &roots).is_err());
+
+        // An empty address in a pane is not local either.
+        crate::mods::publish_focused(serde_json::Value::Null);
+        crate::mods::publish_panes(serde_json::json!([{"pane": "p1", "terminal": "", "cwd": pane}]));
+        assert!(crate::mods::local_pane_folders().is_empty());
+        crate::mods::publish_panes(serde_json::json!([]));
+        std::fs::remove_dir_all(base).unwrap();
     }
 }
