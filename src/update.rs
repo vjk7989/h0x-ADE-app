@@ -138,8 +138,9 @@ pub(crate) fn landed(stdout: &[u8]) -> Result<&[u8], String> {
 
 /// Downloads a trusted `url` into `file`, giving up after `max_time` seconds.
 /// A download that was redirected off the trusted hosts, or that `<url>.minisig`
-/// does not sign with the release key, is deleted.
-pub(crate) fn download(url: &str, file: &Path, max_time: &str) -> Result<(), String> {
+/// does not sign with the release key, is deleted. Ok: the bytes that were
+/// checked; use these, not the file (it can be swapped after the check, see `seal`).
+pub(crate) fn download(url: &str, file: &Path, max_time: &str) -> Result<Vec<u8>, String> {
     if !trusted_url(url) {
         return Err(untrusted(url));
     }
@@ -150,14 +151,37 @@ pub(crate) fn download(url: &str, file: &Path, max_time: &str) -> Result<(), Str
         return Err(format!("{url}: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     landed(&out.stdout)
-        .map(drop)
-        .and_then(|()| {
+        .and_then(|_| {
             let bytes = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
-            signed(url, &bytes)
+            signed(url, &bytes)?;
+            Ok(bytes)
         })
         .inspect_err(|_| {
             let _ = std::fs::remove_file(file);
         })
+}
+
+/// Writes checked `bytes` to a new file in a new folder under `parent` (the
+/// app home: private to this user), so what runs is exactly what was checked,
+/// not a path someone could have swapped. Returns the folder (remove it when
+/// done) and the file.
+pub(crate) fn seal(parent: &Path, bytes: &[u8], name: &str) -> Result<(PathBuf, PathBuf), String> {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let dir = parent.join(format!("sealed-{}-{nanos}", std::process::id()));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    // Fails if the name exists, and never follows a planted link.
+    builder.create(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let file = dir.join(name);
+    let written = std::fs::OpenOptions::new().write(true).create_new(true).open(&file).and_then(|mut f| std::io::Write::write_all(&mut f, bytes));
+    match written {
+        Ok(()) => Ok((dir, file)),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            Err(format!("{}: {e}", file.display()))
+        }
+    }
 }
 
 /// The public half of the key CI signs every app and core release file with (key id 29957E064EAB76C4).
@@ -235,6 +259,19 @@ static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 /// The checker runs (a release, or pointed at a test server), and is looking right now.
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static CHECKING: AtomicBool = AtomicBool::new(false);
+/// "Check for updates automatically" (settings.json `check_updates`): when off,
+/// only "Check now" looks.
+static AUTO: AtomicBool = AtomicBool::new(true);
+
+pub fn set_auto(on: bool) {
+    AUTO.store(on, Ordering::Relaxed);
+}
+
+/// Whether the background checker looks this round: on its schedule only when
+/// automatic checks are on; always when the person asked.
+fn due(auto: bool, asked: bool) -> bool {
+    auto || asked
+}
 
 pub fn core() -> CoreInfo {
     CORE.lock().unwrap().clone()
@@ -296,10 +333,11 @@ pub fn check_now() {
     WAKE.1.notify_all();
 }
 
-fn sleep(d: Duration) {
+/// Waits; true when "Check now" cut it short.
+fn sleep(d: Duration) -> bool {
     let woken = WAKE.0.lock().unwrap();
     let (mut woken, _) = WAKE.1.wait_timeout_while(woken, d, |w| !*w).unwrap();
-    *woken = false;
+    std::mem::take(&mut *woken)
 }
 
 /// Starts checking in the background: the app if it's an installed release, the core too.
@@ -313,8 +351,13 @@ pub fn start() {
     RUNNING.store(true, Ordering::Relaxed);
     CHECKING.store(true, Ordering::Relaxed);
     std::thread::spawn(move || {
-        sleep(Duration::from_secs(10));
+        let mut asked = sleep(Duration::from_secs(10));
         loop {
+            if !due(AUTO.load(Ordering::Relaxed), asked) {
+                CHECKING.store(false, Ordering::Relaxed);
+                asked = sleep(EVERY);
+                continue;
+            }
             CHECKING.store(true, Ordering::Relaxed);
             let mut wait = EVERY;
             let mut succeeded = true;
@@ -340,7 +383,7 @@ pub fn start() {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
             *CHECKED.lock().unwrap() = checked_at(succeeded, now);
             CHECKING.store(false, Ordering::Relaxed);
-            sleep(wait);
+            asked = sleep(wait);
         }
     });
 }
@@ -457,12 +500,15 @@ fn check_from(root: &Path, releases: &str) -> Result<Option<String>, String> {
 /// Downloads, checks and unpacks a release into `work`; returns the app inside.
 fn unpack(url: &str, sha: &str, work: &Path) -> Result<PathBuf, String> {
     let tarball = work.join("app.tar.gz");
-    download(url, &tarball, "600")?;
-    let bytes = std::fs::read(&tarball).map_err(|e| e.to_string())?;
+    let bytes = download(url, &tarball, "600")?;
     if sha256(&bytes) != sha.to_ascii_lowercase() {
         return Err("the download is damaged (checksum mismatch)".into());
     }
-    run(crate::spawn::command(system("tar")).arg("-xzf").arg(&tarball).arg("-C").arg(work))?;
+    let home = crate::mods::ensure_app_dir().map_err(|e| format!("{}: {e}", crate::mods::app_dir().display()))?;
+    let (sealed_dir, sealed) = seal(&home, &bytes, "app.tar.gz")?;
+    let extracted = run(crate::spawn::command(system("tar")).arg("-xzf").arg(&sealed).arg("-C").arg(work));
+    let _ = std::fs::remove_dir_all(&sealed_dir);
+    extracted?;
     let app = work.join(PACKED);
     if cfg!(target_os = "macos") {
         // Authority is absent at -dv, even for a Developer ID release.
@@ -667,12 +713,33 @@ pub fn relaunch() {
     relaunch_expected(None);
 }
 
+/// `text` as a PowerShell string: it ends at any of the five quote characters
+/// (' and U+2018..U+201B), each of which a doubled copy escapes.
+#[cfg(any(windows, test))]
+fn ps_quote(text: &str) -> String {
+    let mut out = String::from("'");
+    for c in text.chars() {
+        out.push(c);
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+#[cfg(any(windows, test))]
+fn relaunch_script(pid: u32, exe: &Path) -> String {
+    format!("Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Start-Process {}", ps_quote(&exe.to_string_lossy()))
+}
+
 #[cfg(windows)]
 fn relaunch_expected(expected: Option<&str>) -> bool {
     let Some(root) = root() else { return false };
-    let exe = exe_in(&root).to_string_lossy().replace('\'', "''");
-    let script = format!("Wait-Process -Id {} -ErrorAction SilentlyContinue; Start-Process '{exe}'", std::process::id());
-    let mut command = crate::spawn::command("powershell");
+    // The system's own PowerShell: one earlier on PATH must not run here.
+    let Some(system_root) = std::env::var_os("SystemRoot") else { return false };
+    let script = relaunch_script(std::process::id(), &exe_in(&root));
+    let mut command = crate::spawn::command(PathBuf::from(system_root).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe"));
     if let Some(expected) = expected {
         command.env("H0X_ADE_UPDATE_EXPECTED", expected);
     }
@@ -1206,6 +1273,48 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         // Every h0x-core release has `update --version`: the first one is bumped too.
         assert_eq!(after_update_target("0.1.0", Some(&latest), 1, "0.1.11"), "0.1.13");
         assert_eq!(after_update_target("0.1.0", None, 1, "0.1.11"), "0.1.11");
+    }
+
+    #[test]
+    fn background_checks_follow_the_setting_but_asking_always_checks() {
+        assert!(due(true, false));
+        assert!(due(true, true));
+        assert!(!due(false, false), "automatic checks off: nothing runs on the schedule");
+        assert!(due(false, true), "Check now still works with automatic checks off");
+    }
+
+    #[test]
+    fn a_sealed_copy_holds_the_checked_bytes_in_a_fresh_folder() {
+        let parent = std::env::temp_dir().join(format!("h0x-ade-seal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        let checked = b"the bytes that were verified";
+        let (dir, file) = seal(&parent, checked, "install.sh").unwrap();
+        assert!(dir.starts_with(&parent) && file == dir.join("install.sh"));
+        assert_eq!(std::fs::read(&file).unwrap(), checked);
+        // Swapping the downloaded path afterwards changes nothing that runs.
+        let downloaded = parent.join("download.sh");
+        std::fs::write(&downloaded, checked).unwrap();
+        std::fs::write(&downloaded, b"swapped").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), checked);
+        let (other, _) = seal(&parent, b"", "empty").unwrap();
+        assert_ne!(dir, other, "every copy gets its own folder");
+        assert!(seal(&parent.join("missing").join("deeper"), checked, "x").is_err());
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn relaunch_quotes_every_powershell_quote_character() {
+        assert_eq!(ps_quote("plain"), "'plain'");
+        assert_eq!(ps_quote(""), "''");
+        for q in ['\'', '\u{2018}', '\u{2019}', '\u{201a}', '\u{201b}'] {
+            assert_eq!(ps_quote(&format!("a{q}b")), format!("'a{q}{q}b'"), "U+{:04X}", q as u32);
+        }
+        let exe = Path::new("C:/Users/O\u{2019}Neil/My Apps/it's here/HyperOx.exe");
+        assert_eq!(
+            relaunch_script(42, exe),
+            "Wait-Process -Id 42 -ErrorAction SilentlyContinue; Start-Process 'C:/Users/O\u{2019}\u{2019}Neil/My Apps/it''s here/HyperOx.exe'"
+        );
     }
 
     #[test]
