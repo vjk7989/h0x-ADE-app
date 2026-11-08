@@ -624,11 +624,23 @@ fn scripted(calls: &Rc<RefCell<Calls>>, name: &str, first: &Value, text: Option<
 
 // The Remote page as it looks once its tasks have finished: `replies` answer core, `setup` runs after init.
 fn describe_remote(cx: &mut TestAppContext, staged: &Staged, replies: &[(&str, Value)], setup: &str) -> (String, Rc<RefCell<Calls>>) {
+    describe_remote_in(cx, staged, replies, setup, "/fixture/app")
+}
+
+// The Remote page with the app folder at `app_home`.
+fn describe_remote_in(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    replies: &[(&str, Value)],
+    setup: &str,
+    app_home: &str,
+) -> (String, Rc<RefCell<Calls>>) {
     let calls = Rc::new(RefCell::new(Calls::default()));
     calls.borrow_mut().replies = replies.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
     let mut p = props();
     p["section"] = json!("remote");
-    let values = fixture(true, p, updates("current", "current"));
+    let mut values = fixture(true, p, updates("current", "current"));
+    values.insert("appHome".into(), json!(app_home));
     let policy = Policy::new()
         .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
         .with_host_module(module(values, calls.clone()))
@@ -750,6 +762,273 @@ fn settings_remote_token_file_is_emptied_when_core_refuses(cx: &mut TestAppConte
     let c = calls.borrow();
     assert_eq!(c.writes.last().map(|w| w.1.as_str()), Some(""), "emptied even on failure: {:?}", c.writes);
     assert!(tree.contains("fixture invalid") && !tree.contains("BAD-TOKEN"), "{tree}");
+}
+
+// The Remote page's replies with the web panel running and `core read h0x-bridge-web` printing `stdout`.
+fn web_replies(stdout: &str) -> Vec<(&'static str, Value)> {
+    let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([{"name":"h0x-bridge-web", "state":"live"}]));
+    replies.push(("read h0x-bridge-web", json!({"code":0, "stdout":stdout, "stderr":""})));
+    replies
+}
+
+// The `core` calls that start a terminal.
+fn starts(calls: &Rc<RefCell<Calls>>) -> Vec<Vec<String>> {
+    calls.borrow().cores.iter().filter(|a| a.first().map(String::as_str) == Some("run")).cloned().collect()
+}
+
+#[gpui::test]
+fn settings_remote_pair_code_shows_only_until_it_expires(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+    for (label, expires) in [("exactly now", "Date.now()"), ("a minute ago", "Date.now() - 60000"), ("at zero", "0"), ("missing", "undefined")] {
+        let setup = format!("this.pairing = {{ code: 'GONE42', expires_ms: {expires} }};");
+        let (tree, _) = describe_remote(cx, &staged, &replies, &setup);
+        assert!(!tree.contains("GONE42"), "a code expiring {label} is hidden: {tree}");
+        assert!(tree.contains("Get a one-time code, then send it to your bot."), "{label}: {tree}");
+    }
+    let (tree, _) = describe_remote(cx, &staged, &replies, "this.pairing = { code: 'DAY123', expires_ms: Date.now() + 86400000 };");
+    assert!(tree.contains("Send /pair DAY123 to your bot."), "{tree}");
+    assert!(tree.contains("works for 86400 s.") || tree.contains("works for 86399 s."), "a day ahead counts whole seconds: {tree}");
+    let far = "this.pairing = { code: 'FAR999', expires_ms: Date.now() + 10 * 365 * 86400000 };";
+    let (tree, _) = describe_remote(cx, &staged, &replies, far);
+    assert!(tree.contains("Send /pair FAR999") && !tree.contains("NaN") && !tree.contains("Infinity"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_remote_blank_token_makes_no_call(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let replies = remote_replies(bridge_ls(json!([]), false, "unset"), json!([]));
+    for value in ["", "   ", "\\t \\t"] {
+        let setup = format!("this.tokenInput.set_value('{value}'); this.saveToken(cx);");
+        let (tree, calls) = describe_remote(cx, &staged, &replies, &setup);
+        let c = calls.borrow();
+        assert!(c.writes.is_empty(), "nothing is written for {value:?}: {:?}", c.writes);
+        assert!(c.cores.iter().all(|a| !a.join(" ").starts_with("bridge telegram")), "no call for {value:?}: {:?}", c.cores);
+        assert!(!tree.contains("Bot token saved.") && tree.contains("Not set"), "{value:?}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_remote_long_padded_token_is_trimmed_and_never_an_argument(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+    replies.push(("bridge telegram token --file", core_ok(json!({"telegram_token":"set"}))));
+    let setup = "this.tokenInput.set_value('  ' + 'Z'.repeat(4096) + '  \\n'); this.saveToken(cx);";
+    let (tree, calls) = describe_remote(cx, &staged, &replies, setup);
+    let c = calls.borrow();
+    let path = "/fixture/app/telegram-token.tmp".to_string();
+    assert_eq!(c.writes, vec![(path.clone(), "Z".repeat(4096)), (path, String::new())], "trimmed, written whole, then emptied");
+    assert!(c.cores.iter().all(|a| !a.join(" ").contains("ZZZZ")), "the token is never an argument: {:?}", c.cores);
+    assert!(tree.contains("Bot token saved.") && !tree.contains("ZZZZ"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_remote_token_file_sits_in_a_windows_app_home(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+    replies.push(("bridge telegram token --file", core_ok(json!({"telegram_token":"set"}))));
+    let home = r"C:\Users\Ana López\AppData\Roaming\h0x-ade";
+    let setup = "this.tokenInput.set_value('7:WIN-TOKEN'); this.saveToken(cx);";
+    let (tree, calls) = describe_remote_in(cx, &staged, &replies, setup, home);
+    let c = calls.borrow();
+    let path = format!("{home}/telegram-token.tmp");
+    assert_eq!(c.writes, vec![(path.clone(), "7:WIN-TOKEN".to_string()), (path.clone(), String::new())], "{:?}", c.writes);
+    assert!(
+        c.cores.iter().any(|a| *a == ["bridge", "telegram", "token", "--file", path.as_str()]),
+        "the path with a space is one argument: {:?}",
+        c.cores
+    );
+    assert!(tree.contains("Bot token saved.") && !tree.contains("WIN-TOKEN"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_remote_web_link_is_the_first_json_line_with_a_url_or_pair(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let qr = |calls: &Rc<RefCell<Calls>>| calls.borrow().cores.iter().filter(|a| a.get(..2) == Some(&["bridge".to_string(), "qr".to_string()][..])).cloned().collect::<Vec<_>>();
+    let stdout = "Starting…\r\n42\r\nnull\r\n{\"event\":\"ready\"}\r\n{\"url\":\"http://10.0.0.2:7000\",\"pair\":\"http://10.0.0.2:7000/#t=first\"}\r\n{\"url\":\"http://10.0.0.3:7000\",\"pair\":\"http://10.0.0.3:7000/#t=second\"}\r\n";
+    let mut replies = web_replies(stdout);
+    replies.push(("bridge qr", core_ok(json!({"size":1, "rows":["1"]}))));
+    let (tree, calls) = describe_remote(cx, &staged, &replies, "");
+    assert!(tree.contains("http://10.0.0.2:7000/#t=first") && !tree.contains("#t=second"), "the first link wins: {tree}");
+    assert_eq!(qr(&calls), vec![vec!["bridge", "qr", "http://10.0.0.2:7000/#t=first", "--json"]], "{:?}", calls.borrow().cores);
+
+    let (tree, calls) = describe_remote(cx, &staged, &web_replies("Starting the panel\n"), "");
+    assert!(tree.contains("st-r-web-stop") && tree.contains("Running"), "{tree}");
+    assert!(!tree.contains("Scan with your phone") && qr(&calls).is_empty(), "no link yet: {tree}");
+
+    let (tree, calls) = describe_remote(cx, &staged, &web_replies("{\"url\":\"http://10.0.0.4:7000\"}\n"), "");
+    assert!(tree.contains("http://10.0.0.4:7000") && tree.contains("Scan with your phone"), "a url alone is the link: {tree}");
+    assert!(qr(&calls).is_empty(), "no pair link, no QR: {:?}", calls.borrow().cores);
+}
+
+#[gpui::test]
+fn settings_remote_odd_qr_replies_keep_the_page_and_the_link(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let blacks = |tree: &str| tree.matches("#000000").count();
+    // The same page without a QR: a url-only link with the same text.
+    let (base, _) = describe_remote(cx, &staged, &web_replies("{\"url\":\"http://10.0.0.2:7000/#t=qr\"}\n"), "");
+    for (label, reply, extra) in [
+        ("no modules", core_ok(json!({"size":0, "rows":[]})), 0),
+        ("uneven rows", core_ok(json!({"size":4, "rows":["1", "0110", "", "2x"]})), 2),
+        ("not json", json!({"code":0, "stdout":"QR unavailable", "stderr":""}), 0),
+        ("no rows", core_ok(json!({"size":21})), 0),
+    ] {
+        let mut replies = web_replies("{\"pair\":\"http://10.0.0.2:7000/#t=qr\"}\n");
+        replies.push(("bridge qr", reply));
+        let (tree, calls) = describe_remote(cx, &staged, &replies, "");
+        assert!(tree.contains("Scan with your phone") && tree.contains("#t=qr") && tree.contains("st-r-web-stop"), "{label}: {tree}");
+        assert_eq!(blacks(&tree), blacks(&base) + extra, "{label}: dark modules drawn: {tree}");
+        assert!(calls.borrow().cores.iter().any(|a| a.join(" ").starts_with("bridge qr")), "{label}: {:?}", calls.borrow().cores);
+    }
+    let mut replies = web_replies("{\"pair\":\"http://10.0.0.2:7000/#t=qr\"}\n");
+    replies.push(("bridge qr", core_error("qr")));
+    let (tree, _) = describe_remote(cx, &staged, &replies, "");
+    assert!(tree.contains("fixture qr") && tree.contains("Scan with your phone") && tree.contains("#t=qr"), "a refused QR says why: {tree}");
+}
+
+#[gpui::test]
+fn settings_remote_vps_start_needs_a_machine_and_a_public_host(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+    for (label, setup) in [
+        ("nothing picked", "this.reach = 'vps'; this.startWeb(cx);"),
+        ("no host", "this.reach = 'vps'; this.via = 'remote'; this.startWeb(cx);"),
+        ("a blank host", "this.reach = 'vps'; this.via = 'remote'; this.publicHost.set_value('   '); this.startWeb(cx);"),
+        ("no machine", "this.reach = 'vps'; this.publicHost.set_value('vps.example.com'); this.startWeb(cx);"),
+    ] {
+        let (tree, calls) = describe_remote(cx, &staged, &replies, setup);
+        assert!(tree.contains("Pick a machine and type its public host."), "{label}: {tree}");
+        assert!(starts(&calls).is_empty(), "{label}: nothing starts: {:?}", calls.borrow().cores);
+    }
+    let setup = "this.reach = 'vps'; this.via = 'remote'; this.publicHost.set_value(' vps.example.com '); this.startWeb(cx);";
+    let (tree, calls) = describe_remote(cx, &staged, &replies, setup);
+    let runs = starts(&calls);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(runs[0].ends_with(&["bridge", "web", "--json", "--via", "remote", "--public-host", "vps.example.com"].map(String::from)), "{runs:?}");
+    assert!(tree.contains("st-r-via-remote") && !tree.contains("Pick a machine"), "{tree}");
+
+    let mut replies = replies.clone();
+    replies.push(("machine ls", core_ok(json!({"machines":[]}))));
+    let (tree, _) = describe_remote(cx, &staged, &replies, "this.reach = 'vps';");
+    assert!(tree.contains("Add a machine first (Machines page).") && !tree.contains("st-r-via-"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_remote_web_starts_once_with_the_chosen_reach(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+    for (reach, tail) in [("lan", vec!["--lan"]), ("tunnel", vec!["--tunnel", "--yes"])] {
+        let setup = format!("this.reach = '{reach}'; this.startWeb(cx); this.startWeb(cx);");
+        let (_, calls) = describe_remote(cx, &staged, &replies, &setup);
+        let runs = starts(&calls);
+        assert_eq!(runs.len(), 1, "{reach}: a second Start while busy is ignored: {runs:?}");
+        let mut want = vec!["run", "--bg", "--keep", "--no-parent", "--outlive-parent", "--name", "h0x-bridge-web", "--label", "h0x-bridge=web"];
+        want.extend(["--", "h0x-core", "bridge", "web", "--json"]);
+        want.extend(tail);
+        assert_eq!(runs[0], want, "{reach}");
+    }
+    let (tree, _) = describe_remote(cx, &staged, &web_replies(""), "");
+    assert!(tree.contains("st-r-web-stop") && !tree.contains("st-r-web-start"), "a running panel offers only Stop: {tree}");
+}
+
+#[gpui::test]
+fn settings_remote_stopping_a_bridge_that_is_gone_shows_why(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut replies = web_replies("");
+    replies.push(("kill", core_error("not_found")));
+    let setup = "this.remoteAction('st-r-web-stop', () => this.coreJson(['kill', 'h0x-bridge-web']), cx);";
+    let (tree, calls) = describe_remote(cx, &staged, &replies, setup);
+    assert!(calls.borrow().cores.iter().any(|a| *a == ["kill", "h0x-bridge-web"]), "{:?}", calls.borrow().cores);
+    assert!(tree.contains("fixture not_found") && tree.contains("Remote control: On") && tree.contains("st-r-web-stop"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_remote_activity_keeps_the_newest_twenty_newest_first(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let log = |n: i64| {
+        let entries: Vec<Value> =
+            (0..n).map(|i| json!({"time_ms":1700000000000i64 + i * 1000, "identity":"i1", "command":format!("cmd-{i:02}"), "result":"ok"})).collect();
+        core_ok(json!({ "entries": entries }))
+    };
+    let with_log = |reply: Value| {
+        let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+        replies.iter_mut().find(|(k, _)| *k == "bridge log").unwrap().1 = reply;
+        replies
+    };
+    for (label, reply) in [("no entries", log(0)), ("a failed log", core_error("log"))] {
+        let (tree, _) = describe_remote(cx, &staged, &with_log(reply), "");
+        assert!(tree.contains("Nothing yet.") && tree.contains("Remote control: On"), "{label}: {tree}");
+        assert!(!tree.contains("cmd-") && !tree.contains("fixture log"), "{label}: {tree}");
+    }
+    let (tree, calls) = describe_remote(cx, &staged, &with_log(log(20)), "");
+    assert!(calls.borrow().cores.iter().any(|a| *a == ["bridge", "log", "-n", "20", "--json"]), "{:?}", calls.borrow().cores);
+    assert!((0..20).all(|i| tree.contains(&format!("cmd-{i:02}"))) && !tree.contains("Nothing yet."), "all 20 shown: {tree}");
+    assert!(tree.find("cmd-19") < tree.find("cmd-00"), "newest first: {tree}");
+    let (tree, _) = describe_remote(cx, &staged, &with_log(log(21)), "");
+    assert!(!tree.contains("cmd-00") && (1..21).all(|i| tree.contains(&format!("cmd-{i:02}"))), "the oldest of 21 is dropped: {tree}");
+    assert!(tree.find("cmd-20") < tree.find("cmd-01"), "newest first: {tree}");
+}
+
+#[gpui::test]
+fn settings_remote_unicode_device_labels_show_in_devices_and_activity(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let ids = json!([
+        {"id":"i1", "transport":"telegram", "user_id":"42", "label":"Ана · 手机 📱", "paired_at_ms":1700000000000i64},
+        {"id":"i2", "transport":"web", "user_id":"user-77"},
+        {"id":"i3", "transport":"web"}
+    ]);
+    let (tree, _) = describe_remote(cx, &staged, &remote_replies(bridge_ls(ids, false, "set"), json!([])), "");
+    // The device row and both activity entries (identity i1) carry the label.
+    assert!(tree.matches("Ана · 手机 📱").count() >= 3, "{tree}");
+    assert!(tree.contains("user-77") && tree.contains("web · paired"), "{tree}");
+    for id in ["i1", "i2", "i3"] {
+        assert!(tree.contains(&format!("st-r-unpair-{id}")), "{id} can be removed: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_remote_locked_with_the_bot_and_the_panel_both_running(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let both = json!([{"name":"h0x-bridge-telegram", "state":"live"}, {"name":"h0x-bridge-web", "state":"live"}]);
+    let mut replies = remote_replies(bridge_ls(json!([]), true, "set"), both);
+    replies.push(("read h0x-bridge-web", json!({"code":0, "stdout":"{\"url\":\"http://10.0.0.9:7000\"}\n", "stderr":""})));
+    let (tree, _) = describe_remote(cx, &staged, &replies, "");
+    assert!(tree.contains("Remote control: Locked") && tree.contains("Unlock"), "{tree}");
+    assert!(tree.contains("st-r-bot-stop") && tree.contains("st-r-web-stop"), "{tree}");
+    assert!(!tree.contains("st-r-bot-start") && !tree.contains("st-r-web-start"), "{tree}");
+    assert!(tree.matches("Running").count() >= 2 && tree.contains("http://10.0.0.9:7000"), "{tree}");
+    // Only the exact terminal names count as running.
+    let lookalikes = json!([{"name":"h0x-bridge-web-2", "state":"live"}, {"name":"old-h0x-bridge-telegram", "state":"live"}]);
+    let (tree, _) = describe_remote(cx, &staged, &remote_replies(bridge_ls(json!([]), false, "set"), lookalikes), "");
+    assert!(tree.contains("st-r-bot-start") && tree.contains("st-r-web-start"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_remote_unreadable_bridge_answers_show_a_message(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (label, reply, want) in [
+        ("not json", json!({"code":0, "stdout":"garbage", "stderr":""}), "Couldn't read remote control."),
+        ("no identities", core_ok(json!({"locked":false})), "Couldn't read remote control."),
+        ("a silent failure", json!({"code":1, "stdout":"", "stderr":""}), "It didn't work."),
+        ("an unknown command", json!({"code":2, "stdout":"", "stderr":"error: unknown command \"bridge\"\n"}), "Update h0x-core to use remote control."),
+    ] {
+        let (tree, _) = describe_remote(cx, &staged, &[("bridge ls", reply)], "");
+        assert!(tree.contains(want), "{label}: {tree}");
+        assert!(!tree.contains("Reading remote control") && !tree.contains("Remote control: On"), "{label}: {tree}");
+    }
 }
 
 /// The consent dialog (ADR-048) names the mod, its folder and its powers, and
