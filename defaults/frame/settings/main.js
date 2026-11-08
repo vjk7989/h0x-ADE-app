@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { core, run, theme, themes, fonts, updates, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "h0x";
+import { core, run, theme, themes, fonts, updates, settings, layouts, shared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, props, closeOverlay, window } from "h0x";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -770,19 +770,20 @@ export default class Settings extends View {
   }
 
   // The token goes through a file under the app folder (never an argument) and the file is
-  // emptied afterwards, whatever the result: the mod host has no way to delete a file.
+  // deleted afterwards, whatever the result; a leftover from a crash is deleted first.
   saveToken(cx) {
     const token = this.tokenInput.value().trim();
     if (!token) return;
     const path = `${appHome()}/telegram-token.tmp`;
     this.remoteAction("token", async () => {
       try {
+        await removeAppFile(path);
         await writeTextFile(path, token, null);
         await this.coreJson(["bridge", "telegram", "token", "--file", path]);
         this.remoteNotice = "Bot token saved.";
         this.tokenInput.set_value("");
       } finally {
-        await writeTextFile(path, "", null).catch(() => {});
+        await removeAppFile(path).catch(() => {});
       }
     }, cx);
   }

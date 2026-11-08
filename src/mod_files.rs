@@ -206,9 +206,194 @@ pub fn write_text(
     }
 }
 
+/// Deletes one file inside the app home (a file already gone is fine).
+fn remove(path: &Path, roots: &[String]) -> Result<(), String> {
+    check(path, roots)?;
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+        _ => Ok(()),
+    }
+}
+
+pub fn remove_app_file(path: String) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send {
+    let roots = real_roots([crate::mods::app_dir()]);
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(remove(Path::new(&path), &roots));
+    });
+    async move {
+        rx.recv()
+            .await
+            .map_err(|e| HostError::new(e.to_string()))?
+            .map_err(HostError::new)?;
+        Ok(HostValue::Null)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_deletes_only_inside_the_app_home() {
+        let base = std::env::temp_dir().join(format!(
+            "h0x-ade-remove-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = base.join("home");
+        let other = base.join("other");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let roots = real_roots([home.clone()]);
+        let inside = home.join("t.tmp");
+        std::fs::write(&inside, "x").unwrap();
+        remove(&inside, &roots).unwrap();
+        assert!(!inside.exists());
+        remove(&inside, &roots).unwrap();
+        let outside = other.join("keep.txt");
+        std::fs::write(&outside, "x").unwrap();
+        let dotdot = home.join("..").join("other").join("keep.txt");
+        for path in [outside.clone(), dotdot, PathBuf::from(r"Z:\elsewhere\t.tmp"), PathBuf::from("/nowhere/t.tmp")] {
+            assert!(remove(&path, &roots).is_err(), "{}", path.display());
+        }
+        assert!(outside.exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A fresh `<temp>/h0x-ade-<name>-<nanos>` with an app home and a folder beside it.
+    fn remove_scratch(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "h0x-ade-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (home, other) = (base.join("home"), base.join("other"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        (base, home, other)
+    }
+
+    #[test]
+    fn remove_never_deletes_the_app_home_or_a_folder_in_it() {
+        let (base, home, _) = remove_scratch("remove-dirs");
+        let roots = real_roots([home.clone()]);
+        let sub = home.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("a.txt"), "a").unwrap();
+        std::fs::write(home.join("b.txt"), "b").unwrap();
+        for dir in [home.clone(), sub.clone(), home.join("sub/"), home.join("sub").join("..")] {
+            assert!(remove(&dir, &roots).is_err(), "a folder is never removed: {}", dir.display());
+        }
+        assert!(sub.join("a.txt").exists() && home.join("b.txt").exists(), "nothing under the app home went");
+        // Empty and relative paths resolve against the working folder, never the app home.
+        assert!(remove(Path::new(""), &roots).is_err());
+        assert!(remove(Path::new("b.txt"), &roots).is_err());
+        assert!(home.join("b.txt").exists());
+        // No roots: nothing is removable.
+        assert!(remove(&home.join("b.txt"), &[]).is_err());
+        assert!(home.join("b.txt").exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn remove_refuses_paths_that_climb_out_or_only_look_like_the_app_home() {
+        let (base, home, other) = remove_scratch("remove-climb");
+        let roots = real_roots([home.clone()]);
+        let keep = other.join("keep.txt");
+        std::fs::write(&keep, "x").unwrap();
+        let sibling = base.join("home2");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("x.txt"), "x").unwrap();
+        for path in [
+            home.join("missing").join("..").join("..").join("other").join("keep.txt"),
+            home.join("..").join("home").join("..").join("other").join("keep.txt"),
+            sibling.join("x.txt"),
+        ] {
+            assert!(remove(&path, &roots).is_err(), "{}", path.display());
+        }
+        assert!(keep.exists() && sibling.join("x.txt").exists(), "files outside the app home survive");
+        // `..` that stays inside is fine.
+        let inside = home.join("t.tmp");
+        std::fs::write(&inside, "x").unwrap();
+        remove(&home.join("..").join("home").join("t.tmp"), &roots).unwrap();
+        assert!(!inside.exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_through_a_link_in_the_app_home_never_reaches_outside() {
+        let (base, home, other) = remove_scratch("remove-links");
+        let roots = real_roots([home.clone()]);
+        let keep = other.join("keep.txt");
+        std::fs::write(&keep, "x").unwrap();
+        // A link to a file outside, and a link to a folder outside.
+        std::os::unix::fs::symlink(&keep, home.join("telegram-token.tmp")).unwrap();
+        std::os::unix::fs::symlink(&other, home.join("out")).unwrap();
+        assert!(remove(&home.join("telegram-token.tmp"), &roots).is_err());
+        assert!(remove(&home.join("out").join("keep.txt"), &roots).is_err());
+        assert!(remove(&home.join("out"), &roots).is_err());
+        assert!(keep.exists(), "the outside file survives");
+        assert!(std::fs::symlink_metadata(home.join("telegram-token.tmp")).is_ok() && std::fs::symlink_metadata(home.join("out")).is_ok());
+        // A link to a file inside: only the link goes, never what it points at.
+        let target = home.join("settings.json");
+        std::fs::write(&target, "{}").unwrap();
+        std::os::unix::fs::symlink(&target, home.join("inner")).unwrap();
+        remove(&home.join("inner"), &roots).unwrap();
+        assert!(std::fs::symlink_metadata(home.join("inner")).is_err(), "the link is removed");
+        assert!(target.exists(), "its target stays");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_takes_any_windows_spelling_of_a_file_in_the_app_home_and_nothing_outside() {
+        let (base, home, other) = remove_scratch("remove-win");
+        let roots = real_roots([home.clone()]);
+        let real_home = std::fs::canonicalize(&home).unwrap().to_string_lossy().into_owned();
+        let plain = real_home.strip_prefix(r"\\?\").unwrap().to_owned();
+        let inside = home.join("t.tmp");
+        for spelling in [
+            format!(r"{plain}/t.tmp"),
+            format!(r"{}\t.tmp", plain.to_uppercase()),
+            format!(r"{}\T.TMP", plain.to_lowercase()),
+            format!(r"{real_home}\t.tmp"),
+            format!(r"{plain}\t.tmp."),
+            format!(r"{plain}\t.tmp "),
+        ] {
+            std::fs::write(&inside, "x").unwrap();
+            remove(Path::new(&spelling), &roots).unwrap_or_else(|e| panic!("{spelling}: {e}"));
+            assert!(!inside.exists(), "{spelling}");
+        }
+        let keep = other.join("keep.txt");
+        std::fs::write(&keep, "x").unwrap();
+        let real_keep = std::fs::canonicalize(&keep).unwrap().to_string_lossy().into_owned();
+        let plain_keep = real_keep.strip_prefix(r"\\?\").unwrap().to_owned();
+        let (drive, rest) = plain_keep.split_once(r":\").unwrap();
+        for path in [
+            format!(r"{plain}\..\other\keep.txt."),
+            format!(r"{real_home}\..\other\keep.txt"),
+            format!(r"{plain}/../other/keep.txt"),
+            format!(r"\\localhost\{drive}$\{rest}"),
+            format!(r"\\?\UNC\localhost\{drive}$\{rest}"),
+            format!(r"\\127.0.0.1\{drive}$\{rest}"),
+        ] {
+            assert!(remove(Path::new(&path), &roots).is_err(), "{path}");
+            assert!(keep.exists(), "{path}");
+        }
+        // The app home through a share is not the app home's root either: refused.
+        let (_, home_rest) = plain.split_once(r":\").unwrap();
+        std::fs::write(&inside, "x").unwrap();
+        assert!(remove(Path::new(&format!(r"\\localhost\{drive}$\{home_rest}\t.tmp")), &roots).is_err());
+        assert!(inside.exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[test]
     fn creates_updates_and_rejects_stale_text() {
         let root = std::path::PathBuf::from("/var/tmp").join(format!(

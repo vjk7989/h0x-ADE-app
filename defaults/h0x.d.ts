@@ -27,6 +27,9 @@ export function readTextFile(path: string, options?: { on?: string | null }): Pr
 /** Writes UTF-8 text only if it still matches expected (null creates a new file).
  * Rejects on a stale snapshot; existing files are replaced atomically. */
 export function writeTextFile(path: string, text: string, expected: string | null): Promise<null>;
+/** Deletes one file inside the app folder (appHome()); a missing file is fine, any other
+ * path rejects. */
+export function removeAppFile(path: string): Promise<null>;
 
 /** The agents people can start from a menu (entries with `run` in programs.json), most picked
  *  first, and whether each is installed: asked of the shell agents start in (on another machine,

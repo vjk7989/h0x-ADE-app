@@ -1061,6 +1061,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             let expected = a.get(2).and_then(|v| match v { HostValue::Str(s) => Some(s.clone()), _ => None });
             Ok(crate::mod_files::write_text(a.string(0)?.to_owned(), a.string(1)?.to_owned(), expected))
         })
+        .async_function("removeAppFile", |a| Ok(crate::mod_files::remove_app_file(a.string(0)?.to_owned())))
         .async_function("core", |a| Ok(exec_future("h0x-core".into(), strings(a.get(0)), None, None, EXEC_LIMIT)))
         .function("busyVerb", busy_verb_call)
         .function("home", |_| Ok(home().to_string_lossy().into_owned().into()))

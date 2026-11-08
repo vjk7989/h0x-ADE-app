@@ -64,6 +64,9 @@ struct Calls {
     replies: BTreeMap<String, Value>,
     cores: Vec<Vec<String>>,
     writes: Vec<(String, String)>,
+    /// Paths passed to `removeAppFile`, and the files a script of writes and removes leaves behind.
+    removes: Vec<String>,
+    files: BTreeMap<String, String>,
 }
 
 fn updates(app: &str, core: &str) -> Value {
@@ -158,7 +161,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
     for name in ["nextCommand", "watchFolder"] {
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     }
-    for name in ["exec", "core", "readTextFile", "writeTextFile", "sendFeedback"] {
+    for name in ["exec", "core", "readTextFile", "writeTextFile", "removeAppFile", "sendFeedback"] {
         let calls = calls.clone();
         module = module.async_function(name, move |a| {
             let first = a.get(0).map(from_host).unwrap_or(Value::Null);
@@ -608,7 +611,18 @@ fn scripted(calls: &Rc<RefCell<Calls>>, name: &str, first: &Value, text: Option<
     }
     match name {
         "writeTextFile" => {
-            c.writes.push((first.as_str()?.into(), text?.as_str()?.into()));
+            let (path, text): (String, String) = (first.as_str()?.into(), text?.as_str()?.into());
+            c.files.insert(path.clone(), text.clone());
+            c.writes.push((path, text));
+            Some(Value::Null)
+        }
+        "removeAppFile" => {
+            c.removes.push(first.as_str()?.into());
+            // A `removeAppFile refuses` reply makes every removal reject.
+            if c.replies.contains_key("removeAppFile refuses") {
+                return None;
+            }
+            c.files.remove(first.as_str()?);
             Some(Value::Null)
         }
         "core" => {
@@ -635,7 +649,20 @@ fn describe_remote_in(
     setup: &str,
     app_home: &str,
 ) -> (String, Rc<RefCell<Calls>>) {
+    describe_remote_with(cx, staged, replies, setup, app_home, &[])
+}
+
+// The Remote page with `files` already on disk.
+fn describe_remote_with(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    replies: &[(&str, Value)],
+    setup: &str,
+    app_home: &str,
+    files: &[(&str, &str)],
+) -> (String, Rc<RefCell<Calls>>) {
     let calls = Rc::new(RefCell::new(Calls::default()));
+    calls.borrow_mut().files = files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     calls.borrow_mut().replies = replies.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
     let mut p = props();
     p["section"] = json!("remote");
@@ -736,7 +763,7 @@ fn settings_remote_page_with_an_older_core_says_to_update(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn settings_remote_token_goes_through_a_file_that_is_emptied_and_is_never_shown(cx: &mut TestAppContext) {
+fn settings_remote_token_goes_through_a_file_that_is_deleted_and_is_never_shown(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
@@ -745,7 +772,9 @@ fn settings_remote_token_goes_through_a_file_that_is_emptied_and_is_never_shown(
     let (tree, calls) = describe_remote(cx, &staged, &replies, setup);
     let c = calls.borrow();
     let path = "/fixture/app/telegram-token.tmp";
-    assert_eq!(c.writes, vec![(path.to_string(), "123456:SECRET-TOKEN".to_string()), (path.to_string(), String::new())], "written, then emptied");
+    assert_eq!(c.writes, vec![(path.to_string(), "123456:SECRET-TOKEN".to_string())], "written once");
+    assert_eq!(c.removes, vec![path.to_string(), path.to_string()], "a leftover is removed first, the file last");
+    assert!(c.files.is_empty(), "no file holds the token: {:?}", c.files);
     assert!(c.cores.iter().any(|a| a.join(" ") == format!("bridge telegram token --file {path}")), "--file is called: {:?}", c.cores);
     assert!(c.cores.iter().all(|a| !a.join(" ").contains("SECRET")), "the token is never an argument: {:?}", c.cores);
     assert!(tree.contains("Bot token saved."), "{tree}");
@@ -753,15 +782,70 @@ fn settings_remote_token_goes_through_a_file_that_is_emptied_and_is_never_shown(
 }
 
 #[gpui::test]
-fn settings_remote_token_file_is_emptied_when_core_refuses(cx: &mut TestAppContext) {
+fn settings_remote_token_file_is_deleted_when_core_refuses(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let mut replies = remote_replies(bridge_ls(json!([]), false, "unset"), json!([]));
     replies.push(("bridge telegram token --file", core_error("invalid")));
     let (tree, calls) = describe_remote(cx, &staged, &replies, "this.tokenInput.set_value('9:BAD-TOKEN'); this.saveToken(cx);");
     let c = calls.borrow();
-    assert_eq!(c.writes.last().map(|w| w.1.as_str()), Some(""), "emptied even on failure: {:?}", c.writes);
+    assert_eq!(c.writes.len(), 1, "{:?}", c.writes);
+    assert_eq!(c.removes.last().map(String::as_str), Some("/fixture/app/telegram-token.tmp"), "deleted even on failure: {:?}", c.removes);
+    assert!(c.files.is_empty(), "no file holds the token: {:?}", c.files);
     assert!(tree.contains("fixture invalid") && !tree.contains("BAD-TOKEN"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_remote_token_leftover_file_is_removed_before_and_after(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let path = "/fixture/app/telegram-token.tmp";
+    let setup = "this.tokenInput.set_value('8:NEW-TOKEN'); this.saveToken(cx);";
+    for (label, reply) in [("saved", core_ok(json!({"telegram_token":"set"}))), ("refused", core_error("invalid"))] {
+        let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+        replies.push(("bridge telegram token --file", reply));
+        let (_, calls) = describe_remote_with(cx, &staged, &replies, setup, "/fixture/app", &[(path, "1:OLD-TOKEN")]);
+        let c = calls.borrow();
+        assert_eq!(c.removes.first().map(String::as_str), Some(path), "{label}: the leftover goes first: {:?}", c.removes);
+        assert!(c.files.is_empty(), "{label}: no file holds a token: {:?}", c.files);
+    }
+}
+
+#[gpui::test]
+fn settings_remote_token_file_is_deleted_when_the_core_call_throws(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // No reply for the token command: the core call itself rejects.
+    let replies = remote_replies(bridge_ls(json!([]), false, "unset"), json!([]));
+    let setup = "this.tokenInput.set_value('5:THROW-TOKEN'); this.saveToken(cx);";
+    let (tree, calls) = describe_remote(cx, &staged, &replies, setup);
+    let c = calls.borrow();
+    let path = "/fixture/app/telegram-token.tmp".to_string();
+    assert_eq!(c.writes, vec![(path.clone(), "5:THROW-TOKEN".to_string())], "{:?}", c.writes);
+    assert!(c.cores.iter().any(|a| a.join(" ") == format!("bridge telegram token --file {path}")), "{:?}", c.cores);
+    assert_eq!(c.removes, vec![path.clone(), path], "removed before and after the throw");
+    assert!(c.files.is_empty(), "no file holds the token: {:?}", c.files);
+    assert!(c.unexpected.iter().all(|m| !m.contains("THROW-TOKEN")), "{:?}", c.unexpected);
+    assert!(tree.contains("unexpected core") && !tree.contains("Bot token saved.") && !tree.contains("THROW-TOKEN"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_remote_token_is_never_written_when_the_leftover_cannot_be_removed(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let path = "/fixture/app/telegram-token.tmp";
+    let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+    replies.push(("bridge telegram token --file", core_ok(json!({"telegram_token":"set"}))));
+    replies.push(("removeAppFile refuses", Value::Null));
+    let setup = "this.tokenInput.set_value('6:NEW-TOKEN'); this.saveToken(cx);";
+    let (tree, calls) = describe_remote_with(cx, &staged, &replies, setup, "/fixture/app", &[(path, "1:OLD-TOKEN")]);
+    let c = calls.borrow();
+    assert!(c.writes.is_empty(), "nothing is written over a leftover: {:?}", c.writes);
+    assert!(c.cores.iter().all(|a| a.get(..3) != Some(&["bridge".to_string(), "telegram".to_string(), "token".to_string()][..])), "core is never asked: {:?}", c.cores);
+    assert_eq!(c.removes, vec![path.to_string(), path.to_string()], "tried first, and again in the finally");
+    assert_eq!(c.files.get(path).map(String::as_str), Some("1:OLD-TOKEN"), "the leftover is untouched, not overwritten");
+    assert!(tree.contains("unexpected removeAppFile") && !tree.contains("Bot token saved."), "{tree}");
+    assert!(!tree.contains("NEW-TOKEN") && !tree.contains("OLD-TOKEN"), "{tree}");
 }
 
 // The Remote page's replies with the web panel running and `core read h0x-bridge-web` printing `stdout`.
@@ -805,6 +889,7 @@ fn settings_remote_blank_token_makes_no_call(cx: &mut TestAppContext) {
         let (tree, calls) = describe_remote(cx, &staged, &replies, &setup);
         let c = calls.borrow();
         assert!(c.writes.is_empty(), "nothing is written for {value:?}: {:?}", c.writes);
+        assert!(c.removes.is_empty(), "nothing is removed for {value:?}: {:?}", c.removes);
         assert!(c.cores.iter().all(|a| !a.join(" ").starts_with("bridge telegram")), "no call for {value:?}: {:?}", c.cores);
         assert!(!tree.contains("Bot token saved.") && tree.contains("Not set"), "{value:?}: {tree}");
     }
@@ -820,7 +905,9 @@ fn settings_remote_long_padded_token_is_trimmed_and_never_an_argument(cx: &mut T
     let (tree, calls) = describe_remote(cx, &staged, &replies, setup);
     let c = calls.borrow();
     let path = "/fixture/app/telegram-token.tmp".to_string();
-    assert_eq!(c.writes, vec![(path.clone(), "Z".repeat(4096)), (path, String::new())], "trimmed, written whole, then emptied");
+    assert_eq!(c.writes, vec![(path.clone(), "Z".repeat(4096))], "trimmed, written whole");
+    assert_eq!(c.removes.last(), Some(&path), "then deleted");
+    assert!(c.files.is_empty(), "no file holds the token: {:?}", c.files);
     assert!(c.cores.iter().all(|a| !a.join(" ").contains("ZZZZ")), "the token is never an argument: {:?}", c.cores);
     assert!(tree.contains("Bot token saved.") && !tree.contains("ZZZZ"), "{tree}");
 }
@@ -836,7 +923,9 @@ fn settings_remote_token_file_sits_in_a_windows_app_home(cx: &mut TestAppContext
     let (tree, calls) = describe_remote_in(cx, &staged, &replies, setup, home);
     let c = calls.borrow();
     let path = format!("{home}/telegram-token.tmp");
-    assert_eq!(c.writes, vec![(path.clone(), "7:WIN-TOKEN".to_string()), (path.clone(), String::new())], "{:?}", c.writes);
+    assert_eq!(c.writes, vec![(path.clone(), "7:WIN-TOKEN".to_string())], "{:?}", c.writes);
+    assert_eq!(c.removes.last(), Some(&path), "{:?}", c.removes);
+    assert!(c.files.is_empty(), "no file holds the token: {:?}", c.files);
     assert!(
         c.cores.iter().any(|a| *a == ["bridge", "telegram", "token", "--file", path.as_str()]),
         "the path with a space is one argument: {:?}",
