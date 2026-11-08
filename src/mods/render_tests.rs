@@ -1012,6 +1012,7 @@ fn a_working_kept_sub_agent_under_an_idle_parent_shows_one_busy_verb_on_its_sub_
 struct FilesDisk {
     files: BTreeMap<String, String>,
     fail: Option<String>,
+    read_fail: Option<String>,
     send_code: i64,
     reads: Vec<Value>,
     writes: Vec<(String, String, Value)>,
@@ -1072,7 +1073,11 @@ fn files_module(values: BTreeMap<String, Value>, disk: Rc<RefCell<FilesDisk>>) -
         let mut disk = read.borrow_mut();
         disk.reads.push(json!([path, a.get(1).map(from_host).unwrap_or(Value::Null)]));
         let text = disk.files.get(&path).cloned();
-        Ok(std::future::ready(Ok(to_host(&json!(text)))))
+        let result = match disk.read_fail.clone() {
+            Some(message) => Err(HostError::new(message)),
+            None => Ok(to_host(&json!(text))),
+        };
+        Ok(std::future::ready(result))
     });
     let write = disk.clone();
     module = module.async_function("writeTextFile", move |a| {
@@ -1262,6 +1267,68 @@ fn files_panel_marks_remote_and_oversized_files_read_only_and_shows_unsaved_stat
         assert!(tree.contains(expected), "missing {expected}: {tree}");
     }
     assert!(disk.borrow().writes.is_empty(), "showing a file writes nothing");
+}
+
+// A read that fails shows its reason, cut to 120 characters (not bytes).
+#[gpui::test]
+fn files_panel_shows_why_a_file_cannot_be_previewed_capped_at_120_characters(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // The reason the panel shows when reading the file fails with `message`.
+    let shown = |cx: &mut TestAppContext, message: &str| -> String {
+        let disk = files_disk(&[("/fixture/project/notes.txt", "hello\n")]);
+        disk.borrow_mut().read_fail = Some(message.to_owned());
+        let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, "this.show('notes.txt', cx);");
+        let line = tree
+            .lines()
+            .find_map(|l| l.split_once("Cannot preview this file: "))
+            .unwrap_or_else(|| panic!("no reason shown for {message:?}: {tree}"))
+            .1;
+        line[..line.rfind('"').unwrap_or_else(|| panic!("{line}"))].to_owned()
+    };
+
+    let message = "/etc/notes.txt is outside your home folder and your spaces";
+    let short = shown(cx, message);
+    assert!(short.ends_with(message), "a short reason shows whole: {short}");
+    // What the host puts before the message (the call it rejected), if anything.
+    let lead = short.chars().count() - message.chars().count();
+    assert!(lead < 120, "{short}");
+    let prefix: String = short.chars().take(lead).collect();
+
+    // Exactly 120 characters show whole; the 121st is cut, and so is the rest of a long one.
+    let fill = 120 - lead;
+    let exact = "a".repeat(fill);
+    assert_eq!(shown(cx, &exact), format!("{prefix}{exact}"));
+    assert_eq!(shown(cx, &format!("{exact}b")), format!("{prefix}{exact}"));
+    assert_eq!(shown(cx, &"x".repeat(500)).chars().count(), 120);
+    // Characters, not bytes: a two-byte letter on the boundary stays whole.
+    let accents = format!("{}é", "a".repeat(fill - 1));
+    assert_eq!(shown(cx, &accents), format!("{prefix}{accents}"));
+    assert_eq!(shown(cx, &"é".repeat(fill + 1)), format!("{prefix}{}", "é".repeat(fill)));
+    // A character outside the BMP straddling the cap: never shown half, the panel still renders.
+    let straddle = shown(cx, &format!("{}😀tail", "a".repeat(fill - 1)));
+    assert!(straddle.starts_with(&format!("{prefix}{}", "a".repeat(fill - 1))), "{straddle}");
+    assert!(!straddle.contains('😀') && !straddle.contains("tail"), "{straddle}");
+    // An empty message still shows the line, with only what the host adds.
+    assert_eq!(shown(cx, ""), prefix);
+}
+
+// Something in the preview that throws no message at all (null, undefined, an
+// empty error or string) reads "unknown error", never "null" or "undefined".
+#[gpui::test]
+fn files_panel_says_unknown_error_when_a_preview_fails_without_a_message(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for thrown in ["null", "undefined", "new Error('')", "''"] {
+        let disk = files_disk(&[("/fixture/project/notes.txt", "hello\n")]);
+        // The drafts lookup runs inside the preview's try, after the read.
+        let setup = format!(
+            "this.drafts = {{ get() {{ throw {thrown}; }}, delete() {{}}, set() {{}} }}; this.show('notes.txt', cx);"
+        );
+        let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, &setup);
+        assert!(tree.contains("Cannot preview this file: unknown error"), "{thrown}: {tree}");
+        assert!(!tree.contains("Cannot preview this file: null") && !tree.contains("Cannot preview this file: undefined"), "{thrown}: {tree}");
+    }
 }
 
 #[gpui::test]
