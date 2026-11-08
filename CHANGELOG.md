@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-11-08
+
+### New
+
+- Settings → Remote: connect Telegram (paste the bot token, pair your account) and start the phone web panel with a QR code, on the same Wi-Fi, through a Cloudflare tunnel or through your own VPS. It also lists paired devices and recent activity, and has Lock, Unlock and Unpair.
+
+### Fixed
+
+- The Files panel previews text files again in every folder of a space, instead of showing "Cannot preview this file". When a preview fails, it now says why.
+
+### Requires
+
+- h0x-core 0.1.7.
+
 ## [0.1.8] - 2026-11-08
 
 ### New
