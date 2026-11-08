@@ -10,6 +10,7 @@ const SECTIONS = [
   { id: "look", title: "Look", icon: "palette" },
   ...(window()?.platform === "macos" ? [{ id: "keyboard", title: "Keyboard", icon: "keyboard" }] : []),
   { id: "machines", title: "Machines", icon: "server" },
+  { id: "remote", title: "Remote", icon: "shield" },
   { id: "alerts", title: "Alerts", icon: "bell" },
   { id: "mods", title: "Mods", icon: "shield" },
   { id: "updates", title: "Updates", icon: "refresh" },
@@ -53,12 +54,38 @@ export default class Settings extends View {
     this.machineResults = {};
     this.machineEdit = null;
     this.machineNotice = null;
+    this.tokenInput = InputState.new({ placeholder: "Paste the bot token" });
+    this.tokenInput.set_masked(true);
+    this.remote = null; // bridge ls
+    this.remoteLog = [];
+    this.remoteTerms = [];
+    this.remoteError = null;
+    this.remoteNotice = null;
+    this.remoteBusy = {};
+    this.remoteLoading = false;
+    this.pairing = null; // {code, expires_ms}
+    this.webLink = null; // {url, pair}
+    this.webQr = null; // {text, size, rows}
+    this.reach = "lan"; // "lan" | "tunnel" | "vps"
+    this.via = "";
+    this.publicHost = InputState.new({ placeholder: "Public host, like vps.example.com" });
+    this.tick = 0;
     this.handle = cx.focus_handle();
     this.handle.focus();
     cx.spawn(async (cx) => {
       await this.load();
       if (this.section === "machines") await this.loadMachines();
       cx.notify();
+    });
+    if (this.section === "remote") cx.spawn(async (cx) => { await this.loadRemote(); cx.notify(); });
+    cx.timer.every(1000, (cx) => {
+      if (this.section !== "remote") return;
+      if (++this.tick % 3 === 0) {
+        cx.spawn(async (cx) => {
+          await this.loadRemote();
+          cx.notify();
+        });
+      } else cx.notify(); // the pairing countdown
     });
     cx.timer.every(3000, (cx) => {
       if (this.section !== "machines") return;
@@ -674,6 +701,208 @@ export default class Settings extends View {
       .child(h_flex().pt(16).child(this.button(t, "st-m-add", "Add a machine", () => run("mod.open", { name: "machine-add" }))));
   }
 
+  // Remote ---------------------------------------------------------------
+
+  // Runs a core command; JSON answers come back parsed. A core that doesn't know the command says to update.
+  async coreJson(args) {
+    const r = await core(args);
+    let payload = null;
+    try { payload = JSON.parse(r.stdout || r.stderr); } catch {}
+    if (r.code !== 0) {
+      const text = payload?.error?.message || (r.stderr || r.stdout || "It didn't work.").trim();
+      throw new Error(/unrecogni[sz]ed|unknown (sub)?command|invalid subcommand|no such command/i.test(text) ? "Update h0x-core to use remote control." : text);
+    }
+    return payload;
+  }
+
+  termRunning(name) {
+    return this.remoteTerms.some((t) => t.name === name && t.state !== "finished");
+  }
+
+  async loadRemote() {
+    if (this.remoteLoading) return;
+    this.remoteLoading = true;
+    try {
+      const ls = await this.coreJson(["bridge", "ls", "--json"]);
+      if (!Array.isArray(ls?.identities)) throw new Error("Couldn't read remote control.");
+      this.remote = ls;
+      this.remoteError = null;
+      const log = await this.coreJson(["bridge", "log", "-n", "20", "--json"]).catch(() => null);
+      this.remoteLog = Array.isArray(log?.entries) ? log.entries.slice(-20).reverse() : [];
+      const terms = await this.coreJson(["ls", "--json"]).catch(() => null);
+      this.remoteTerms = Array.isArray(terms?.terminals) ? terms.terminals : [];
+      await this.loadMachines();
+      if (!this.termRunning("h0x-bridge-web")) {
+        this.webLink = null;
+        this.webQr = null;
+      } else if (!this.webLink) {
+        const r = await core(["read", "h0x-bridge-web"]);
+        for (const line of String(r.stdout ?? "").split("\n")) {
+          let found = null;
+          try { found = JSON.parse(line.trim()); } catch {}
+          if (found && (found.url || found.pair)) { this.webLink = found; break; }
+        }
+      }
+      if (this.webLink?.pair && this.webQr?.text !== this.webLink.pair) {
+        const q = await this.coreJson(["bridge", "qr", this.webLink.pair, "--json"]);
+        if (Array.isArray(q?.rows)) this.webQr = { text: this.webLink.pair, size: q.size, rows: q.rows };
+      }
+    } catch (e) {
+      this.remoteError = e.message ?? String(e);
+    } finally {
+      this.remoteLoading = false;
+    }
+  }
+
+  remoteAction(key, work, cx) {
+    if (this.remoteBusy[key]) return;
+    this.remoteBusy[key] = true;
+    this.remoteProblem = null;
+    this.remoteNotice = null;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try { await work(); } catch (e) { this.remoteProblem = e.message ?? String(e); } finally { delete this.remoteBusy[key]; }
+      await this.loadRemote();
+      cx.notify();
+    });
+  }
+
+  // The token goes through a file under the app folder (never an argument) and the file is
+  // emptied afterwards, whatever the result: the mod host has no way to delete a file.
+  saveToken(cx) {
+    const token = this.tokenInput.value().trim();
+    if (!token) return;
+    const path = `${appHome()}/telegram-token.tmp`;
+    this.remoteAction("token", async () => {
+      try {
+        await writeTextFile(path, token, null);
+        await this.coreJson(["bridge", "telegram", "token", "--file", path]);
+        this.remoteNotice = "Bot token saved.";
+        this.tokenInput.set_value("");
+      } finally {
+        await writeTextFile(path, "", null).catch(() => {});
+      }
+    }, cx);
+  }
+
+  startArgs(name, label, command) {
+    return ["run", "--bg", "--keep", "--no-parent", "--outlive-parent", "--name", name, "--label", label, "--", "h0x-core", ...command];
+  }
+
+  startWeb(cx) {
+    const host = this.publicHost.value().trim();
+    const options = this.reach === "tunnel" ? ["--tunnel", "--yes"] : this.reach === "vps" ? ["--via", this.via, "--public-host", host] : ["--lan"];
+    this.remoteAction("web", async () => {
+      if (this.reach === "vps" && (!this.via || !host)) throw new Error("Pick a machine and type its public host.");
+      this.webLink = null;
+      this.webQr = null;
+      await this.coreJson(this.startArgs("h0x-bridge-web", "h0x-bridge=web", ["bridge", "web", "--json", ...options]));
+    }, cx);
+  }
+
+  remoteButton(t, id, label, work) {
+    return this.button(t, id, this.remoteBusy[id] ? "…" : label, (_e, cx) => this.remoteAction(id, work, cx));
+  }
+
+  qrGrid(q) {
+    const px = 5, quiet = 4, pad = (q.size + quiet * 2) * px;
+    const grid = v_flex().w(pad).h(pad).flex_none().bg("#ffffff").p(quiet * px);
+    for (const row of q.rows) {
+      const line = h_flex().h(px).flex_none();
+      for (const run of row.match(/0+|1+/g) ?? []) line.child(div().w(run.length * px).h(px).flex_none().bg(run[0] === "1" ? "#000000" : "#ffffff"));
+      grid.child(line);
+    }
+    return grid;
+  }
+
+  remoteStatus(t) {
+    const r = this.remote;
+    const when = (ms) => (ms ? new Date(ms).toLocaleDateString() : "");
+    return v_flex().w_full()
+      .child(this.heading(t, "Status"))
+      .child(this.row(t, `Remote control: ${r.locked ? "Locked" : "On"}`, r.locked ? "Paired devices can't run commands until you unlock." : "Paired devices can reach your terminals.",
+        this.remoteButton(t, "st-r-lock", r.locked ? "Unlock" : "Lock", () => this.coreJson(["bridge", r.locked ? "unlock" : "lock"]))))
+      .children(r.identities.map((i) => this.row(t, i.label || i.user_id || i.id, `${i.transport} · paired ${when(i.paired_at_ms)}`,
+        this.remoteButton(t, `st-r-unpair-${i.id}`, "Remove", () => this.coreJson(["bridge", "unpair", i.id])))))
+      .when(r.identities.length === 0, (el) => el.child(div().py(10).text_size(12.5).text_color(t.dim).child("No paired devices yet.")));
+  }
+
+  remoteTelegram(t) {
+    const r = this.remote;
+    const on = this.termRunning("h0x-bridge-telegram");
+    const left = this.pairing ? Math.max(0, Math.ceil((this.pairing.expires_ms - Date.now()) / 1000)) : 0;
+    const field = Input.new(this.tokenInput).flex_1().min_w(0).h(32).px(10).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(13).text_color(t.foreground);
+    return v_flex().w_full()
+      .child(this.heading(t, "Telegram"))
+      .child(this.row(t, "Bot token", `${r.telegram_token === "set" ? "Set" : "Not set"}. Get a token from @BotFather on Telegram.`, div()))
+      .child(h_flex().w_full().py(10).gap(6).items_center().border_b(1).border_color(t.border)
+        .child(field)
+        .child(this.button(t, "st-r-token", this.remoteBusy.token ? "…" : "Save", (_e, cx) => this.saveToken(cx))))
+      .child(this.row(t, "Pair my Telegram",
+        this.pairing && left > 0 ? `Send /pair ${this.pairing.code} to your bot. The code works for ${left} s.` : "Get a one-time code, then send it to your bot.",
+        this.remoteButton(t, "st-r-pair", "Pair my Telegram", async () => {
+          const p = await this.coreJson(["bridge", "pair", "--transport", "telegram", "--json"]);
+          this.pairing = { code: p.code, expires_ms: p.expires_ms };
+        })))
+      .when(Boolean(this.pairing) && left > 0, (el) => el.child(div().py(8).text_size(22).font_semibold().text_color(t.accent).child(this.pairing.code)))
+      .child(this.row(t, "Bot", on ? "Running" : "Stopped", on
+        ? this.remoteButton(t, "st-r-bot-stop", "Stop bot", () => this.coreJson(["kill", "h0x-bridge-telegram"]))
+        : this.remoteButton(t, "st-r-bot-start", "Start bot", () => this.coreJson(this.startArgs("h0x-bridge-telegram", "h0x-bridge=telegram", ["bridge", "run"])))));
+  }
+
+  remoteWeb(t) {
+    const on = this.termRunning("h0x-bridge-web");
+    const choice = (value, label) => h_flex().id(`st-r-reach-${value}`).gap(8).py(4).items_center().cursor_pointer()
+      .on_click((_e, cx) => { this.reach = value; cx.notify(); })
+      .child(div().text_color(this.reach === value ? t.accent : t.muted).child(this.reach === value ? "◉" : "○"))
+      .child(div().text_size(13.5).text_color(t.foreground).child(label));
+    const machines = (this.machineList ?? []).map((m) => this.button(t, `st-r-via-${m.name}`, `${this.via === m.name ? "◉ " : "○ "}${m.name}`, (_e, cx) => { this.via = m.name; cx.notify(); }));
+    return v_flex().w_full()
+      .child(this.heading(t, "Phone / web panel"))
+      .child(v_flex().w_full().py(8).gap(2)
+        .child(choice("lan", "Same Wi-Fi"))
+        .child(choice("tunnel", "From anywhere (Cloudflare)"))
+        .child(choice("vps", "Through my VPS")))
+      .when(this.reach === "tunnel", (el) => el.child(div().pb(8).text_size(12.5).text_color(t.dim).child("Traffic passes through Cloudflare.")))
+      .when(this.reach === "vps", (el) => el.child(v_flex().pb(8).gap(6)
+        .child(h_flex().gap(6).children(machines))
+        .when(machines.length === 0, (e) => e.child(div().text_size(12.5).text_color(t.dim).child("Add a machine first (Machines page)."))
+        )
+        .child(Input.new(this.publicHost).w_full().h(32).px(10).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(13).text_color(t.foreground))))
+      .child(this.row(t, "Phone / web panel", on ? "Running" : "Stopped", on
+        ? this.remoteButton(t, "st-r-web-stop", "Stop", () => this.coreJson(["kill", "h0x-bridge-web"]))
+        : this.button(t, "st-r-web-start", this.remoteBusy.web ? "…" : "Start", (_e, cx) => this.startWeb(cx))))
+      .when(on && Boolean(this.webLink), (el) => el.child(v_flex().py(10).gap(8)
+        .when(Boolean(this.webQr), (e) => e.child(this.qrGrid(this.webQr)))
+        .child(div().text_size(12.5).text_color(t.muted).child("Scan with your phone"))
+        .child(div().id("st-r-link").text_size(12).text_color(t.dim).child(this.webLink?.pair ?? this.webLink?.url ?? ""))));
+  }
+
+  remoteActivity(t) {
+    const names = Object.fromEntries((this.remote?.identities ?? []).map((i) => [i.id, i.label || i.user_id || i.id]));
+    return v_flex().w_full()
+      .child(this.heading(t, "Activity"))
+      .children(this.remoteLog.map((e) => h_flex().w_full().py(5).gap(12).border_b(1).border_color(t.border)
+        .child(div().w(80).flex_none().text_size(12).text_color(t.dim).child(e.time_ms ? new Date(e.time_ms).toLocaleTimeString() : ""))
+        .child(div().w(110).flex_none().text_size(12.5).text_color(t.muted).child(names[e.identity] ?? e.identity ?? ""))
+        .child(div().flex_1().min_w(0).text_size(12.5).text_color(t.foreground).child([e.command, e.what, e.result].filter(Boolean).join(" · ")))))
+      .when(this.remoteLog.length === 0, (el) => el.child(div().py(10).text_size(12.5).text_color(t.dim).child("Nothing yet.")));
+  }
+
+  remotePage(t) {
+    return v_flex().w_full()
+      .child(div().pb(8).text_size(12.5).line_height("18px").text_color(t.dim).child("Control your terminals from your phone, through Telegram or a web panel."))
+      .when(Boolean(this.remoteError), (el) => el.child(div().py(10).text_size(12.5).text_color(t.blocked).child(this.remoteError)))
+      .when(Boolean(this.remoteProblem), (el) => el.child(div().py(10).text_size(12.5).text_color(t.blocked).child(this.remoteProblem)))
+      .when(Boolean(this.remoteNotice), (el) => el.child(div().py(10).text_size(12.5).text_color(t.ansi2).child(this.remoteNotice)))
+      .when(this.remote === null && !this.remoteError, (el) => el.child(div().py(14).text_size(12.5).text_color(t.dim).child("Reading remote control…")))
+      .when(this.remote !== null, (el) => el
+        .child(this.remoteStatus(t))
+        .child(this.remoteTelegram(t))
+        .child(this.remoteWeb(t))
+        .child(this.remoteActivity(t)));
+  }
+
   // Alerts ---------------------------------------------------------------
 
   alerts(t) {
@@ -815,6 +1044,7 @@ export default class Settings extends View {
               this.machineEdit = null;
               this.handle.focus();
               if (s.id === "machines") cx.spawn(async (cx) => { await this.loadMachines(); cx.notify(); });
+              if (s.id === "remote") cx.spawn(async (cx) => { await this.loadRemote(); cx.notify(); });
               cx.notify();
             })
             .child(svg(I(s.icon)).size(15).text_color(on ? t.accent : t.dim))
@@ -874,6 +1104,8 @@ export default class Settings extends View {
                         ? this.keyboard(t)
                       : this.section === "machines"
                         ? this.machines(t)
+                      : this.section === "remote"
+                        ? this.remotePage(t)
                       : this.section === "alerts"
                         ? this.alerts(t)
                       : this.section === "mods"

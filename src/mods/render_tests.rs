@@ -60,6 +60,10 @@ struct Calls {
     unexpected: Vec<String>,
     effects: Vec<(String, Vec<Value>)>,
     shared: BTreeMap<String, Value>,
+    /// Scripted `core` answers by the start of the joined arguments; with none, nothing is scripted.
+    replies: BTreeMap<String, Value>,
+    cores: Vec<Vec<String>>,
+    writes: Vec<(String, String)>,
 }
 
 fn updates(app: &str, core: &str) -> Value {
@@ -158,7 +162,9 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         let calls = calls.clone();
         module = module.async_function(name, move |a| {
             let first = a.get(0).map(from_host).unwrap_or(Value::Null);
+            let scripted = scripted(&calls, name, &first, a.get(1).map(from_host));
             let reply = match name {
+                _ if scripted.is_some() => scripted,
                 "readTextFile" if first == "/fixture/app/settings.json" || first == "/fixture/.ssh/config" => Some(Value::Null),
                 "readTextFile" => first
                     .as_str()
@@ -592,6 +598,158 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
         assert!(tree.contains(if checking { "Checking" } else if succeeded { "Up to date" } else { "Check your connection" }), "check status missing: {tree}");
     }
     eprintln!("27 settings cases, each twice: {:?}", start.elapsed());
+}
+
+// The scripted answer to a `core` or `writeTextFile` call, recording it; None when nothing is scripted.
+fn scripted(calls: &Rc<RefCell<Calls>>, name: &str, first: &Value, text: Option<Value>) -> Option<Value> {
+    let mut c = calls.borrow_mut();
+    if c.replies.is_empty() {
+        return None;
+    }
+    match name {
+        "writeTextFile" => {
+            c.writes.push((first.as_str()?.into(), text?.as_str()?.into()));
+            Some(Value::Null)
+        }
+        "core" => {
+            let args: Vec<String> = serde_json::from_value(first.clone()).ok()?;
+            let key = args.join(" ");
+            let reply = c.replies.iter().filter(|(k, _)| key.starts_with(k.as_str())).max_by_key(|(k, _)| k.len()).map(|(_, v)| v.clone());
+            c.cores.push(args);
+            reply
+        }
+        _ => None,
+    }
+}
+
+// The Remote page as it looks once its tasks have finished: `replies` answer core, `setup` runs after init.
+fn describe_remote(cx: &mut TestAppContext, staged: &Staged, replies: &[(&str, Value)], setup: &str) -> (String, Rc<RefCell<Calls>>) {
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    calls.borrow_mut().replies = replies.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+    let mut p = props();
+    p["section"] = json!("remote");
+    let values = fixture(true, p, updates("current", "current"));
+    let policy = Policy::new()
+        .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+        .with_host_module(module(values, calls.clone()))
+        .unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let root = staged.wrapper("frame/settings", setup);
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(runtime, root, policy, window, cx))
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
+    let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    (tree, calls)
+}
+
+fn bridge_ls(identities: Value, locked: bool, token: &str) -> Value {
+    core_ok(json!({"identities":identities, "locked":locked, "telegram_token":token}))
+}
+
+fn remote_replies(ls: Value, terminals: Value) -> Vec<(&'static str, Value)> {
+    vec![
+        ("bridge ls", ls),
+        ("bridge log", core_ok(json!({"entries":[
+            {"time_ms":1700000000000i64, "identity":"i1", "command":"list", "result":"ok"},
+            {"time_ms":1700000060000i64, "identity":"i1", "command":"send", "what":"t1", "result":"ok"}
+        ]}))),
+        ("ls --json", core_ok(json!({"terminals":terminals}))),
+    ]
+}
+
+#[gpui::test]
+fn settings_remote_page_shows_unpaired_paired_and_locked(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let paired = json!([{"id":"i1", "transport":"telegram", "user_id":"42", "label":"My phone", "paired_at_ms":1700000000000i64}]);
+    let (tree, _) = describe_remote(cx, &staged, &remote_replies(bridge_ls(json!([]), false, "unset"), json!([])), "");
+    for want in ["Remote control: On", "No paired devices yet.", "Not set", "@BotFather", "Stopped", "Same Wi-Fi", "Activity", "send"] {
+        assert!(tree.contains(want), "unpaired page lacks {want:?}: {tree}");
+    }
+    let (tree, _) = describe_remote(cx, &staged, &remote_replies(bridge_ls(paired.clone(), false, "set"), json!([])), "");
+    assert!(tree.contains("My phone") && tree.contains("st-r-unpair-i1") && tree.contains("Set."), "{tree}");
+    assert!(tree.contains("st-r-lock") && !tree.contains("No paired devices yet."), "{tree}");
+    let (tree, _) = describe_remote(cx, &staged, &remote_replies(bridge_ls(paired, true, "set"), json!([])), "");
+    assert!(tree.contains("Remote control: Locked") && tree.contains("Unlock"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_remote_page_shows_the_bot_running_or_stopped(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let ls = || bridge_ls(json!([]), false, "set");
+    let (tree, _) = describe_remote(cx, &staged, &remote_replies(ls(), json!([])), "");
+    assert!(tree.contains("st-r-bot-start") && !tree.contains("st-r-bot-stop"), "{tree}");
+    let running = json!([{"name":"h0x-bridge-telegram", "state":"live", "labels":{"h0x-bridge":"telegram"}}]);
+    let (tree, _) = describe_remote(cx, &staged, &remote_replies(ls(), running), "");
+    assert!(tree.contains("st-r-bot-stop") && !tree.contains("st-r-bot-start"), "{tree}");
+    let finished = json!([{"name":"h0x-bridge-telegram", "state":"finished"}]);
+    let (tree, _) = describe_remote(cx, &staged, &remote_replies(ls(), finished), "");
+    assert!(tree.contains("st-r-bot-start"), "a finished bot is stopped: {tree}");
+}
+
+#[gpui::test]
+fn settings_remote_page_shows_the_pair_code_and_the_web_qr(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let web = json!([{"name":"h0x-bridge-web", "state":"live"}]);
+    let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), web);
+    let output = json!({"url":"http://192.168.1.5:7000", "pair":"http://192.168.1.5:7000/#t=abc"});
+    replies.push(("read h0x-bridge-web", json!({"code":0, "stdout":format!("starting\n{output}\n"), "stderr":""})));
+    replies.push(("bridge qr http://192.168.1.5:7000/#t=abc",core_ok(json!({"size":3, "rows":["101", "010", "111"]}))));
+    let far = now_ms() + 600_000;
+    let setup = format!("this.pairing = {{ code: 'AB12CD', expires_ms: {far} }}; this.reach = 'tunnel';");
+    let (tree, calls) = describe_remote(cx, &staged, &replies, &setup);
+    assert!(tree.contains("AB12CD") && tree.contains("Send /pair AB12CD to your bot"), "{tree}");
+    assert!(tree.contains("Scan with your phone") && tree.contains("st-r-web-stop"), "{tree}");
+    assert!(tree.contains("http://192.168.1.5:7000/#t=abc"), "the link is shown: {tree}");
+    assert!(tree.contains("Traffic passes through Cloudflare"), "{tree}");
+    // 3 rows of runs: 1 0 1 / 0 1 0 / 111, inside a quiet zone, 5 px per module.
+    assert!(tree.matches("#000000").count() >= 6 && tree.contains("#ffffff"), "the QR grid is drawn: {tree}");
+    assert!(calls.borrow().cores.iter().any(|c| c.get(..2) == Some(&["bridge".to_string(), "qr".to_string()][..])), "{:?}", calls.borrow().cores);
+}
+
+#[gpui::test]
+fn settings_remote_page_with_an_older_core_says_to_update(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let old = json!({"code":2, "stdout":"", "stderr":"error: unrecognized subcommand 'bridge'\n"});
+    let (tree, _) = describe_remote(cx, &staged, &[("bridge", old)], "");
+    assert!(tree.contains("Update h0x-core to use remote control."), "{tree}");
+    assert!(!tree.contains("unrecognized") && !tree.contains("Remote control: On"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_remote_token_goes_through_a_file_that_is_emptied_and_is_never_shown(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+    replies.push(("bridge telegram token --file", core_ok(json!({"telegram_token":"set"}))));
+    let setup = "this.tokenInput.set_value('123456:SECRET-TOKEN'); this.saveToken(cx);";
+    let (tree, calls) = describe_remote(cx, &staged, &replies, setup);
+    let c = calls.borrow();
+    let path = "/fixture/app/telegram-token.tmp";
+    assert_eq!(c.writes, vec![(path.to_string(), "123456:SECRET-TOKEN".to_string()), (path.to_string(), String::new())], "written, then emptied");
+    assert!(c.cores.iter().any(|a| a.join(" ") == format!("bridge telegram token --file {path}")), "--file is called: {:?}", c.cores);
+    assert!(c.cores.iter().all(|a| !a.join(" ").contains("SECRET")), "the token is never an argument: {:?}", c.cores);
+    assert!(tree.contains("Bot token saved."), "{tree}");
+    assert!(!tree.contains("SECRET"), "the token is never shown: {tree}");
+}
+
+#[gpui::test]
+fn settings_remote_token_file_is_emptied_when_core_refuses(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut replies = remote_replies(bridge_ls(json!([]), false, "unset"), json!([]));
+    replies.push(("bridge telegram token --file", core_error("invalid")));
+    let (tree, calls) = describe_remote(cx, &staged, &replies, "this.tokenInput.set_value('9:BAD-TOKEN'); this.saveToken(cx);");
+    let c = calls.borrow();
+    assert_eq!(c.writes.last().map(|w| w.1.as_str()), Some(""), "emptied even on failure: {:?}", c.writes);
+    assert!(tree.contains("fixture invalid") && !tree.contains("BAD-TOKEN"), "{tree}");
 }
 
 /// The consent dialog (ADR-048) names the mod, its folder and its powers, and
