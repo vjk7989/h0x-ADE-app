@@ -986,6 +986,109 @@ mod tests {
     }
 
     #[test]
+    fn a_mod_whose_fonts_change_after_it_was_allowed_loads_none() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-fonts-changed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("mods").join("O\u{2019}Neil fonts");
+        std::fs::create_dir_all(dir.join("fonts")).unwrap();
+        std::fs::write(dir.join("main.js"), "export default 1").unwrap();
+        let found = crate::mods::Found { id: "O\u{2019}Neil fonts".into(), dir: dir.clone(), hint: Default::default(), stamp: std::time::SystemTime::UNIX_EPOCH };
+        let choices: BTreeMap<String, ModChoice> = [(found.id.clone(), ModChoice { hash: crate::mods::content_hash(&dir), allow: true })].into();
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &choices), vec![root.join("fonts"), dir.join("fonts")]);
+        // A font file added after the person said yes is new code: ask again.
+        std::fs::write(dir.join("fonts").join("planted.ttf"), b"not a font").unwrap();
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &choices), vec![root.join("fonts")], "stale answer");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mod_fonts_link_to_elsewhere_counts_toward_its_hash() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-fonts-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let dir = root.join("mods").join("linked");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.js"), "export default 1").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("fonts")).unwrap();
+        let found = crate::mods::Found { id: "linked".into(), dir: dir.clone(), hint: Default::default(), stamp: std::time::SystemTime::UNIX_EPOCH };
+        let choices: BTreeMap<String, ModChoice> = [("linked".to_owned(), ModChoice { hash: crate::mods::content_hash(&dir), allow: true })].into();
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &choices).len(), 2);
+        // Changing what the link points at changes the mod's code.
+        std::fs::write(elsewhere.join("planted.ttf"), b"not a font").unwrap();
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &choices), vec![root.join("fonts")]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_shipped_mod_brings_its_fonts_without_asking_until_it_is_changed() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-fonts-shipped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let name = "toast";
+        let dir = root.join("mods").join(name);
+        let mut files = 0;
+        for (path, bytes) in crate::mods::DEFAULT_MODS {
+            let Some(rel) = path.strip_prefix(&format!("{name}/")) else { continue };
+            let to = dir.join(rel);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::write(to, bytes).unwrap();
+            files += 1;
+        }
+        assert!(files > 0, "HyperOx ships a {name} mod");
+        let found = crate::mods::Found { id: name.into(), dir: dir.clone(), hint: Default::default(), stamp: std::time::SystemTime::UNIX_EPOCH };
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &BTreeMap::new()), vec![root.join("fonts"), dir.join("fonts")]);
+        // A font added to a shipped mod makes it someone else's code.
+        std::fs::create_dir_all(dir.join("fonts")).unwrap();
+        std::fs::write(dir.join("fonts").join("planted.ttf"), b"not a font").unwrap();
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &BTreeMap::new()), vec![root.join("fonts")]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn missing_or_malformed_settings_allow_no_mod_fonts() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-fonts-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("mods").join("mine");
+        std::fs::create_dir_all(dir.join("fonts")).unwrap();
+        std::fs::write(dir.join("main.js"), "export default 1").unwrap();
+        let found = crate::mods::Found { id: "mine".into(), dir: dir.clone(), hint: Default::default(), stamp: std::time::SystemTime::UNIX_EPOCH };
+        let mods = format!(r#""mods":{{"mine":{{"hash":"{}","allow":true}}}}"#, crate::mods::content_hash(&dir));
+        // As load_home_fonts reads settings.json: unreadable means the defaults.
+        let dirs = |text: &str| font_dirs(&root, std::slice::from_ref(&found), &serde_json::from_str::<Person>(text).unwrap_or_default().mods);
+        assert_eq!(dirs(&format!("{{{mods}}}")), vec![root.join("fonts"), dir.join("fonts")], "well-formed control");
+        for bad in [
+            format!(r#"{{{mods},"check_updates":"no"}}"#),
+            format!(r#"{{{mods},"clipboard_write":null}}"#),
+            format!("{{{mods}"),
+            String::new(),
+        ] {
+            assert_eq!(dirs(&bad), vec![root.join("fonts")], "{bad:?}");
+        }
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &Person::default().mods), vec![root.join("fonts")], "missing settings.json");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clipboard_and_update_switches_round_trip_and_reject_wrong_types() {
+        let look = crate::layout::Look::default();
+        assert!(!Settings::default().clipboard_write && Settings::default().check_updates);
+        // The settings toggle: on, saved, reloaded, off again, saved without the default.
+        let p = Person { clipboard_write: true, check_updates: false, ..Person::default() };
+        let saved = serde_json::to_string(&p).unwrap();
+        let mut back: Person = serde_json::from_str(&saved).unwrap();
+        let s = Settings::compose(&back, &look, true);
+        assert!(s.clipboard_write && !s.check_updates);
+        back.clipboard_write = false;
+        back.check_updates = true;
+        let value = serde_json::to_value(&back).unwrap();
+        assert!(value.get("clipboard_write").is_none() && value.get("check_updates").is_none(), "{value}");
+        for bad in [r#"{"check_updates":"no"}"#, r#"{"check_updates":0}"#, r#"{"check_updates":null}"#, r#"{"clipboard_write":null}"#, r#"{"clipboard_write":"true"}"#, r#"{"clipboard_write":1}"#] {
+            assert!(serde_json::from_str::<Person>(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn shipped_looks_and_theme_clicks_have_the_same_precedence() {
         use crate::layout::{Node, ThemeChoice};
         let person = Person { font_size: Some(19.0), theme: Some(ThemeChoice::One("moss".into())), ..Person::default() };

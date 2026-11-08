@@ -1318,6 +1318,66 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
     }
 
     #[test]
+    fn quotes_only_and_other_powershell_specials_stay_one_literal() {
+        assert_eq!(ps_quote("'"), "''''");
+        assert_eq!(ps_quote("''"), "''''''");
+        assert_eq!(ps_quote("'\u{2018}\u{2019}\u{201a}\u{201b}"), "'''\u{2018}\u{2018}\u{2019}\u{2019}\u{201a}\u{201a}\u{201b}\u{201b}'");
+        // Inside single quotes nothing else is special: no expansion, no escapes.
+        for text in ["$env:PATH", "`n", "\"double\"", "\u{201c}curly\u{201d}", "a;b|c&d", "$(calc)"] {
+            assert_eq!(ps_quote(text), format!("'{text}'"));
+        }
+        let exe = Path::new(r"C:\Users\O’Neil\App Data\it's\HyperOx.exe");
+        assert_eq!(
+            relaunch_script(u32::MAX, exe),
+            r"Wait-Process -Id 4294967295 -ErrorAction SilentlyContinue; Start-Process 'C:\Users\O’’Neil\App Data\it''s\HyperOx.exe'"
+        );
+    }
+
+    #[test]
+    fn seal_takes_any_file_name_and_leaves_nothing_when_it_fails() {
+        let parent = std::env::temp_dir().join(format!("h0x-ade-seal-edges-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        let (dir, file) = seal(&parent, b"\0\xff checked", "O\u{2019}Neil app 1.tar.gz").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"\0\xff checked");
+        std::fs::remove_dir_all(&dir).unwrap();
+        // Back-to-back copies never share (or fail on) a folder name.
+        let dirs: Vec<PathBuf> = (0..64).map(|_| seal(&parent, b"", "x").unwrap().0).collect();
+        let unique: std::collections::BTreeSet<&PathBuf> = dirs.iter().collect();
+        assert_eq!(unique.len(), dirs.len());
+        for d in &dirs {
+            std::fs::remove_dir_all(d).unwrap();
+        }
+        // The file can't be made: the new folder is removed again.
+        assert!(seal(&parent, b"x", "missing/install.sh").is_err());
+        assert!(seal(&parent, b"x", "").is_err());
+        assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 0, "no sealed folder left behind");
+        // The parent is a file, not a folder.
+        let not_dir = parent.join("file");
+        std::fs::write(&not_dir, b"").unwrap();
+        assert!(seal(&not_dir, b"x", "x").is_err());
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn check_now_cuts_one_wait_short_and_is_not_remembered() {
+        check_now();
+        let started = std::time::Instant::now();
+        assert!(sleep(Duration::from_secs(60)), "asked");
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert!(!sleep(Duration::from_millis(10)), "the next round is a scheduled one");
+    }
+
+    #[test]
+    fn turning_automatic_checks_off_and_on_takes_effect_at_runtime() {
+        set_auto(false);
+        assert!(!due(AUTO.load(Ordering::Relaxed), false));
+        assert!(due(AUTO.load(Ordering::Relaxed), true), "Check now while off");
+        set_auto(true);
+        assert!(due(AUTO.load(Ordering::Relaxed), false));
+    }
+
+    #[test]
     fn sha256_is_hex() {
         assert_eq!(sha256(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     }
