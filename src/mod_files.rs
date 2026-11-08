@@ -525,4 +525,73 @@ mod tests {
         assert!(!allowed(r"\\server\share\xy\a.txt", &roots, true));
         assert!(!allowed(r"\\other\share\x\a.txt", &roots, true));
     }
+
+    /// The focused terminal (a floating block or a shown agent, in no pane) is
+    /// a root by the same rules as a pane's terminal; an empty address is never
+    /// local, in a pane or focused.
+    #[test]
+    fn the_focused_terminal_folder_is_a_root_by_the_same_rules_as_a_pane() {
+        let base = std::env::temp_dir().join(format!(
+            "h0x-ade-focused-roots-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (pane, block) = (base.join("pane"), base.join("block"));
+        std::fs::create_dir_all(&pane).unwrap();
+        std::fs::create_dir_all(&block).unwrap();
+        std::fs::write(pane.join("p.txt"), "p").unwrap();
+        std::fs::write(block.join("a.txt"), "a").unwrap();
+        crate::mods::publish_panes(serde_json::json!([{"pane": "p1", "terminal": "t1", "cwd": pane}]));
+        crate::mods::publish_focused(serde_json::json!(
+            {"space": "s1", "tab": "tab1", "pane": null, "terminal": "blk", "cwd": block}
+        ));
+        assert_eq!(crate::mods::local_pane_folders(), vec![pane.clone(), block.clone()]);
+        let roots = real_roots(crate::mods::local_pane_folders());
+        assert_eq!(check(&block.join("a.txt"), &roots), Ok(()));
+        assert_eq!(check(&pane.join("p.txt"), &roots), Ok(()));
+        assert!(check(&base, &roots).is_err());
+
+        // Remote, mod, empty address, relative, missing folder, filesystem root, nothing focused.
+        let top = std::env::temp_dir().ancestors().last().unwrap().to_path_buf();
+        for focused in [
+            serde_json::json!({"terminal": "vps/blk", "cwd": block}),
+            serde_json::json!({"terminal": "", "cwd": block}),
+            serde_json::json!({"terminal": null, "cwd": block}),
+            serde_json::json!({"cwd": block}),
+            serde_json::json!({"terminal": "blk", "cwd": "relative/dir"}),
+            serde_json::json!({"terminal": "blk", "cwd": ""}),
+            serde_json::json!({"terminal": "blk", "cwd": null}),
+            serde_json::json!({"terminal": "blk"}),
+            serde_json::json!({"terminal": "blk", "cwd": top}),
+            serde_json::json!({"terminal": "blk", "cwd": "/"}),
+            serde_json::json!({"terminal": "blk", "cwd": r"C:\"}),
+            serde_json::Value::Null,
+        ] {
+            crate::mods::publish_focused(focused.clone());
+            let roots = real_roots(crate::mods::local_pane_folders());
+            assert_eq!(roots.len(), 1, "{focused}: {roots:?}");
+            assert!(check(&block.join("a.txt"), &roots).is_err(), "{focused}");
+            assert_eq!(check(&pane.join("p.txt"), &roots), Ok(()), "{focused}");
+        }
+
+        // The focused terminal is a pane's: its folder is that one root.
+        crate::mods::publish_focused(serde_json::json!(
+            {"space": "s1", "tab": "tab1", "pane": "p1", "terminal": "t1", "cwd": pane}
+        ));
+        let folders = crate::mods::local_pane_folders();
+        assert!(!folders.is_empty() && folders.iter().all(|f| f == &pane), "{folders:?}");
+        let roots = real_roots(folders);
+        assert_eq!(check(&pane.join("p.txt"), &roots), Ok(()));
+        assert!(check(&block.join("a.txt"), &roots).is_err());
+
+        // An empty address in a pane is not local either.
+        crate::mods::publish_focused(serde_json::Value::Null);
+        crate::mods::publish_panes(serde_json::json!([{"pane": "p1", "terminal": "", "cwd": pane}]));
+        assert!(crate::mods::local_pane_folders().is_empty());
+        crate::mods::publish_panes(serde_json::json!([]));
+        std::fs::remove_dir_all(base).unwrap();
+    }
 }

@@ -1313,6 +1313,24 @@ fn files_panel_shows_why_a_file_cannot_be_previewed_capped_at_120_characters(cx:
     assert_eq!(shown(cx, ""), prefix);
 }
 
+// Something in the preview that throws no message at all (null, undefined, an
+// empty error or string) reads "unknown error", never "null" or "undefined".
+#[gpui::test]
+fn files_panel_says_unknown_error_when_a_preview_fails_without_a_message(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for thrown in ["null", "undefined", "new Error('')", "''"] {
+        let disk = files_disk(&[("/fixture/project/notes.txt", "hello\n")]);
+        // The drafts lookup runs inside the preview's try, after the read.
+        let setup = format!(
+            "this.drafts = {{ get() {{ throw {thrown}; }}, delete() {{}}, set() {{}} }}; this.show('notes.txt', cx);"
+        );
+        let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, &setup);
+        assert!(tree.contains("Cannot preview this file: unknown error"), "{thrown}: {tree}");
+        assert!(!tree.contains("Cannot preview this file: null") && !tree.contains("Cannot preview this file: undefined"), "{thrown}: {tree}");
+    }
+}
+
 #[gpui::test]
 fn files_panel_auto_saves_once_a_second_after_the_last_change(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
