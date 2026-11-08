@@ -32,10 +32,17 @@ function items(p, git) {
       const parent = term?.parent && all.find((t) => t.address === term.parent);
       // Once they go to the program, Shift+right-click still opens this menu.
       const toProgram = term?.labels?.["h0x.right-click"] === "program";
+      // A terminal shown outside a tab (a layout terminal block, a window) has
+      // no pane to split, zoom or close: its pane is the block's id.
+      const inTab = panes().some((pane) => pane.pane === tg.pane);
       return [
-        ["Split right", "pane.split", { direction: "right", pane: tg.pane }],
-        ["Split down", "pane.split", { direction: "down", pane: tg.pane }],
-        ["Zoom", "pane.zoom", { pane: tg.pane }],
+        ...(inTab
+          ? [
+              ["Split right", "pane.split", { direction: "right", pane: tg.pane }],
+              ["Split down", "pane.split", { direction: "down", pane: tg.pane }],
+              ["Zoom", "pane.zoom", { pane: tg.pane }],
+            ]
+          : []),
         ...(term
           ? [
               toProgram
@@ -44,7 +51,7 @@ function items(p, git) {
             ]
           : []),
         ...(parent ? [[`Send back to ${parent.name || parent.address}`, "terminal.park", { terminal: term.address }]] : []),
-        ["Close pane", "pane.close", { pane: tg.pane }],
+        ...(inTab ? [["Close pane", "pane.close", { pane: tg.pane }]] : []),
       ];
     }
     case "tab":
@@ -132,6 +139,7 @@ export default class Menu extends View {
       .bg(t.popover)
       .text_size(12.8)
       .on_key_down((e, cx) => {
+        if (!list.length && e.key !== "escape") return;
         if (e.key === "down") this.at = (this.at + 1) % list.length;
         else if (e.key === "up") this.at = (this.at + list.length - 1) % list.length;
         else if (e.key === "enter") this.choose(this.at, cx);

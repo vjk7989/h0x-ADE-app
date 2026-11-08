@@ -208,6 +208,10 @@ pub fn open_main(core: std::sync::Arc<core_link::Core>, requests: async_channel:
                     traffic_light_position: cfg!(target_os = "macos").then(|| point(px(12.0), px(7.0))),
                 }),
                 app_owns_titlebar_drag: cfg!(target_os = "macos"),
+                // Linux: open with the title bar the shipped layouts draw. Turning the
+                // system's off on the first render, while KWin maps the window, shrinks
+                // it to 20x20; turning it on later (a "system" layout) is fine.
+                window_decorations: Some(WindowDecorations::Client),
                 // HyperOx Dev and other side-by-side builds get their own dock icon.
                 app_id: Some(std::env::var("H0X_ADE_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "h0x-ade".into())),
                 ..Default::default()
