@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-11-08
+
+### New
+
+- A small "Beta" label next to the HyperOx name.
+- Ctrl+Shift+Q quits on Windows and Linux.
+- Includes upstream fixes: kept sub-agents listed once (with their busy word), confirm dialogs sized to content with rounded corners, pane navigation while zoomed, find highlighting wide characters, a second rename press closes the prompt, Linux window decorations and input-method fixes.
+
+### Requires
+
+- h0x-core 0.1.6, which adds remote control via Telegram and a phone web panel.
+
 ## [0.1.7] - 2026-11-06
 
 ### Changed
