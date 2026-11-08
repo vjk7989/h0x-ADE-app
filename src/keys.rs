@@ -346,6 +346,18 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_shift_q_quits_on_windows_and_linux_exactly_once() {
+        let text = include_str!("../defaults/keys.json");
+        assert_eq!(text.matches("\"ctrl-shift-q\"").count(), 1);
+        let defaults: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(defaults["global"]["ctrl-shift-q"], "app.quit");
+        let quit_keys = defaults["global"].as_object().unwrap().iter()
+            .filter(|(_, action)| action.as_str() == Some("app.quit"))
+            .count();
+        assert_eq!(quit_keys, 1);
+    }
+
+    #[test]
     fn object_bindings_pass_named_typed_arguments() {
         use serde_json::json;
         for (name, args) in [
