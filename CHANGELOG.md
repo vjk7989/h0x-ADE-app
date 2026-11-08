@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-11-08
+
+### Changed
+
+- Settings → Remote: the Telegram bot token is deleted from disk right after it is handed to the core, and any leftover from an interrupted save is removed first.
+
+### Requires
+
+- h0x-core 0.1.8: the phone panel is end-to-end encrypted, and bridge secrets are kept in the system's secret store. Phones paired with an older version must scan the QR code once more.
+
 ## [0.1.9] - 2026-11-08
 
 ### New
