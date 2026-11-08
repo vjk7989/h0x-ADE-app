@@ -124,7 +124,7 @@ fn read_request_within(stream: &UnixStream, limit: Duration) -> Result<String, S
         std::thread::spawn(move || {
             std::thread::sleep(limit);
             if !done.load(Ordering::SeqCst) {
-                let _ = late.shutdown(std::net::Shutdown::Both);
+                let _ = late.shutdown(std::net::Shutdown::Read);
             }
         });
     }
