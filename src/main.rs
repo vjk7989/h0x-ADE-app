@@ -220,3 +220,15 @@ pub fn open_main(core: std::sync::Arc<core_link::Core>, requests: async_channel:
                 .expect("cannot open the HyperOx window");
             cx.activate(true);
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn skill_printed_by_dash_dash_skill_uses_h0x_names_only() {
+        let skill = include_str!("SKILL.md");
+        assert!(!skill.trim().is_empty());
+        assert!(!skill.to_ascii_lowercase().contains("herdr"));
+        assert!(!skill.contains("HC_"));
+        assert!(skill.contains("$H0X_TERMINAL_ID"));
+    }
+}

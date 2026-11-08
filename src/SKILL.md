@@ -4,7 +4,7 @@ HyperOx shows spaces, tabs and panes. h0x-core runs their terminals
 and keeps them alive when the window closes. Use `h0x-ade` only to change
 what the person sees. For starting, reading, messaging, waiting on or cleaning
 up agents and programs, read `h0x-core --skill` and use h0x-core.
-Your terminal address is `$HC_TERMINAL_ID`; it is not a pane ID.
+Your terminal address is `$H0X_TERMINAL_ID`; it is not a pane ID.
 
 ## Inspect before acting
 

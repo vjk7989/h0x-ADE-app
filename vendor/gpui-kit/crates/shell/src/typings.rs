@@ -3140,7 +3140,7 @@ const BASE: &str = r#"  /** A row. */
   /** The frame around retained multi-line text state. */
   export const Textarea: { new: (state: TextareaState) => NativeElement };
 
-  // HERDR: built-in source editing and read-only code viewing.
+  // HyperOx: built-in source editing and read-only code viewing.
   export interface EditorState {
     value(): string;
     /** Programmatic replacement works even in readonly mode. */
@@ -3152,7 +3152,7 @@ const BASE: &str = r#"  /** A row. */
     new: (options?: {
       language?: string;
       value?: string;
-      /** HERDR: concrete code font; defaults to the shell theme's mono font. */
+      /** HyperOx: concrete code font; defaults to the shell theme's mono font. */
       font_family?: string;
       /** Font size in pixels; defaults to the theme's mono_md size. */
       font_size?: number;

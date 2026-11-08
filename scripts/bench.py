@@ -90,7 +90,7 @@ def env():
         H0X_ADE_BENCH=f"{ROOT}/frames.jsonl",
         WAYLAND_DISPLAY=e.get("WAYLAND_DISPLAY", ""),
     )
-    for key in ("HC_SOCKET", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SCOPE"):
+    for key in ("H0X_CORE_SOCKET", "H0X_TERMINAL_ID", "H0X_TERMINAL_SOCKET", "H0X_SCOPE"):
         e.pop(key, None)
     e["XDG_CONFIG_HOME"] = f"{ROOT}/config"
     return e
