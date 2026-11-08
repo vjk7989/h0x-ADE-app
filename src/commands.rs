@@ -97,7 +97,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("app.zoom_out", &[], "Make everything smaller."),
     cmd("app.zoom_reset", &[], "Back to normal size."),
     cmd("app.update", &[], "Restart into the update HyperOx downloaded (your terminals keep running)."),
-    cmd("app.quit", &[], "Quit (macOS)."),
+    cmd("app.quit", &[], "Quit the app."),
     cmd("app.hide", &[], "Hide the app (macOS)."),
     cmd("app.hide_others", &[], "Hide other apps (macOS)."),
     cmd("app.show_all", &[], "Show all apps (macOS)."),

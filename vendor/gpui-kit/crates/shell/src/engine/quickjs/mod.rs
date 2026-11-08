@@ -5861,7 +5861,7 @@ globalThis.__gpui = (() => {
     return this;
   };
 
-  // HERDR: looping animation that never re-enters the script. `frames` shows
+  // HyperOx: looping animation that never re-enters the script. `frames` shows
   // one string after another as the element's text (a spinner); `loop` swings
   // a property between two values. Both run on a clock shared by every view,
   // so spinners stay in step, and only while the element is drawn.
@@ -5899,7 +5899,7 @@ globalThis.__gpui = (() => {
     return this;
   };
 
-  // HERDR: an svg turning once every `ms`, forever (a spinner), natively.
+  // HyperOx: an svg turning once every `ms`, forever (a spinner), natively.
   methods.spin = function (ms) {
     const period = finiteDuration(ms ?? 1000, "spin period");
     if (period < 100) throw new RangeError("spin period must be at least 100 milliseconds");
@@ -7026,7 +7026,7 @@ globalThis.__gpui = (() => {
     NumberInput: {
       new: (state) => element(__number_input_element(state.__handle)),
     },
-    // HERDR: code editor uses the same value/event lifecycle as TextareaState.
+    // HyperOx: code editor uses the same value/event lifecycle as TextareaState.
     EditorState: {
       new: (options = {}) => {
         const handle = __editor_state_new(JSON.stringify(options));

@@ -26,7 +26,7 @@
 
 ### New
 
-- Includes the herdr-app 0.1.13 improvements: find in a terminal's screen and scrollback, a draggable scrollbar on terminal panes, and terminal.scroll for mods and agents.
+- Includes upstream 0.1.13 improvements: find in a terminal's screen and scrollback, a draggable scrollbar on terminal panes, and terminal.scroll for mods and agents.
 
 ### Fixed
 

@@ -529,7 +529,7 @@ No arguments.
 
 ## `app.quit`
 
-Quit (macOS).
+Quit the app.
 
 No arguments.
 

@@ -266,6 +266,21 @@ mod tests {
         Launch::new(Record { last_run: version.map(str::to_owned), ..Record::default() }, running, fresh)
     }
     #[test]
+    fn bundled_whats_new_notes_never_mention_herdr() {
+        let text = include_str!("../CHANGELOG.md");
+        for os in ["macos", "linux", "windows"] {
+            let notes = parse_for_os(text, os);
+            assert!(!notes.is_empty());
+            for note in &notes {
+                for item in &note.items {
+                    for shown in [&item.headline, &item.detail] {
+                        assert!(!shown.to_ascii_lowercase().contains("herdr"), "{} on {os}: {shown}", note.version);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn platform_spotlight_is_recognized() {
         let text = format!("## [1.8.0] - 2026-10-23\n<!-- spotlight {} -->\n- New thing\n", std::env::consts::OS);
         assert!(parse(&text)[0].spotlight);

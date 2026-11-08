@@ -1,7 +1,7 @@
 # HyperOx app
 
 The HyperOx 2 desktop app (`h0x-ade`): a native GPUI client of
-[h0x-core](https://github.com/vjk7989/h0x-ADE-core). Can (`ogulcancelik`)
+[h0x-core](https://github.com/vjk7989/h0x-ADE-core). vjk7989 (HyperOx)
 maintains it.
 
 If AGENTS.local.md exists, read it too: the maintainer's local rules.
