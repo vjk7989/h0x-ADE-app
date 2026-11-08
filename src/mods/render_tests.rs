@@ -2906,6 +2906,17 @@ fn sessions_panel_shows_the_file_in_this_computers_file_manager(cx: &mut TestApp
         assert_eq!(h.execs, vec![expected], "{platform}");
         assert!(h.effects.is_empty(), "explorer's exit code 1 is not an error: {:?}", h.effects);
     }
+
+#[gpui::test]
+fn sessions_panel_refuses_to_reveal_a_path_explorer_would_split(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let list = core_ok(json!({"sessions":[]}));
+    let host = sessions_host(&[("list", list)], &[]);
+    let setup = format!("{} this.command('reveal', cx);", session_target(None, "/fixture/project", "claude", "a1", "C:/Users/me/a,/select,C:/evil.jsonl"));
+    describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "windows"), &host, &setup);
+    assert!(host.borrow().execs.is_empty(), "{:?}", host.borrow().execs);
+}
 }
 
 #[gpui::test]
