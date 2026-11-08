@@ -201,7 +201,7 @@ export default class Files extends View {
           cx.notify();
         });
         doc.state.on("blur", (_e, cx) => { if (this.doc === doc) this.save(cx); });
-      } catch (e) { if (this.file === path && this.current(context)) this.fileError = `Cannot preview this file: ${String(e?.message ?? e).slice(0, 120)}`; }
+      } catch (e) { if (this.file === path && this.current(context)) this.fileError = `Cannot preview this file: ${Array.from(String(e?.message || e || "unknown error")).slice(0, 120).join("")}`; }
       finally { cx.notify(); }
     });
   }
