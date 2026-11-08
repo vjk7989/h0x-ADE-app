@@ -74,6 +74,7 @@ fn restrict_to_owner(path: &std::path::Path) -> Result<(), String> {
         .args(["/inheritance:r", "/grant:r"])
         .arg(format!("{user}:F"))
         .arg("SYSTEM:F")
+        .args(["/remove:g", "*S-1-5-32-544"])
         .creation_flags(0x0800_0000)
         .output()
         .map_err(|e| e.to_string())?;
