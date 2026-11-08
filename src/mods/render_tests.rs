@@ -3028,10 +3028,21 @@ fn sessions_panel_refuses_to_reveal_a_path_explorer_would_split(cx: &mut TestApp
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let list = core_ok(json!({"sessions":[]}));
-    let host = sessions_host(&[("list", list)], &[]);
-    let setup = format!("{} this.command('reveal', cx);", session_target(None, "/fixture/project", "claude", "a1", "C:/Users/me/a,/select,C:/evil.jsonl"));
-    describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "windows"), &host, &setup);
-    assert!(host.borrow().execs.is_empty(), "{:?}", host.borrow().execs);
+    for (platform, path, set) in [
+        ("windows", "C:/Users/me/a,/select,C:/evil.jsonl", ""),
+        ("windows", "C:/Users/me/\"a\".jsonl", ""),
+        ("windows", "", ""),
+        ("windows", "x", "this.target.path = null;"),
+        ("macos", "x", "this.target.path = null;"),
+        ("linux", "", ""),
+    ] {
+        let host = sessions_host(&[("list", list.clone())], &[]);
+        let setup = format!("{} {set} this.command('reveal', cx);", session_target(None, "/fixture/project", "claude", "a1", path));
+        describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", platform), &host, &setup);
+        let h = host.borrow();
+        assert!(h.execs.is_empty(), "{platform} {path:?}: {:?}", h.execs);
+        assert!(!h.effects.is_empty(), "{platform} {path:?}: the failure is shown");
+    }
 }
 
 #[gpui::test]
