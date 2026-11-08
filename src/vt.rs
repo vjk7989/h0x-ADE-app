@@ -1484,8 +1484,8 @@ impl Vt {
     /// Wraps pasted text the way the program asked (bracketed paste or not).
     pub fn paste_bytes(&self, text: &str) -> Vec<u8> {
         if self.mode(BRACKETED_PASTE) {
-            // Every ESC and C1 CSI goes: removing only the end marker lets `ESC[20` + marker + `1~` rebuild it.
-            let clean: String = text.chars().filter(|c| !matches!(c, '\x1b' | '\u{9b}')).collect();
+            // Every ESC and C1 control (U+0080-U+009F, CSI among them) goes: removing only the end marker lets `ESC[20` + marker + `1~` rebuild it.
+            let clean: String = text.chars().filter(|c| !matches!(c, '\x1b' | '\u{80}'..='\u{9f}')).collect();
             [b"\x1b[200~".as_slice(), clean.as_bytes(), b"\x1b[201~"].concat()
         } else {
             text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
@@ -1829,6 +1829,7 @@ mod tests {
             assert!(!inner.contains(&0x1b), "{evil:?}");
             assert!(!String::from_utf8_lossy(inner).contains('\u{9b}'), "{evil:?}");
         }
+        assert_eq!(vt.paste_bytes("a\u{80}b\u{85}c\u{9d}d\u{9f}e\u{a0}f"), "\x1b[200~abcde\u{a0}f\x1b[201~".as_bytes());
         assert_eq!(vt.paste_bytes(""), b"\x1b[200~\x1b[201~");
         assert_eq!(vt.paste_bytes("plain\ntext"), b"\x1b[200~plain\ntext\x1b[201~");
         // Without bracketed paste nothing is wrapped.

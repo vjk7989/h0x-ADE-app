@@ -1024,10 +1024,20 @@ fn windows_read_args(path: &str) -> Vec<String> {
     vec!["-NoProfile".into(), "-NonInteractive".into(), "-EncodedCommand".into(), base64::engine::general_purpose::STANDARD.encode(utf16)]
 }
 
+/// `\\server\share`, `//server/share` and `\\?\UNC\...`: reading one makes the remote machine open an SMB connection.
+fn is_unc(path: &str) -> bool {
+    path.replace('/', "\\").starts_with("\\\\")
+}
+
 /// A text file on another machine: `cat`, or PowerShell where there is none (Windows).
 fn read_remote(machine: &str, path: &str) -> Result<Option<String>, String> {
     let (code, out, _) = match run_remote(machine, "cat", &["--".into(), path.into()], None) {
-        Err(e) if e.contains("cannot start") => run_remote(machine, "powershell.exe", &windows_read_args(path), None)?,
+        Err(e) if e.contains("cannot start") => {
+            if is_unc(path) {
+                return Err("A network path cannot be read through another machine".into());
+            }
+            run_remote(machine, "powershell.exe", &windows_read_args(path), None)?
+        }
         r => r?,
     };
     if code != 0 {
@@ -1777,6 +1787,16 @@ mod tests {
             assert_eq!(verdict, if refused { Trust::Denied } else { Trust::Allowed }, "{manifest:?}");
         }
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn network_paths_are_not_read_through_a_remote_machine() {
+        for unc in ["\\\\server\\share\\f.txt", "//server/share/f.txt", "\\\\?\\UNC\\server\\share\\f.txt", "\\/server/share", "//"] {
+            assert!(is_unc(unc), "{unc}");
+        }
+        for local in ["C:/r/f.txt", "C:\\r\\f.txt", "/home/u/f.txt", "r/f.txt", "", "/", "\\r"] {
+            assert!(!is_unc(local), "{local}");
+        }
     }
 
     #[test]

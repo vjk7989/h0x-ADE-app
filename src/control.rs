@@ -47,17 +47,33 @@ pub fn listen(tx: async_channel::Sender<Request>) {
     let _ = std::thread::Builder::new().name("h0x-ade-control".into()).spawn(move || {
         let open = std::sync::Arc::new(AtomicUsize::new(0));
         for stream in listener.incoming().flatten() {
-            if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
-                open.fetch_sub(1, Ordering::SeqCst);
-                continue;
-            }
-            let (tx, open) = (tx.clone(), open.clone());
+            let Some(slot) = Slot::take(&open) else { continue };
+            let tx = tx.clone();
             std::thread::spawn(move || {
+                let _slot = slot;
                 serve(stream, tx);
-                open.fetch_sub(1, Ordering::SeqCst);
             });
         }
     });
+}
+
+/// One of the `MAX_CONNECTIONS` places; freed when dropped, even by a panic.
+struct Slot(std::sync::Arc<AtomicUsize>);
+
+impl Slot {
+    fn take(open: &std::sync::Arc<AtomicUsize>) -> Option<Slot> {
+        if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+            open.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Slot(open.clone()))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// The ACL of the socket file: this user and SYSTEM only, nothing inherited.
@@ -69,16 +85,20 @@ fn restrict_to_owner(path: &std::path::Path) -> Result<(), String> {
         Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
         _ => user,
     };
-    let out = std::process::Command::new("icacls")
-        .arg(path)
-        .args(["/inheritance:r", "/grant:r"])
-        .arg(format!("{user}:F"))
-        .arg("SYSTEM:F")
-        .args(["/remove:g", "*S-1-5-32-544"])
-        .creation_flags(0x0800_0000)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stdout).trim().to_owned()) }
+    let icacls = |build: &dyn Fn(&mut std::process::Command)| {
+        let mut command = std::process::Command::new("icacls");
+        command.arg(path).creation_flags(0x0800_0000);
+        build(&mut command);
+        let out = command.output().map_err(|e| e.to_string())?;
+        if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stdout).trim().to_owned()) }
+    };
+    // Start from no explicit entries, then drop the inherited ones and grant the two.
+    icacls(&|c| {
+        c.arg("/reset");
+    })?;
+    icacls(&|c| {
+        c.args(["/inheritance:r", "/grant:r"]).arg(format!("{user}:F")).arg("*S-1-5-18:F").args(["/remove:g", "*S-1-5-32-544"]);
+    })
 }
 
 /// A request is one JSON line; anything longer is not one.
@@ -95,9 +115,26 @@ fn read_request(reader: impl BufRead) -> Result<String, String> {
     Ok(line)
 }
 
+/// `read_request` from a socket, which must deliver the whole line within `limit`:
+/// a client sending a byte now and then does not keep its place.
+fn read_request_within(stream: &UnixStream, limit: Duration) -> Result<String, String> {
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Ok(late) = stream.try_clone() {
+        let done = done.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(limit);
+            if !done.load(Ordering::SeqCst) {
+                let _ = late.shutdown(std::net::Shutdown::Both);
+            }
+        });
+    }
+    let line = read_request(BufReader::new(stream));
+    done.store(true, Ordering::SeqCst);
+    line
+}
+
 fn serve(stream: UnixStream, tx: async_channel::Sender<Request>) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let line = match read_request(BufReader::new(&stream)) {
+    let line = match read_request_within(&stream, Duration::from_secs(10)) {
         Ok(line) => line,
         Err(e) => {
             let _ = (&stream).write_all(format!("{}\n", json!({ "error": e })).as_bytes());
@@ -389,6 +426,55 @@ mod tests {
         BufReader::new(&client).read_line(&mut answer).unwrap();
         assert!(serde_json::from_str::<Value>(&answer).unwrap()["error"].as_str().unwrap().starts_with("bad request"), "{answer}");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_slow_client_loses_its_place_after_the_limit_for_the_whole_line() {
+        let dir = std::env::temp_dir().join(format!("h0x-ade-slow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("h0x-ade.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        // One byte every 100 ms never ends the line; each read alone is well inside the limit.
+        let drip = std::thread::spawn(move || {
+            for _ in 0..40 {
+                if client.write_all(b"x").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let started = std::time::Instant::now();
+        let result = read_request_within(&server, Duration::from_millis(500));
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        assert!(!result.is_ok_and(|line| line.ends_with('\n')));
+        drip.join().unwrap();
+        // A prompt client is served.
+        let mut client = UnixStream::connect(&path).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        client.write_all(b"{}\n").unwrap();
+        assert_eq!(read_request_within(&server, Duration::from_millis(500)).unwrap(), "{}\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_connection_place_is_freed_even_when_the_handler_panics() {
+        let open = std::sync::Arc::new(AtomicUsize::new(0));
+        let slots: Vec<Slot> = (0..MAX_CONNECTIONS).map(|_| Slot::take(&open).unwrap()).collect();
+        assert!(Slot::take(&open).is_none());
+        assert_eq!(open.load(Ordering::SeqCst), MAX_CONNECTIONS);
+        drop(slots);
+        assert_eq!(open.load(Ordering::SeqCst), 0);
+        let slot = Slot::take(&open).unwrap();
+        let panicked = std::thread::spawn(move || {
+            let _slot = slot;
+            panic!("handler failed");
+        })
+        .join();
+        assert!(panicked.is_err());
+        assert_eq!(open.load(Ordering::SeqCst), 0);
+        assert!(Slot::take(&open).is_some());
     }
 
     #[test]

