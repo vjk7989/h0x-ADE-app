@@ -33,7 +33,7 @@ const BURST = 30000, LISTED = 5;
 // submit a fake prompt line), line/paragraph separators and invisible or bidi format
 // characters (they disguise a name) are dropped and it is capped at 200 characters.
 // At most 120 UTF-16 units of the error; a character the cut would split is dropped whole.
-const reason = e => { const s = String(e?.message || e || "unknown error").slice(0, 120); return /[\ud800-\udbff]$/.test(s) ? s.slice(0, -1) : s; };
+const reason = e => { const s = String((e !== null && typeof e === "object" ? e.message : e) || "unknown error").slice(0, 120); return /[\ud800-\udbff]$/.test(s) ? s.slice(0, -1) : s; };
 const noteName =name => [...name.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "")].slice(0, 200).join("");
 // A file is written back with the line endings it was read with: CRLF only when every line had it.
 const eol = text => /\r\n/.test(text) && !/(^|[^\r])\n/.test(text) ? "\r\n" : "\n";
