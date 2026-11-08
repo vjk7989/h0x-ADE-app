@@ -263,8 +263,17 @@ static CHECKING: AtomicBool = AtomicBool::new(false);
 /// only "Check now" looks.
 static AUTO: AtomicBool = AtomicBool::new(true);
 
+/// Turning automatic checks back on checks now, not at the next hour; setting
+/// the value it already has does nothing.
 pub fn set_auto(on: bool) {
-    AUTO.store(on, Ordering::Relaxed);
+    if !AUTO.swap(on, Ordering::Relaxed) && on {
+        wake();
+    }
+}
+
+fn wake() {
+    *WAKE.0.lock().unwrap() = true;
+    WAKE.1.notify_all();
 }
 
 /// Whether the background checker looks this round: on its schedule only when
@@ -329,8 +338,7 @@ pub fn check_now() {
     if RUNNING.load(Ordering::Relaxed) {
         CHECKING.store(true, Ordering::Relaxed);
     }
-    *WAKE.0.lock().unwrap() = true;
-    WAKE.1.notify_all();
+    wake();
 }
 
 /// Waits; true when "Check now" cut it short.
@@ -1281,6 +1289,23 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         assert!(due(true, true));
         assert!(!due(false, false), "automatic checks off: nothing runs on the schedule");
         assert!(due(false, true), "Check now still works with automatic checks off");
+    }
+
+    #[test]
+    fn turning_automatic_checks_back_on_wakes_the_checker() {
+        let woken = || std::mem::take(&mut *WAKE.0.lock().unwrap());
+        set_auto(true);
+        woken();
+        set_auto(true);
+        assert!(!woken(), "already on: nothing to wake");
+        set_auto(false);
+        assert!(!woken(), "turning off wakes nothing");
+        set_auto(false);
+        set_auto(true);
+        assert!(woken(), "off to on checks right away");
+        assert!(AUTO.load(Ordering::Relaxed));
+        // The woken checker counts it as asked, so it runs even if the setting flips back.
+        assert!(due(false, true));
     }
 
     #[test]

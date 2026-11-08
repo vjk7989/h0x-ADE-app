@@ -891,6 +891,7 @@ export default class Settings extends View {
         .when(Boolean(this.webQr?.rows), (e) => e.child(this.qrGrid(this.webQr)))
         .when(Boolean(this.webQr) && !this.webQr.rows, (e) => e.child(div().text_size(12.5).text_color(t.dim).child("Cannot draw the QR code; use the link below.")))
         .child(div().text_size(12.5).text_color(t.muted).child("Scan with your phone"))
+        .when(typeof this.webLink?.warning === "string" && this.webLink.warning !== "", (e) => e.child(div().id("st-r-warning").text_size(12.5).line_height("18px").text_color(t.ansi3).child(this.webLink.warning)))
         .child(div().id("st-r-link").text_size(12).text_color(t.dim).child(this.webLink?.pair ?? this.webLink?.url ?? ""))));
   }
 
