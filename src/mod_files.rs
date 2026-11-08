@@ -77,11 +77,12 @@ fn write(path: &Path, text: &str, expected: Option<&str>) -> Result<(), String> 
 }
 
 /// Where mods may read, write and watch (ADR-048, amended): the person's home
-/// folder, HyperOx's app home, and the folders of the spaces open on this
-/// computer. Computed per call: spaces come and go.
+/// folder, HyperOx's app home, and the folders of the spaces and terminals open
+/// on this computer. Computed per call: spaces come and go.
 pub fn allowed_roots() -> Vec<String> {
     let mut roots = vec![crate::mods::home(), crate::mods::app_dir()];
     roots.extend(crate::mods::local_space_folders());
+    roots.extend(crate::mods::local_pane_folders());
     real_roots(roots)
 }
 
@@ -349,5 +350,54 @@ mod tests {
         assert!(!within("/home/Ana/x", "/home/ana", false));
         assert!(!within("/home/anabel", "/home/ana", false));
         assert!(!within("/etc/passwd", "/home/ana", false));
+    }
+
+    /// A folder on another drive is a root like any other: whatever the case,
+    /// slashes or `\\?\` prefix of the path asked about, and nothing beside it.
+    #[test]
+    fn a_folder_on_another_drive_is_a_root() {
+        for (root, inside, outside) in [
+            (r"\\?\G:\proj", r"g:/PROJ/notes/a.txt", r"G:\proj2\a.txt"),
+            (r"\\?\G:\test-claude-makes-app", r"G:\test-claude-makes-app/solana.txt", r"G:\other\solana.txt"),
+            (r"D:\x", r"\\?\d:\X\a.txt", r"D:\xy\a.txt"),
+        ] {
+            let roots = [root.to_owned()];
+            assert!(!is_fs_root(root, true), "{root}");
+            assert!(allowed(inside, &roots, true), "{inside}");
+            assert!(allowed(root, &roots, true), "{root}");
+            assert!(!allowed(outside, &roots, true), "{outside}");
+            assert!(!allowed(r"C:\Windows\win.ini", &roots, true));
+        }
+        // The drive itself is still no root.
+        assert!(!allowed(r"G:\proj\a.txt", &[r"G:\".to_owned()], true));
+    }
+
+    /// The Files panel lists the focused terminal's live folder, so that folder
+    /// is a root too (local terminals only), and the file in it reads as text
+    /// whatever its extension.
+    #[test]
+    fn a_local_terminals_folder_is_a_root_and_any_extension_reads_as_text() {
+        let dir = std::env::temp_dir().join(format!("h0x-ade-pane-{}", std::process::id()));
+        let far = std::env::temp_dir().join(format!("h0x-ade-far-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&far).unwrap();
+        for name in ["a.txt", "b.log", "README"] {
+            std::fs::write(dir.join(name), "plain\n").unwrap();
+        }
+        std::fs::write(far.join("c.txt"), "x").unwrap();
+        crate::mods::publish_panes(serde_json::json!([
+            {"pane": "p1", "terminal": "t1", "cwd": dir},
+            {"pane": "p2", "terminal": "vps/t2", "cwd": far},
+            {"pane": "p3", "terminal": null, "cwd": far},
+            {"pane": "p4", "terminal": "t4", "cwd": "relative/dir"},
+        ]));
+        assert_eq!(crate::mods::local_pane_folders(), vec![dir.clone()]);
+        let roots = allowed_roots();
+        for name in ["a.txt", "b.log", "README"] {
+            assert_eq!(check(&dir.join(name), &roots), Ok(()), "{name}");
+            assert_eq!(read(&dir.join(name)).unwrap().as_deref(), Some("plain\n"), "{name}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(far).unwrap();
     }
 }

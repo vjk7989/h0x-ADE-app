@@ -201,7 +201,7 @@ export default class Files extends View {
           cx.notify();
         });
         doc.state.on("blur", (_e, cx) => { if (this.doc === doc) this.save(cx); });
-      } catch { if (this.file === path && this.current(context)) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
+      } catch (e) { if (this.file === path && this.current(context)) this.fileError = `Cannot preview this file: ${String(e?.message ?? e).slice(0, 120)}`; }
       finally { cx.notify(); }
     });
   }
