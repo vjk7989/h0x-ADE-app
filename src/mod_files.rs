@@ -400,4 +400,129 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
         std::fs::remove_dir_all(far).unwrap();
     }
+
+    /// A terminal at `/` or a drive, or with no usable folder, opens nothing.
+    #[test]
+    fn a_terminal_at_a_filesystem_root_or_without_a_folder_adds_no_root() {
+        let top = std::env::temp_dir().ancestors().last().unwrap().to_path_buf();
+        crate::mods::publish_panes(serde_json::json!([
+            {"pane": "p1", "terminal": "t1", "cwd": top},
+            {"pane": "p2", "terminal": "t2", "cwd": "/"},
+            {"pane": "p3", "terminal": "t3", "cwd": r"C:\"},
+            {"pane": "p4", "terminal": "t4", "cwd": r"G:\"},
+            {"pane": "p5", "terminal": "t5", "cwd": r"C:relative"},
+            {"pane": "p6", "terminal": "t6", "cwd": ""},
+            {"pane": "p7", "terminal": "t7", "cwd": null},
+            {"pane": "p8", "terminal": "t8"},
+            {"pane": "p9", "terminal": "t9", "cwd": 42},
+            {"pane": "p10", "cwd": top},
+        ]));
+        let roots = real_roots(crate::mods::local_pane_folders());
+        assert!(roots.is_empty(), "{roots:?}");
+        // No panes at all, or no list: nothing.
+        crate::mods::publish_panes(serde_json::json!([]));
+        assert!(crate::mods::local_pane_folders().is_empty());
+        crate::mods::publish_panes(serde_json::Value::Null);
+        assert!(crate::mods::local_pane_folders().is_empty());
+    }
+
+    /// Every local terminal's folder is a root while its pane is open: written
+    /// with `..`, not created yet, or joined with `/` the way the Files panel
+    /// does on Windows too. Closing the pane takes its folder away.
+    #[test]
+    fn terminal_roots_follow_the_panes_snapshot() {
+        let base = std::env::temp_dir().join(format!(
+            "h0x-ade-pane-roots-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (one, two) = (base.join("one"), base.join("two"));
+        std::fs::create_dir_all(one.join("sub")).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        std::fs::write(one.join("a.txt"), "a").unwrap();
+        std::fs::write(two.join("b.txt"), "b").unwrap();
+        std::fs::write(base.join("beside.txt"), "x").unwrap();
+        let one_pane = serde_json::json!({"pane": "p1", "terminal": "t1", "cwd": one.join("sub").join("..")});
+        crate::mods::publish_panes(serde_json::json!([
+            one_pane,
+            {"pane": "p2", "terminal": "t2", "cwd": two},
+            {"pane": "p3", "terminal": "t3", "cwd": base.join("gone")},
+        ]));
+        let roots = real_roots(crate::mods::local_pane_folders());
+        assert_eq!(roots.len(), 3, "{roots:?}");
+        assert_eq!(check(&one.join("a.txt"), &roots), Ok(()));
+        assert_eq!(check(&two.join("b.txt"), &roots), Ok(()));
+        // A folder that no longer exists still counts where it was.
+        assert_eq!(check(&base.join("gone").join("new.txt"), &roots), Ok(()));
+        // `root/path`, as the Files panel joins them, with mixed separators on Windows.
+        assert_eq!(check(Path::new(&format!("{}/a.txt", one.display())), &roots), Ok(()));
+        assert_eq!(check(Path::new(&format!("{}/sub/../a.txt", one.display())), &roots), Ok(()));
+        // Beside and above the terminals' folders, nothing.
+        assert!(check(&base.join("beside.txt"), &roots).is_err());
+        assert!(check(&base, &roots).is_err());
+        assert!(check(&one.join("..").join("beside.txt"), &roots).is_err());
+        assert!(check(Path::new(&format!("{}/../beside.txt", two.display())), &roots).is_err());
+        // The second terminal closes: its folder is no root any more.
+        crate::mods::publish_panes(serde_json::json!([one_pane]));
+        let roots = real_roots(crate::mods::local_pane_folders());
+        assert_eq!(roots.len(), 1, "{roots:?}");
+        assert_eq!(check(&one.join("a.txt"), &roots), Ok(()));
+        assert!(check(&two.join("b.txt"), &roots).is_err());
+        crate::mods::publish_panes(serde_json::json!([]));
+        assert!(real_roots(crate::mods::local_pane_folders()).is_empty());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A terminal whose folder is a link: the link's target is the root, and a
+    /// link inside it that points out reaches nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_a_terminals_folder_does_not_reach_outside_it() {
+        let base = std::env::temp_dir().join(format!(
+            "h0x-ade-pane-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (pane, outside) = (base.join("pane"), base.join("outside"));
+        std::fs::create_dir_all(&pane).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        std::os::unix::fs::symlink(&outside, pane.join("out")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), pane.join("secret.txt")).unwrap();
+        std::os::unix::fs::symlink(&pane, base.join("alias")).unwrap();
+        crate::mods::publish_panes(serde_json::json!([{"pane": "p1", "terminal": "t1", "cwd": base.join("alias")}]));
+        let roots = real_roots(crate::mods::local_pane_folders());
+        assert_eq!(roots, vec![pane.canonicalize().unwrap().to_string_lossy().into_owned()]);
+        assert_eq!(check(&base.join("alias").join("new.txt"), &roots), Ok(()));
+        assert!(check(&pane.join("out").join("secret.txt"), &roots).is_err());
+        assert!(check(&pane.join("out").join("new.txt"), &roots).is_err());
+        assert!(check(&pane.join("secret.txt"), &roots).is_err());
+        crate::mods::publish_panes(serde_json::json!([]));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A UNC folder is a terminal folder on Windows only (elsewhere it is a
+    /// relative name), and as a root it opens that folder, never the share.
+    /// Pure: no network lookup.
+    #[test]
+    fn a_unc_terminal_folder_never_opens_its_share() {
+        crate::mods::publish_panes(serde_json::json!([{"pane": "p1", "terminal": "t1", "cwd": r"\\server\share\x"}]));
+        let expected = if cfg!(windows) { vec![PathBuf::from(r"\\server\share\x")] } else { Vec::new() };
+        assert_eq!(crate::mods::local_pane_folders(), expected);
+        crate::mods::publish_panes(serde_json::json!([]));
+        let roots = [r"\\?\UNC\server\share\x".to_owned()];
+        assert!(allowed(r"\\server\share\x\a.txt", &roots, true));
+        assert!(allowed(r"\\?\UNC\SERVER\share\X/sub/b.txt", &roots, true));
+        assert!(allowed(r"//server/share/x/a.txt", &roots, true));
+        assert!(!allowed(r"\\server\share\y.txt", &roots, true));
+        assert!(!allowed(r"\\server\share", &roots, true));
+        assert!(!allowed(r"\\server\share\xy\a.txt", &roots, true));
+        assert!(!allowed(r"\\other\share\x\a.txt", &roots, true));
+    }
 }
