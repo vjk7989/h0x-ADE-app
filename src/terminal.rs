@@ -3185,6 +3185,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn dropped_windows_paths_stay_one_literal_each_for_powershell() {
+        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()));
+        // Backslash, UNC and long-path forms are quoted whole; `$`, backticks and `;` stay literal.
+        assert_eq!(q(&[r"C:\Users\me\it's here.png"]), r"'C:\Users\me\it''s here.png' ");
+        assert_eq!(q(&[r"\\server\share\a b.png", r"\\?\C:\x.png"]), r"'\\server\share\a b.png' '\\?\C:\x.png' ");
+        assert_eq!(q(&[r"C:\a $env:USERNAME `n; calc.png"]), r"'C:\a $env:USERNAME `n; calc.png' ");
+        // Every quote kind at once, at both ends, and a path of nothing but quotes.
+        assert_eq!(q(&["'\u{2018}\u{2019}\u{201A}\u{201B}"]), "'''\u{2018}\u{2018}\u{2019}\u{2019}\u{201A}\u{201A}\u{201B}\u{201B}' ");
+        assert_eq!(q(&["\u{201B}x\u{2018}"]), "'\u{201B}\u{201B}x\u{2018}\u{2018}' ");
+        // Several paths: each is its own literal; an empty one is still an (empty) literal.
+        assert_eq!(q(&["a'b", "", "c\u{2019}d"]), "'a''b' '' 'c\u{2019}\u{2019}d' ");
+        assert_eq!(q(&["C:/plain.png"]), "C:/plain.png ");
+    }
+
+    #[test]
     fn copied_files_paste_as_files_not_their_bare_path_text() {
         use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths};
         let shot = std::path::PathBuf::from("/Users/me/Library/Application Support/clip/file-1.png");

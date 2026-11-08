@@ -1802,6 +1802,152 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_windows_read_reads_back_exactly_the_path_and_runs_nothing_else() {
+        use base64::Engine;
+        let quotes = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
+        let script = |path: &str| {
+            let args = windows_read_args(path);
+            assert_eq!(args.len(), 4, "{path:?}");
+            assert_eq!(args[..3], ["-NoProfile", "-NonInteractive", "-EncodedCommand"]);
+            assert!(!args[3].is_empty() && args[3].bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b)), "{path:?}");
+            let bytes = base64::engine::general_purpose::STANDARD.decode(&args[3]).unwrap();
+            assert_eq!(bytes.len() % 2, 0, "{path:?}");
+            (args[3].len(), String::from_utf16(&bytes.chunks(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect::<Vec<_>>()).unwrap())
+        };
+        // Splits a script into what precedes the path, the path as PowerShell reads its
+        // single-quoted literal (any of the five quotes ends it unless doubled), and the rest.
+        let split = |s: &str| {
+            let at = s.find("ReadAllBytes(").unwrap() + "ReadAllBytes(".len();
+            let mut chars = s[at..].char_indices().peekable();
+            assert!(chars.next().is_some_and(|(_, c)| quotes.contains(&c)), "{s}");
+            let mut literal = String::new();
+            while let Some((i, c)) = chars.next() {
+                if !quotes.contains(&c) {
+                    literal.push(c);
+                } else if chars.peek().is_some_and(|(_, n)| quotes.contains(n)) {
+                    literal.push(chars.next().unwrap().1);
+                } else {
+                    return (s[..at].to_owned(), literal, s[at + i + c.len_utf8()..].to_owned());
+                }
+            }
+            panic!("the literal never ends: {s}");
+        };
+        let (_, reference) = script("x");
+        let (head, _, tail) = split(&reference);
+        let long = format!("C:/{}/f.txt", "d\u{e9}&|'\u{2019} ".repeat(1500));
+        let max_path = format!("C:\\{}", "a".repeat(4093));
+        for path in [
+            "",
+            "-",
+            "--",
+            "-EncodedCommand ZQBjAGgAbwA=",
+            "a b c.txt",
+            r"C:\Users\me\it's here.txt",
+            "C:/mixed\\slashes/x.txt",
+            "//server/share/a.txt",
+            r"\\server\share\a.txt",
+            r"\\?\C:\a.txt",
+            "a&b|c^d%PATH%\"e(f)g<h>i.txt",
+            "x'); calc; ('",
+            "x\u{2018}); calc; (\u{2019}",
+            "\u{201A}); calc; #\u{201B}",
+            "'",
+            "''",
+            "\u{2019}\u{2019}\u{2019}",
+            "line\nbreak'; calc\r\n#",
+            "nul\0byte",
+            "$(calc)`$env:x`.txt",
+            "@'\n'@",
+            "\u{65e5}\u{672c}\u{8a9e}/\u{1f600}.txt",
+            max_path.as_str(),
+            long.as_str(),
+        ] {
+            let (encoded, s) = script(path);
+            let (h, literal, t) = split(&s);
+            // The same script around it every time; the path comes back unchanged (slashes turned).
+            assert_eq!((h.as_str(), t.as_str()), (head.as_str(), tail.as_str()), "{path:?}");
+            assert_eq!(literal, path.replace('/', "\\"), "{path:?}");
+            if path.len() <= 4096 {
+                // Still fits a Windows command line (32767 characters).
+                assert!(encoded < 32_000, "{path:?}: {encoded}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_mods_dependencies_block_it_in_any_shape_unless_absent_or_empty() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-deps-shapes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("main.js"), "a").unwrap();
+        let found = Found { id: "deps-shapes".into(), dir: root.clone(), hint: Hint::default(), stamp: SystemTime::now() };
+        let manifest = |deps: Option<&str>| match deps {
+            Some(d) => format!(r#"{{"id":"deps-shapes","name":"x","entry":"main.js","dependencies":{d}}}"#),
+            None => r#"{"id":"deps-shapes","name":"x","entry":"main.js"}"#.to_owned(),
+        };
+        let huge = format!("\"{}\"", "g".repeat(1 << 20));
+        let many = format!("{{{}}}", (0..500).map(|i| format!("\"l{i}\":\"https://example.com/l{i}.git#main\"")).collect::<Vec<_>>().join(","));
+        let blocked = [
+            r#"{"lib":{"git":"https://example.com/l.git"}}"#,
+            r#"{"lib":{"git":"https://example.com/l.git","entry":"src/x.js"}}"#,
+            r#"{"lib":"https://example.com/l.git#main"}"#,
+            r#"{"":""}"#,
+            r#"{"lib":null}"#,
+            r#"{"lib":{}}"#,
+            "0",
+            "1.5e300",
+            "-1",
+            "true",
+            "false",
+            r#""https://example.com/l.git""#,
+            "[[[\"lib\"]]]",
+            "[{\"git\":\"https://example.com/l.git\"}]",
+            huge.as_str(),
+            many.as_str(),
+        ];
+        let loads = [None, Some("null"), Some("{}"), Some(" { } ")];
+        let allowed = |hash: String| BTreeMap::from([("deps-shapes".to_owned(), crate::settings::ModChoice { hash, allow: true })]);
+        let write = |text: &str| std::fs::write(root.join("gpui-shell.json"), text).unwrap();
+        for deps in blocked {
+            write(&manifest(Some(deps)));
+            let shown = &deps[..deps.len().min(60)];
+            // Allowed for exactly this code, denied, or never asked: it never runs and is never offered.
+            assert_eq!(trust(&found, &allowed(content_hash(&root))), Trust::Denied, "{shown}");
+            assert_eq!(trust(&found, &BTreeMap::new()), Trust::Denied, "{shown}");
+        }
+        for deps in loads {
+            write(&manifest(deps));
+            // gpui-shell itself fetches nothing for these.
+            assert!(gpui_shell::plugin::PluginManifest::parse(&manifest(deps)).unwrap().dependencies().is_empty(), "{deps:?}");
+            assert_eq!(trust(&found, &allowed(content_hash(&root))), Trust::Allowed, "{deps:?}");
+            assert_eq!(trust(&found, &BTreeMap::new()), Trust::Ask(content_hash(&root)), "{deps:?}");
+        }
+        // Whatever gpui-shell would fetch for, the mod is blocked: the check reads the manifest as gpui-shell does.
+        let mut fetching = 0;
+        for text in [
+            manifest(Some(r#"{"lib":"https://example.com/l.git#main"}"#)),
+            format!("{}\n", manifest(Some(r#"{"lib":{"git":"https://example.com/l.git","tag":"v1"}}"#))),
+            // A repeated key: both read the last one.
+            r#"{"id":"deps-shapes","name":"x","entry":"main.js","dependencies":null,"dependencies":{"lib":"https://example.com/l.git#main"}}"#.to_owned(),
+            r#"{"id":"deps-shapes","name":"x","entry":"main.js","dependencies":{"lib":"https://example.com/l.git#main"},"dependencies":{}}"#.to_owned(),
+            // Not readable as a manifest: gpui-shell refuses to load it at all.
+            format!("\u{feff}{}", manifest(Some(r#"{"lib":"https://example.com/l.git#main"}"#))),
+            r#"{"id":"deps-shapes","dependencies":{"lib":"https://example.com/l.git#main""#.to_owned(),
+            String::new(),
+        ] {
+            write(&text);
+            let fetches = gpui_shell::plugin::PluginManifest::parse(&text).is_ok_and(|m| !m.dependencies().is_empty());
+            if fetches {
+                fetching += 1;
+                assert_eq!(trust(&found, &allowed(content_hash(&root))), Trust::Denied, "{text}");
+            }
+        }
+        // The first three manifests are ones gpui-shell fetches for.
+        assert!(fetching >= 3, "{fetching}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn cloned_mods_rewrite_assets_and_self_overlays_and_reject_nonobject_metadata() {
         let root = std::env::temp_dir().join(format!("h0x-mod-clone-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);

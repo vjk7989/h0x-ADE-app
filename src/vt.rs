@@ -1837,6 +1837,43 @@ mod tests {
     }
 
     #[test]
+    fn bracketed_paste_drops_every_escape_at_any_nesting_and_keeps_the_rest() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"\x1b[?2004h");
+        let mut evil = vec![
+            "\x1b".to_owned(),
+            "\u{9b}".to_owned(),
+            "\x1bstart".to_owned(),
+            "end\x1b".to_owned(),
+            "\u{9b}start and end\u{9b}".to_owned(),
+            "\x1b\u{9b}\x1b\u{9b}".to_owned(),
+            // Lossily decoded bad UTF-8 around the escapes.
+            "\u{fffd}\x1b\u{fffd}[201~\u{fffd}\u{9b}\u{fffd}201~".to_owned(),
+            "\u{65e5}\x1b[201~\u{1f600}\r\n\t\u{9b}201~".to_owned(),
+        ];
+        // Each wrap would rebuild the end marker if one layer were removed.
+        let (mut esc, mut c1, mut mixed) = ("\x1b[201~".to_owned(), "\u{9b}201~".to_owned(), "\x1b[201~".to_owned());
+        for _ in 0..12 {
+            esc = format!("\x1b[20{esc}1~");
+            c1 = format!("\u{9b}20{c1}1~");
+            mixed = format!("\x1b{mixed}[201~\u{9b}");
+            evil.extend([esc.clone(), c1.clone(), mixed.clone()]);
+        }
+        for text in &evil {
+            let out = vt.paste_bytes(text);
+            assert!(out.starts_with(b"\x1b[200~") && out.ends_with(b"\x1b[201~"), "{text:?}");
+            let inner = std::str::from_utf8(&out[6..out.len() - 6]).unwrap();
+            // Only the two escapes go; every other character, newlines included, arrives as typed.
+            let want: String = text.chars().filter(|c| !matches!(c, '\x1b' | '\u{9b}')).collect();
+            assert_eq!(inner, want, "{text:?}");
+        }
+        // Without bracketed paste the text is passed as before, escapes and all.
+        vt.write(b"\x1b[?2004l");
+        assert_eq!(vt.paste_bytes("\x1b[201~a\u{9b}\r\nb\n"), "\x1b[201~a\u{9b}\rb\r".as_bytes());
+        assert_eq!(vt.paste_bytes(""), b"");
+    }
+
+    #[test]
     fn terminal_search_matches_case_insensitively_and_wraps_navigation() {
         let mut vt = Vt::new(32, 4);
         vt.write(b"Needle here\r\nnot this\r\nneedle again");

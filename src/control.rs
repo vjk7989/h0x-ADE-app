@@ -311,6 +311,86 @@ mod tests {
     }
 
     #[test]
+    fn the_line_limit_holds_however_the_bytes_arrive() {
+        let max = MAX_LINE as usize;
+        // Small buffers: the line reaches read_request in many pieces.
+        for capacity in [1, 7, 4096, 65_535, 65_536, 65_537] {
+            let read = |bytes: &[u8]| read_request(BufReader::with_capacity(capacity, bytes));
+            let exact = format!("{}\n", "a".repeat(max - 1));
+            assert_eq!(read(exact.as_bytes()).unwrap(), exact, "{capacity}");
+            let over = format!("{}\n", "a".repeat(max));
+            assert!(read(over.as_bytes()).unwrap_err().contains("longer"), "{capacity}");
+            // No newline at all: exactly the limit is a request, one byte more is not.
+            assert_eq!(read("a".repeat(max).as_bytes()).unwrap().len(), max, "{capacity}");
+            assert!(read("a".repeat(max + 1).as_bytes()).is_err(), "{capacity}");
+            // A two-byte character straddling the limit is refused, not cut in half.
+            let straddle = format!("{}\u{e9}\n", "a".repeat(max - 1));
+            assert!(read(straddle.as_bytes()).is_err(), "{capacity}");
+            // Only the first line is the request.
+            assert_eq!(read(b"{}\n{\"quit\":true}\n").unwrap(), "{}\n", "{capacity}");
+        }
+        // Not UTF-8: refused with the reason.
+        assert!(read_request(&b"{\"a\":\"\xff\xfe\"}\n"[..]).unwrap_err().starts_with("bad request"));
+        assert_eq!(read_request(&b"\n"[..]).unwrap(), "\n");
+    }
+
+    #[test]
+    fn the_socket_answers_an_oversized_line_with_an_error_and_forwards_one_at_the_limit() {
+        let max = MAX_LINE as usize;
+        // `{"pad":"…"}\n` of exactly `len` bytes.
+        let line = |len: usize| format!("{{\"pad\":\"{}\"}}\n", "a".repeat(len - 11));
+        for (len, forwarded) in [(max, true), (max + 1, false), (max * 4, false)] {
+            let (server, client) = UnixStream::pair().unwrap();
+            let (tx, rx) = async_channel::unbounded();
+            let served = std::thread::spawn(move || serve(server, tx));
+            let request = line(len);
+            assert_eq!(request.len(), len);
+            let writer = std::thread::spawn(move || {
+                // In pieces, as a slow client sends it.
+                for piece in request.as_bytes().chunks(1000) {
+                    if (&client).write_all(piece).is_err() {
+                        break;
+                    }
+                }
+                client
+            });
+            if forwarded {
+                let Ok(Request::Control { cmd, reply }) = rx.recv_blocking() else { panic!("{len}: nothing forwarded") };
+                assert_eq!(cmd["pad"].as_str().unwrap().len(), len - 11);
+                reply.send(json!({ "ok": true })).unwrap();
+            }
+            served.join().unwrap();
+            let client = writer.join().unwrap();
+            let mut answer = String::new();
+            BufReader::new(&client).read_line(&mut answer).unwrap();
+            let answer: Value = serde_json::from_str(&answer).unwrap();
+            if forwarded {
+                assert_eq!(answer, json!({ "ok": true }));
+            } else {
+                assert!(answer["error"].as_str().unwrap().contains("longer"), "{len}: {answer}");
+                assert!(rx.try_recv().is_err(), "{len}: an oversized line reached the window");
+            }
+        }
+    }
+
+    #[test]
+    fn a_silent_client_is_dropped_with_an_error_and_nothing_reaches_the_window() {
+        let (server, client) = UnixStream::pair().unwrap();
+        let (tx, rx) = async_channel::unbounded();
+        let started = std::time::Instant::now();
+        // Half a request, then silence (the connection stays open).
+        (&client).write_all(b"{\"status\"").unwrap();
+        let served = std::thread::spawn(move || serve(server, tx));
+        served.join().unwrap();
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_secs(9) && waited < Duration::from_secs(30), "{waited:?}");
+        let mut answer = String::new();
+        BufReader::new(&client).read_line(&mut answer).unwrap();
+        assert!(serde_json::from_str::<Value>(&answer).unwrap()["error"].as_str().unwrap().starts_with("bad request"), "{answer}");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn a_second_launch_raises_the_running_window() {
         let dir = std::env::temp_dir().join(format!("h0x-ade-raise-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -328,6 +408,32 @@ mod tests {
         });
         assert!(raise_running_at(&path));
         assert_eq!(asked.join().unwrap(), json!({ "raise": true }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn the_socket_file_is_restricted_to_its_owner_and_a_failed_restriction_is_an_error() {
+        // A home with spaces, shell characters and non-ASCII letters, as a person may have.
+        let dir = std::env::temp_dir().join(format!("h0x ade & (\u{e9}\u{65e5}) {}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("h0x-ade.sock");
+        std::fs::write(&path, b"").unwrap();
+        restrict_to_owner(&path).unwrap();
+        let out = std::process::Command::new("icacls").arg(&path).output().unwrap();
+        let acl = String::from_utf8_lossy(&out.stdout).to_lowercase();
+        let user = std::env::var("USERNAME").unwrap().to_lowercase();
+        assert!(acl.contains(&format!("{user}:(f)")), "{acl}");
+        assert!(acl.contains("system:(f)"), "{acl}");
+        for other in ["everyone", "users:", "authenticated users", "administrators", "(i)"] {
+            assert!(!acl.contains(other), "{other} still has access: {acl}");
+        }
+        // Nothing to restrict: an error, so listen() serves nothing.
+        assert!(restrict_to_owner(&dir.join("missing.sock")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
