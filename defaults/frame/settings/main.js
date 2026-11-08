@@ -877,7 +877,7 @@ export default class Settings extends View {
       .when(on && !this.webLink, (el) => el.child(div().py(10).text_size(12.5).text_color(t.dim).child("Starting…")))
       .when(on && Boolean(this.webLink), (el) => el.child(v_flex().py(10).gap(8)
         .when(Boolean(this.webQr?.rows), (e) => e.child(this.qrGrid(this.webQr)))
-        .when(Boolean(this.webQr) && !this.webQr.rows, (e) => e.child(div().text_size(12.5).text_color(t.dim).child("Cannot draw the QR code; use the link above.")))
+        .when(Boolean(this.webQr) && !this.webQr.rows, (e) => e.child(div().text_size(12.5).text_color(t.dim).child("Cannot draw the QR code; use the link below.")))
         .child(div().text_size(12.5).text_color(t.muted).child("Scan with your phone"))
         .child(div().id("st-r-link").text_size(12).text_color(t.dim).child(this.webLink?.pair ?? this.webLink?.url ?? ""))));
   }
