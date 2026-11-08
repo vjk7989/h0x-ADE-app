@@ -64,7 +64,7 @@ pub(crate) mod capability;
 mod component;
 mod component_registry;
 mod input_tokens;
-// HERDR: syntax highlighting shipped with script editors.
+// HyperOx: syntax highlighting shipped with script editors.
 mod syntax;
 pub use input_tokens::{
     InlineTokenCallbacks, inline_token_click_data, inline_token_context_data,

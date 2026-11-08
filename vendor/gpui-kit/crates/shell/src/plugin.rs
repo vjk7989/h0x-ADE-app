@@ -1254,7 +1254,7 @@ fn load_view_with_policy(
     loaded
 }
 
-// HERDR: describe the same loaded JS view repeatedly without native materialization.
+// HyperOx: describe the same loaded JS view repeatedly without native materialization.
 #[cfg(feature = "render-test-support")]
 pub struct DescriptionSession {
     runtime: Rc<ShellRuntime>,
@@ -1370,7 +1370,7 @@ impl ShellRuntime {
         let object = view.read(cx).object().clone();
         let policy = view.read(cx).policy();
         let snapshot = self.build_snapshot(&object, Some(view), policy, window, cx)?;
-        // HERDR: retained native state needs a current GPUI view even when
+        // HyperOx: retained native state needs a current GPUI view even when
         // checking only constructs elements, without laying out their contents.
         struct CheckView {
             runtime: Rc<ShellRuntime>,

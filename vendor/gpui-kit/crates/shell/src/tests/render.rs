@@ -5680,7 +5680,7 @@ export default class Note extends View {
     draw(&mut context, &view);
 }
 
-// HERDR: exercise editor exports, retained value/events, and materialization beside an input.
+// HyperOx: exercise editor exports, retained value/events, and materialization beside an input.
 #[gpui::test]
 fn an_editor_holds_highlighted_code_beside_an_input(cx: &mut TestAppContext) {
     cx.update(|cx| crate::init(cx));
@@ -5739,7 +5739,7 @@ export default class Code extends View {
     assert!(tree.contains("changes=1"), "{tree}");
 }
 
-// HERDR: readonly rejects keyboard edits without disabling selection or programmatic refresh.
+// HyperOx: readonly rejects keyboard edits without disabling selection or programmatic refresh.
 #[gpui::test]
 fn a_readonly_script_editor_remains_selectable(cx: &mut TestAppContext) {
     cx.update(|cx| crate::init(cx));

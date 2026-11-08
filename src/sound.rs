@@ -61,14 +61,57 @@ fn custom(sound: &str) -> Option<PathBuf> {
     path.as_deref().filter(|p| !p.is_empty()).map(resolve)
 }
 
-/// The bundled sound, written once to a temp file players can open.
+/// The bundled sound, written once to a private temp file players can open.
 fn bundled(sound: &str) -> Result<PathBuf, String> {
+    static DIR: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
     let (name, bytes) = if sound == "done" { ("done", DONE) } else { ("blocked", BLOCKED) };
-    let path = std::env::temp_dir().join(format!("h0x-ade-{}-{name}.mp3", std::process::id()));
-    if !path.exists() {
-        std::fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    let dir = DIR.get_or_init(|| private_dir(&std::env::temp_dir())).as_ref().map_err(Clone::clone)?;
+    write_new(dir, name, bytes)
+}
+
+/// A fresh directory only this user can enter. `create_dir` fails on anything that
+/// already exists (a planted symlink included), so the name need not be secret.
+fn private_dir(base: &Path) -> Result<PathBuf, String> {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = base.join(format!("h0x-ade-{}-{nanos}", std::process::id()));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// `NAME.mp3` in `dir`, created exclusively (an existing file or link is an error, never followed).
+fn write_new(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    use std::io::Write;
+    let path = dir.join(format!("{name}.mp3"));
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut f) => f.write_all(bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?,
+        // Written by an earlier call this run.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && std::fs::read(&path).is_ok_and(|b| b == bytes) => {}
+        Err(e) => return Err(format!("cannot write {}: {e}", path.display())),
     }
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_dir_is_fresh_and_files_are_exclusive() {
+        let base = std::env::temp_dir().join(format!("h0x-sound-test-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = private_dir(&base).unwrap();
+        assert!(dir.starts_with(&base) && dir.is_dir());
+        let path = write_new(&dir, "done", b"abc").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"abc");
+        // Same content again is fine; different content (substituted file) is refused.
+        assert_eq!(write_new(&dir, "done", b"abc").unwrap(), path);
+        assert!(write_new(&dir, "done", b"xyz").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"abc");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 }
 
 /// Windows plays MP3 itself (MCI): no player to find.

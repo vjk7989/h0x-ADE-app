@@ -100,7 +100,7 @@ where
         return element;
     };
 
-    // HERDR: embedded mods have an AppWindow root, so use GPUI's window-owned tooltip.
+    // HyperOx: embedded mods have an AppWindow root, so use GPUI's window-owned tooltip.
     if window.root::<ShellRoot>().flatten().is_none() {
         return element.tooltip(move |_, cx| cx.new(|_| TooltipLabel { text: text.clone() }).into());
     }
