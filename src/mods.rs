@@ -1352,6 +1352,15 @@ mod tests {
     }
 
     #[test]
+    fn typings_and_agent_guide_written_to_the_app_home_never_mention_herdr() {
+        let gpui_kit = gpui_shell::type_declarations(&gpui_shell::FrozenComponentRegistry::default());
+        for (file, text) in [("h0x.d.ts", DECLARATIONS), ("gpui-kit.d.ts", gpui_kit.as_str()), ("AGENTS.md", AGENTS_MD)] {
+            assert!(!text.trim().is_empty(), "{file} is empty");
+            assert!(!text.to_ascii_lowercase().contains("herdr"), "{file} mentions herdr");
+        }
+    }
+
+    #[test]
     fn exec_timeout_defaults_caps_and_rejects_invalid_values() {
         assert_eq!(exec_limit(None).unwrap(), EXEC_LIMIT);
         assert_eq!(exec_limit(Some(&HostObject::new().field("timeout", HostValue::Null).into())).unwrap(), EXEC_LIMIT);

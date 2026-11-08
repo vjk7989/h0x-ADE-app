@@ -358,6 +358,21 @@ mod tests {
     }
 
     #[test]
+    fn macos_keeps_cmd_q_as_its_only_quit_key_and_leaves_ctrl_shift_q_unbound() {
+        let text = include_str!("../defaults/keys.macos.json");
+        assert_eq!(text.matches("\"ctrl-shift-q\"").count(), 0);
+        assert_eq!(text.matches("\"cmd-q\"").count(), 1);
+        let defaults: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(defaults["global"]["cmd-q"], "app.quit");
+        let quit_keys = defaults["global"].as_object().unwrap().iter()
+            .filter(|(_, action)| action.as_str() == Some("app.quit"))
+            .count();
+        assert_eq!(quit_keys, 1);
+        // The Windows/Linux keymap carries no macOS command key for quitting.
+        assert_eq!(include_str!("../defaults/keys.json").matches("\"cmd-q\"").count(), 0);
+    }
+
+    #[test]
     fn object_bindings_pass_named_typed_arguments() {
         use serde_json::json;
         for (name, args) in [
