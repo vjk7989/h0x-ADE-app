@@ -1044,7 +1044,7 @@ fn quote_paths(paths: impl IntoIterator<Item = String>) -> String {
         if !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=,:@%~".contains(c)) {
             return p;
         }
-        if cfg!(windows) { format!("'{}'", p.replace('\'', "''")) } else { format!("'{}'", p.replace('\'', "'\\''")) }
+        if cfg!(windows) { crate::programs::powershell_quote(&p) } else { format!("'{}'", p.replace('\'', "'\\''")) }
     };
     let mut out: String = paths.into_iter().map(quote).collect::<Vec<_>>().join(" ");
     out.push(' ');
@@ -3170,6 +3170,18 @@ mod tests {
         assert_eq!(q(&["/tmp/shot.png"]), "/tmp/shot.png ");
         assert_eq!(q(&["/tmp/my shot.png", "/a/b"]), "'/tmp/my shot.png' /a/b ");
         assert_eq!(q(&["/tmp/it's.png"]), "'/tmp/it'\\''s.png' ");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn dropped_paths_for_powershell_double_every_single_quote() {
+        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()));
+        assert_eq!(q(&["C:/a b.png"]), "'C:/a b.png' ");
+        assert_eq!(q(&["it's.png"]), "'it''s.png' ");
+        assert_eq!(q(&["r\u{2019};iwr evil|iex;\u{2019}.png"]), "'r\u{2019}\u{2019};iwr evil|iex;\u{2019}\u{2019}.png' ");
+        for c in ['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
+            assert_eq!(q(&[&format!("a{c}b")]), format!("'a{c}{c}b' "));
+        }
     }
 
     #[test]

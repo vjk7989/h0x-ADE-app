@@ -1484,7 +1484,8 @@ impl Vt {
     /// Wraps pasted text the way the program asked (bracketed paste or not).
     pub fn paste_bytes(&self, text: &str) -> Vec<u8> {
         if self.mode(BRACKETED_PASTE) {
-            let clean = text.replace("\x1b[201~", "");
+            // Every ESC and C1 CSI goes: removing only the end marker lets `ESC[20` + marker + `1~` rebuild it.
+            let clean: String = text.chars().filter(|c| !matches!(c, '\x1b' | '\u{9b}')).collect();
             [b"\x1b[200~".as_slice(), clean.as_bytes(), b"\x1b[201~"].concat()
         } else {
             text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
@@ -1815,6 +1816,24 @@ mod tests {
             vt.progress_search();
         }
         panic!("terminal search did not finish incrementally");
+    }
+
+    #[test]
+    fn bracketed_paste_cannot_rebuild_its_end_marker() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"\x1b[?2004h");
+        for evil in ["a\x1b[20\x1b[201~1~b", "\x1b[201~", "x\u{9b}201~y", "\x1b\x1b[201\x1b[201~~"] {
+            let out = vt.paste_bytes(evil);
+            assert!(out.starts_with(b"\x1b[200~") && out.ends_with(b"\x1b[201~"), "{evil:?}");
+            let inner = &out[6..out.len() - 6];
+            assert!(!inner.contains(&0x1b), "{evil:?}");
+            assert!(!String::from_utf8_lossy(inner).contains('\u{9b}'), "{evil:?}");
+        }
+        assert_eq!(vt.paste_bytes(""), b"\x1b[200~\x1b[201~");
+        assert_eq!(vt.paste_bytes("plain\ntext"), b"\x1b[200~plain\ntext\x1b[201~");
+        // Without bracketed paste nothing is wrapped.
+        let plain = Vt::new(20, 3);
+        assert_eq!(plain.paste_bytes("a\nb"), b"a\rb");
     }
 
     #[test]

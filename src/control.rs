@@ -4,12 +4,13 @@
 
 use crate::mods::{self, Request};
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(windows)]
 use uds_windows::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 fn socket() -> PathBuf {
@@ -37,19 +38,71 @@ pub fn listen(tx: async_channel::Sender<Request>) {
             return tracing::warn!("cannot restrict {}: {e}", path.display());
         }
     }
+    // Only this user (and SYSTEM) may drive the window.
+    #[cfg(windows)]
+    if let Err(e) = restrict_to_owner(&path) {
+        let _ = std::fs::remove_file(&path);
+        return tracing::warn!("cannot restrict {}: {e}", path.display());
+    }
     let _ = std::thread::Builder::new().name("h0x-ade-control".into()).spawn(move || {
+        let open = std::sync::Arc::new(AtomicUsize::new(0));
         for stream in listener.incoming().flatten() {
-            let tx = tx.clone();
-            std::thread::spawn(move || serve(stream, tx));
+            if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                open.fetch_sub(1, Ordering::SeqCst);
+                continue;
+            }
+            let (tx, open) = (tx.clone(), open.clone());
+            std::thread::spawn(move || {
+                serve(stream, tx);
+                open.fetch_sub(1, Ordering::SeqCst);
+            });
         }
     });
 }
 
-fn serve(stream: UnixStream, tx: async_channel::Sender<Request>) {
+/// The ACL of the socket file: this user and SYSTEM only, nothing inherited.
+#[cfg(windows)]
+fn restrict_to_owner(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let user = std::env::var("USERNAME").map_err(|e| format!("no user name: {e}"))?;
+    let user = match std::env::var("USERDOMAIN") {
+        Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
+        _ => user,
+    };
+    let out = std::process::Command::new("icacls")
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r"])
+        .arg(format!("{user}:F"))
+        .arg("SYSTEM:F")
+        .creation_flags(0x0800_0000)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stdout).trim().to_owned()) }
+}
+
+/// A request is one JSON line; anything longer is not one.
+const MAX_LINE: u64 = 64 * 1024;
+const MAX_CONNECTIONS: usize = 16;
+
+/// The request line, or why it is refused.
+fn read_request(reader: impl BufRead) -> Result<String, String> {
     let mut line = String::new();
-    if BufReader::new(&stream).read_line(&mut line).is_err() {
-        return;
+    reader.take(MAX_LINE + 1).read_line(&mut line).map_err(|e| format!("bad request: {e}"))?;
+    if line.len() as u64 > MAX_LINE {
+        return Err(format!("bad request: longer than {MAX_LINE} bytes"));
     }
+    Ok(line)
+}
+
+fn serve(stream: UnixStream, tx: async_channel::Sender<Request>) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let line = match read_request(BufReader::new(&stream)) {
+        Ok(line) => line,
+        Err(e) => {
+            let _ = (&stream).write_all(format!("{}\n", json!({ "error": e })).as_bytes());
+            return;
+        }
+    };
     let reply = match serde_json::from_str::<Value>(&line) {
         Ok(cmd) => {
             let timeout = Duration::from_secs(if cmd.get("shot").is_some() { 30 } else { 5 });
@@ -244,6 +297,18 @@ mod shot_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_oversized_request_line_is_refused() {
+        let ok = "{\"status\":true}\n";
+        assert_eq!(read_request(ok.as_bytes()).unwrap(), ok);
+        let exact = format!("{}\n", "a".repeat(MAX_LINE as usize - 1));
+        assert_eq!(read_request(exact.as_bytes()).unwrap().len() as u64, MAX_LINE);
+        let big = "a".repeat(MAX_LINE as usize + 10);
+        assert!(read_request(big.as_bytes()).unwrap_err().contains("longer"));
+        assert!(read_request(format!("{big}\n").as_bytes()).is_err());
+        assert_eq!(read_request(&b""[..]).unwrap(), "");
+    }
 
     #[test]
     fn a_second_launch_raises_the_running_window() {
