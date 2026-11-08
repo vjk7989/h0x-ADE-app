@@ -675,7 +675,7 @@ impl Vt {
             ok(ghostty_mouse_event_new(std::ptr::null(), &mut mouse_event), "mouse_event_new");
 
             install_png_decoder();
-            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
+            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: false, clipboard: [None, None] });
             let ud = &mut *shared as *mut Shared as *const c_void;
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_USERDATA, ud);
             let hold: GhosttyTerminalRenderHoldFn = Some(on_render_hold);
@@ -2471,9 +2471,20 @@ mod tests {
     }
 
     #[test]
+    fn osc52_writes_start_disabled_until_the_setting_allows_them() {
+        let mut vt = Vt::new(80, 24);
+        vt.write(b"\x1b]52;c;aGk=\x07");
+        assert_eq!(vt.take_clipboard(), [None, None]);
+        vt.allow_clipboard_write(true);
+        vt.write(b"\x1b]52;c;aGk=\x07");
+        assert_eq!(vt.take_clipboard(), [Some("hi".into()), None]);
+    }
+
+    #[test]
     fn osc52_writes_are_decoded_and_bounded() {
         use base64::Engine;
         let mut vt = Vt::new(80, 24);
+        vt.allow_clipboard_write(true);
         vt.write(b"\x1b]52;c;aGVs");
         assert_eq!(vt.take_clipboard(), [None, None]);
         vt.write(b"bG8=\x07");
