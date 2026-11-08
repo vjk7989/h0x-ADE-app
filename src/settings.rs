@@ -1120,4 +1120,21 @@ mod tests {
         let missing: Vec<&String> = keys.iter().filter(|k| !section.contains(&format!("`{k}`"))).collect();
         assert!(missing.is_empty(), "defaults/AGENTS.md (## The person) doesn't explain: {missing:?}");
     }
+
+    /// The guide's stated defaults are what an empty settings.json gives, and
+    /// every key it documents is one settings.json keeps.
+    #[test]
+    fn the_guide_states_the_real_clipboard_write_and_check_updates_defaults() {
+        let guide = include_str!("../defaults/AGENTS.md");
+        let entry = |key: &str| {
+            let start = guide.find(&format!("- `{key}`:")).unwrap_or_else(|| panic!("`{key}` is not documented"));
+            let rest = &guide[start + 3..];
+            rest[..rest.find("\n- ").unwrap_or(rest.len())].to_owned()
+        };
+        let clipboard = serde_json::from_str::<Person>("{}").unwrap().clipboard_write;
+        assert!(entry("clipboard_write").contains(&format!("(default `{clipboard}`")), "guide: {:?}, code default: {clipboard}", entry("clipboard_write"));
+        assert!(entry("check_updates").contains("(default `true`)"), "{:?}", entry("check_updates"));
+        let off = serde_json::to_value(serde_json::from_str::<Person>(r#"{"check_updates":false}"#).unwrap()).unwrap();
+        assert_eq!(off.get("check_updates"), Some(&serde_json::json!(false)), "settings.json drops the documented check_updates key: {off}");
+    }
 }

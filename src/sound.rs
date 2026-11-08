@@ -112,6 +112,96 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"abc");
         std::fs::remove_dir_all(&base).unwrap();
     }
+
+    // A base of its own per test (they share a process id).
+    fn base(test: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("h0x sound {test} {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    #[test]
+    fn bundled_sounds_share_one_private_dir_never_the_old_predictable_path() {
+        let done = bundled("done").unwrap();
+        assert_eq!(bundled("done").unwrap(), done, "reused across calls");
+        assert_eq!(std::fs::read(&done).unwrap(), DONE);
+        let blocked = bundled("blocked").unwrap();
+        assert_eq!(std::fs::read(&blocked).unwrap(), BLOCKED);
+        // Anything else is the blocked sound.
+        assert_eq!(bundled("").unwrap(), blocked);
+        let dir = done.parent().unwrap();
+        assert_eq!(blocked.parent(), Some(dir));
+        assert_eq!(dir.parent(), Some(std::env::temp_dir().as_path()));
+        assert_ne!(done, std::env::temp_dir().join(format!("h0x-ade-{}-done.mp3", std::process::id())));
+        assert!(dir.file_name().unwrap().to_string_lossy().starts_with(&format!("h0x-ade-{}-", std::process::id())), "{}", dir.display());
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(dir).unwrap().permissions()) & 0o777, 0o700);
+    }
+
+    #[test]
+    fn private_dir_errors_instead_of_panicking_when_it_cannot_be_made() {
+        let base = base("missing");
+        // The base itself is missing (a temp dir that went away), or is a file.
+        let gone = base.join("gone");
+        let err = private_dir(&gone).unwrap_err();
+        assert!(err.starts_with("cannot create ") && err.contains("gone"), "{err}");
+        let file = base.join("file");
+        std::fs::write(&file, b"").unwrap();
+        assert!(private_dir(&file).unwrap_err().starts_with("cannot create "));
+        assert!(!gone.exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn write_new_handles_empty_bytes_a_missing_dir_and_a_planted_file() {
+        let base = base("write");
+        // Empty bytes: written, then reused (empty matches empty).
+        let empty = write_new(&base, "empty", b"").unwrap();
+        assert_eq!(empty, base.join("empty.mp3"));
+        assert_eq!(write_new(&base, "empty", b"").unwrap(), empty);
+        assert!(std::fs::read(&empty).unwrap().is_empty());
+        // A planted empty file is not the sound: refused and left as it was.
+        let planted = base.join("done.mp3");
+        std::fs::write(&planted, b"").unwrap();
+        assert!(write_new(&base, "done", b"abc").unwrap_err().starts_with("cannot write "));
+        assert!(std::fs::read(&planted).unwrap().is_empty());
+        // A planted directory with the file's name.
+        std::fs::create_dir(base.join("blocked.mp3")).unwrap();
+        assert!(write_new(&base, "blocked", b"abc").is_err());
+        // No directory to write into.
+        assert!(write_new(&base.join("gone"), "done", b"abc").unwrap_err().starts_with("cannot write "));
+        assert!(!base.join("gone").exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_new_never_writes_through_a_planted_symlink() {
+        let base = base("symlink");
+        let dir = base.join("dir");
+        std::fs::create_dir(&dir).unwrap();
+        // To a victim file with other bytes: refused, victim unchanged.
+        let victim = base.join("victim");
+        std::fs::write(&victim, b"keep").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("done.mp3")).unwrap();
+        assert!(write_new(&dir, "done", b"abc").is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+        // Dangling: create_new must not create its target.
+        let target = base.join("created");
+        std::os::unix::fs::symlink(&target, dir.join("blocked.mp3")).unwrap();
+        assert!(write_new(&dir, "blocked", b"abc").is_err());
+        assert!(!target.exists());
+        // A planted link to a file that already holds the sound is only read, never written.
+        let same = base.join("same");
+        std::fs::write(&same, b"abc").unwrap();
+        std::os::unix::fs::symlink(&same, dir.join("x.mp3")).unwrap();
+        let before = std::fs::metadata(&same).unwrap().modified().unwrap();
+        assert!(write_new(&dir, "x", b"abc").is_ok());
+        assert_eq!(std::fs::read(&same).unwrap(), b"abc");
+        assert_eq!(std::fs::metadata(&same).unwrap().modified().unwrap(), before);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 }
 
 /// Windows plays MP3 itself (MCI): no player to find.

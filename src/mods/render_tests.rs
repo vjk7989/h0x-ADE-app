@@ -63,6 +63,8 @@ struct Calls {
     /// Scripted `core` answers by the start of the joined arguments; with none, nothing is scripted.
     replies: BTreeMap<String, Value>,
     cores: Vec<Vec<String>>,
+    /// `exec` calls (program, then its arguments) while replies are scripted; they answer like `core`.
+    execs: Vec<Vec<String>>,
     writes: Vec<(String, String)>,
     /// Paths passed to `removeAppFile`, and the files a script of writes and removes leaves behind.
     removes: Vec<String>,
@@ -632,6 +634,14 @@ fn scripted(calls: &Rc<RefCell<Calls>>, name: &str, first: &Value, text: Option<
             c.cores.push(args);
             reply
         }
+        "exec" => {
+            let mut args = vec![first.as_str()?.to_owned()];
+            args.extend(serde_json::from_value::<Vec<String>>(text?).ok()?);
+            let key = args.join(" ");
+            let reply = c.replies.iter().filter(|(k, _)| key.starts_with(k.as_str())).max_by_key(|(k, _)| k.len()).map(|(_, v)| v.clone());
+            c.execs.push(args);
+            reply
+        }
         _ => None,
     }
 }
@@ -683,6 +693,111 @@ fn describe_remote_with(
     let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
     (tree, calls)
+}
+
+// `entry` on the populated fixture with `props`, once its tasks have finished: `replies` answer core and exec.
+fn describe_scripted(cx: &mut TestAppContext, staged: &Staged, entry: &str, props: Value, replies: &[(&str, Value)]) -> (String, Rc<RefCell<Calls>>) {
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    calls.borrow_mut().replies = replies.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+    let policy = Policy::new()
+        .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+        .with_host_module(module(fixture(true, props, updates("current", "current")), calls.clone()))
+        .unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(runtime, staged.0.join(entry), policy, window, cx))
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
+    let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    (tree, calls)
+}
+
+fn git_ok(stdout: &str) -> Value {
+    json!({"code":0, "stdout":stdout, "stderr":""})
+}
+
+#[gpui::test]
+fn worktree_remove_skips_submodule_names_and_paths_that_leave_the_repo(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // (name, path, probed): .gitmodules records as `git config -z --get-regexp` prints them.
+    let records = [
+        ("ok", "libs/ok", true),
+        ("my lib", "libs/my lib", true),
+        ("./dot", "./dot", true),
+        ("a..b", "libs/a..b", true),
+        ("", "libs/empty", false),
+        ("nopath", "", false),
+        ("..", "up", false),
+        ("x/..", "xdd", false),
+        ("foo/../bar", "foobar", false),
+        ("mixed", "a\\..\\b", false),
+        ("mixed2", "a/..\\b", false),
+        ("trail", "x/..", false),
+        ("abs", "/etc", false),
+        ("/abs", "abs2", false),
+        ("unc", "\\\\server\\x", false),
+        ("\\back", "back", false),
+        ("drive", "C:foo", false),
+        ("C:\\x", "cx", false),
+        ("lower", "c:/x", false),
+    ];
+    let listed: String = records.iter().map(|(name, path, _)| format!("submodule.{name}.path\n{path}\0")).collect();
+    let mut p = props();
+    p["action"] = json!("remove");
+    let (_, calls) = describe_scripted(cx, &staged, "mods/worktree", p, &[
+        ("git rev-parse --show-toplevel", git_ok("/r\n")),
+        ("git rev-parse --path-format=absolute --git-common-dir", git_ok("/r/.git\n")),
+        ("git --no-optional-locks -c core.fsmonitor=false status --porcelain", git_ok("")),
+        ("git rev-parse --absolute-git-dir", git_ok("/r/.git\n")),
+        ("git --git-dir /r/.git config --file /r/.gitmodules -z --get-regexp", git_ok(&listed)),
+        ("git --git-dir /r/.git rev-parse HEAD:", git_ok("abc123\n")),
+        // Each probed submodule: checked out, an empty nested .gitmodules, nothing unpushed.
+        ("git --git-dir /r/.git/modules/", git_ok("")),
+    ]);
+    let c = calls.borrow();
+    assert!(c.unexpected.is_empty(), "{:?}", c.unexpected);
+    let probed: Vec<&str> = c.execs.iter()
+        .filter(|a| a.len() == 5 && a[1] == "--git-dir" && a[3..] == ["rev-parse", "--git-dir"])
+        .map(|a| a[2].strip_prefix("/r/.git/modules/").unwrap_or(&a[2]))
+        .collect();
+    let safe: Vec<&str> = records.iter().filter(|r| r.2).map(|r| r.0).collect();
+    assert_eq!(probed, safe, "{:?}", c.execs);
+    let pinned: Vec<&str> = c.execs.iter().filter_map(|a| a.last()?.strip_prefix("HEAD:")).filter(|p| *p != ".gitmodules").collect();
+    let paths: Vec<&str> = records.iter().filter(|r| r.2).map(|r| r.1).collect();
+    assert_eq!(pinned, paths, "{:?}", c.execs);
+    // The safe ones were checked for unpushed commits; nothing reached outside the repo's modules folder.
+    assert_eq!(c.execs.iter().filter(|a| a.contains(&"rev-list".to_string())).count(), safe.len(), "{:?}", c.execs);
+    assert!(!c.execs.iter().flatten().any(|a| a.contains("modules/..") || a.contains("modules//") || a.contains("modules/C:")), "{:?}", c.execs);
+}
+
+#[gpui::test]
+fn changes_panel_diffs_never_run_external_diff_textconv_or_fsmonitor(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    const READ: &str = "git --no-optional-locks -c core.fsmonitor=false -c diff.autoRefreshIndex=false";
+    // With a HEAD one numstat diff; on an unborn branch the staged and unstaged ones.
+    for (head, numstats) in [(git_ok("abc\n"), 1), (json!({"code":128, "stdout":"", "stderr":"fatal: no HEAD"}), 2)] {
+        let (tree, calls) = describe_scripted(cx, &staged, "mods/changes", props(), &[
+            ("git rev-parse --show-toplevel", git_ok("/r\n")),
+            (format!("{READ} status").as_str(), git_ok(" M a.txt\0")),
+            (format!("{READ} rev-parse --verify HEAD").as_str(), head.clone()),
+            (format!("{READ} diff").as_str(), git_ok("1\t2\ta.txt\0")),
+        ]);
+        let c = calls.borrow();
+        assert!(tree.contains("a.txt"), "{tree}");
+        let diffs: Vec<&Vec<String>> = c.execs.iter().filter(|a| a.iter().any(|x| x == "diff")).collect();
+        assert_eq!(diffs.iter().filter(|a| a.iter().any(|x| x == "--numstat")).count(), numstats, "{head}: {:?}", c.execs);
+        for args in &diffs {
+            let diff = args.iter().position(|x| x == "diff").unwrap();
+            let before = &args[..diff];
+            assert!(before.windows(2).any(|w| w == ["-c", "core.fsmonitor=false"]), "{args:?}");
+            assert!(args[diff..].iter().any(|x| x == "--no-ext-diff") && args[diff..].iter().any(|x| x == "--no-textconv"), "{args:?}");
+        }
+    }
 }
 
 fn bridge_ls(identities: Value, locked: bool, token: &str) -> Value {
@@ -2906,6 +3021,7 @@ fn sessions_panel_shows_the_file_in_this_computers_file_manager(cx: &mut TestApp
         assert_eq!(h.execs, vec![expected], "{platform}");
         assert!(h.effects.is_empty(), "explorer's exit code 1 is not an error: {:?}", h.effects);
     }
+}
 
 #[gpui::test]
 fn sessions_panel_refuses_to_reveal_a_path_explorer_would_split(cx: &mut TestAppContext) {
@@ -2917,6 +3033,43 @@ fn sessions_panel_refuses_to_reveal_a_path_explorer_would_split(cx: &mut TestApp
     describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "windows"), &host, &setup);
     assert!(host.borrow().execs.is_empty(), "{:?}", host.borrow().execs);
 }
+
+#[gpui::test]
+fn sessions_panel_reveal_refuses_only_what_explorer_splits_and_passes_one_argument_elsewhere(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let list = core_ok(json!({"sessions":[]}));
+    // None: refused with a toast and nothing run.
+    for (platform, path, expected) in [
+        ("windows", "C:/Users/me/a,b/p/a1.jsonl", None),
+        ("windows", "C:\\Users\\me\\say \"hi\"\\a1.jsonl", None),
+        ("windows", "C:/Users/me/`whoami`/a1.jsonl", None),
+        ("windows", "\\\\server\\share\\a,b.jsonl", None),
+        ("windows", ",", None),
+        ("windows", "\\\\server\\share\\p\\a1.jsonl", Some(json!(["explorer", ["/select,\\\\server\\share\\p\\a1.jsonl"]]))),
+        ("windows", "C:/Users/José/プロジェクト/a1.jsonl", Some(json!(["explorer", ["/select,C:\\Users\\José\\プロジェクト\\a1.jsonl"]]))),
+        ("windows", "C:/Users/me/my dir;x/a1.jsonl", Some(json!(["explorer", ["/select,C:\\Users\\me\\my dir;x\\a1.jsonl"]]))),
+        ("windows", "C:\\Users\\me\\", Some(json!(["explorer", ["/select,C:\\Users\\me\\"]]))),
+        ("macos", "/Users/me/a,b/\"q\" `x`.jsonl", Some(json!(["open", ["-R", "/Users/me/a,b/\"q\" `x`.jsonl"]]))),
+        ("linux", "/home/me/a,b \"q\"/`x`/a1.jsonl", Some(json!(["xdg-open", ["/home/me/a,b \"q\"/`x`"]]))),
+        ("linux", "/a1.jsonl", Some(json!(["xdg-open", ["/"]]))),
+    ] {
+        let host = sessions_host(&[("list", list.clone())], &[]);
+        let setup = format!("{} this.command('reveal', cx);", session_target(None, "/fixture/project", "claude", "a1", path));
+        describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", platform), &host, &setup);
+        let h = host.borrow();
+        let toasts: Vec<_> = h.effects.iter().filter(|(n, _)| n == "notify").map(|(_, a)| a[0]["title"].clone()).collect();
+        match expected {
+            None => {
+                assert!(h.execs.is_empty(), "{platform} {path}: {:?}", h.execs);
+                assert_eq!(toasts, vec![json!("Couldn't show the file")], "{platform} {path}");
+            }
+            Some(expected) => {
+                assert_eq!(h.execs, vec![expected], "{platform} {path}");
+                assert!(toasts.is_empty(), "{platform} {path}: {toasts:?}");
+            }
+        }
+    }
 }
 
 #[gpui::test]
