@@ -878,6 +878,7 @@ fn settings_remote_odd_qr_replies_keep_the_page_and_the_link(cx: &mut TestAppCon
         ("uneven rows", core_ok(json!({"size":4, "rows":["1", "0110", "", "2x"]})), 2),
         ("not json", json!({"code":0, "stdout":"QR unavailable", "stderr":""}), 0),
         ("no rows", core_ok(json!({"size":21})), 0),
+        ("rows that are not text", core_ok(json!({"size":2, "rows":[1, 0]})), 0),
     ] {
         let mut replies = web_replies("{\"pair\":\"http://10.0.0.2:7000/#t=qr\"}\n");
         replies.push(("bridge qr", reply));

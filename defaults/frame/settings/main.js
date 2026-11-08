@@ -61,6 +61,7 @@ export default class Settings extends View {
     this.remoteTerms = [];
     this.remoteError = null;
     this.remoteNotice = null;
+    this.remoteProblem = null;
     this.remoteBusy = {};
     this.remoteLoading = false;
     this.pairing = null; // {code, expires_ms}
@@ -744,8 +745,9 @@ export default class Settings extends View {
         }
       }
       if (this.webLink?.pair && this.webQr?.text !== this.webLink.pair) {
-        const q = await this.coreJson(["bridge", "qr", this.webLink.pair, "--json"]);
-        if (Array.isArray(q?.rows)) this.webQr = { text: this.webLink.pair, size: q.size, rows: q.rows };
+        const q = await this.coreJson(["bridge", "qr", this.webLink.pair, "--json"]).catch((e) => { this.remoteError = e.message ?? String(e); return null; });
+        const ok = Array.isArray(q?.rows) && q.rows.every((r) => typeof r === "string") && Number.isFinite(q.size);
+        this.webQr = { text: this.webLink.pair, size: q?.size, rows: ok ? q.rows : null };
       }
     } catch (e) {
       this.remoteError = e.message ?? String(e);
@@ -872,8 +874,10 @@ export default class Settings extends View {
       .child(this.row(t, "Phone / web panel", on ? "Running" : "Stopped", on
         ? this.remoteButton(t, "st-r-web-stop", "Stop", () => this.coreJson(["kill", "h0x-bridge-web"]))
         : this.button(t, "st-r-web-start", this.remoteBusy.web ? "…" : "Start", (_e, cx) => this.startWeb(cx))))
+      .when(on && !this.webLink, (el) => el.child(div().py(10).text_size(12.5).text_color(t.dim).child("Starting…")))
       .when(on && Boolean(this.webLink), (el) => el.child(v_flex().py(10).gap(8)
-        .when(Boolean(this.webQr), (e) => e.child(this.qrGrid(this.webQr)))
+        .when(Boolean(this.webQr?.rows), (e) => e.child(this.qrGrid(this.webQr)))
+        .when(Boolean(this.webQr) && !this.webQr.rows, (e) => e.child(div().text_size(12.5).text_color(t.dim).child("Cannot draw the QR code; use the link above.")))
         .child(div().text_size(12.5).text_color(t.muted).child("Scan with your phone"))
         .child(div().id("st-r-link").text_size(12).text_color(t.dim).child(this.webLink?.pair ?? this.webLink?.url ?? ""))));
   }
