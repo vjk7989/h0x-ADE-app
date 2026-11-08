@@ -848,22 +848,6 @@ fn settings_remote_token_is_never_written_when_the_leftover_cannot_be_removed(cx
     assert!(!tree.contains("NEW-TOKEN") && !tree.contains("OLD-TOKEN"), "{tree}");
 }
 
-#[gpui::test]
-fn settings_remote_blank_token_touches_no_file_and_no_core(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
-    let staged = Staged::new();
-    for value in ["", "   ", "  \\t  \\n "] {
-        let mut replies = remote_replies(bridge_ls(json!([]), false, "unset"), json!([]));
-        replies.push(("bridge telegram token --file", core_ok(json!({"telegram_token":"set"}))));
-        let setup = format!("this.tokenInput.set_value('{value}'); this.saveToken(cx);");
-        let (tree, calls) = describe_remote(cx, &staged, &replies, &setup);
-        let c = calls.borrow();
-        assert!(c.writes.is_empty() && c.removes.is_empty(), "{value:?}: {:?} {:?}", c.writes, c.removes);
-        assert!(c.cores.iter().all(|a| !a.join(" ").starts_with("bridge telegram token")), "{value:?}: {:?}", c.cores);
-        assert!(!tree.contains("Bot token saved."), "{value:?}: {tree}");
-    }
-}
-
 // The Remote page's replies with the web panel running and `core read h0x-bridge-web` printing `stdout`.
 fn web_replies(stdout: &str) -> Vec<(&'static str, Value)> {
     let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([{"name":"h0x-bridge-web", "state":"live"}]));
@@ -905,6 +889,7 @@ fn settings_remote_blank_token_makes_no_call(cx: &mut TestAppContext) {
         let (tree, calls) = describe_remote(cx, &staged, &replies, &setup);
         let c = calls.borrow();
         assert!(c.writes.is_empty(), "nothing is written for {value:?}: {:?}", c.writes);
+        assert!(c.removes.is_empty(), "nothing is removed for {value:?}: {:?}", c.removes);
         assert!(c.cores.iter().all(|a| !a.join(" ").starts_with("bridge telegram")), "no call for {value:?}: {:?}", c.cores);
         assert!(!tree.contains("Bot token saved.") && tree.contains("Not set"), "{value:?}: {tree}");
     }
