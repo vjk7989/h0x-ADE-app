@@ -667,7 +667,7 @@ fn settings_remote_page_shows_unpaired_paired_and_locked(cx: &mut TestAppContext
     let staged = Staged::new();
     let paired = json!([{"id":"i1", "transport":"telegram", "user_id":"42", "label":"My phone", "paired_at_ms":1700000000000i64}]);
     let (tree, _) = describe_remote(cx, &staged, &remote_replies(bridge_ls(json!([]), false, "unset"), json!([])), "");
-    for want in ["Remote control: On", "No paired devices yet.", "Not set", "@BotFather", "Stopped", "Same Wi-Fi", "Activity", "send"] {
+    for want in ["Remote control: On", "No paired devices yet.", "Not set", "@BotFather", "Stopped", "Same Wi-Fi", "ACTIVITY", "send"] {
         assert!(tree.contains(want), "unpaired page lacks {want:?}: {tree}");
     }
     let (tree, _) = describe_remote(cx, &staged, &remote_replies(bridge_ls(paired.clone(), false, "set"), json!([])), "");
