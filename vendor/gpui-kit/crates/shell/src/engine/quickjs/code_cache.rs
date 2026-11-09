@@ -9,6 +9,7 @@ pub(super) struct EvaluatedCode {
 }
 
 pub(super) struct CachedCode {
+    pub(super) root: std::path::PathBuf,
     pub(super) result: std::result::Result<EvaluatedCode, String>,
     pub(super) sources: Rc<SourceFiles>,
 }
@@ -25,6 +26,12 @@ impl SourceFiles {
             .borrow_mut()
             .entry(path.to_path_buf())
             .or_insert_with(|| source_stamp(path));
+    }
+
+    /// HyperOx: the stamp of the bytes the loader actually evaluated, not of a separate read
+    /// (a file changed A -> B -> A between resolving and loading must not cache B's code as A).
+    pub(super) fn record_loaded(&self, path: &Path, bytes: &[u8]) {
+        self.files.borrow_mut().insert(path.to_path_buf(), content_stamp(bytes));
     }
 
     pub(super) fn current(&self) -> bool {
@@ -142,6 +149,22 @@ mod tests {
         file.set_modified(before).unwrap();
         drop(file);
         assert_eq!(value(&runtime, &tree), "bbbb");
+    }
+
+    #[test]
+    fn the_stamp_is_of_the_bytes_loaded_not_of_a_later_read() {
+        // Resolve sees A, the loader reads B, the file goes back to A: B's code must not stay valid as A.
+        let tree = Tree::new();
+        let path = tree.path.join("part.js");
+        tree.write("part.js", "export const value = 'A';");
+        let sources = SourceFiles::default();
+        sources.record(&path);
+        tree.write("part.js", "export const value = 'B';");
+        sources.record_loaded(&path, b"export const value = 'B';");
+        tree.write("part.js", "export const value = 'A';");
+        assert!(!sources.current(), "code evaluated from B is stale once the file is A again");
+        tree.write("part.js", "export const value = 'B';");
+        assert!(sources.current());
     }
 
     #[test]
@@ -340,20 +363,25 @@ fn field(hash: &mut Sha256, bytes: &[u8]) {
     hash.update(bytes);
 }
 
-/// HyperOx: what a cached module's imported file looked like. Unlike `stamp`
-/// it covers the bytes, so a file edited with the same size and modified time
-/// still invalidates the shared code (never stricter than the consent hash, which is
-/// over content).
+/// HyperOx: what a cached module's source file is, by content. Unlike `stamp` it covers the
+/// bytes (a same-size edit with a restored modified time still invalidates the shared code,
+/// as the consent hash, which is over content, would).
 fn source_stamp(path: &Path) -> [u8; 32] {
-    let mut hash = Sha256::new();
-    hash.update(stamp(path));
     match std::fs::read(path) {
-        Ok(bytes) => {
-            hash.update([1]);
-            hash.update(Sha256::digest(&bytes));
+        Ok(bytes) => content_stamp(&bytes),
+        Err(error) => {
+            let mut hash = Sha256::new();
+            hash.update([0]);
+            field(&mut hash, format!("{:?}", error.kind()).as_bytes());
+            hash.finalize().into()
         }
-        Err(_) => hash.update([0]),
     }
+}
+
+fn content_stamp(bytes: &[u8]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update([1]);
+    hash.update(Sha256::digest(bytes));
     hash.finalize().into()
 }
 

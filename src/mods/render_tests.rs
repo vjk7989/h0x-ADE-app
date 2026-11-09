@@ -746,6 +746,32 @@ fn the_editor_helper_refusal_holds_for_every_way_an_import_can_name_it(cx: &mut 
     cx.run_until_parked();
 }
 
+// HyperOx: editing a mod must not grow what the runtime keeps. Vendor tests of the shell crate do not
+// run in CI, so the app gates the code cache here: one evaluated version and one registration per root.
+#[gpui::test]
+fn editing_a_mod_many_times_keeps_one_cached_version_and_one_registration(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("edited");
+    std::fs::create_dir_all(&root).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        for version in 0..20 {
+            std::fs::write(root.join("main.js"), format!(
+                "import {{ View, div }} from 'gpui-kit'; export default class Panel extends View {{ render() {{ return div().child('v{version:02}'); }} }}"
+            )).unwrap();
+            for _ in 0..3 {
+                let mut session = DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx).unwrap();
+                assert!(session.describe(window, cx).unwrap().contains(&format!("v{version:02}")));
+            }
+            assert_eq!(runtime.code_cache_counts(), (1, 1), "after edit {version}");
+        }
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
 struct Empty;
 impl gpui::Render for Empty {
     fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {

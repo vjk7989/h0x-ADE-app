@@ -1534,6 +1534,14 @@ impl ShellRuntime {
         *self.source_revision.borrow_mut() = Some(Box::new(provider));
     }
 
+    /// Evaluated code versions kept, and module registrations alive: both stay at one per
+    /// loaded root however often a mod is edited. For tests of the code cache.
+    #[doc(hidden)]
+    pub fn code_cache_counts(&self) -> (usize, usize) {
+        let versions = self.code_cache.borrow().values().map(Vec::len).sum();
+        (versions, self.app_modules.applications.borrow().len())
+    }
+
     /// Loads an application's JavaScript entry without exposing engine values.
     ///
     /// Reuses evaluated code for an unchanged revision, but returns a fresh
@@ -2226,6 +2234,7 @@ impl ShellRuntime {
                 let code_application = self.new_application_generation();
                 let _application_scope = scope::enter_application(code_application.clone());
                 let result = read_module_source(&entry).and_then(|source| {
+                    sources.record_loaded(&entry, source.as_bytes());
                     self.load_source_with_lease(
                         &format!("{}?v={}", entry.to_string_lossy(), lease.generation()),
                         &source, Some(lease.clone()), Some(code_application.clone()),
@@ -2239,10 +2248,16 @@ impl ShellRuntime {
                     self.release_application_generation_without_context(&code_application);
                 }
                 let code = Rc::new(code_cache::CachedCode {
+                    root: root.clone(),
                     result: result.map_err(|error| format!("{error:#}")), sources,
                 });
                 if cacheable {
-                    self.code_cache.borrow_mut().entry(fingerprint).or_default().push(code.clone());
+                    // HyperOx: one version per root. Older versions would keep their class,
+                    // lease and generation forever (the leak this cache exists to fix); open
+                    // copies hold their own clones, so nothing else needs the old entry.
+                    let mut cache = self.code_cache.borrow_mut();
+                    cache.retain(|_, versions| versions.iter().all(|old| old.root != root));
+                    cache.insert(fingerprint, vec![code.clone()]);
                 }
                 code
             }
@@ -5551,6 +5566,9 @@ impl Loader for AppModules {
             }
             Exception::throw_message(ctx, &error.to_string())
         })?;
+        if let Some(application) = &application {
+            application.sources.record_loaded(Path::new(path), source.as_bytes());
+        }
         Module::declare(ctx.clone(), name, source)
     }
 }
