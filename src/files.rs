@@ -432,6 +432,31 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn a_repo_configured_fsmonitor_command_does_not_run_while_ignored_folders_are_still_pruned() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = test_repo("fsmonitor");
+        std::fs::create_dir_all(root.join("target/deep")).unwrap();
+        std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(root.join("a"), "t").unwrap();
+        // An index, so git has something to ask the fsmonitor about.
+        assert!(std::process::Command::new("git").arg("-C").arg(&root).args(["add", "a"]).status().unwrap().success());
+        let hook = root.with_extension("fsmonitor-hook");
+        let marker = root.with_extension("fsmonitor-ran");
+        let _ = std::fs::remove_file(&marker);
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(std::process::Command::new("git").arg("-C").arg(&root).arg("config").arg("core.fsmonitor").arg(&hook).status().unwrap().success());
+        let paths = watch_directories(&root).unwrap();
+        assert!(!marker.exists(), "the repo's fsmonitor command ran");
+        assert!(!paths.contains(&root.join("target")));
+        assert!(paths.contains(&root.join(".git/refs/heads")));
+        std::fs::remove_dir_all(&root).unwrap();
+        let _ = std::fs::remove_file(&hook);
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn new_directories_and_changed_ignore_rules_update_live_watches() {
         use std::time::{Duration, Instant};
         let root = test_repo("dynamic");

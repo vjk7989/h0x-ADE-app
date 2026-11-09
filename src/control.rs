@@ -540,4 +540,38 @@ mod windows_tests {
         assert!(restrict_to_owner(&dir.join("missing.sock")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn the_sid_comes_from_odd_whoami_output_and_anything_that_is_not_a_sid_is_refused() {
+        for (out, sid) in [
+            // With the header row, unquoted, LF only, padded, a localized or odd account name.
+            ("\"User Name\",\"SID\"\r\n\"PC\\me\",\"S-1-5-21-1-2-3-1001\"\r\n", "S-1-5-21-1-2-3-1001"),
+            ("PC\\me,S-1-5-21-7-1001", "S-1-5-21-7-1001"),
+            ("\"PC\\me\",\"S-1-5-21-7-1001\"\n", "S-1-5-21-7-1001"),
+            ("  \"PC\\me\",\"S-1-5-21-7-1001\"  \r\n\r\n", "S-1-5-21-7-1001"),
+            ("\"BÜRO\\José Müller\",\"S-1-5-21-4-1001\"\r\n", "S-1-5-21-4-1001"),
+            ("\"PC\\a,\"\"b\"\"\",\"S-1-5-21-9-1001\"\r\n", "S-1-5-21-9-1001"),
+            ("\"NT AUTHORITY\\SYSTEM\",\"S-1-5-18\"", "S-1-5-18"),
+        ] {
+            assert_eq!(sid_from_whoami(out).as_deref(), Some(sid), "{out:?}");
+        }
+        // Fails closed: an extra column, a lower-case or star-prefixed SID, anything icacls would read as more
+        // than a SID, or no SID at all.
+        for out in [
+            "\"PC\\me\",\"S-1-5-21-1-1001\",\"extra\"",
+            "\"PC\\me\",\"s-1-5-21-1-1001\"",
+            "\"PC\\me\",\"*S-1-5-21-1-1001\"",
+            "\"PC\\me\",\"S-1-5-21-1-1001:F\"",
+            "\"PC\\me\",\"S-1-5-21-1-1001 /grant Everyone\"",
+            "\"PC\\me\",\"S-1-5-21-1-1001\t\"x",
+            "\"PC\\me\",\"\"",
+            "\"PC\\me\"",
+            "\"\"",
+            ",",
+            "\r\n",
+            "INFO: Der Benutzer konnte nicht gefunden werden.",
+        ] {
+            assert_eq!(sid_from_whoami(out), None, "{out:?}");
+        }
+    }
 }
