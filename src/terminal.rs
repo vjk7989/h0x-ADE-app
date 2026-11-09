@@ -269,7 +269,7 @@ impl TerminalView {
             search_task: None,
             _reader: None,
         };
-        view.connect(core, false, cx);
+        view.connect(core, cx);
         view
     }
 
@@ -280,7 +280,7 @@ impl TerminalView {
         }
         self.ended = None;
         self.lost = false;
-        self.connect(core, true, cx);
+        self.connect(core, cx);
         cx.notify();
     }
 
@@ -291,8 +291,7 @@ impl TerminalView {
 
     /// Attaches off the UI thread: a terminal on a machine still dialing can
     /// take seconds, and the window must keep drawing meanwhile.
-    /// `announce_end`: emit Ended if the terminal turns out to be gone.
-    fn connect(&mut self, core: Arc<Core>, announce_end: bool, cx: &mut Context<Self>) {
+    fn connect(&mut self, core: Arc<Core>, cx: &mut Context<Self>) {
         let (cols, rows, facts) = {
             let mut g = self.grid.borrow_mut();
             let (cols, rows) = (g.vt.cols, g.vt.rows);
@@ -314,7 +313,7 @@ impl TerminalView {
         // Replacing the task drops an attach still in flight for an older connection.
         self._reader = Some(cx.spawn(async move |this, cx| {
             let attached = cx.background_executor().spawn(async move { core.attach(&address, cols, rows, facts) }).await;
-            let Ok(Some(rx)) = this.update(cx, |this, cx| this.attached(attached, (cols, rows), announce_end, cx)) else {
+            let Ok(Some(rx)) = this.update(cx, |this, cx| this.attached(attached, (cols, rows), cx)) else {
                 return;
             };
             while let Ok(first) = rx.recv().await {
@@ -334,7 +333,6 @@ impl TerminalView {
         &mut self,
         attached: anyhow::Result<crate::core_link::Attached>,
         attached_size: (u16, u16),
-        announce_end: bool,
         cx: &mut Context<Self>,
     ) -> Option<async_channel::Receiver<Stream>> {
         cx.notify();
@@ -370,10 +368,8 @@ impl TerminalView {
                 None
             }
             Err(e) => {
+                // A failed lookup or reconnect is not evidence the program exited.
                 self.ended = Some(format!("{e:#}"));
-                if announce_end {
-                    cx.emit(TerminalEvent::Ended);
-                }
                 None
             }
         }
@@ -2222,6 +2218,35 @@ impl Focusable for TerminalView {
 mod tests {
     use super::{ScrollTarget, pages_to_lines, scroll_target};
     use serde_json::{Value, json};
+
+    #[gpui::test]
+    fn attach_errors_do_not_announce_a_terminal_exit(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        let view = cx.new(|cx| super::TerminalView::attach(crate::core_link::offline(), "remote/t1".into(), (40, 5), cx));
+        let ends = cx.new(|cx| {
+            cx.subscribe(&view, |count: &mut usize, _, event: &super::TerminalEvent, _| {
+                if matches!(event, super::TerminalEvent::Ended) {
+                    *count += 1;
+                }
+            }).detach();
+            0usize
+        });
+        cx.run_until_parked();
+        for kind in ["not_found", "unavailable", "permission_denied"] {
+            view.update(cx, |view, cx| {
+                let error = crate::core_link::RpcError(json!({ "message": "attach failed", "data": { "kind": kind } }));
+                view.attached(Err(error.into()), (40, 5), cx);
+            });
+            cx.run_until_parked();
+            assert_eq!(ends.read_with(cx, |count, _| *count), 0, "{kind}");
+        }
+        view.update(cx, |view, cx| {
+            let error = crate::core_link::RpcError(json!({ "message": "program finished", "data": { "kind": "finished" } }));
+            view.attached(Err(error.into()), (40, 5), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(ends.read_with(cx, |count, _| *count), 1);
+    }
 
     #[gpui::test]
     fn terminal_release_ends_window_text_selection(cx: &mut gpui::TestAppContext) {
