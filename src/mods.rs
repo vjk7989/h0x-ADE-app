@@ -807,6 +807,18 @@ pub fn publish_focused(v: Value) -> bool {
     publish("focused", |s| (std::mem::replace(&mut s.focused, v.clone()), v))
 }
 
+/// Whether the window is presented (not minimized or hidden); a missing field counts as visible.
+/// Reads no dependency: a timer asking must not make its copy draw again on every window change.
+fn window_visible() -> bool {
+    SNAPSHOT.with(|s| s.borrow().window.get("visible").and_then(Value::as_bool).unwrap_or(true))
+}
+
+/// A number that changes whenever the spaces, panes, machines or window snapshot does: lets
+/// a mod's frequent timer skip comparing them. Compare for equality only.
+fn snapshot_revision() -> f64 {
+    REVISIONS.with_borrow(|r| ["spaces", "panes", "machines", "window"].iter().map(|k| r.get(k).copied().unwrap_or(0)).sum::<u64>() as f64)
+}
+
 #[derive(Default)]
 struct LiveReads(HashMap<&'static str, u64>);
 
@@ -1279,6 +1291,8 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             Ok(to_host(&Value::Array(list)))
         })
         .function("window", reader(reads.clone(), "window", |s| &s.window))
+        .function("revision", |_| Ok(HostValue::Number(snapshot_revision())))
+        .function("windowVisible", |_| Ok(HostValue::Bool(window_visible())))
         .function("theme", |_| Ok(to_host(&serde_json::to_value(&*crate::settings::theme()).unwrap_or(Value::Null))))
         .function("settings", |_| Ok(to_host(&serde_json::to_value(&*crate::settings::get()).unwrap_or(Value::Null))))
         .function("keys", |_| {
@@ -1586,6 +1600,115 @@ mod tests {
             assert!(!snapshot_changed(1));
             drop(reads);
             assert!(!snapshot_changed(1));
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn revision_moves_only_when_spaces_panes_machines_or_window_change() {
+        std::thread::spawn(|| {
+            let start = snapshot_revision();
+            assert!(publish_spaces(json!([{"id":"s1"}])));
+            let spaces = snapshot_revision();
+            assert_ne!(spaces, start);
+            assert!(!publish_spaces(json!([{"id":"s1"}])), "equal snapshot");
+            assert_eq!(snapshot_revision(), spaces);
+            assert!(publish_agents(json!([{"address":"t1"}])));
+            assert!(publish_terminals(json!([{"address":"t1"}])));
+            assert_eq!(snapshot_revision(), spaces, "agents and terminals are not watched");
+            assert!(publish_window(json!({"active":false})));
+            let inactive = snapshot_revision();
+            assert_ne!(inactive, spaces);
+            assert!(publish_window(json!({"active":true})));
+            assert_ne!(snapshot_revision(), inactive, "switching back moves it too");
+            assert!(publish_panes(json!([{"pane":"p1"}])));
+            assert!(publish_machines(json!([{"name":null,"layout":"ready"}])));
+            assert_eq!(snapshot_revision(), start + 5.0);
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn revision_starts_at_zero_and_ignores_publishes_equal_to_the_empty_defaults() {
+        std::thread::spawn(|| {
+            assert_eq!(snapshot_revision(), 0.0);
+            assert!(!publish_spaces(json!([])));
+            assert!(!publish_panes(json!([])));
+            assert!(!publish_machines(json!([])));
+            assert!(!publish_window(Value::Null));
+            assert_eq!(snapshot_revision(), 0.0);
+            assert!(publish_window(json!({"active":true})));
+            assert!(publish_window(Value::Null), "a window snapshot going away is a change too");
+            assert_eq!(snapshot_revision(), 2.0);
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn revision_counts_changes_in_one_tick_separately_and_a_return_to_an_earlier_snapshot() {
+        std::thread::spawn(|| {
+            assert!(publish_spaces(json!([{"id":"a"}])));
+            let before = snapshot_revision();
+            // Two snapshots in the same tick: the sum cannot cancel out, every counter only goes up.
+            assert!(publish_spaces(json!([{"id":"a"},{"id":"b"}])));
+            assert!(publish_panes(json!([{"pane":"p1"}])));
+            assert_eq!(snapshot_revision(), before + 2.0);
+            // A -> B -> A between two looks: the old stringify saw nothing, the revision still moves.
+            let mid = snapshot_revision();
+            assert!(publish_spaces(json!([{"id":"a"}])));
+            assert!(publish_spaces(json!([{"id":"a"},{"id":"b"}])));
+            assert!(snapshot_revision() > mid);
+            // Only `active` was compared before; any other window field now moves it too.
+            assert!(publish_window(json!({"active":true,"maximized":false})));
+            let window = snapshot_revision();
+            assert!(publish_window(json!({"active":true,"maximized":true})));
+            assert_ne!(snapshot_revision(), window);
+            // The other snapshots do not.
+            let still = snapshot_revision();
+            assert!(publish_tree(json!({"id":"s1","tabs":[]})));
+            assert!(publish_focused(json!({"pane":"p1"})));
+            assert!(publish_floats(json!({"f":{"edge":"top"}})));
+            assert_eq!(snapshot_revision(), still);
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn window_visible_reads_no_dependency_and_only_false_means_hidden() {
+        std::thread::spawn(|| {
+            assert!(window_visible(), "no window snapshot yet");
+            let reads = Rc::new(RefCell::new(LiveReads::default()));
+            LIVE_READS.with_borrow_mut(|copies| { copies.insert(1, Rc::downgrade(&reads)); });
+            assert!(publish_window(json!({"active":true,"visible":true})));
+            assert!(window_visible());
+            // Unfocused but still on screen: visible. Minimized: not.
+            assert!(publish_window(json!({"active":false,"visible":true})));
+            assert!(window_visible());
+            assert!(publish_window(json!({"active":false})));
+            assert!(window_visible(), "a missing field counts as visible");
+            assert!(publish_window(json!({"active":false,"visible":false})));
+            assert!(!window_visible());
+            // Asking never subscribes the copy: a focus change leaves it alone.
+            assert!(!snapshot_changed(1));
+            assert!(publish_window(json!({"active":true,"visible":false})));
+            assert!(!snapshot_changed(1));
+            // Reading window() does subscribe it.
+            read(&reads, "window", |s| &s.window);
+            assert!(publish_window(json!({"active":false,"visible":false})));
+            assert!(snapshot_changed(1));
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn revision_stays_exact_up_to_the_largest_safe_js_integer() {
+        std::thread::spawn(|| {
+            // JS numbers are f64: the sum must still move by one right below 2^53.
+            REVISIONS.with_borrow_mut(|r| {
+                r.insert("spaces", (1u64 << 52) - 1);
+                r.insert("window", (1u64 << 52) - 2);
+            });
+            let before = snapshot_revision();
+            assert_eq!(before, ((1u64 << 53) - 3) as f64);
+            assert!(publish_window(json!({"active":false})));
+            assert_eq!(snapshot_revision(), before + 1.0);
+            assert!(publish_window(json!({"active":true})));
+            assert_eq!(snapshot_revision(), 9_007_199_254_740_991.0, "Number.MAX_SAFE_INTEGER");
         }).join().unwrap();
     }
 
