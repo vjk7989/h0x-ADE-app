@@ -101,6 +101,8 @@ pub struct TerminalView {
     selection_scroll: Option<Task<()>>,
     /// The terminal's folder, for links to relative paths.
     pub cwd: Option<PathBuf>,
+    /// How the program in this pane reads a dropped path.
+    pub quoting: Quoting,
     /// The link under the pointer while the link modifier is held.
     link: Option<LinkTarget>,
     /// Right-clicks go to the program when it takes the mouse (Shift: the menu).
@@ -231,6 +233,7 @@ impl TerminalView {
             selection_pointer: Point::default(),
             selection_scroll: None,
             cwd: None,
+            quoting: Quoting::default(),
             link: None,
             right_click_to_program: false,
             grid: Rc::new(RefCell::new(Grid {
@@ -543,7 +546,10 @@ impl TerminalView {
     /// gets each file copied there first (`h0x-core put`), and its path there.
     fn dropped(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
         if !self.address.contains('/') {
-            let text = quote_paths(paths.iter().map(|p| p.to_string_lossy().into_owned()));
+            let text = quote_paths(paths.iter().map(|p| p.to_string_lossy().into_owned()), self.quoting);
+            if text.is_empty() {
+                return;
+            }
             let bytes = self.grid.borrow().vt.paste_bytes(&text);
             return self.send(&bytes);
         }
@@ -554,6 +560,7 @@ impl TerminalView {
     /// paths there; `copies`: the local files were only for sending.
     fn put_there(&self, paths: Vec<std::path::PathBuf>, copies: bool, cx: &mut Context<Self>) {
         let addr = self.address.clone();
+        let shell = self.quoting;
         cx.spawn(async move |this, cx| {
             let there = cx
                 .background_executor()
@@ -574,7 +581,11 @@ impl TerminalView {
                 .await;
             if !there.is_empty() {
                 let _ = this.update(cx, |this, _| {
-                    let bytes = this.grid.borrow().vt.paste_bytes(&quote_paths(there));
+                    let text = quote_paths(there, shell);
+                    if text.is_empty() {
+                        return;
+                    }
+                    let bytes = this.grid.borrow().vt.paste_bytes(&text);
                     this.send(&bytes);
                 });
             }
@@ -1037,20 +1048,71 @@ pub(crate) fn shown_title(title: &str) -> &str {
     if rest.is_empty() || !title[..led].chars().any(spinner) || !title[..led].ends_with(char::is_whitespace) { title } else { rest }
 }
 
-/// Paths as a shell reads them, space-separated with a trailing space: bare
-/// when plain, else single-quoted (`'` escaped as the shell wants it).
-fn quote_paths(paths: impl IntoIterator<Item = String>) -> String {
-    let quote = |p: String| {
-        // PowerShell reads a leading `-` as a parameter, `@` as a splat and `,` as an array.
-        let powershell_syntax = cfg!(windows) && (p.starts_with(['-', '@']) || p.contains(','));
-        if !p.is_empty() && !powershell_syntax && p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=,:@%~".contains(c)) {
-            return p;
+/// How the program a pane runs reads a dropped or pasted path.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Quoting {
+    Posix,
+    Fish,
+    Cmd,
+    PowerShell,
+    /// A program HyperOx can't quote for: only paths with no metacharacter are typed.
+    #[default]
+    Unknown,
+}
+
+impl Quoting {
+    /// From `programs::of`: a known shell by its name, a known agent or tool as a
+    /// POSIX shell (it reads pasted paths itself), anything else unknown. A pane
+    /// running ssh, tmux (zellij, screen), mosh or wsl has an unknown shell behind it.
+    pub fn of(program: &serde_json::Value) -> Self {
+        let key = program["key"].as_str().unwrap_or_default();
+        if key.is_empty() || key == "ssh" || key == "tmux" {
+            return Self::Unknown;
         }
-        if cfg!(windows) { crate::programs::powershell_quote(&p) } else { format!("'{}'", p.replace('\'', "'\\''")) }
+        if key != "shell" && key != "program" {
+            return Self::Posix;
+        }
+        match program["name"].as_str().unwrap_or_default().to_ascii_lowercase().as_str() {
+            "zsh" | "bash" | "sh" | "dash" | "ksh" => Self::Posix,
+            "fish" => Self::Fish,
+            "cmd" => Self::Cmd,
+            "pwsh" | "powershell" => Self::PowerShell,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Paths as the pane's shell reads them, space-separated with a trailing space:
+/// bare when plain, else quoted its way. A path the shell can't take literally
+/// is left out; with none left the text is empty.
+fn quote_paths(paths: impl IntoIterator<Item = String>, shell: Quoting) -> String {
+    let quote = |p: String| -> Option<String> {
+        if p.is_empty() {
+            return None;
+        }
+        let plain = |extra: &str| p.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(c));
+        // Shells expand a leading `~` (home) and, in zsh, `=` (a command's path).
+        let expands = p.starts_with(['~', '=']);
+        match shell {
+            Quoting::Unknown => (plain("/._-+:") && !p.starts_with('-')).then_some(p),
+            Quoting::Cmd => {
+                if p.contains(['&', '|', '<', '>', '^', '%', '"', '!', '\n', '\r']) {
+                    return None;
+                }
+                // A `\` right before the closing quote would read as an escaped quote.
+                let slashes = p.len() - p.trim_end_matches('\\').len();
+                Some(if plain("/\\._-+:~") { p } else { format!("\"{p}{}\"", "\\".repeat(slashes)) })
+            }
+            Quoting::PowerShell => {
+                // PowerShell reads a leading `-` as a parameter, `@` as a splat and `,` as an array.
+                let syntax = p.starts_with(['-', '@']) || p.contains(',');
+                Some(if plain("/._-+=,:@%~") && !syntax && !expands { p } else { crate::programs::powershell_quote(&p) })
+            }
+            Quoting::Fish => Some(if plain("/._-+=,:@%~") && !expands { p } else { format!("'{}'", p.replace('\\', "\\\\").replace('\'', "\\'")) }),
+            Quoting::Posix => Some(if plain("/._-+=,:@%~") && !expands { p } else { format!("'{}'", p.replace('\'', "'\\''")) }),
+        }
     };
-    let mut out: String = paths.into_iter().map(quote).collect::<Vec<_>>().join(" ");
-    out.push(' ');
-    out
+    paths.into_iter().filter_map(quote).map(|p| p + " ").collect()
 }
 
 /// Files on the clipboard: their text is only the bare path, which an agent
@@ -1076,10 +1138,29 @@ fn image_file(item: &ClipboardItem) -> Option<std::path::PathBuf> {
         ImageFormat::Svg => "svg",
         _ => "png",
     };
+    static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let dir = DIR.get_or_init(|| private_dir(&std::env::temp_dir())).as_ref()?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
-    let path = std::env::temp_dir().join(format!("h0x-paste-{stamp}.{ext}"));
-    std::fs::write(&path, bytes).ok()?;
-    Some(path)
+    write_new(&dir.join(format!("paste-{stamp}.{ext}")), &bytes)
+}
+
+/// A directory only this user can enter, new in `parent`, with a name no one can predict.
+fn private_dir(parent: &std::path::Path) -> Option<std::path::PathBuf> {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    let dir = parent.join(format!("h0x-paste-{}-{stamp}", std::process::id()));
+    let mut make = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut make, 0o700);
+    make.create(&dir).ok()?;
+    Some(dir)
+}
+
+/// The bytes in a file that must not exist yet (no truncating someone else's file or link).
+fn write_new(path: &std::path::Path, bytes: &[u8]) -> Option<std::path::PathBuf> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).ok()?;
+    file.write_all(bytes).ok()?;
+    Some(path.to_owned())
 }
 
 fn paste_image_bytes(format: ImageFormat, bytes: &[u8]) -> Option<(ImageFormat, std::borrow::Cow<'_, [u8]>)> {
@@ -3049,7 +3130,7 @@ mod tests {
         assert_eq!(shown_title("\u{2717} build"), "\u{2717} build");
     }
 
-    use super::key_bytes;
+    use super::{Quoting, key_bytes};
     use crate::vt::Vt;
     use gpui::{KeyDownEvent, Keystroke, Modifiers};
 
@@ -3166,18 +3247,82 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(windows))]
-    fn dropped_paths_are_typed_as_the_shell_reads_them() {
-        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()));
-        assert_eq!(q(&["/tmp/shot.png"]), "/tmp/shot.png ");
-        assert_eq!(q(&["/tmp/my shot.png", "/a/b"]), "'/tmp/my shot.png' /a/b ");
-        assert_eq!(q(&["/tmp/it's.png"]), "'/tmp/it'\\''s.png' ");
+    fn pasted_images_go_to_a_fresh_private_directory_and_never_overwrite() {
+        let parent = std::env::temp_dir().join(format!("h0x-ade-paste-test-{}", std::process::id()));
+        std::fs::create_dir_all(&parent).unwrap();
+        let one = super::private_dir(&parent).unwrap();
+        let two = super::private_dir(&parent).unwrap();
+        assert_ne!(one, two);
+        assert!(one.starts_with(&parent) && one.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&one).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        let file = one.join("paste-1.png");
+        assert_eq!(super::write_new(&file, b"png bytes").as_deref(), Some(file.as_path()));
+        assert_eq!(std::fs::read(&file).unwrap(), b"png bytes");
+        // An existing file (or planted link) is refused and left as it was.
+        assert_eq!(super::write_new(&file, b"other"), None);
+        assert_eq!(std::fs::read(&file).unwrap(), b"png bytes");
+        std::fs::remove_dir_all(&parent).unwrap();
     }
 
     #[test]
-    #[cfg(windows)]
+    fn dropped_paths_are_typed_as_the_posix_shell_reads_them() {
+        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), Quoting::Posix);
+        assert_eq!(q(&["/tmp/shot.png"]), "/tmp/shot.png ");
+        assert_eq!(q(&["/tmp/my shot.png", "/a/b"]), "'/tmp/my shot.png' /a/b ");
+        assert_eq!(q(&["/tmp/it's.png"]), "'/tmp/it'\\''s.png' ");
+        assert_eq!(q(&["/a/b&c.png", r"C:\x\y.png"]), r"'/a/b&c.png' 'C:\x\y.png' ");
+        assert_eq!(q(&[]), "");
+    }
+
+    #[test]
+    fn dropped_paths_for_fish_escape_backslash_and_quote() {
+        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), Quoting::Fish);
+        assert_eq!(q(&["/tmp/shot.png"]), "/tmp/shot.png ");
+        assert_eq!(q(&["/tmp/it's.png"]), "'/tmp/it\\'s.png' ");
+        assert_eq!(q(&[r"/tmp/a\b c.png"]), r"'/tmp/a\\b c.png' ");
+        assert_eq!(q(&["/a&b $x.png"]), "'/a&b $x.png' ");
+    }
+
+    #[test]
+    fn dropped_paths_for_cmd_refuse_what_cmd_would_run() {
+        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), Quoting::Cmd);
+        assert_eq!(q(&[r"C:\a\b.png"]), r"C:\a\b.png ");
+        assert_eq!(q(&[r"C:\my files\b.png"]), "\"C:\\my files\\b.png\" ");
+        for bad in ["a&calc.png", "a|b", "a<b", "a>b", "a^b", "%PATH%.png", "a\"b", "a!b", "a\nb"] {
+            assert_eq!(q(&[bad]), "", "{bad:?}");
+        }
+        assert_eq!(q(&["a&b", "ok.png"]), "ok.png ");
+    }
+
+    #[test]
+    fn dropped_paths_for_an_unknown_program_refuse_metacharacters() {
+        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), Quoting::Unknown);
+        assert_eq!(q(&["/tmp/shot-1.png"]), "/tmp/shot-1.png ");
+        for bad in ["/a b", "/a'b", "/a&b", "/a;b", "/a$b", "/a`b", "/a(b)", "/a*b", "-rf", "", "/a\u{2019}b", r"C:\x"] {
+            assert_eq!(q(&[bad]), "", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_pane_program_picks_the_quoting() {
+        let of = |key: &str, name: &str| Quoting::of(&serde_json::json!({ "key": key, "name": name }));
+        assert_eq!(of("shell", "bash"), Quoting::Posix);
+        assert_eq!(of("shell", "fish"), Quoting::Fish);
+        assert_eq!(of("shell", "cmd"), Quoting::Cmd);
+        assert_eq!(of("shell", "pwsh"), Quoting::PowerShell);
+        assert_eq!(of("shell", "PowerShell"), Quoting::PowerShell);
+        assert_eq!(of("shell", "nu"), Quoting::Unknown);
+        assert_eq!(of("program", "vim"), Quoting::Unknown);
+        assert_eq!(of("claude", "Claude Code"), Quoting::Posix);
+    }
+
+    #[test]
     fn dropped_paths_for_powershell_double_every_single_quote() {
-        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()));
+        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), Quoting::PowerShell);
         assert_eq!(q(&["C:/a b.png"]), "'C:/a b.png' ");
         assert_eq!(q(&["it's.png"]), "'it''s.png' ");
         assert_eq!(q(&["-Force", "@list.txt", "a,b.txt", "C:/plain/x-y.png"]), "'-Force' '@list.txt' 'a,b.txt' C:/plain/x-y.png ");
@@ -3188,9 +3333,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn dropped_windows_paths_stay_one_literal_each_for_powershell() {
-        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()));
+        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), Quoting::PowerShell);
         // Backslash, UNC and long-path forms are quoted whole; `$`, backticks and `;` stay literal.
         assert_eq!(q(&[r"C:\Users\me\it's here.png"]), r"'C:\Users\me\it''s here.png' ");
         assert_eq!(q(&[r"\\server\share\a b.png", r"\\?\C:\x.png"]), r"'\\server\share\a b.png' '\\?\C:\x.png' ");
@@ -3198,9 +3342,134 @@ mod tests {
         // Every quote kind at once, at both ends, and a path of nothing but quotes.
         assert_eq!(q(&["'\u{2018}\u{2019}\u{201A}\u{201B}"]), "'''\u{2018}\u{2018}\u{2019}\u{2019}\u{201A}\u{201A}\u{201B}\u{201B}' ");
         assert_eq!(q(&["\u{201B}x\u{2018}"]), "'\u{201B}\u{201B}x\u{2018}\u{2018}' ");
-        // Several paths: each is its own literal; an empty one is still an (empty) literal.
-        assert_eq!(q(&["a'b", "", "c\u{2019}d"]), "'a''b' '' 'c\u{2019}\u{2019}d' ");
+        // Several paths: each is its own literal; an empty one is skipped.
+        assert_eq!(q(&["a'b", "", "c\u{2019}d"]), "'a''b' 'c\u{2019}\u{2019}d' ");
         assert_eq!(q(&["C:/plain.png"]), "C:/plain.png ");
+    }
+
+    #[test]
+    fn dropped_paths_with_shell_syntax_or_line_ends_stay_literal_or_are_refused() {
+        let q = |shell: Quoting, v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), shell);
+        // fish: `$`, `(`, `;` and line ends sit inside single quotes, which fish reads verbatim.
+        assert_eq!(q(Quoting::Fish, &["/a $HOME (id); b\nc\rd.png"]), "'/a $HOME (id); b\nc\rd.png' ");
+        assert_eq!(q(Quoting::Fish, &[r"/a\'b.png"]), r"'/a\\\'b.png' ");
+        // POSIX: substitutions and line ends sit inside the quotes too.
+        assert_eq!(q(Quoting::Posix, &["/a\nb.png", "/c\rd.png"]), "'/a\nb.png' '/c\rd.png' ");
+        assert_eq!(q(Quoting::Posix, &["/a $(id) `id`.png"]), "'/a $(id) `id`.png' ");
+        // PowerShell: `$()`, backticks, line ends and all five single quotes stay one verbatim literal.
+        assert_eq!(q(Quoting::PowerShell, &["C:/a $(calc) `n.png"]), "'C:/a $(calc) `n.png' ");
+        assert_eq!(q(Quoting::PowerShell, &["C:/a\nb\r.png"]), "'C:/a\nb\r.png' ");
+        assert_eq!(
+            q(Quoting::PowerShell, &["a'b\u{2018}c\u{2019}d\u{201A}e\u{201B}f"]),
+            "'a''b\u{2018}\u{2018}c\u{2019}\u{2019}d\u{201A}\u{201A}e\u{201B}\u{201B}f' "
+        );
+        assert_eq!(q(Quoting::PowerShell, &["--%", "@(calc)", "x,y", "#x", "a;calc"]), "'--%' '@(calc)' 'x,y' '#x' 'a;calc' ");
+        // cmd: `!`, `%VAR%` and line ends are refused; spaces, parentheses, `;`, `,` and `=` are quoted.
+        for bad in ["C:/a!b!.png", "C:/%USERPROFILE%/x.png", "C:/a\rcalc.png", "C:/a\r\ncalc.png"] {
+            assert_eq!(q(Quoting::Cmd, &[bad]), "", "{bad:?}");
+        }
+        assert_eq!(q(Quoting::Cmd, &[r"C:\Program Files (x86)\a;b,c=d.png"]), r#""C:\Program Files (x86)\a;b,c=d.png" "#);
+        assert_eq!(q(Quoting::Cmd, &[r"\\server\share\x.png"]), r"\\server\share\x.png ");
+        // An unknown program gets nothing with a line end, tab or non-ASCII letter.
+        for bad in ["/a\nb", "/a\rb", "/a\tb", "/caf\u{e9}.png", "-"] {
+            assert_eq!(q(Quoting::Unknown, &[bad]), "", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_dropped_path_leaves_the_others_and_all_refused_types_nothing() {
+        let q = |shell: Quoting, v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), shell);
+        assert_eq!(q(Quoting::Unknown, &["/ok/a.png", "/bad b.png", "/ok/c.png"]), "/ok/a.png /ok/c.png ");
+        assert_eq!(q(Quoting::Unknown, &["-x", "/a;b"]), "");
+        assert_eq!(q(Quoting::Cmd, &["a&b", "c|d", "%x%"]), "");
+        // Shells that can quote anything never leave one out.
+        for shell in [Quoting::Posix, Quoting::Fish, Quoting::PowerShell] {
+            assert_eq!(q(shell, &["/a", "/b c"]).matches(' ').count(), 3, "{shell:?}");
+        }
+        // An empty path is never typed, whatever the shell.
+        for shell in [Quoting::Posix, Quoting::Fish, Quoting::PowerShell, Quoting::Cmd, Quoting::Unknown] {
+            assert_eq!(q(shell, &[""]), "", "{shell:?}");
+            assert_eq!(q(shell, &["", "/a"]), "/a ", "{shell:?}");
+        }
+    }
+
+    #[test]
+    fn leading_tilde_and_equals_are_quoted_and_cmd_keeps_a_trailing_backslash_literal() {
+        let q = |shell, v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), shell);
+        for shell in [Quoting::Posix, Quoting::Fish, Quoting::PowerShell] {
+            assert_eq!(q(shell, &["~/a.png", "=ls", "/a~b=c"]), "'~/a.png' '=ls' /a~b=c ", "{shell:?}");
+        }
+        assert_eq!(q(Quoting::Cmd, &[r"C:\my dir\"]), "\"C:\\my dir\\\\\" ");
+        assert_eq!(q(Quoting::Cmd, &[r"C:\my dir\\"]), "\"C:\\my dir\\\\\\\\\" ");
+        assert_eq!(q(Quoting::Cmd, &[r"C:\dir\"]), r"C:\dir\ ");
+    }
+
+    #[test]
+    fn panes_behind_ssh_tmux_and_friends_have_an_unknown_shell() {
+        let of = |argv: &[&str]| Quoting::of(&crate::programs::of(None, &argv.iter().map(|s| s.to_string()).collect::<Vec<_>>()));
+        for argv in [&["ssh", "host"][..], &["tmux"], &["screen"], &["mosh", "h"], &["wsl"], &["zellij"]] {
+            assert_eq!(of(argv), Quoting::Unknown, "{argv:?}");
+        }
+        assert_eq!(Quoting::of(&serde_json::Value::Null), Quoting::Unknown);
+        assert_eq!(Quoting::of(&serde_json::json!({})), Quoting::Unknown);
+    }
+
+    #[test]
+    fn the_quoting_follows_the_program_the_pane_runs() {
+        let of = |argv: &[&str]| Quoting::of(&crate::programs::of(None, &argv.iter().map(|s| s.to_string()).collect::<Vec<_>>()));
+        assert_eq!(of(&["cmd.exe"]), Quoting::Cmd);
+        assert_eq!(of(&["CMD.EXE", "/K"]), Quoting::Cmd);
+        assert_eq!(of(&[r"C:\Windows\System32\cmd.exe"]), Quoting::Cmd);
+        assert_eq!(of(&[r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"]), Quoting::PowerShell);
+        assert_eq!(of(&["PWSH.EXE", "-NoLogo"]), Quoting::PowerShell);
+        assert_eq!(of(&["/usr/bin/fish", "-l"]), Quoting::Fish);
+        assert_eq!(of(&["-zsh"]), Quoting::Posix);
+        assert_eq!(of(&["/bin/bash"]), Quoting::Posix);
+        for other in ["nu", "tcsh", "csh", "elvish", "xonsh", "ion", "some-tool"] {
+            assert_eq!(of(&[other]), Quoting::Unknown, "{other}");
+        }
+        // Nothing known about the pane yet: unknown.
+        assert_eq!(of(&[]), Quoting::Unknown);
+        // Known agents and tools read the path themselves.
+        assert_eq!(of(&["claude"]), Quoting::Posix);
+        assert_eq!(of(&["vim", "x"]), Quoting::Posix);
+        assert_eq!(Quoting::of(&crate::programs::of(Some("claude"), &[])), Quoting::Posix);
+    }
+
+    #[test]
+    fn a_pasted_image_with_nowhere_private_to_go_is_not_pasted() {
+        let base = std::env::temp_dir().join(format!("h0x-ade-paste-fail-{} \u{fc}\u{7a7a}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        // A parent with spaces and unicode still works.
+        let dir = super::private_dir(&base).expect("a private directory");
+        assert!(dir.starts_with(&base) && dir.is_dir());
+        // A parent that does not exist, or is a file: no directory, no panic.
+        assert_eq!(super::private_dir(&base.join("missing")), None);
+        std::fs::write(base.join("file"), b"x").unwrap();
+        assert_eq!(super::private_dir(&base.join("file")), None);
+        // No directory to write into: no file.
+        assert_eq!(super::write_new(&base.join("missing").join("paste-1.png"), b"x"), None);
+        // An empty image is still a new file.
+        let empty = dir.join("paste-0.png");
+        assert_eq!(super::write_new(&empty, b"").as_deref(), Some(empty.as_path()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = base.join("locked");
+            std::fs::create_dir(&locked).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+            // root ignores the mode: only check where it holds.
+            if std::fs::create_dir(locked.join("probe")).is_err() {
+                assert_eq!(super::private_dir(&locked), None);
+            }
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            // A planted link at the name is refused and its target is not made.
+            let target = base.join("target.png");
+            std::os::unix::fs::symlink(&target, dir.join("paste-2.png")).unwrap();
+            assert_eq!(super::write_new(&dir.join("paste-2.png"), b"x"), None);
+            assert!(!target.exists());
+        }
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

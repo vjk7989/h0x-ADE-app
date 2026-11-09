@@ -1985,8 +1985,10 @@ impl AppWindow {
     fn tell_term(&self, view: &Entity<TerminalView>, addr: &str, cx: &mut Context<Self>) {
         let cwd = self.cwds.get(addr).map(std::path::PathBuf::from);
         let to_program = self.live.get(addr).and_then(|r| r.pointer("/labels/h0x.right-click")).and_then(Value::as_str) == Some("program");
+        let quoting = crate::terminal::Quoting::of(&self.program(addr));
         view.update(cx, |v, _| {
             v.cwd = cwd;
+            v.quoting = quoting;
             v.right_click_to_program = to_program;
         });
     }
@@ -4101,7 +4103,9 @@ impl AppWindow {
                     .child("no agents yet. start claude, codex or pi in a terminal")
                     .into_any_element(),
             },
-            Content::Context { .. } => match self.model.active_tab() {
+            Content::Context { .. } => {
+                let Some(_depth) = ContextDepth::enter() else { return div().size_full().into_any_element() };
+                match self.model.active_tab() {
                 Some(c) => self.render_node(c.shown(), focused, self.pane_frame(), cx),
                 None if self.documents.get("").is_some_and(|s| s.layout() == "loading") => div().size_full().into_any_element(),
                 None => {
@@ -4115,7 +4119,8 @@ impl AppWindow {
                         .child(format!("No space open. Make one{}.", key.unwrap_or_default()))
                         .into_any_element()
                 }
-            },
+                }
+            }
         }
     }
 
@@ -4780,6 +4785,39 @@ fn apply_look(el: Div, n: &Node, focused: bool) -> Div {
     shadow(el, n.shadow.as_deref())
 }
 
+/// A background image names a file inside the app's home: relative, no
+/// `..`, no drive or network prefix, and still inside it once links are resolved.
+fn confined_image(home: &std::path::Path, image: &str) -> Option<PathBuf> {
+    let rel = std::path::Path::new(image);
+    if image.is_empty() || crate::links::network(rel) || !rel.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+        return None;
+    }
+    let home = home.canonicalize().ok()?;
+    let full = home.join(rel).canonicalize().ok()?;
+    full.starts_with(&home).then_some(full)
+}
+
+thread_local! {
+    /// A Context block is being drawn: the tab it shows is already on screen.
+    static IN_CONTEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Held while a Context block draws its tab: a Context block inside that tab
+/// would draw it again without end.
+struct ContextDepth;
+
+impl ContextDepth {
+    fn enter() -> Option<Self> {
+        (!IN_CONTEXT.replace(true)).then(|| Self)
+    }
+}
+
+impl Drop for ContextDepth {
+    fn drop(&mut self) {
+        IN_CONTEXT.set(false);
+    }
+}
+
 /// A color or gradient paints the element; an image is a layer behind
 /// whatever comes after it (call before adding content).
 fn paint(el: Div, bg: &Paint) -> Div {
@@ -4791,7 +4829,8 @@ fn paint(el: Div, bg: &Paint) -> Div {
                 Fit::Cover => ObjectFit::Cover,
                 Fit::Contain => ObjectFit::Contain,
             };
-            el.child(img(mods::app_dir().join(image)).absolute().top_0().left_0().size_full().object_fit(fit))
+            let Some(path) = confined_image(&mods::app_dir(), image) else { return el };
+            el.child(img(path).absolute().top_0().left_0().size_full().object_fit(fit))
         }
     }
 }
@@ -5684,6 +5723,119 @@ export default class Probe extends View {
         let terminals = super::default_layout("terminals");
         assert!(terminals.find("tabs").is_some());
         assert!(matches!(terminals.find("main").and_then(|n| n.content()), Some(super::Content::Context { .. })));
+    }
+
+    #[test]
+    fn background_images_stay_inside_the_app_home() {
+        let tmp = std::env::temp_dir().join(format!("h0x-ade-bg-{}", std::process::id()));
+        let home = tmp.join("home");
+        std::fs::create_dir_all(home.join("bg")).unwrap();
+        std::fs::write(home.join("bg/sky.jpg"), b"x").unwrap();
+        std::fs::write(tmp.join("outside.png"), b"x").unwrap();
+        let ok = super::confined_image(&home, "bg/sky.jpg").unwrap();
+        assert!(ok.ends_with("sky.jpg") && ok.starts_with(home.canonicalize().unwrap()));
+        let outside = tmp.join("outside.png").to_string_lossy().into_owned();
+        for bad in ["", "../outside.png", "bg/../../outside.png", "./bg/sky.jpg", "bg/missing.jpg", "//evil/share/x.png", r"\\evil\share\x.png", r"\\?\UNC\evil\share\x.png", "/etc/passwd", r"C:\x.png", "C:x.png", outside.as_str()] {
+            assert_eq!(super::confined_image(&home, bad), None, "{bad:?}");
+        }
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn a_context_block_inside_a_context_block_does_not_draw_again() {
+        let outer = super::ContextDepth::enter().expect("the first Context block draws");
+        assert!(super::ContextDepth::enter().is_none());
+        assert!(super::ContextDepth::enter().is_none());
+        drop(outer);
+        // Dropped: the next Context block draws.
+        assert!(super::ContextDepth::enter().is_some());
+    }
+
+    #[test]
+    fn a_context_guard_is_released_when_drawing_unwinds_and_is_per_thread() {
+        let unwound = std::panic::catch_unwind(|| {
+            let _outer = super::ContextDepth::enter().expect("the first Context block draws");
+            // Refused twice: a refused guard releases nothing.
+            assert!(super::ContextDepth::enter().is_none());
+            assert!(super::ContextDepth::enter().is_none());
+            panic!("drawing the tab failed");
+        });
+        assert!(unwound.is_err());
+        let again = super::ContextDepth::enter().expect("the unwind released the guard");
+        // Another thread draws its own Context block.
+        std::thread::spawn(|| assert!(super::ContextDepth::enter().is_some())).join().unwrap();
+        assert!(super::ContextDepth::enter().is_none());
+        drop(again);
+    }
+
+    #[test]
+    fn background_images_through_links_out_of_the_app_home_draw_nothing() {
+        let tmp = std::env::temp_dir().join(format!("h0x-ade-bg-link-{}", std::process::id()));
+        let home = tmp.join("home");
+        let outside = tmp.join("outside");
+        std::fs::create_dir_all(home.join("bg")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(home.join("bg").join("sky.jpg"), b"x").unwrap();
+        std::fs::write(outside.join("x.png"), b"x").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, home.join("out")).unwrap();
+            std::os::unix::fs::symlink(outside.join("x.png"), home.join("bg").join("x.png")).unwrap();
+            std::os::unix::fs::symlink(home.join("bg"), home.join("in")).unwrap();
+            assert_eq!(super::confined_image(&home, "bg/x.png"), None);
+        }
+        #[cfg(windows)]
+        {
+            // A junction needs no privilege, unlike a symlink.
+            let junction = |link: &std::path::Path, target: &std::path::Path| {
+                let out = std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(link).arg(target).output().unwrap();
+                assert!(out.status.success(), "mklink /J {}: {}", link.display(), String::from_utf8_lossy(&out.stderr));
+            };
+            junction(&home.join("out"), &outside);
+            junction(&home.join("in"), &home.join("bg"));
+        }
+        assert_eq!(super::confined_image(&home, "out/x.png"), None);
+        assert_eq!(super::confined_image(&home, "out"), None);
+        // A link that stays inside the home still draws.
+        let inside = super::confined_image(&home, "in/sky.jpg").expect("a link inside the home");
+        assert!(inside.starts_with(home.canonicalize().unwrap()));
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn background_image_names_that_are_odd_device_like_or_too_long_draw_nothing() {
+        let tmp = std::env::temp_dir().join(format!("h0x-ade-bg-odd-{}", std::process::id()));
+        let home = tmp.join("home");
+        std::fs::create_dir_all(home.join("bg")).unwrap();
+        std::fs::write(home.join("bg").join("sky.jpg"), b"x").unwrap();
+        std::fs::write(home.join("bg").join("天空 ☁.png"), b"x").unwrap();
+        // Unicode and spaces inside the home are fine.
+        let sky = super::confined_image(&home, "bg/天空 ☁.png").expect("a unicode name in the home");
+        assert!(sky.starts_with(home.canonicalize().unwrap()));
+        let long = format!("bg/{}.png", "a".repeat(5000));
+        for bad in [
+            " ",
+            "\t",
+            "bg/sky.jpg ",
+            "bg/sky.jpg.",
+            "CON",
+            "bg/NUL",
+            "//?/C:/x.png",
+            r"\\.\C:\x.png",
+            "//./pipe/x",
+            r"\??\C:\x.png",
+            "/??/C:/x.png",
+            r"\x.png",
+            "bg/sky.jpg/..",
+            r"bg\..\..\x.png",
+            "../home/bg/sky.jpg",
+            long.as_str(),
+        ] {
+            assert_eq!(super::confined_image(&home, bad), None, "{bad:?}");
+        }
+        // A home that does not exist names no image.
+        assert_eq!(super::confined_image(&tmp.join("missing"), "bg/sky.jpg"), None);
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]
