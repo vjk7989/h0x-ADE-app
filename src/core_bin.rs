@@ -172,7 +172,13 @@ pub fn install() -> Result<PathBuf, String> {
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
     let file = work.join(script);
-    let result = crate::update::download(&format!("{releases}/latest/download/{script}"), &file, "120").and_then(|()| run_installer(&file, &releases));
+    // Run a fresh copy of the checked bytes, not the downloaded path.
+    let result = crate::update::download(&format!("{releases}/latest/download/{script}"), &file, "120").and_then(|bytes| {
+        let (sealed_dir, sealed) = crate::update::seal(&home, &bytes, script)?;
+        let ran = run_installer(&sealed, &releases);
+        let _ = std::fs::remove_dir_all(&sealed_dir);
+        ran
+    });
     let _ = std::fs::remove_dir_all(&work);
     result?;
     let home = crate::mods::home();

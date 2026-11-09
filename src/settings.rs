@@ -10,7 +10,7 @@ use gpui::{Hsla, Pixels, Rgba, px};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Mutex;
 
@@ -381,9 +381,13 @@ pub struct Person {
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
-    /// Allow terminal programs (including remote ones) to copy text locally.
-    #[serde(skip_serializing_if = "is_true")]
+    /// Allow terminal programs (including remote ones) to copy text locally
+    /// (OSC 52). Off unless set: any output could replace the clipboard.
+    #[serde(skip_serializing_if = "is_false")]
     pub clipboard_write: bool,
+    /// Look for HyperOx and h0x-core updates in the background; "Check now" always works.
+    #[serde(skip_serializing_if = "is_true")]
+    pub check_updates: bool,
     /// A draggable scroll position thumb at a terminal pane's right edge.
     #[serde(skip_serializing_if = "is_true")]
     pub pane_scrollbars: bool,
@@ -449,6 +453,10 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 impl Default for Person {
     fn default() -> Self {
         Person {
@@ -459,7 +467,8 @@ impl Default for Person {
             font_size: None,
             font_ligatures: false,
             ui_font: None,
-            clipboard_write: true,
+            clipboard_write: false,
+            check_updates: true,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
@@ -499,6 +508,7 @@ pub struct Settings {
     /// 0..1: below 1, what's behind a terminal shows through.
     pub terminal_opacity: f32,
     pub clipboard_write: bool,
+    pub check_updates: bool,
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
@@ -540,7 +550,8 @@ impl Default for Settings {
             pane_scrollbars: true,
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
-            clipboard_write: true,
+            clipboard_write: false,
+            check_updates: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
@@ -580,6 +591,7 @@ impl Settings {
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
+            check_updates: person.check_updates,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
         }
@@ -687,6 +699,7 @@ pub fn write_person(person: &Person) -> std::io::Result<()> {
 
 /// Installs new settings; returns whether anything changed.
 pub fn set(s: Settings) -> bool {
+    crate::update::set_auto(s.check_updates);
     #[cfg(target_os = "macos")]
     gpui_macos::set_option_as_alt(match s.option_as_alt {
         OptionAsAlt::Auto => None,
@@ -768,14 +781,23 @@ pub fn note_fonts(names: Vec<String>) {
     *FONTS.lock().unwrap() = Some(names.into_iter().map(|n| n.to_lowercase()).collect());
 }
 
-/// Font files the home brings: `fonts/` and each mod's `fonts/` (a layout's
-/// look travels with its mod, as HyperOx 98's does). Loads the ones not loaded
-/// yet; true when any was.
+/// Where fonts load from: `home/fonts` and the `fonts/` of each mod that may
+/// run (HyperOx's own, or allowed by the person for its current code). A mod
+/// not allowed yet, or denied, loads none: font files are parsed natively.
+fn font_dirs(home: &Path, mods: &[crate::mods::Found], choices: &BTreeMap<String, ModChoice>) -> Vec<PathBuf> {
+    let mut dirs = vec![home.join("fonts")];
+    dirs.extend(mods.iter().filter(|m| crate::mods::trust(m, choices) == crate::mods::Trust::Allowed).map(|m| m.dir.join("fonts")));
+    dirs
+}
+
+/// Font files the home brings: `fonts/` and each allowed mod's `fonts/` (a
+/// layout's look travels with its mod, as HyperOx 98's does). Loads the ones
+/// not loaded yet; true when any was.
 pub fn load_home_fonts(cx: &mut gpui::App) -> bool {
     static LOADED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
     let home = crate::mods::app_dir();
-    let mut dirs = vec![home.join("fonts")];
-    dirs.extend(std::fs::read_dir(home.join("mods")).into_iter().flatten().flatten().map(|e| e.path().join("fonts")));
+    let person = load_person().unwrap_or_default();
+    let dirs = font_dirs(&home, &crate::mods::scan(), &person.mods);
     let mut new = Vec::new();
     let mut loaded = LOADED.lock().unwrap();
     for dir in dirs {
@@ -916,12 +938,154 @@ mod tests {
     }
 
     #[test]
-    fn program_clipboard_writes_default_on_and_can_be_disabled() {
+    fn program_clipboard_writes_default_off_and_can_be_enabled() {
         let default: Person = serde_json::from_str("{}").unwrap();
-        assert!(default.clipboard_write);
+        assert!(!default.clipboard_write);
+        assert!(!Settings::compose(&default, &crate::layout::Look::default(), true).clipboard_write);
+        assert!(serde_json::to_value(&default).unwrap().get("clipboard_write").is_none());
+        let on: Person = serde_json::from_str(r#"{"clipboard_write":true}"#).unwrap();
+        assert!(Settings::compose(&on, &crate::layout::Look::default(), true).clipboard_write);
+        assert_eq!(serde_json::to_value(on).unwrap()["clipboard_write"], true);
         let off: Person = serde_json::from_str(r#"{"clipboard_write":false}"#).unwrap();
-        assert!(!Settings::compose(&off, &crate::layout::Look::default(), true).clipboard_write);
-        assert_eq!(serde_json::to_value(off).unwrap()["clipboard_write"], false);
+        assert!(!off.clipboard_write);
+    }
+
+    #[test]
+    fn update_checks_default_on_and_can_be_turned_off() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert!(default.check_updates);
+        assert!(serde_json::to_value(&default).unwrap().get("check_updates").is_none());
+        let off: Person = serde_json::from_str(r#"{"check_updates":false}"#).unwrap();
+        assert!(!Settings::compose(&off, &crate::layout::Look::default(), true).check_updates);
+        assert_eq!(serde_json::to_value(off).unwrap()["check_updates"], false);
+    }
+
+    #[test]
+    fn fonts_load_only_from_mods_that_may_run() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-fonts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let found = |id: &str| {
+            let dir = root.join("mods").join(id);
+            std::fs::create_dir_all(dir.join("fonts")).unwrap();
+            std::fs::write(dir.join("main.js"), id).unwrap();
+            crate::mods::Found { id: id.into(), dir, hint: Default::default(), stamp: std::time::SystemTime::UNIX_EPOCH }
+        };
+        let (allowed, denied, unasked, stale) = (found("allowed"), found("denied"), found("unasked"), found("stale"));
+        let choice = |m: &crate::mods::Found, allow, hash: Option<String>| ModChoice { hash: hash.unwrap_or_else(|| crate::mods::content_hash(&m.dir)), allow };
+        let choices: BTreeMap<String, ModChoice> = [
+            ("allowed".to_owned(), choice(&allowed, true, None)),
+            ("denied".to_owned(), choice(&denied, false, None)),
+            ("stale".to_owned(), choice(&stale, true, Some("old code".into()))),
+        ]
+        .into();
+        let mods = [allowed.clone(), denied, unasked, stale];
+        assert_eq!(font_dirs(&root, &mods, &choices), vec![root.join("fonts"), allowed.dir.join("fonts")]);
+        assert_eq!(font_dirs(&root, &mods, &BTreeMap::new()), vec![root.join("fonts")], "no consent, no mod fonts");
+        assert_eq!(font_dirs(&root, &[], &choices), vec![root.join("fonts")]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_mod_whose_fonts_change_after_it_was_allowed_loads_none() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-fonts-changed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("mods").join("O\u{2019}Neil fonts");
+        std::fs::create_dir_all(dir.join("fonts")).unwrap();
+        std::fs::write(dir.join("main.js"), "export default 1").unwrap();
+        let found = crate::mods::Found { id: "O\u{2019}Neil fonts".into(), dir: dir.clone(), hint: Default::default(), stamp: std::time::SystemTime::UNIX_EPOCH };
+        let choices: BTreeMap<String, ModChoice> = [(found.id.clone(), ModChoice { hash: crate::mods::content_hash(&dir), allow: true })].into();
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &choices), vec![root.join("fonts"), dir.join("fonts")]);
+        // A font file added after the person said yes is new code: ask again.
+        std::fs::write(dir.join("fonts").join("planted.ttf"), b"not a font").unwrap();
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &choices), vec![root.join("fonts")], "stale answer");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mod_fonts_link_to_elsewhere_counts_toward_its_hash() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-fonts-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let dir = root.join("mods").join("linked");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.js"), "export default 1").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("fonts")).unwrap();
+        let found = crate::mods::Found { id: "linked".into(), dir: dir.clone(), hint: Default::default(), stamp: std::time::SystemTime::UNIX_EPOCH };
+        let choices: BTreeMap<String, ModChoice> = [("linked".to_owned(), ModChoice { hash: crate::mods::content_hash(&dir), allow: true })].into();
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &choices).len(), 2);
+        // Changing what the link points at changes the mod's code.
+        std::fs::write(elsewhere.join("planted.ttf"), b"not a font").unwrap();
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &choices), vec![root.join("fonts")]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_shipped_mod_brings_its_fonts_without_asking_until_it_is_changed() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-fonts-shipped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let name = "toast";
+        let dir = root.join("mods").join(name);
+        let mut files = 0;
+        for (path, bytes) in crate::mods::DEFAULT_MODS {
+            let Some(rel) = path.strip_prefix(&format!("{name}/")) else { continue };
+            let to = dir.join(rel);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::write(to, bytes).unwrap();
+            files += 1;
+        }
+        assert!(files > 0, "HyperOx ships a {name} mod");
+        let found = crate::mods::Found { id: name.into(), dir: dir.clone(), hint: Default::default(), stamp: std::time::SystemTime::UNIX_EPOCH };
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &BTreeMap::new()), vec![root.join("fonts"), dir.join("fonts")]);
+        // A font added to a shipped mod makes it someone else's code.
+        std::fs::create_dir_all(dir.join("fonts")).unwrap();
+        std::fs::write(dir.join("fonts").join("planted.ttf"), b"not a font").unwrap();
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &BTreeMap::new()), vec![root.join("fonts")]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn missing_or_malformed_settings_allow_no_mod_fonts() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-fonts-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("mods").join("mine");
+        std::fs::create_dir_all(dir.join("fonts")).unwrap();
+        std::fs::write(dir.join("main.js"), "export default 1").unwrap();
+        let found = crate::mods::Found { id: "mine".into(), dir: dir.clone(), hint: Default::default(), stamp: std::time::SystemTime::UNIX_EPOCH };
+        let mods = format!(r#""mods":{{"mine":{{"hash":"{}","allow":true}}}}"#, crate::mods::content_hash(&dir));
+        // As load_home_fonts reads settings.json: unreadable means the defaults.
+        let dirs = |text: &str| font_dirs(&root, std::slice::from_ref(&found), &serde_json::from_str::<Person>(text).unwrap_or_default().mods);
+        assert_eq!(dirs(&format!("{{{mods}}}")), vec![root.join("fonts"), dir.join("fonts")], "well-formed control");
+        for bad in [
+            format!(r#"{{{mods},"check_updates":"no"}}"#),
+            format!(r#"{{{mods},"clipboard_write":null}}"#),
+            format!("{{{mods}"),
+            String::new(),
+        ] {
+            assert_eq!(dirs(&bad), vec![root.join("fonts")], "{bad:?}");
+        }
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &Person::default().mods), vec![root.join("fonts")], "missing settings.json");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clipboard_and_update_switches_round_trip_and_reject_wrong_types() {
+        let look = crate::layout::Look::default();
+        assert!(!Settings::default().clipboard_write && Settings::default().check_updates);
+        // The settings toggle: on, saved, reloaded, off again, saved without the default.
+        let p = Person { clipboard_write: true, check_updates: false, ..Person::default() };
+        let saved = serde_json::to_string(&p).unwrap();
+        let mut back: Person = serde_json::from_str(&saved).unwrap();
+        let s = Settings::compose(&back, &look, true);
+        assert!(s.clipboard_write && !s.check_updates);
+        back.clipboard_write = false;
+        back.check_updates = true;
+        let value = serde_json::to_value(&back).unwrap();
+        assert!(value.get("clipboard_write").is_none() && value.get("check_updates").is_none(), "{value}");
+        for bad in [r#"{"check_updates":"no"}"#, r#"{"check_updates":0}"#, r#"{"check_updates":null}"#, r#"{"clipboard_write":null}"#, r#"{"clipboard_write":"true"}"#, r#"{"clipboard_write":1}"#] {
+            assert!(serde_json::from_str::<Person>(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

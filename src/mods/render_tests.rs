@@ -753,6 +753,25 @@ fn settings_remote_page_shows_the_pair_code_and_the_web_qr(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn settings_remote_page_shows_the_panel_warning_only_when_there_is_one(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let text = "Messages are end-to-end encrypted; the page itself is delivered by Cloudflare, so an attacker who controls that path could change it";
+    let ready = |extra: &str| format!("{{\"url\":\"http://10.0.0.2:7000\"{extra}}}\n");
+    let shown = |cx: &mut TestAppContext, extra: &str| {
+        let mut replies = web_replies(&ready(extra));
+        replies.push(("bridge qr", core_ok(json!({"size":1, "rows":["1"]}))));
+        describe_remote(cx, &staged, &replies, "").0
+    };
+    let tree = shown(cx, &format!(",\"warning\":\"{text}\""));
+    assert!(tree.contains(text) && tree.contains("Scan with your phone"), "{tree}");
+    for extra in [",\"warning\":null", "", ",\"warning\":\"\"", ",\"warning\":7"] {
+        let tree = shown(cx, extra);
+        assert!(tree.contains("Scan with your phone") && !tree.contains("st-r-warning") && !tree.contains("Cloudflare, so"), "{extra}: {tree}");
+    }
+}
+
+#[gpui::test]
 fn settings_remote_page_with_an_older_core_says_to_update(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
