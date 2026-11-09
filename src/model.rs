@@ -328,6 +328,25 @@ impl Model {
         true
     }
 
+    pub fn swap_panes(&mut self, pane: &str, target: &str) -> Result<(), String> {
+        let is_pane = |m: &Model, id: &str| m.tab_of(id).and_then(|c| c.root.find(id)).is_some_and(Node::is_pane);
+        if !is_pane(self, pane) {
+            return Err(format!("no pane {pane:?}"));
+        }
+        if !is_pane(self, target) {
+            return Err(format!("no target pane {target:?}"));
+        }
+        if pane == target {
+            return Err("pane.swap target is the pane itself".into());
+        }
+        let Some(c) = self.tab_of_mut(pane) else { return Err(format!("no pane {pane:?}")) };
+        if c.root.find(target).is_none() {
+            return Err(format!("pane.swap target {target:?} is in another tab"));
+        }
+        c.root.swap(pane, target);
+        Ok(())
+    }
+
     /// Removes a pane. Returns what else closed: the tab, and the space if it was its last.
     pub fn remove_pane(&mut self, pane_id: &str) -> (bool, bool) {
         let Some(c) = self.tab_of_mut(pane_id) else { return (false, false) };
@@ -786,6 +805,79 @@ mod tests {
         let order: Vec<&str> = m.spaces[0].tabs.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(order, ["c1", "c3", "c2"]);
         assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c3"));
+    }
+
+    fn three_panes_and_another_tab() -> Model {
+        let mut m = model_with_one();
+        m.split("x1", Axis::Row, "x2", "t2");
+        m.split("x2", Axis::Row, "x3", "t3");
+        m.add_tab("p1", Tab::new("c2", "docs", "x4", "t4"));
+        m.select_tab("c1");
+        m.focus_pane("x1");
+        m
+    }
+
+    fn pane_order(m: &Model, tab: &str) -> Vec<String> {
+        m.tab(tab).unwrap().root.panes().iter().map(|n| n.id.clone()).collect()
+    }
+
+    #[test]
+    fn swapping_panes_by_id_trades_places_and_keeps_focus_on_the_same_id() {
+        let mut m = three_panes_and_another_tab();
+        assert_eq!(m.swap_panes("x1", "x3"), Ok(()));
+        assert_eq!(pane_order(&m, "c1"), ["x3", "x2", "x1"]);
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+        assert_eq!(m.address_of("x1").as_deref(), Some("t1"));
+        assert_eq!(m.swap_panes("x2", "x3"), Ok(()));
+        assert_eq!(pane_order(&m, "c1"), ["x2", "x3", "x1"]);
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+    }
+
+    #[test]
+    fn swapping_panes_by_id_refuses_each_bad_pair_without_changes() {
+        let mut m = three_panes_and_another_tab();
+        let cases = [
+            ("nope", "x2", "no pane \"nope\""),
+            ("x1", "nope", "no target pane \"nope\""),
+            ("x1", "x1", "pane.swap target is the pane itself"),
+            ("x1", "x4", "pane.swap target \"x4\" is in another tab"),
+        ];
+        for (pane, target, error) in cases {
+            assert_eq!(m.swap_panes(pane, target), Err(error.to_owned()), "{pane} {target}");
+            assert_eq!(pane_order(&m, "c1"), ["x1", "x2", "x3"], "{pane} {target}");
+            assert_eq!(pane_order(&m, "c2"), ["x4"], "{pane} {target}");
+            assert_eq!(m.focused_pane().as_deref(), Some("x1"), "{pane} {target}");
+        }
+    }
+
+    #[test]
+    fn swapping_panes_by_id_works_on_another_machine_but_never_across_machines() {
+        let mut m = three_panes_and_another_tab();
+        m.add_space("box/p2", "remote", "/home/me", Tab::new("box/c3", "", "box/x5", "box/t5"));
+        m.spaces.last_mut().unwrap().machine = Some("box".into());
+        m.split("box/x5", Axis::Row, "box/x6", "box/t6");
+        m.select_tab("c1");
+        m.focus_pane("x1");
+        assert_eq!(m.swap_panes("box/x5", "box/x6"), Ok(()));
+        assert_eq!(pane_order(&m, "box/c3"), ["box/x6", "box/x5"]);
+        assert_eq!(m.address_of("box/x5").as_deref(), Some("box/t5"));
+        assert_eq!(m.swap_panes("x1", "box/x5"), Err("pane.swap target \"box/x5\" is in another tab".to_owned()));
+        assert_eq!(m.swap_panes("box/x6", "x1"), Err("pane.swap target \"x1\" is in another tab".to_owned()));
+        // Empty ids name no pane.
+        assert_eq!(m.swap_panes("", "x1"), Err("no pane \"\"".to_owned()));
+        assert_eq!(m.swap_panes("x1", ""), Err("no target pane \"\"".to_owned()));
+        assert_eq!(pane_order(&m, "c1"), ["x1", "x2", "x3"]);
+        assert_eq!(pane_order(&m, "box/c3"), ["box/x6", "box/x5"]);
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+    }
+
+    #[test]
+    fn swapping_refuses_a_container_as_pane_or_target() {
+        let mut m = three_panes_and_another_tab();
+        let container = m.tab("c1").unwrap().root.id.clone();
+        assert_eq!(m.swap_panes(&container, "x1"), Err(format!("no pane {container:?}")));
+        assert_eq!(m.swap_panes("x1", &container), Err(format!("no target pane {container:?}")));
+        assert_eq!(pane_order(&m, "c1"), ["x1", "x2", "x3"]);
     }
 
     #[test]

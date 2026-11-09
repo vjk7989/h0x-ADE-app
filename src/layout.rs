@@ -375,6 +375,9 @@ pub struct Node {
     /// Root only: the terminal right-click menu's mod (default: `menu`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_menu: Option<String>,
+    /// Root only: the mod that shows notifications (default: `toast`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toast: Option<String>,
     /// Dragging this node moves the window; a double-click maximizes it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub window_drag: bool,
@@ -414,6 +417,7 @@ impl Node {
             traffic_lights: None,
             preview: None,
             terminal_menu: None,
+            toast: None,
             window_drag: false,
         }
     }
@@ -567,6 +571,11 @@ impl Node {
         let removed = remove_inner(self, id)?;
         collapse(self);
         Some(removed)
+    }
+
+    /// Removes a composition slot without simplifying the authored layout.
+    pub fn remove_slot(&mut self, id: &str) -> Option<Node> {
+        remove_inner(self, id)
     }
 
     /// Puts `new` beside `target` along `axis` (after it). Reuses the parent
@@ -852,6 +861,80 @@ mod tests {
         let mut root = Node::container("ctx", Axis::Row, vec![term("x"), term("y")]);
         root.remove("y");
         assert_eq!((root.id.as_str(), root.children().len()), ("ctx", 1));
+    }
+
+    #[test]
+    fn removing_a_composition_slot_keeps_authored_containers() {
+        let mut panel = Node::container("panel", Axis::Column, vec![term("panel-body")]);
+        panel.hidden = true;
+        panel.size = Some(Size::Px { px: 368.0 });
+        let mut root = Node::container("work-body", Axis::Row, vec![term("coordinator"), term("main"), panel.clone()]);
+        assert!(root.remove_slot("coordinator").is_some());
+        assert!(root.find("coordinator").is_none());
+        assert_eq!(root.find("panel"), Some(&panel));
+        assert!(root.remove_slot("missing").is_none());
+        // Ours: removing the last child of a container keeps the (now empty) container.
+        let mut solo = Node::container("solo", Axis::Row, vec![term("only")]);
+        assert!(solo.remove_slot("only").is_some());
+        assert_eq!(solo.children().len(), 0);
+    }
+
+    #[test]
+    fn removing_a_nested_slot_keeps_every_container_and_its_id() {
+        let column = Node::container("col", Axis::Column, vec![term("x"), term("y")]);
+        let mut root = Node::container("root", Axis::Row, vec![column, term("z")]);
+        assert_eq!(root.remove_slot("y").map(|n| n.id), Some("y".into()));
+        // Ours: a split left with one slot is not collapsed into it.
+        assert_eq!(root.children().iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["col", "z"]);
+        assert_eq!(root.find("col").map(|c| c.children().len()), Some(1));
+        assert_eq!(root.remove_slot("x").map(|n| n.id), Some("x".into()));
+        assert_eq!(root.find("col").map(|c| c.children().len()), Some(0));
+        assert_eq!(root.children().len(), 2);
+        // The root is not a slot of itself, and an empty container or a block has none.
+        let before = root.clone();
+        assert!(root.remove_slot("root").is_none());
+        assert!(root.remove_slot("col").is_some_and(|n| n.children().is_empty()));
+        assert!(root.remove_slot("").is_none());
+        assert_eq!(root.children().iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["z"]);
+        assert_ne!(root, before);
+        let mut empty = Node::container("empty", Axis::Row, vec![]);
+        assert!(empty.remove_slot("anything").is_none());
+        let mut block = term("b");
+        assert!(block.remove_slot("b").is_none());
+        assert_eq!(block, term("b"));
+    }
+
+    #[test]
+    fn removing_a_slot_gives_its_weight_to_the_slot_it_was_split_from() {
+        let weighted = |id: &str, weight: f32| {
+            let mut n = term(id);
+            n.size = Some(Size::Weight { weight });
+            n
+        };
+        let w = |n: &Node, id: &str| n.find(id).and_then(|x| x.size);
+        let mut root = Node::container("row", Axis::Row, vec![weighted("a", 1.0), weighted("b", 2.0), weighted("c", 4.0)]);
+        // The last child hands its share to the one before it.
+        root.remove_slot("c");
+        assert_eq!((w(&root, "a"), w(&root, "b")), (Some(Size::Weight { weight: 1.0 }), Some(Size::Weight { weight: 6.0 })));
+        // The first child hands it to the next; an unsized slot counts as weight 1.
+        root.remove_slot("a");
+        assert_eq!(w(&root, "b"), Some(Size::Weight { weight: 7.0 }));
+        root.children_mut().unwrap().push(term("d"));
+        root.remove_slot("d");
+        assert_eq!(w(&root, "b"), Some(Size::Weight { weight: 8.0 }));
+        // Fixed pixel sizes neither give nor take a share.
+        let mut fixed = term("px");
+        fixed.size = Some(Size::Px { px: 368.0 });
+        let mut root = Node::container("row", Axis::Row, vec![fixed.clone(), weighted("e", 3.0), weighted("f", 1.0)]);
+        root.remove_slot("px");
+        assert_eq!(w(&root, "e"), Some(Size::Weight { weight: 3.0 }));
+        let mut root = Node::container("row", Axis::Row, vec![fixed.clone(), weighted("e", 3.0)]);
+        root.remove_slot("e");
+        assert_eq!(root.find("px"), Some(&fixed));
+        // A missing id changes nothing.
+        let before = root.clone();
+        assert!(root.remove_slot("missing").is_none());
+        assert_eq!(root, before);
     }
 
     #[test]

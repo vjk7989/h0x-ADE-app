@@ -1,5 +1,4 @@
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
-// A viewed done agent stays in Done until left.
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -130,18 +129,8 @@ export default class Agents extends View {
     return this.changed[a.address]?.at ?? 0;
   }
 
-  // Looking at a done agent makes it idle; it stays with Done until you leave
-  // it rather than drop away under you. Any other change moves it at once.
-  hold(list) {
-    const cur = list.find((a) => a.focused);
-    const same = cur && cur.address === this.held?.address;
-    // Arriving, or any change but done turning idle, sets what it was.
-    if (!same || cur.status !== "idle") this.held = cur ? { address: cur.address, rank: RANK[cur.status] ?? 0 } : null;
-  }
-
   rank(a) {
-    const sawDone = a.address === this.held?.address && this.held.rank === RANK.done && a.status === "idle";
-    return sawDone ? RANK.done : RANK[a.status] ?? 0;
+    return RANK[a.status] ?? 0;
   }
 
   sortMenu(t) {
@@ -237,12 +226,13 @@ export default class Agents extends View {
     const shown = focused()?.agent;
     const now = Date.now();
     this.track(list, now);
-    this.hold(list);
     // A kept sub-agent (one with a pane) is in agents() too: where a tree shows
     // it, it gets no row of its own, unless it's pinned.
     const nested = new Set(collapsed ? [] : list.flatMap((a) => this.tree(all, a.address).map((s) => s.t.address)));
     list = list.filter((a) => a.pinned || !nested.has(a.address));
     this.ownRow = new Set(list.map((a) => a.address));
+    const tabCounts = new Map();
+    for (const a of list) tabCounts.set(a.tab, (tabCounts.get(a.tab) ?? 0) + 1);
     const byPriority = sort.id === "priority";
     const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0))]));
     const rankOf = (a) => urgency.get(a.address);
@@ -291,9 +281,13 @@ export default class Agents extends View {
     // Read the pane snapshot once: every host read copies the whole list into JS.
     const leads = leadPanes(panes());
     const tabs = spaces().flatMap(s => s.tabs);
-    const tabLabels = new Map(tabs.map(tab => [tab.id, title(tab, leads.get(tab.id))]));
+    const tabById = new Map(tabs.map(tab => [tab.id, tab]));
     const workingSince = new Map(tabs.map(tab => [tab.id, tab.working_since]));
-    const labels = new Map(list.map(a => [a.address, tabLabels.get(a.tab) ?? (a.title || a.program?.name || "")]));
+    const labels = new Map(list.map(a => {
+      const tab = tabById.get(a.tab);
+      const many = tabCounts.get(a.tab) > 1;
+      return [a.address, tab ? title(many ? { ...tab, named: false } : tab, many ? a : leads.get(a.tab)) : (a.title || a.program?.name || "")];
+    }));
     const label = (a) => labels.get(a.address);
     const detail = new Map(list.map(a => [a.address, /^\d+$/.test(label(a)) ? null : label(a)]));
     const seen = {};
