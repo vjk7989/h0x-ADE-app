@@ -2,6 +2,7 @@
 //! that can serve this app runs:
 //! - none found (core_bin.rs): install it for me (the core's own installer),
 //!   or point at one;
+//! - found but it won't start or answer (its own error, with a retry);
 //! - too old (or missing a method the app calls): update it (`h0x-core update`,
 //!   terminals kept);
 //! - a newer generation than this app speaks: update the app.
@@ -29,7 +30,54 @@ const CORE_PLACE: &str = if cfg!(windows) { r"%LOCALAPPDATA%\Programs\h0x-core" 
 /// What's missing before the main window can open.
 pub enum Need {
     Install,
+    /// The core is there but failed to start; carries its own message and hint.
+    Connect(String),
     Fix(Mismatch),
+}
+
+impl Need {
+    /// A core that reports its own startup error gets that error and a retry;
+    /// one that can't be run or read at all gets the install screen.
+    pub fn connection(error: anyhow::Error) -> Self {
+        match error.downcast_ref::<crate::core_link::ConnectError>() {
+            Some(error) => Self::Connect(error.to_string()),
+            None => Self::Install,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Need;
+
+    #[test]
+    fn unreadable_core_connections_offer_installation_instead_of_retry() {
+        let error = anyhow::anyhow!("bad hello reply from core: EOF");
+        assert!(matches!(Need::connection(error), Need::Install));
+    }
+
+    #[test]
+    fn structured_core_errors_keep_the_recovery_hint_and_retry() {
+        let message = "the core pipe cannot be accessed
+
+try again without elevation";
+        let error = anyhow::Error::new(crate::core_link::ConnectError(message.into())).context("connecting");
+        assert!(matches!(Need::connection(error), Need::Connect(text) if text == message));
+    }
+
+    #[test]
+    fn a_missing_binary_or_a_refused_hello_is_not_a_reachable_core_error() {
+        let missing = anyhow::anyhow!("no such file").context("cannot run `h0x-core connect`: is h0x-core installed?");
+        assert!(matches!(Need::connection(missing), Need::Install));
+        let refused = anyhow::anyhow!("core refused hello: {{\"message\":\"nope\"}}");
+        assert!(matches!(Need::connection(refused), Need::Install));
+    }
+
+    #[test]
+    fn an_empty_core_message_still_retries() {
+        let error = anyhow::Error::new(crate::core_link::ConnectError(String::new()));
+        assert!(matches!(Need::connection(error), Need::Connect(text) if text.is_empty()));
+    }
 }
 
 enum State {
@@ -75,7 +123,10 @@ impl Setup {
                     self.state = State::Ready;
                 }
             },
-            Err(e) => self.state = State::Failed(format!("h0x-core is there but didn't start: {e:#}")),
+            Err(e) => {
+                self.need = Need::connection(e);
+                self.state = State::Ready;
+            }
         }
         cx.notify();
     }
@@ -140,6 +191,11 @@ impl Setup {
                 "h0x-core runs your terminals and agents, and keeps them alive when this window closes. HyperOx couldn't find it on this computer.".into(),
                 format!("Install it for me puts it in {CORE_PLACE}, like its own installer: {CORE_INSTALL}"),
             ),
+            Need::Connect(error) => (
+                "HyperOx can't connect to h0x-core".into(),
+                error.clone(),
+                "Once you've resolved this, try again.".into(),
+            ),
             Need::Fix(Mismatch::TooOld { have, need }) => (
                 "HyperOx needs a newer h0x-core".into(),
                 format!("Yours is {have}; this HyperOx needs {need} or newer. Updating keeps your terminals running."),
@@ -185,6 +241,7 @@ impl Render for Setup {
                 .gap(px(10.0))
                 .child(button("install", "Install it for me", true).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.install(w, cx)))))
                 .child(button("choose", "I have it somewhere…", false).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.choose(w, cx))))),
+            Need::Connect(_) => div().child(button("retry", "Retry", true).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))),
             Need::Fix(Mismatch::Newer { .. }) => div()
                 .flex()
                 .gap(px(10.0))

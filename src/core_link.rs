@@ -272,6 +272,29 @@ fn read_frame(r: &mut impl Read) -> Option<(u32, u8, Vec<u8>)> {
     Some((channel, h[4], payload))
 }
 
+#[derive(Debug)]
+pub struct ConnectError(pub String);
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ConnectError {}
+
+/// The core's own startup error (its JSON on stderr), with the recovery hint.
+fn connect_error(stderr: &str) -> Option<ConnectError> {
+    let reply: Value = serde_json::from_str(stderr.trim()).ok()?;
+    let error = reply.get("error")?;
+    let message = error.get("message")?.as_str()?;
+    Some(ConnectError(match error.get("hint").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        Some(hint) => format!("{message}
+
+{hint}"),
+        None => message.to_owned(),
+    }))
+}
+
 impl Core {
     /// Connects to the user's core (starting it if needed) and switches to framed mode.
     pub fn connect() -> Result<Arc<Core>> {
@@ -512,6 +535,32 @@ pub fn offline() -> Arc<Core> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_errors_keep_the_cores_message_and_recovery_hint() {
+        let stderr = json!({"error": {
+            "kind": "unavailable", "message": "the core pipe cannot be accessed",
+            "hint": "stop it with h0x-core server stop in an elevated terminal"
+        }}).to_string();
+        assert_eq!(connect_error(&stderr).unwrap().to_string(), "the core pipe cannot be accessed
+
+stop it with h0x-core server stop in an elevated terminal");
+        assert!(connect_error("not JSON").is_none());
+    }
+
+    #[test]
+    fn startup_errors_without_a_hint_or_message_or_with_noise_around_them() {
+        let no_hint = json!({"error": {"message": "boom"}}).to_string();
+        assert_eq!(connect_error(&no_hint).unwrap().to_string(), "boom");
+        let empty_hint = json!({"error": {"message": "boom", "hint": ""}}).to_string();
+        assert_eq!(connect_error(&empty_hint).unwrap().to_string(), "boom");
+        assert_eq!(connect_error(&format!("  {no_hint}
+")).unwrap().to_string(), "boom");
+        assert!(connect_error("").is_none());
+        assert!(connect_error(&json!({"error": {"hint": "only a hint"}}).to_string()).is_none());
+        assert!(connect_error(&json!({"result": {}}).to_string()).is_none());
+        assert!(connect_error(&json!({"error": {"message": 7}}).to_string()).is_none());
+    }
 
     #[test]
     fn the_event_stream_keeps_the_terminals_as_the_core_has_them() {

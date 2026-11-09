@@ -8,13 +8,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::Mutex;
 use std::time::Duration;
 
 #[cfg(any(target_os = "macos", all(test, unix)))]
 mod cli_link;
 
-static BIN: OnceLock<PathBuf> = OnceLock::new();
+static BIN: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 #[cfg(target_os = "macos")]
 pub fn install_cli_link() {
@@ -30,7 +30,7 @@ pub fn install_cli_link() {
 
 /// The core the app runs (`h0x-core` until one is found).
 pub fn path() -> PathBuf {
-    BIN.get().cloned().unwrap_or_else(|| PathBuf::from("h0x-core"))
+    BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().unwrap_or_else(|| PathBuf::from("h0x-core"))
 }
 
 /// Uses this core from now on, and puts its folder first on PATH so mods'
@@ -41,11 +41,12 @@ pub fn use_core(bin: PathBuf) {
         let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
         dirs.extend(std::env::split_paths(&path).filter(|d| d != dir));
         if let Ok(joined) = std::env::join_paths(dirs) {
-            // SAFETY: set once at start, before other threads read the environment.
+            // SAFETY: set at start or from the setup screen, before the main window
+            // (and its mods) read the environment.
             unsafe { std::env::set_var("PATH", joined) };
         }
     }
-    let _ = BIN.set(bin);
+    *BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bin);
 }
 
 /// Finder and Dock launches don't inherit the person's shell PATH.
@@ -240,6 +241,48 @@ pub fn update_to(at_least: Option<&str>) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_can_replace_an_unusable_core_before_reconnecting() {
+        const CHILD: &str = "H0X_TEST_RESELECT_CORE";
+        // BIN is process-wide: run in a child process so other tests keep their own.
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "core_bin::tests::setup_can_replace_an_unusable_core_before_reconnecting", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(output.status.success(), "{}
+{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("h0x-core-reselect-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bad = root.join("bad-core");
+        std::fs::write(&bad, "#!/bin/sh
+if [ \"$1\" = --version ]; then echo h0x-core 0.1.0; exit; fi
+read hello
+echo unusable >&2
+exit 1
+").unwrap();
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for replacement in ["chosen", "installed"] {
+            use_core(find(Some(bad.to_str().unwrap())).unwrap());
+            assert!(crate::core_link::Core::connect().is_err());
+            let good = root.join(replacement);
+            let hello = serde_json::json!({"result": {"selected": replacement}});
+            std::fs::write(&good, format!("#!/bin/sh
+read hello
+echo '{hello}'
+")).unwrap();
+            std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o755)).unwrap();
+            use_core(good.clone());
+            let core = crate::core_link::Core::connect().unwrap_or_else(|e| panic!("{replacement}: {e:#}"));
+            assert_eq!(path(), good);
+            assert_eq!(core.hello["selected"], replacement);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn startup_path_keeps_shell_order_and_falls_back_to_usual_dirs() {
