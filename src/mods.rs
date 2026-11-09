@@ -1868,7 +1868,7 @@ mod tests {
         std::fs::write(root.join("main.js"), "a").unwrap();
         std::fs::write(root.join("sub/a.js"), "b").unwrap();
         link_folder(&root, &root.join("self"));
-        link_folder(&root, &root.join("sub/back"));
+        link_folder(&root, &root.join("sub").join("back"));
         assert_eq!(mod_files(&root, true), ["main.js", "sub/a.js"]);
         assert_eq!(content_hash(&root).len(), 64);
         std::fs::remove_dir_all(&root).unwrap();
