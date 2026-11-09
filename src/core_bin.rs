@@ -8,13 +8,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::Mutex;
 use std::time::Duration;
 
 #[cfg(any(target_os = "macos", all(test, unix)))]
 mod cli_link;
 
-static BIN: OnceLock<PathBuf> = OnceLock::new();
+static BIN: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 #[cfg(target_os = "macos")]
 pub fn install_cli_link() {
@@ -30,22 +30,24 @@ pub fn install_cli_link() {
 
 /// The core the app runs (`h0x-core` until one is found).
 pub fn path() -> PathBuf {
-    BIN.get().cloned().unwrap_or_else(|| PathBuf::from("h0x-core"))
+    BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().unwrap_or_else(|| PathBuf::from("h0x-core"))
 }
 
 /// Uses this core from now on, and puts its folder first on PATH so mods'
 /// `core()` and anything the app runs find the same one.
 pub fn use_core(bin: PathBuf) {
-    if let Some(dir) = bin.parent() {
+    // Only an absolute folder goes on PATH: a relative or empty one means "here".
+    if let Some(dir) = bin.parent().filter(|d| d.is_absolute()) {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
         dirs.extend(std::env::split_paths(&path).filter(|d| d != dir));
         if let Ok(joined) = std::env::join_paths(dirs) {
-            // SAFETY: set once at start, before other threads read the environment.
+            // SAFETY: set at start or from the setup screen, before the main window
+            // (and its mods) read the environment.
             unsafe { std::env::set_var("PATH", joined) };
         }
     }
-    let _ = BIN.set(bin);
+    *BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bin);
 }
 
 /// Finder and Dock launches don't inherit the person's shell PATH.
@@ -82,7 +84,9 @@ pub fn version(bin: &Path) -> Option<String> {
 /// The first h0x-core found, or None.
 pub fn find(configured: Option<&str>) -> Option<PathBuf> {
     let home = crate::mods::home();
-    let pick = |candidates: Vec<PathBuf>| candidates.into_iter().filter(|c| c.is_file()).find(|c| version(c).is_some());
+    // Absolute only: an empty or relative PATH entry or configured path means the
+    // current folder, where a planted h0x-core must never be found.
+    let pick = |candidates: Vec<PathBuf>| candidates.into_iter().filter(|c| c.is_absolute() && c.is_file()).find(|c| version(c).is_some());
     if let Some(found) = pick(configured.map(|c| vec![expand(c, &home)]).unwrap_or_default()) {
         return Some(found);
     }
@@ -165,6 +169,9 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
 /// `.minisig` is the release key's signature, and run as one argument; values
 /// reach it through the environment, never a command string.
 pub fn install() -> Result<PathBuf, String> {
+    if let Some(dir) = std::env::var_os("H0X_CORE_INSTALL_DIR").map(PathBuf::from).filter(|d| !d.is_absolute()) {
+        return Err(format!("H0X_CORE_INSTALL_DIR must be an absolute folder, not {}", dir.display()));
+    }
     let releases = crate::update::core_releases();
     let script = if cfg!(windows) { "install.ps1" } else { "install.sh" };
     let home = crate::mods::ensure_app_dir().map_err(|e| format!("{}: {e}", crate::mods::app_dir().display()))?;
@@ -240,6 +247,140 @@ pub fn update_to(at_least: Option<&str>) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_can_replace_an_unusable_core_before_reconnecting() {
+        const CHILD: &str = "H0X_TEST_RESELECT_CORE";
+        // BIN is process-wide: run in a child process so other tests keep their own.
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "core_bin::tests::setup_can_replace_an_unusable_core_before_reconnecting", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(output.status.success(), "{}
+{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("h0x-core-reselect-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bad = root.join("bad-core");
+        std::fs::write(&bad, "#!/bin/sh
+if [ \"$1\" = --version ]; then echo h0x-core 0.1.0; exit; fi
+read hello
+echo unusable >&2
+exit 1
+").unwrap();
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for replacement in ["chosen", "installed"] {
+            use_core(find(Some(bad.to_str().unwrap())).unwrap());
+            assert!(crate::core_link::Core::connect().is_err());
+            let good = root.join(replacement);
+            let hello = serde_json::json!({"result": {"selected": replacement}});
+            std::fs::write(&good, format!("#!/bin/sh
+read hello
+echo '{hello}'
+")).unwrap();
+            std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o755)).unwrap();
+            use_core(good.clone());
+            let core = crate::core_link::Core::connect().unwrap_or_else(|e| panic!("{replacement}: {e:#}"));
+            assert_eq!(path(), good);
+            assert_eq!(core.hello["selected"], replacement);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // BIN and PATH are process-wide: runs in a child process.
+    #[test]
+    fn the_core_path_survives_a_poisoned_lock_and_concurrent_replacement() {
+        const CHILD: &str = "H0X_TEST_CORE_PATH_LOCK";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "core_bin::tests::the_core_path_survives_a_poisoned_lock_and_concurrent_replacement", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let (a, b) = if cfg!(windows) {
+            (PathBuf::from(r"C:\Users\me\AppData\Local\Programs\h0x-core\h0x-core.exe"), PathBuf::from(r"D:\Tools\h0x core\h0x-core.exe"))
+        } else {
+            (PathBuf::from("/home/me/.local/bin/h0x-core"), PathBuf::from("/opt/h0x core/bin/h0x-core"))
+        };
+        // A thread that panicked while holding the lock must not take the core away.
+        let _ = std::thread::spawn(|| {
+            let _held = BIN.lock().unwrap();
+            panic!("poisons the lock");
+        })
+        .join();
+        assert!(BIN.is_poisoned());
+        assert_eq!(path(), PathBuf::from("h0x-core"));
+        use_core(a.clone());
+        assert_eq!(path(), a);
+        // Readers during replacements see one whole path or the other.
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let (a, b) = (a.clone(), b.clone());
+                std::thread::spawn(move || (0..2000).all(|_| [&a, &b].contains(&&path())))
+            })
+            .collect();
+        for i in 0..2000 {
+            use_core(if i % 2 == 0 { b.clone() } else { a.clone() });
+        }
+        assert!(readers.into_iter().all(|r| r.join().unwrap()));
+        assert_eq!(path(), a);
+        // Each replacement moves its folder to the front without piling up PATH entries.
+        use_core(b.clone());
+        let dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH").unwrap()).collect();
+        assert_eq!(dirs[0], b.parent().unwrap());
+        assert_eq!(dirs.iter().filter(|d| d.as_path() == a.parent().unwrap()).count(), 1, "{dirs:?}");
+        assert_eq!(dirs.iter().filter(|d| d.as_path() == b.parent().unwrap()).count(), 1, "{dirs:?}");
+    }
+
+    // The committed fixture core sits in the child's current folder, with `.`
+    // and an empty entry on PATH. BIN, PATH and the folder are process-wide.
+    #[cfg(unix)]
+    #[test]
+    fn a_core_in_the_current_folder_or_on_a_relative_path_is_never_used() {
+        const CHILD: &str = "H0X_TEST_RELATIVE_CORE";
+        if std::env::var_os(CHILD).is_none() {
+            let home = std::env::temp_dir().join(format!("h0x-core-relative-home-{}", std::process::id()));
+            std::fs::create_dir_all(&home).unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "core_bin::tests::a_core_in_the_current_folder_or_on_a_relative_path_is_never_used", "--nocapture"])
+                .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core-bin"))
+                .env(CHILD, "1")
+                .env("PATH", ".:")
+                .env("HOME", &home)
+                .env("SHELL", "/nonexistent/sh")
+                .env_remove("H0X_CORE_DIRS")
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&home);
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let here = std::env::current_dir().unwrap();
+        assert!(here.join("h0x-core").is_file());
+        let safe = |found: &Option<PathBuf>| found.as_deref().is_none_or(|p| p.is_absolute() && !p.starts_with(&here));
+        let found = find(None);
+        assert!(safe(&found), "found {found:?} through a relative PATH entry");
+        for configured in ["h0x-core", "./h0x-core"] {
+            let found = find(Some(configured));
+            assert!(safe(&found), "configured {configured:?} gave {found:?}");
+        }
+        // SAFETY: this child process runs only this test.
+        unsafe { std::env::set_var("PATH", "/usr/bin:/bin") };
+        use_core(PathBuf::from("h0x-core"));
+        let path = std::env::var_os("PATH").unwrap();
+        assert!(std::env::split_paths(&path).all(|d| d.is_absolute()), "a relative core put {path:?} on PATH");
+        // A relative install folder is refused before anything is downloaded.
+        // SAFETY: this child process runs only this test.
+        unsafe { std::env::set_var("H0X_CORE_INSTALL_DIR", "relative/bin") };
+        let error = install().unwrap_err();
+        assert!(error.contains("absolute") && error.contains("relative/bin"), "{error}");
+    }
 
     #[test]
     fn startup_path_keeps_shell_order_and_falls_back_to_usual_dirs() {

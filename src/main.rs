@@ -129,7 +129,7 @@ fn main() {
                 Ok(core) => core_link::check(&core.hello).map(|()| core).map_err(setup::Need::Fix),
                 Err(e) => {
                     eprintln!("h0x-ade: {e:#}");
-                    Err(setup::Need::Install)
+                    Err(setup::Need::connection(e))
                 }
             }
         }
