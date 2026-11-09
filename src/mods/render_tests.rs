@@ -180,8 +180,8 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                 "core" if first == json!(["machine", "ls", "--json"]) => {
                     Some(json!({"code":0,"stdout":"{\"machines\":[{\"name\":\"remote\",\"state\":\"online\"}]}","stderr":""}))
                 }
-                "core" if first.as_array().and_then(|a| a.first()).and_then(Value::as_str) == Some("run") => {
-                    Some(json!({"code":0,"stdout":"{\"address\":\"t-setup\"}","stderr":""}))
+                "core" if first == json!(["machine", "add", "host", "--json"]) => {
+                    Some(json!({"code":1,"stdout":"{\"error\":{\"kind\":\"host_key\",\"message\":\"unknown host key\"}}","stderr":""}))
                 }
                 // The sessions panel lists the shown space's folder.
                 "core" if first.as_array().and_then(|a| a.first()).and_then(Value::as_str) == Some("session") => {
@@ -515,27 +515,27 @@ fn machine_picker_keeps_long_lists_scrollable(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn machine_setup_prompt_stacks_above_the_picker(cx: &mut TestAppContext) {
+fn machine_add_needing_input_keeps_the_picker_and_shows_instructions(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let calls = Rc::new(RefCell::new(Calls::default()));
     let policy = Policy::new().with_host_module(module(fixture(false, props(), updates("current", "current")), calls.clone())).unwrap();
-    let root = staged.wrapper("mods/machine-add", "cx.spawn(async () => { await this.inTerminal('host'); });");
+    let root = staged.wrapper("mods/machine-add", "this.typed = 'host'; this.add('host', cx);");
     let window = cx.add_window(|_, _| Empty);
     let mut session = window.update(cx, |_, window, cx| {
         DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root, policy, window, cx).unwrap()
     }).unwrap();
     cx.run_until_parked();
     window.update(cx, |_, window, cx| {
-        session.describe(window, cx).unwrap();
+        let tree = session.describe(window, cx).unwrap();
+        assert!(tree.contains("machine-add"), "{tree}");
+        assert!(tree.contains("ma-message-host"), "{tree}");
+        assert!(tree.contains("h0x-core machine add host"), "{tree}");
         window.remove_window();
     }).unwrap();
     let calls = calls.borrow();
     assert!(calls.unexpected.is_empty(), "{:?}", calls.unexpected);
-    let spec = &calls.effects.iter().find(|(name, _)| name == "openOverlay").unwrap().1[0];
-    assert_eq!(spec["kind"], "dialog");
-    assert_eq!(spec["layout"]["children"][1]["content"]["terminal"], "t-setup");
-    assert!(!calls.effects.iter().any(|(name, _)| name == "closeOverlay"), "the picker must keep monitoring setup");
+    assert!(!calls.effects.iter().any(|(name, _)| name == "openOverlay" || name == "closeOverlay"), "the picker stays open without a setup dialog");
 }
 
 #[gpui::test]
