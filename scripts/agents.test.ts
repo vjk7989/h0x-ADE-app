@@ -4,7 +4,8 @@ import { readFile } from "node:fs/promises";
 const source = (await readFile(new URL("../defaults/mods/agents/main.js", import.meta.url), "utf8"))
   .replace(/^import .*;\n/gm, "").replace("export default class Agents", "class Agents");
 
-function harness(pins: string[], globals: Record<string, unknown> = {}) {
+function harness(pins: string[], extra: Record<string, unknown> = {}) {
+  const globals = { busyVerb: () => "Brewing…", ...extra };
   const data = new Map([["pins", JSON.stringify(pins)]]);
   const writes: unknown[] = [];
   const storage = { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => data.set(k, v), removeItem: (k: string) => data.delete(k) };
