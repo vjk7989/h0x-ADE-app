@@ -463,10 +463,10 @@ fn is_default_scrollback(n: &u32) -> bool {
     *n == SCROLLBACK_DEFAULT
 }
 
-/// A whole number in range, else the default (never an error: a typo here must not discard the file).
+/// A whole number in range (2000.0 and 2e3 count), else the default (never an error: a typo here must not discard the file).
 fn scrollback_or_default<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
-    Ok(v.as_u64().filter(|n| (SCROLLBACK_MIN as u64..=SCROLLBACK_MAX as u64).contains(n)).map_or(SCROLLBACK_DEFAULT, |n| n as u32))
+    Ok(v.as_f64().filter(|n| n.fract() == 0.0 && (SCROLLBACK_MIN as f64..=SCROLLBACK_MAX as f64).contains(n)).map_or(SCROLLBACK_DEFAULT, |n| n as u32))
 }
 
 fn is_true(b: &bool) -> bool {
@@ -710,8 +710,12 @@ pub fn load_person() -> Result<Person, String> {
     if !p.exists() {
         let _ = crate::persist::write_atomic(&p, serde_json::to_string_pretty(&Person::default()).unwrap() + "\n");
     }
-    let text = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    let person: Person = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    parse_person(&std::fs::read_to_string(&p).map_err(|e| e.to_string())?)
+}
+
+/// settings.json's text as the person's settings; a leading UTF-8 BOM (some editors add one) is ignored.
+fn parse_person(text: &str) -> Result<Person, String> {
+    let person: Person = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| e.to_string())?;
     if !(ZOOM_MIN..=ZOOM_MAX).contains(&person.zoom) {
         return Err(format!("zoom {} is outside {ZOOM_MIN}..{ZOOM_MAX}", person.zoom));
     }
@@ -971,6 +975,14 @@ mod tests {
         assert_eq!(lines(r#"{"scrollback_lines": 1000}"#), 1_000);
         assert_eq!(lines(r#"{"scrollback_lines": 100000}"#), 100_000);
         assert_eq!(lines(r#"{"scrollback_lines": 50000}"#), 50_000);
+        // A whole number written with a fraction part or an exponent is still that number.
+        for whole in ["2000.0", "2e3", "2.0E3", "1000.0", "100000.0", "1e5"] {
+            let want = whole.parse::<f64>().unwrap() as u32;
+            assert_eq!(lines(&format!(r#"{{"scrollback_lines": {whole}}}"#)), want, "{whole}");
+        }
+        for bad in ["2000.5", "999.0", "100001.0", "1e6", "1e-3"] {
+            assert_eq!(lines(&format!(r#"{{"scrollback_lines": {bad}}}"#)), 10_000, "{bad}");
+        }
         for bad in ["999", "100001", "0", "-5", "5000.5", "\"5000\"", "null", "true", "[]", "99999999999"] {
             assert_eq!(lines(&format!(r#"{{"scrollback_lines": {bad}}}"#)), 10_000, "{bad}");
         }
@@ -978,6 +990,15 @@ mod tests {
         assert_eq!(Settings::compose(&person, &crate::layout::Look::default(), true).scrollback_lines, 2_000);
         assert_eq!(serde_json::to_value(&person).unwrap()["scrollback_lines"], serde_json::json!(2000));
         assert!(serde_json::to_value(Person::default()).unwrap().get("scrollback_lines").is_none());
+    }
+
+    #[test]
+    fn a_settings_file_with_a_byte_order_mark_loads() {
+        let person = parse_person("\u{feff}{\"scrollback_lines\": 2000, \"font_ligatures\": true}").unwrap();
+        assert_eq!((person.scrollback_lines, person.font_ligatures), (2_000, true));
+        assert_eq!(parse_person("\u{feff}{}").unwrap(), Person::default());
+        assert!(parse_person("\u{feff}").is_err(), "an empty file is still reported");
+        assert!(parse_person("{\"zoom\": 9}").is_err());
     }
 
     #[test]

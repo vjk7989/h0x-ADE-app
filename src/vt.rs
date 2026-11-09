@@ -1977,8 +1977,7 @@ mod tests {
             crate::settings::set(crate::settings::Settings { scrollback_lines: lines, ..(*original).clone() });
             let mut vt = Vt::new(40, 10);
             for line in 1..=3000 {
-                vt.write(format!("{line:04}
-").as_bytes());
+                vt.write(format!("{line:04}\r\n").as_bytes());
             }
             vt.scroll_viewport(-10_000);
             let first: String = vt.frame().rows[0].iter().map(|c| c.text.as_str()).collect();

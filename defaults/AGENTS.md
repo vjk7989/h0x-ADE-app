@@ -741,8 +741,11 @@ What's about the user, never a look:
   are treated as the system clipboard.
   Clipboard reads (`?`) are never allowed.
 - `scrollback_lines`: lines of scrollback kept per terminal pane, `10000`
-  (default; about 10 MB per pane, 1 KB per line). A whole number from `1000`
-  to `100000`; anything else, or leaving it out, means `10000`. Applies to
+  (default). Each pane keeps up to that many lines within a memory cap of
+  1,000 bytes per line (10 MB at the default); wide panes and long wrapped
+  lines use more per line and so keep fewer. A whole number from `1000` to
+  `100000` (`2000.0` counts, `2000.5` doesn't); anything else, or leaving it
+  out, means `10000`. Applies to
   panes opened or reconnected after the change; panes already open keep
   theirs. Also in Settings → Terminal.
 - `check_updates`: `false` stops the automatic update checks (default `true`);
