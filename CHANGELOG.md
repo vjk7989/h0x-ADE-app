@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-11-09
+
+Security release from a full audit.
+
+### Changed
+
+- Settings → Look → Terminal: "Let programs copy to the clipboard" is off by default (programs could otherwise replace your clipboard with a command you might paste).
+- Settings → Updates: "Check for updates automatically" (on by default); "Check now" always works.
+- Settings → Remote shows the phone panel's warning about who delivers the page.
+- Mods you added that pull in code from a git repository no longer run; fonts load only from mods you allowed.
+- Updates install exactly the files that were verified.
+
+### Fixed
+
+- Reading a file on a remote Windows machine can no longer run a command, and network-share paths are refused there.
+- Pasted text can no longer leave paste mode; dropped paths with curly quotes, `-`, `@` or `,` are quoted correctly for PowerShell.
+- The app's control socket is limited to your account and SYSTEM, with request size and time limits.
+- Sessions "Reveal" refuses paths Explorer would split; worktree submodule paths must stay inside the repository; panel git commands run without external diff or text conversion.
+- The notification sound is written to a private temporary folder.
+
+### Requires
+
+- h0x-core 0.1.9.
+
 ## [0.1.10] - 2026-11-08
 
 ### Changed
