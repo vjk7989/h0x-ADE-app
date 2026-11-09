@@ -675,7 +675,7 @@ impl Vt {
             ok(ghostty_mouse_event_new(std::ptr::null(), &mut mouse_event), "mouse_event_new");
 
             install_png_decoder();
-            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
+            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: false, clipboard: [None, None] });
             let ud = &mut *shared as *mut Shared as *const c_void;
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_USERDATA, ud);
             let hold: GhosttyTerminalRenderHoldFn = Some(on_render_hold);
@@ -1484,7 +1484,8 @@ impl Vt {
     /// Wraps pasted text the way the program asked (bracketed paste or not).
     pub fn paste_bytes(&self, text: &str) -> Vec<u8> {
         if self.mode(BRACKETED_PASTE) {
-            let clean = text.replace("\x1b[201~", "");
+            // Every ESC and C1 control (U+0080-U+009F, CSI among them) goes: removing only the end marker lets `ESC[20` + marker + `1~` rebuild it.
+            let clean: String = text.chars().filter(|c| !matches!(c, '\x1b' | '\u{80}'..='\u{9f}')).collect();
             [b"\x1b[200~".as_slice(), clean.as_bytes(), b"\x1b[201~"].concat()
         } else {
             text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
@@ -1815,6 +1816,62 @@ mod tests {
             vt.progress_search();
         }
         panic!("terminal search did not finish incrementally");
+    }
+
+    #[test]
+    fn bracketed_paste_cannot_rebuild_its_end_marker() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"\x1b[?2004h");
+        for evil in ["a\x1b[20\x1b[201~1~b", "\x1b[201~", "x\u{9b}201~y", "\x1b\x1b[201\x1b[201~~"] {
+            let out = vt.paste_bytes(evil);
+            assert!(out.starts_with(b"\x1b[200~") && out.ends_with(b"\x1b[201~"), "{evil:?}");
+            let inner = &out[6..out.len() - 6];
+            assert!(!inner.contains(&0x1b), "{evil:?}");
+            assert!(!String::from_utf8_lossy(inner).contains('\u{9b}'), "{evil:?}");
+        }
+        assert_eq!(vt.paste_bytes("a\u{80}b\u{85}c\u{9d}d\u{9f}e\u{a0}f"), "\x1b[200~abcde\u{a0}f\x1b[201~".as_bytes());
+        assert_eq!(vt.paste_bytes(""), b"\x1b[200~\x1b[201~");
+        assert_eq!(vt.paste_bytes("plain\ntext"), b"\x1b[200~plain\ntext\x1b[201~");
+        // Without bracketed paste nothing is wrapped.
+        let plain = Vt::new(20, 3);
+        assert_eq!(plain.paste_bytes("a\nb"), b"a\rb");
+    }
+
+    #[test]
+    fn bracketed_paste_drops_every_escape_at_any_nesting_and_keeps_the_rest() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"\x1b[?2004h");
+        let mut evil = vec![
+            "\x1b".to_owned(),
+            "\u{9b}".to_owned(),
+            "\x1bstart".to_owned(),
+            "end\x1b".to_owned(),
+            "\u{9b}start and end\u{9b}".to_owned(),
+            "\x1b\u{9b}\x1b\u{9b}".to_owned(),
+            // Lossily decoded bad UTF-8 around the escapes.
+            "\u{fffd}\x1b\u{fffd}[201~\u{fffd}\u{9b}\u{fffd}201~".to_owned(),
+            "\u{65e5}\x1b[201~\u{1f600}\r\n\t\u{9b}201~".to_owned(),
+        ];
+        // Each wrap would rebuild the end marker if one layer were removed.
+        let (mut esc, mut c1, mut mixed) = ("\x1b[201~".to_owned(), "\u{9b}201~".to_owned(), "\x1b[201~".to_owned());
+        for _ in 0..12 {
+            esc = format!("\x1b[20{esc}1~");
+            c1 = format!("\u{9b}20{c1}1~");
+            mixed = format!("\x1b{mixed}[201~\u{9b}");
+            evil.extend([esc.clone(), c1.clone(), mixed.clone()]);
+        }
+        for text in &evil {
+            let out = vt.paste_bytes(text);
+            assert!(out.starts_with(b"\x1b[200~") && out.ends_with(b"\x1b[201~"), "{text:?}");
+            let inner = std::str::from_utf8(&out[6..out.len() - 6]).unwrap();
+            // Only the two escapes go; every other character, newlines included, arrives as typed.
+            let want: String = text.chars().filter(|c| !matches!(c, '\x1b' | '\u{9b}')).collect();
+            assert_eq!(inner, want, "{text:?}");
+        }
+        // Without bracketed paste the text is passed as before, escapes and all.
+        vt.write(b"\x1b[?2004l");
+        assert_eq!(vt.paste_bytes("\x1b[201~a\u{9b}\r\nb\n"), "\x1b[201~a\u{9b}\rb\r".as_bytes());
+        assert_eq!(vt.paste_bytes(""), b"");
     }
 
     #[test]
@@ -2452,9 +2509,20 @@ mod tests {
     }
 
     #[test]
+    fn osc52_writes_start_disabled_until_the_setting_allows_them() {
+        let mut vt = Vt::new(80, 24);
+        vt.write(b"\x1b]52;c;aGk=\x07");
+        assert_eq!(vt.take_clipboard(), [None, None]);
+        vt.allow_clipboard_write(true);
+        vt.write(b"\x1b]52;c;aGk=\x07");
+        assert_eq!(vt.take_clipboard(), [Some("hi".into()), None]);
+    }
+
+    #[test]
     fn osc52_writes_are_decoded_and_bounded() {
         use base64::Engine;
         let mut vt = Vt::new(80, 24);
+        vt.allow_clipboard_write(true);
         vt.write(b"\x1b]52;c;aGVs");
         assert_eq!(vt.take_clipboard(), [None, None]);
         vt.write(b"bG8=\x07");
