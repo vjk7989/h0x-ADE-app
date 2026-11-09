@@ -644,7 +644,7 @@ fn shared_module_code_reaches_only_the_calling_copys_storage(cx: &mut TestAppCon
 import { View, div } from 'gpui-kit';
 import { props } from 'copy';
 sessionStorage.setItem('module', props());
-const read = key => String(sessionStorage.getItem(key));
+const read = key => sessionStorage.getItem(key) ?? 'none';
 export default class Panel extends View {
   init() {
     const before = read('who');
@@ -663,15 +663,15 @@ export default class Panel extends View {
         let mut first = DescriptionSession::load(runtime.clone(), &root, policy("A"), window, cx).unwrap();
         let mut second = DescriptionSession::load(runtime.clone(), &root, policy("B"), window, cx).unwrap();
         let tree = first.describe(window, cx).unwrap();
-        assert!(tree.contains("A|null|A|A"), "{tree}");
+        assert!(tree.contains("A|none|A|A"), "{tree}");
         let tree = second.describe(window, cx).unwrap();
-        assert!(tree.contains("B|null|B|null"), "copy B saw copy A's storage: {tree}");
+        assert!(tree.contains("B|none|B|none"), "copy B saw copy A's storage: {tree}");
         drop(first);
         let mut third = DescriptionSession::load(runtime.clone(), &root, policy("C"), window, cx).unwrap();
         let tree = third.describe(window, cx).unwrap();
-        assert!(tree.contains("C|null|C|null"), "a reopened copy saw an old copy's storage: {tree}");
+        assert!(tree.contains("C|none|C|none"), "a reopened copy saw an old copy's storage: {tree}");
         let tree = second.describe(window, cx).unwrap();
-        assert!(tree.contains("B|null|B|null"), "{tree}");
+        assert!(tree.contains("B|none|B|none"), "{tree}");
     }).unwrap();
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
     cx.run_until_parked();
