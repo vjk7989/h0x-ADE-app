@@ -53,6 +53,22 @@ pub fn app_dir() -> PathBuf {
     env("H0X_ADE_HOME").unwrap_or_else(|| env("XDG_CONFIG_HOME").unwrap_or_else(|| home().join(".config")).join("h0x-ade"))
 }
 
+/// Where `h0x-core` reads its config.toml (mirrors the core's own lookup): a non-empty
+/// `$XDG_CONFIG_HOME`, else `~/.config` (Windows: `%APPDATA%`, else `~\AppData\Roaming`).
+pub fn core_config() -> PathBuf {
+    core_config_in(|k| std::env::var_os(k).map(PathBuf::from), &home(), cfg!(windows))
+}
+
+fn core_config_in(env: impl Fn(&str) -> Option<PathBuf>, home: &Path, windows: bool) -> PathBuf {
+    let env = |k: &str| env(k).filter(|v| !v.as_os_str().is_empty());
+    let base = match env("XDG_CONFIG_HOME") {
+        Some(xdg) => xdg,
+        None if windows => env("APPDATA").unwrap_or_else(|| home.join("AppData").join("Roaming")),
+        None => home.join(".config"),
+    };
+    base.join("h0x-core").join("config.toml")
+}
+
 /// Creates the app home. It holds settings, the control socket and mod
 /// consent, so on unix it is kept private (0700) when this user owns it.
 pub fn ensure_app_dir() -> std::io::Result<PathBuf> {
@@ -1167,6 +1183,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .function("busyVerb", busy_verb_call)
         .function("home", |_| Ok(home().to_string_lossy().into_owned().into()))
         .function("appHome", |_| Ok(app_dir().to_string_lossy().into_owned().into()))
+        .function("coreConfig", |_| Ok(core_config().to_string_lossy().into_owned().into()))
         .function("fonts", |_| Ok(to_host(&json!(*FONTS.lock().unwrap()))))
         .function("updates", |_| Ok(to_host(&crate::update::status())))
         .function("presentUpdateNotes", |a| {
@@ -1441,6 +1458,57 @@ pub fn prepare_load(inst: &Instance) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_config_path_follows_the_cores_lookup() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| pairs.iter().find(|(n, v)| *n == k && !v.is_empty()).map(|(_, v)| PathBuf::from(v))
+        };
+        let home = Path::new("/h");
+        let cases: [(&[(&str, &str)], bool, &str); 5] = [
+            (&[], false, "/h/.config/h0x-core/config.toml"),
+            (&[("XDG_CONFIG_HOME", "/x")], false, "/x/h0x-core/config.toml"),
+            (&[("XDG_CONFIG_HOME", "")], false, "/h/.config/h0x-core/config.toml"),
+            (&[("XDG_CONFIG_HOME", "/x"), ("APPDATA", "/a")], true, "/x/h0x-core/config.toml"),
+            (&[("APPDATA", "/a")], true, "/a/h0x-core/config.toml"),
+        ];
+        for (pairs, windows, want) in cases {
+            let pairs: &'static [(&str, &str)] = Box::leak(pairs.to_vec().into_boxed_slice());
+            assert_eq!(core_config_in(env(pairs), home, windows), Path::new(want), "{pairs:?} windows={windows}");
+        }
+        assert_eq!(core_config_in(env(&[]), home, true), Path::new("/h/AppData/Roaming/h0x-core/config.toml"));
+    }
+
+    #[test]
+    fn core_config_path_table_for_windows_xdg_and_homes_with_spaces() {
+        let tail = |base: &Path| base.join("h0x-core").join("config.toml");
+        let win_home = Path::new(r"C:\Users\Jane Doe");
+        let unix_home = Path::new("/home/jane doe");
+        // (variables, home, windows, the folder config.toml's h0x-core folder sits in)
+        let cases: [(&[(&str, &str)], &Path, bool, PathBuf); 8] = [
+            (&[("APPDATA", r"C:\Users\Jane Doe\AppData\Roaming")], win_home, true, PathBuf::from(r"C:\Users\Jane Doe\AppData\Roaming")),
+            (&[("XDG_CONFIG_HOME", r"D:\x d g"), ("APPDATA", r"C:\a")], win_home, true, PathBuf::from(r"D:\x d g")),
+            (&[("XDG_CONFIG_HOME", r"D:\x d g")], win_home, true, PathBuf::from(r"D:\x d g")),
+            (&[], win_home, true, win_home.join("AppData").join("Roaming")),
+            (&[], unix_home, false, unix_home.join(".config")),
+            (&[("APPDATA", r"C:\a")], unix_home, false, unix_home.join(".config")),
+            (&[("XDG_CONFIG_HOME", "/x y")], unix_home, false, PathBuf::from("/x y")),
+            (&[("XDG_CONFIG_HOME", "/x y"), ("APPDATA", r"C:\a")], unix_home, false, PathBuf::from("/x y")),
+        ];
+        for (pairs, home, windows, base) in cases {
+            let lookup = |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| PathBuf::from(v));
+            let got = core_config_in(lookup, home, windows);
+            assert_eq!(got, tail(&base), "{pairs:?} home={home:?} windows={windows}");
+            assert_eq!(got.file_name().and_then(|n| n.to_str()), Some("config.toml"));
+        }
+    }
+
+    #[test]
+    fn core_config_host_path_ends_in_h0x_core_config_toml() {
+        let path = core_config();
+        assert!(path.ends_with(Path::new("h0x-core").join("config.toml")), "{path:?}");
+        assert_ne!(path, Path::new("h0x-core").join("config.toml"), "never a bare relative path");
+    }
 
     #[cfg(unix)]
     #[test]

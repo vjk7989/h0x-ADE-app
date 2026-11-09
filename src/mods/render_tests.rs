@@ -70,6 +70,13 @@ struct Calls {
     /// Paths passed to `removeAppFile`, and the files a script of writes and removes leaves behind.
     removes: Vec<String>,
     files: BTreeMap<String, String>,
+    /// Scripted read and write outcomes by "<host function> <path>", taken in order (the last repeats):
+    /// None lets the call through, Some(message) rejects it.
+    refusals: BTreeMap<String, Vec<Option<String>>>,
+    /// With `cas`, a `writeTextFile` whose `expected` is not what `files` holds rejects, as the host's does.
+    cas: bool,
+    /// Every `writeTextFile` call as (path, text, expected), rejected ones included.
+    attempts: Vec<(String, String, Value)>,
 }
 
 fn updates(app: &str, core: &str) -> Value {
@@ -97,7 +104,7 @@ fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Val
         ("revision".into(), json!(0)),
         ("windowVisible".into(), json!(true)),
         ("placement".into(), Value::Null),
-        ("home".into(), json!("/fixture")), ("appHome".into(), json!("/fixture/app")),
+        ("home".into(), json!("/fixture")), ("appHome".into(), json!("/fixture/app")), ("coreConfig".into(), json!("/fixture/.config/h0x-core/config.toml")),
         ("keys".into(), Value::Array(serde_json::from_str::<BTreeMap<String, BTreeMap<String, String>>>(include_str!("../../defaults/keys.json")).unwrap().into_iter().flat_map(|(section, bindings)| bindings.into_iter().map(move |(keys, action)| json!({"section":section,"keys":keys,"action":action}))).collect())),
         ("commands".into(), Value::Array(crate::commands::COMMANDS.iter().map(|c| json!({"name":c.name,"about":c.about,"args":c.args.iter().map(|a| json!({"name":a.name,"required":a.required})).collect::<Vec<_>>()})).collect())),
     ]);
@@ -170,10 +177,13 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         let calls = calls.clone();
         module = module.async_function(name, move |a| {
             let first = a.get(0).map(from_host).unwrap_or(Value::Null);
+            if let Some(message) = refused(&calls, name, &first, a.get(1).map(from_host), a.get(2).map(from_host)) {
+                return Ok(std::future::ready(Err(HostError::new(message))));
+            }
             let scripted = scripted(&calls, name, &first, a.get(1).map(from_host));
             let reply = match name {
                 _ if scripted.is_some() => scripted,
-                "readTextFile" if first == "/fixture/app/settings.json" || first == "/fixture/.ssh/config" => Some(Value::Null),
+                "readTextFile" if first == "/fixture/app/settings.json" || first == "/fixture/.ssh/config" || first == "/fixture/.config/h0x-core/config.toml" => Some(Value::Null),
                 "readTextFile" => first
                     .as_str()
                     .and_then(|p| p.strip_prefix("/fixture/app/layouts/"))
@@ -1235,6 +1245,213 @@ fn settings_change_creates_a_missing_file(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn keep_awake_toggle_creates_a_missing_core_config(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+    let (_, calls) = describe_remote_with(cx, &staged, &replies, "this.setKeepAwake(true, cx);", "/fixture/app", &[]);
+    let c = calls.borrow();
+    assert_eq!(c.writes, vec![("/fixture/.config/h0x-core/config.toml".to_string(), "keep_awake = true\n".to_string())]);
+}
+
+const CORE_CONFIG: &str = "/fixture/.config/h0x-core/config.toml";
+
+// Settings → Terminal with core's config.toml holding `file` (None: missing) and writes checked against
+// what was read, as the host checks them. `refusals` script reads and writes of that file by host function;
+// `setup` runs after init. The keep-awake toggle's id carries its state: `st-keep-awake-on` / `-off`.
+fn keep_awake_page(cx: &mut TestAppContext, staged: &Staged, file: Option<&str>, refusals: &[(&str, &[Option<&str>])], setup: &str) -> (String, Rc<RefCell<Calls>>) {
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    {
+        let mut c = calls.borrow_mut();
+        c.files = file.map(|f| (CORE_CONFIG.to_string(), f.to_string())).into_iter().collect();
+        c.replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([])).into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        c.cas = true;
+        c.refusals = refusals
+            .iter()
+            .map(|(name, list)| (format!("{name} {CORE_CONFIG}"), list.iter().map(|o| o.map(str::to_owned)).collect()))
+            .collect();
+    }
+    let setup = String::from("const toggle = this.toggle.bind(this);")
+        + "this.toggle = (t, id, on, f) => toggle(t, id === 'st-keep-awake' ? id + (on ? '-on' : '-off') : id, on, f);"
+        + setup;
+    let tree = describe_settings_with(cx, staged, &calls, "look", &setup, "/fixture/app");
+    (tree, calls)
+}
+
+// Presses the toggle to `on` once the page is up (its own read of the file is left out so the
+// scripted reads belong to the press).
+fn keep_awake_press(on: bool) -> String {
+    format!("this.loadKeepAwake = async () => {{}}; this.setKeepAwake({on}, cx);")
+}
+
+#[gpui::test]
+fn keep_awake_toggle_reads_only_a_top_level_true(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let cases: &[(Option<&str>, bool)] = &[
+        (None, false),
+        (Some(""), false),
+        (Some("   \n\t\n"), false),
+        (Some("keep_awake = true\n"), true),
+        (Some("keep_awake = true"), true),
+        (Some("keep_awake=true\n"), true),
+        (Some("  \tkeep_awake = true\n"), true),
+        (Some("keep_awake = true # stay up\n"), true),
+        (Some("keep_awake = true#x\n"), true),
+        (Some("keep_awake = true   \n"), true),
+        (Some("keep_awake = true\r\n"), true),
+        (Some("a = 1\r\nkeep_awake = true\r\nb = 2\r\n"), true),
+        (Some("\u{feff}keep_awake = true\n"), true),
+        (Some("\u{feff}a = 1\nkeep_awake = true\n"), true),
+        (Some("keep_awake = false\n"), false),
+        (Some("keep_awake = \"yes\"\n"), false),
+        (Some("keep_awake = \"true\"\n"), false),
+        (Some("keep_awake = 1\n"), false),
+        (Some("keep_awake = True\n"), false),
+        (Some("keep_awake = truex\n"), false),
+        (Some("keep_awake = true false\n"), false),
+        (Some("keep_awake =\n"), false),
+        (Some("keep_awake_extra = true\n"), false),
+        (Some("# keep_awake = true\n"), false),
+        (Some("[bridge]\nkeep_awake = true\n"), false),
+        (Some("a = 1\n  [bridge]\nkeep_awake = true\n"), false),
+        (Some("keep_awake = false\nkeep_awake = true\n"), false),
+        (Some("keep_awake = true\nkeep_awake = false\n"), true),
+        (Some("keep_awake = true\n[bridge]\nkeep_awake = false\n"), true),
+    ];
+    for (file, on) in cases {
+        let (tree, calls) = keep_awake_page(cx, &staged, *file, &[], "");
+        let want = if *on { "st-keep-awake-on" } else { "st-keep-awake-off" };
+        assert!(tree.contains(want), "{file:?} should show {want}: {tree}");
+        let c = calls.borrow();
+        assert!(c.attempts.is_empty(), "{file:?}: reading writes nothing: {:?}", c.attempts);
+        assert!(!tree.contains("can't be read"), "{file:?}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn keep_awake_toggle_is_off_when_core_config_cannot_be_read(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (tree, calls) = keep_awake_page(cx, &staged, Some("keep_awake = true\n"), &[("readTextFile", &[Some("permission denied")])], "");
+    assert!(tree.contains("st-keep-awake-off"), "{tree}");
+    let c = calls.borrow();
+    assert!(c.attempts.is_empty(), "{:?}", c.attempts);
+    assert_eq!(c.files.get(CORE_CONFIG).map(String::as_str), Some("keep_awake = true\n"), "the file is byte-identical");
+}
+
+#[gpui::test]
+fn keep_awake_write_changes_only_its_own_line_of_core_config(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // (file before, pressed to, file after)
+    let cases: &[(Option<&str>, bool, &str)] = &[
+        (None, true, "keep_awake = true\n"),
+        (None, false, "keep_awake = false\n"),
+        (Some(""), true, "keep_awake = true\n"),
+        (Some("   \n"), true, "keep_awake = true\n   \n"),
+        (Some("a = 1\n"), true, "keep_awake = true\na = 1\n"),
+        (Some("a = 1"), true, "keep_awake = true\na = 1"),
+        (Some("a = 1\r\nb = 2\r\n"), true, "keep_awake = true\r\na = 1\r\nb = 2\r\n"),
+        (Some("a = 1\nb = 2\r\n"), true, "keep_awake = true\r\na = 1\nb = 2\r\n"),
+        (Some("keep_awake = true\r\nb = 2\r\n"), false, "keep_awake = false\r\nb = 2\r\n"),
+        (Some("a = 1\r\nkeep_awake = false\r\n"), true, "a = 1\r\nkeep_awake = true\r\n"),
+        (Some("keep_awake = true"), false, "keep_awake = false"),
+        (Some("keep_awake = true\n"), false, "keep_awake = false\n"),
+        (Some("\u{feff}"), true, "\u{feff}keep_awake = true\n"),
+        (Some("\u{feff}a = 1\n"), true, "\u{feff}keep_awake = true\na = 1\n"),
+        (Some("\u{feff}keep_awake = false\n"), true, "\u{feff}keep_awake = true\n"),
+        (Some("\u{feff}a = 1\nkeep_awake = false\n"), true, "\u{feff}a = 1\nkeep_awake = true\n"),
+        (Some("  keep_awake = true  # stay up\nb = 2\n"), false, "keep_awake = false\nb = 2\n"),
+        (Some("keep_awake = \"yes\"\n"), true, "keep_awake = true\n"),
+        (Some("keep_awake = 1\n"), false, "keep_awake = false\n"),
+        (Some("[bridge]\nkeep_awake = true\n"), false, "keep_awake = false\n[bridge]\nkeep_awake = true\n"),
+        (Some("# note\n\n[bridge]\r\nkeep_awake = true\r\n"), true, "keep_awake = true\r\n# note\n\n[bridge]\r\nkeep_awake = true\r\n"),
+        (Some("keep_awake = true\nkeep_awake = true\n"), false, "keep_awake = false\nkeep_awake = true\n"),
+    ];
+    for (file, on, after) in cases {
+        let (tree, calls) = keep_awake_page(cx, &staged, *file, &[], &keep_awake_press(*on));
+        let c = calls.borrow();
+        assert_eq!(c.writes, vec![(CORE_CONFIG.to_string(), after.to_string())], "{file:?} pressed {on}");
+        assert_eq!(c.attempts.len(), 1, "{file:?}: one write: {:?}", c.attempts);
+        assert_eq!(c.attempts[0].2, file.map_or(Value::Null, |f| json!(f)), "{file:?}: written over exactly what was read");
+        let want = if *on { "st-keep-awake-on" } else { "st-keep-awake-off" };
+        assert!(tree.contains(want), "{file:?} pressed {on} should show {want}: {tree}");
+        assert!(!tree.contains("can't be read") && !tree.contains("stale snapshot"), "{file:?}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn keep_awake_never_overwrites_a_core_config_it_could_not_read_and_says_so(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for file in [None, Some("keep_awake = false\na = 1\n")] {
+        let (tree, calls) = keep_awake_page(cx, &staged, file, &[("readTextFile", &[Some("permission denied")])], &keep_awake_press(true));
+        let c = calls.borrow();
+        assert!(c.attempts.is_empty(), "{file:?}: nothing is written over it: {:?}", c.attempts);
+        assert_eq!(c.files.get(CORE_CONFIG).map(String::as_str), file, "{file:?}: byte-identical");
+        assert!(tree.contains("config.toml can't be read"), "{file:?}: the page says why nothing changed: {tree}");
+        assert!(tree.contains("st-keep-awake-off"), "{file:?}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn keep_awake_write_rejected_three_times_shows_the_last_rejection(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let file = "a = 1\n";
+    let refusals: &[Option<&str>] = &[Some("first refusal"), Some("second refusal"), Some("third refusal"), Some("fourth refusal")];
+    let (tree, calls) = keep_awake_page(cx, &staged, Some(file), &[("writeTextFile", refusals)], &keep_awake_press(true));
+    let c = calls.borrow();
+    assert_eq!(c.attempts.len(), 3, "three attempts, then it gives up: {:?}", c.attempts);
+    assert!(c.attempts.iter().all(|(_, text, expected)| text == "keep_awake = true\na = 1\n" && *expected == json!(file)), "{:?}", c.attempts);
+    assert!(c.writes.is_empty(), "{:?}", c.writes);
+    assert_eq!(c.files.get(CORE_CONFIG).map(String::as_str), Some(file));
+    assert!(tree.contains("third refusal"), "the last rejection is shown: {tree}");
+    assert!(!tree.contains("first refusal") && !tree.contains("second refusal") && !tree.contains("fourth refusal"), "{tree}");
+    assert!(tree.contains("st-keep-awake-off"), "{tree}");
+}
+
+#[gpui::test]
+fn keep_awake_write_retries_after_one_rejection_and_clears_it(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (tree, calls) = keep_awake_page(cx, &staged, Some("a = 1\n"), &[("writeTextFile", &[Some("busy"), None])], &keep_awake_press(true));
+    let c = calls.borrow();
+    assert_eq!(c.attempts.len(), 2, "{:?}", c.attempts);
+    assert_eq!(c.writes, vec![(CORE_CONFIG.to_string(), "keep_awake = true\na = 1\n".to_string())]);
+    assert!(!tree.contains("busy"), "a later success clears the rejection: {tree}");
+    assert!(tree.contains("st-keep-awake-on"), "{tree}");
+}
+
+#[gpui::test]
+fn keep_awake_read_rejection_after_a_rejected_write_says_it_cannot_be_read(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let refusals: &[(&str, &[Option<&str>])] = &[("readTextFile", &[None, Some("permission denied")]), ("writeTextFile", &[Some("write refused")])];
+    let (tree, calls) = keep_awake_page(cx, &staged, Some("a = 1\n"), refusals, &keep_awake_press(true));
+    let c = calls.borrow();
+    assert_eq!(c.attempts.len(), 1, "no write after the read failed: {:?}", c.attempts);
+    assert!(c.writes.is_empty(), "{:?}", c.writes);
+    assert!(tree.contains("config.toml can't be read"), "the unreadable file is what the page reports: {tree}");
+    assert!(!tree.contains("write refused"), "{tree}");
+}
+
+#[gpui::test]
+fn keep_awake_row_sits_under_terminal_after_scrollback(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    let tree = describe_settings_with(cx, &staged, &calls, "look", "", "/fixture/app");
+    let at = |s: &str| tree.find(s).unwrap_or_else(|| panic!("{s:?} missing: {tree}"));
+    assert!(at("TERMINAL") < at("st-scrollback"), "{tree}");
+    assert!(at("st-scrollback") < at("Keep this PC awake while agents work"), "{tree}");
+    assert!(at("Keep this PC awake while agents work") < at("st-keep-awake"), "{tree}");
+    at("While an agent in a terminal on this PC is working, the PC doesn't go to sleep. The display can still turn off and the screen still locks. Saved as keep_awake in h0x-core's config.toml.");
+    assert_eq!(tree.matches("st-keep-awake").count(), 1, "one toggle: {tree}");
+}
+
+#[gpui::test]
 fn settings_sections_and_updates(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let start = Instant::now();
@@ -1282,6 +1499,27 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
         assert!(tree.contains(if checking { "Checking" } else if succeeded { "Up to date" } else { "Check your connection" }), "check status missing: {tree}");
     }
     eprintln!("27 settings cases, each twice: {:?}", start.elapsed());
+}
+
+// A scripted rejection of a read or write (`Calls::refusals`), or a stale `expected` under `Calls::cas`.
+fn refused(calls: &Rc<RefCell<Calls>>, name: &str, first: &Value, text: Option<Value>, expected: Option<Value>) -> Option<String> {
+    if name != "readTextFile" && name != "writeTextFile" {
+        return None;
+    }
+    let mut c = calls.borrow_mut();
+    let path = first.as_str()?.to_owned();
+    if name == "writeTextFile" {
+        let text = text.as_ref().and_then(Value::as_str).unwrap_or_default().to_owned();
+        c.attempts.push((path.clone(), text, expected.clone().unwrap_or(Value::Null)));
+    }
+    let outcome = c.refusals.get_mut(&format!("{name} {path}")).and_then(|list| if list.len() > 1 { Some(list.remove(0)) } else { list.first().cloned() });
+    if let Some(outcome) = outcome {
+        if outcome.is_some() {
+            return outcome;
+        }
+    }
+    let current = c.files.get(&path).map_or(Value::Null, |t| json!(t));
+    (name == "writeTextFile" && c.cas && expected.unwrap_or(Value::Null) != current).then(|| "stale snapshot: the file changed on disk".to_owned())
 }
 
 // The scripted answer to a `core` or `writeTextFile` call, recording it; None when nothing is scripted.
@@ -1355,8 +1593,14 @@ fn describe_remote_with(
     let calls = Rc::new(RefCell::new(Calls::default()));
     calls.borrow_mut().files = files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     calls.borrow_mut().replies = replies.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+    let tree = describe_settings_with(cx, staged, &calls, "remote", setup, app_home);
+    (tree, calls)
+}
+
+// Settings → `section` with `calls` prepared by the caller, once its tasks have finished.
+fn describe_settings_with(cx: &mut TestAppContext, staged: &Staged, calls: &Rc<RefCell<Calls>>, section: &str, setup: &str, app_home: &str) -> String {
     let mut p = props();
-    p["section"] = json!("remote");
+    p["section"] = json!(section);
     let mut values = fixture(true, p, updates("current", "current"));
     values.insert("appHome".into(), json!(app_home));
     let policy = Policy::new()
@@ -1373,7 +1617,7 @@ fn describe_remote_with(
     cx.run_until_parked();
     let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
-    (tree, calls)
+    tree
 }
 
 // `entry` on the populated fixture with `props`, once its tasks have finished: `replies` answer core and exec.

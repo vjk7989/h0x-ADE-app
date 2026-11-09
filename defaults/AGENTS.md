@@ -1005,7 +1005,7 @@ All of it is in `h0x.d.ts`. In short:
   `timeout` is milliseconds, defaults to 30,000 and is capped at 600,000 (10 minutes),
   locally and remotely. It rejects on timeout, if the program cannot start or the machine cannot be reached.
   `core(args)` (`h0x-core read <t>` gives a terminal's text),
-  `home()`, `appHome()`, `playSound("done" | "blocked" | file)`,
+  `home()`, `appHome()`, `coreConfig()` (this PC's h0x-core config.toml), `playSound("done" | "blocked" | file)`,
   `busyVerb(id, workingSince, now)` (a working agent's rotating verb, "Brewing…").
   `knownAgents({ on })`: the agents people can start (programs.json's
   `run`), most picked first, each `installed` or not there (asked of the
