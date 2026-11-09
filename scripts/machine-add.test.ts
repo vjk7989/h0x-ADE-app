@@ -164,7 +164,7 @@ for (const target of awkward) {
   test(`posix quoting keeps ${JSON.stringify(target)} one literal argument`, async () => {
     const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "host_key" } }) }, "linux");
     await s.add(target);
-    const quoted = s.view.state[target].match(/`h0x-core machine add (.*)`\. /)![1];
+    const quoted = s.view.state[target].match(/`h0x-core machine add (.*?)` in a terminal\./s)![1];
     if (!Bun.which("sh")) return;
     const shell = Bun.spawnSync(["sh", "-c", `printf '%s' ${quoted}`]);
     expect(shell.stdout.toString()).toBe(target);
@@ -173,7 +173,7 @@ for (const target of awkward) {
   test(`powershell quoting keeps ${JSON.stringify(target)} one literal argument`, async () => {
     const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "host_key" } }) }, "windows");
     await s.add(target);
-    const quoted = s.view.state[target].match(/`h0x-core machine add (.*)`\. /)![1];
+    const quoted = s.view.state[target].match(/`h0x-core machine add (.*?)` in a terminal\./s)![1];
     expect(quoted.startsWith("'") && quoted.endsWith("'")).toBe(true);
     // Inside single quotes only a doubled quote character may appear.
     expect(quoted.slice(1, -1).replace(/(['\u2018\u2019\u201A\u201B])\1/g, "")).not.toMatch(/['\u2018\u2019\u201A\u201B]/);
@@ -199,7 +199,7 @@ for (const platform of ["linux", "windows"]) {
     const target = "host\nrm -rf ~";
     const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "host_key" } }) }, platform);
     await s.add(target);
-    const quoted = s.view.state[target].match(/`h0x-core machine add (.*)`\. /s)![1];
+    const quoted = s.view.state[target].match(/`h0x-core machine add (.*?)` in a terminal\./s)![1];
     expect(quoted).toBe(`'${target}'`);
   });
 }
