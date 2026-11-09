@@ -68,9 +68,13 @@ async function modules(gitDir, config, on, out = [], parent = "") {
   for (const record of keys.out.split("\0").filter(Boolean)) {
     const at = record.indexOf("\n");
     const name = record.slice("submodule.".length, at - ".path".length);
+    const path = record.slice(at + 1);
+    // Both come from a repo's .gitmodules: nothing may leave the repo (.., absolute, drive prefix).
+    const unsafe = (s) => !s || /^([/\\]|[A-Za-z]:)/.test(s) || s.split(/[/\\]/).includes("..");
+    if (unsafe(name) || unsafe(path)) continue;
     const dir = `${gitDir}/modules/${name}`;
     if (!(await git(gitDir, ["--git-dir", dir, "rev-parse", "--git-dir"], on)).ok) continue; // never checked out
-    const pinned = await git(gitDir, ["--git-dir", gitDir, "rev-parse", `HEAD:${record.slice(at + 1)}`], on);
+    const pinned = await git(gitDir, ["--git-dir", gitDir, "rev-parse", `HEAD:${path}`], on);
     // Names are only unique within their parent: nested ones carry its name.
     out.push({ name: parent + name, dir, pinned: pinned.ok ? pinned.out : "" });
     if ((await git(gitDir, ["--git-dir", dir, "cat-file", "-e", "HEAD:.gitmodules"], on)).ok) await modules(dir, ["--blob", "HEAD:.gitmodules"], on, out, `${parent + name}/`);

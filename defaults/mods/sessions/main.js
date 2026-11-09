@@ -308,6 +308,9 @@ export default class Sessions extends View {
   // This computer's file manager, with the file selected where it can be.
   reveal(x, cx) {
     const platform = window()?.platform;
+    // Explorer splits its argument on commas and quotes (same guard as links.rs, ADR-050).
+    if (typeof x.path !== "string" || !x.path) return this.fail("Couldn't show the file", "This session has no file to show.");
+    if (platform === "windows" && /[,"`]/.test(x.path)) return this.fail("Couldn't show the file", "The path has a comma or quote that Explorer can't take.");
     const [command, args] =
       platform === "windows" ? ["explorer", [`/select,${x.path.replace(/\//g, "\\")}`]]
       : platform === "macos" ? ["open", ["-R", x.path]]

@@ -86,10 +86,10 @@ enum Record {
         application: Option<Rc<ApplicationGeneration>>,
         subscriptions: Vec<Subscription>,
     },
-    // HERDR: retained code-editor state has the same ownership and events as textareas.
+    // HyperOx: retained code-editor state has the same ownership and events as textareas.
     Editor {
         state: Entity<EditorState>,
-        // HERDR: presentation overrides stay with the retained script editor.
+        // HyperOx: presentation overrides stay with the retained script editor.
         font_family: Option<String>,
         font_size: Option<f32>,
         application: Option<Rc<ApplicationGeneration>>,
@@ -171,7 +171,7 @@ enum Record {
     },
 }
 
-// HERDR: script editor construction options, decoded before retaining any state.
+// HyperOx: script editor construction options, decoded before retaining any state.
 #[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct EditorOptions {
@@ -301,7 +301,7 @@ impl EntityStore {
             Record::View { .. } => Some("View"),
             Record::Input { .. } => Some("InputState"),
             Record::Textarea { .. } => Some("TextareaState"),
-            // HERDR: expose the distinct code-editor handle type.
+            // HyperOx: expose the distinct code-editor handle type.
             Record::Editor { .. } => Some("EditorState"),
             Record::Calendar { .. } => Some("CalendarState"),
             Record::Slider { .. } => Some("SliderState"),
@@ -445,7 +445,7 @@ impl EntityStore {
         }
     }
 
-    // HERDR: code editors ship with syntax support; unset UI colors follow the live palette.
+    // HyperOx: code editors ship with syntax support; unset UI colors follow the live palette.
     pub(crate) fn create_editor(
         &mut self,
         options: EditorOptions,
@@ -483,7 +483,7 @@ impl EntityStore {
         })
     }
 
-    // HERDR: never resolve an editor as an input or textarea.
+    // HyperOx: never resolve an editor as an input or textarea.
     pub fn editor(&self, handle: EntityHandle) -> Option<Entity<EditorState>> {
         match self.record(handle) {
             Some(Record::Editor { state, .. }) => Some(state.clone()),
@@ -491,7 +491,7 @@ impl EntityStore {
         }
     }
 
-    // HERDR: theme defaults are resolved at render time, not frozen at construction.
+    // HyperOx: theme defaults are resolved at render time, not frozen at construction.
     pub(crate) fn editor_font(&self, handle: EntityHandle) -> (Option<String>, Option<f32>) {
         match self.record(handle) {
             Some(Record::Editor {
@@ -819,7 +819,7 @@ impl EntityStore {
             Some(Record::Textarea { state, .. }) => {
                 subscribe_to_events(&state.clone(), event, window, cx, handler)
             }
-            // HERDR: code editors emit the same input events.
+            // HyperOx: code editors emit the same input events.
             Some(Record::Editor { state, .. }) => {
                 subscribe_to_events(&state.clone(), event, window, cx, handler)
             }
@@ -1016,7 +1016,7 @@ impl EntityStore {
                 | Record::Textarea {
                     application: owner, ..
                 }
-                // HERDR: unload editors and their subscriptions with the owning mod.
+                // HyperOx: unload editors and their subscriptions with the owning mod.
                 | Record::Editor { application: owner, .. }
                 | Record::Slider {
                     application: owner, ..
@@ -1158,7 +1158,7 @@ impl EntityStore {
             })
     }
 
-    // HERDR: test the native editing/readonly behavior behind script handles.
+    // HyperOx: test the native editing/readonly behavior behind script handles.
     #[cfg(test)]
     pub(crate) fn first_editor(&self) -> Option<Entity<EditorState>> {
         self.records

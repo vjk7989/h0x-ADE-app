@@ -250,7 +250,7 @@ impl<'a> ChildSpecs<'a> {
             );
         }
         let inherited = refinement.text.color.unwrap_or(self.inherited);
-        // HERDR: for hosted spinners (see `Spin`).
+        // HyperOx: for hosted spinners (see `Spin`).
         let _fade = Fade::enter(&refinement, &states);
         let children: Children = node
             .children()
@@ -308,10 +308,10 @@ impl StateStyles {
 
 #[derive(Default)]
 struct Behavior {
-    /// HERDR: `frames(list, ms)` and `loop(property, policy)` (see [`apply_loops`]).
+    /// HyperOx: `frames(list, ms)` and `loop(property, policy)` (see [`apply_loops`]).
     frames: Option<(f64, Vec<String>)>,
     loops: SmallVec<[Loop; 1]>,
-    /// HERDR: `spin(ms)`: an svg turning once every `ms`.
+    /// HyperOx: `spin(ms)`: an svg turning once every `ms`.
     spin: Option<f64>,
     disabled: bool,
     selectable: Option<bool>,
@@ -705,7 +705,7 @@ pub(crate) fn try_materialize(
     window: &mut Window,
     cx: &mut App,
 ) -> anyhow::Result<AnyElement> {
-    // HERDR: a check constructs elements once; it must not schedule animation frames.
+    // HyperOx: a check constructs elements once; it must not schedule animation frames.
     CHECKING.with(|c| c.set(true));
     let built = with_error_frame(|| materialize(runtime, snapshot, window, cx));
     CHECKING.with(|c| c.set(false));
@@ -779,7 +779,7 @@ fn materialize_node(
     let motion_identity = motion_element_id(id, behavior.key.clone(), &component);
     apply_motion(motion_identity, &motions, &mut refinement, window, cx);
     let frame_text = apply_loops(&behavior, &mut refinement, window, cx);
-    // HERDR: for hosted spinners (see `Spin`).
+    // HyperOx: for hosted spinners (see `Spin`).
     let _fade = Fade::enter(&refinement, &states);
     if matches!(
         component,
@@ -1439,7 +1439,7 @@ fn materialize_component(
             // still wins and an icon in a dark button comes out light.
             warn_unhonoured_a11y(&behavior, "svg", &[]);
             let path = crate::AppAssets::cache_key(&path);
-            // HERDR: `spin`.
+            // HyperOx: `spin`.
             if let Some(ms) = behavior.spin
                 && HOSTED.with(|h| h.get())
                 && !checking()
@@ -1485,7 +1485,7 @@ fn materialize_component(
         Component::AvatarFallback => components::avatar::orphan("AvatarFallback"),
         Component::Image(path) => {
             warn_unhonoured_a11y(&behavior, "image", &[]);
-            // HERDR: animated images need an identity to retain their frame state.
+            // HyperOx: animated images need an identity to retain their frame state.
             let mut source = gpui::ImageSource::from(path);
             if let gpui::ImageSource::Resource(gpui::Resource::Embedded(path)) = &mut source {
                 *path = crate::AppAssets::cache_key(path);
@@ -1599,7 +1599,7 @@ fn materialize_component(
         Component::Textarea(handle) => {
             components::textarea::textarea(runtime, handle, refinement, behavior, states, children)
         }
-        // HERDR: retained source-code editor materialization.
+        // HyperOx: retained source-code editor materialization.
         Component::Editor(handle) => {
             components::editor::editor(runtime, handle, refinement, behavior, states, children, cx)
         }
@@ -1828,7 +1828,7 @@ where
         let writer = Rc::clone(&bounds);
         element = element.on_prepaint(move |value, _, _| writer.set(Some(value)));
 
-        // HERDR: controls need the same hover callbacks as plain layout elements.
+        // HyperOx: controls need the same hover callbacks as plain layout elements.
         if let Some(callback) = behavior.on_hover {
             let runtime = Rc::downgrade(runtime);
             let bounds = Rc::clone(&bounds);
@@ -2527,7 +2527,7 @@ fn motion_element_id(
         Component::Textarea(handle) => {
             gpui::ElementId::NamedInteger("gpui-shell-textarea".into(), *handle)
         }
-        // HERDR: stable identity across script editor renders.
+        // HyperOx: stable identity across script editor renders.
         Component::Editor(handle) => {
             gpui::ElementId::NamedInteger("gpui-shell-editor".into(), *handle)
         }
@@ -2749,7 +2749,7 @@ pub(in crate::materialize) fn resolve_ops(
     (refinement, behavior, states, motions, slots)
 }
 
-// HERDR: looping animation, run here and never in the script. A view with a
+// HyperOx: looping animation, run here and never in the script. A view with a
 // loop asks to be drawn again when its next value is due (the next frame of
 // `frames`, ~30 fps for `loop`), so a spinner costs one native redraw of its
 // view per step and nothing while the view isn't drawn.
@@ -2772,7 +2772,7 @@ thread_local! {
         RefCell::new(std::collections::HashMap::new());
 }
 
-// HERDR: a spinner in a view a ShellRoot shows is drawn by that ShellRoot.
+// HyperOx: a spinner in a view a ShellRoot shows is drawn by that ShellRoot.
 // The view lays out an empty slot that says where it is; ShellRoot paints it
 // turned, on top of its cached content, and wakes only itself. A step then
 // redraws ShellRoot's thin layers instead of rebuilding the whole view: GPUI

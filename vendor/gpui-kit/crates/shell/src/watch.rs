@@ -430,7 +430,7 @@ impl ShellRuntime {
         Watcher::start(self, &view, application_root, entry, window, cx)
     }
 
-    /// HERDR: reloads the application now, for a host that watches its files
+    /// HyperOx: reloads the application now, for a host that watches its files
     /// itself (one OS watcher for many applications instead of a polling loop
     /// each). Same rules as [`Self::watch`]: a failed reload keeps the last
     /// good view and returns the error.

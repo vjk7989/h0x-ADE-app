@@ -12,11 +12,11 @@ Preserve compatibility with released versions and installed user data.
 Discuss breaking changes and removal of compatibility code with the maintainer
 before changing documented behavior.
 
-## Before you grow the app's core: ask Can
+## Before you grow the app's core: ask the maintainer
 
 The app's core (the model, machine layout documents, commands, and shared mod APIs)
 stays small; everything else is mods. Before adding anything to it, answer
-these three, then discuss with Can and wait for his go:
+these three, then discuss with the maintainer and wait for the go:
 
 1. Does the app itself act on it (it changes what the app does, not only
    how something looks)?
@@ -26,7 +26,7 @@ these three, then discuss with Can and wait for his go:
 
 If all three are no, it belongs in mods (their shared storage, their own
 code), even at the price of some repetition. Same for h0x-core: what the
-app asks of it goes through Can too.
+app asks of it goes through the maintainer too.
 
 `h0x-ade --skill` prints the window manual in `src/SKILL.md`.
 Keep it current when changing agent-facing behavior.
@@ -83,9 +83,9 @@ down` when done.
 
 ## Contributing
 
-Work on a branch and open a pull request to `master`. CI must pass and Can
+Work on a branch and open a pull request to `main`. CI must pass and the maintainer
 approves; merges are squashed. Commit messages: lowercase conventional
-commits, single line, no AI co-author lines. Only Can releases (a `v*` tag).
+commits, single line, no AI co-author lines. Only the maintainer (vjk7989) releases (a `v*` tag).
 
 CHANGELOG.md: every release gets a `## [x.y.z] - YYYY-MM-DD` section
 (`### New` / `### Fixed`), written at release time from the commits since the

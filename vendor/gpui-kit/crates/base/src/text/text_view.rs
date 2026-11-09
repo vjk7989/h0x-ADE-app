@@ -3540,7 +3540,7 @@ mod tests {
     }
 }
 
-// HERDR: HTML paragraphs carry no source spans; two inline flows in one HTML
+// HyperOx: HTML paragraphs carry no source spans; two inline flows in one HTML
 // block used to share an element id and panic in prepaint.
 #[cfg(test)]
 mod herdr_html_inline_flows {

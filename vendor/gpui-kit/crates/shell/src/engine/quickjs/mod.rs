@@ -1185,7 +1185,7 @@ pub(crate) mod exports {
         "Input",
         "InputState",
         "NumberInput",
-        // HERDR: source editor exports in gpui-base.
+        // HyperOx: source editor exports in gpui-base.
         "Editor",
         "EditorState",
         "Textarea",
@@ -1649,7 +1649,7 @@ impl ShellRuntime {
         )
     }
 
-    // HERDR: the plain interpreter. In a long-lived window the JIT's upkeep ran
+    // HyperOx: the plain interpreter. In a long-lived window the JIT's upkeep ran
     // on the main thread and grew with every loaded mod copy (module
     // generations are never freed), freezing the window for seconds; mod JS
     // ran no faster with it outside tight numeric loops.
