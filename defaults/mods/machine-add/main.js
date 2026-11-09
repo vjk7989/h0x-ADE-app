@@ -8,7 +8,16 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
-import { core, exec, home, readTextFile, theme, props, closeOverlay } from "h0x";
+import { core, exec, home, readTextFile, theme, props, closeOverlay, window } from "h0x";
+
+// The target as one argument in the shell the person pastes it into: PowerShell
+// on Windows (single quotes, doubled inside; PowerShell also reads the curly
+// single quotes as quotes), a POSIX shell elsewhere.
+function shellQuote(target, windows) {
+  // A comma would make PowerShell pass an array.
+  if ((windows ? /^[a-z0-9_@%+=:./-]+$/i : /^[a-z0-9_@%+=:,./-]+$/i).test(target)) return target;
+  return windows ? "'" + target.replace(/['‘’‚‛]/g, (q) => q + q) + "'" : "'" + target.replace(/'/g, "'\\''") + "'";
+}
 
 const I = (name) => `mods/workspace-chrome/${name}.svg`;
 
@@ -131,8 +140,8 @@ export default class MachineAdd extends View {
         this.typed = "";
         await this.refresh();
         await this.checkMac(target);
-      } else if (["hc_missing", "incompatible", "login_needed", "auth_failed", "host_key"].includes(why.kind) || /password|passphrase|host key|permission denied|login/i.test(why.message ?? "")) {
-        const quoted = /^[a-z0-9_@%+=:,./-]+$/i.test(target) ? target : "'" + target.replace(/'/g, "'\\''") + "'";
+      } else if (["h0x_core_missing", "incompatible", "login_needed", "auth_failed", "host_key"].includes(why.kind) || /password|passphrase|host key|permission denied|login/i.test(why.message ?? "")) {
+        const quoted = shellQuote(target, window()?.platform === "windows");
         this.pending.add(target);
         this.state[target] = `Couldn't add ${target} here: it needs you to answer something (a password, a new host key, or installing h0x-core there). Run \`h0x-core machine add ${quoted}\` in a terminal. \`h0x-core machine --help\` shows the options.`;
       } else this.state[target] = why.message || "it didn't work";

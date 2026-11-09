@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const source = await readFile(new URL("../defaults/mods/machine-add/main.js", import.meta.url), "utf8");
 
-function setup(result: any) {
+function setup(result: any, platform = "linux") {
   const calls: string[][] = [];
   const overlays: unknown[] = [];
   const machines: any[] = [];
@@ -14,7 +14,7 @@ function setup(result: any) {
     View: class {}, div() {}, svg() {}, TextView: {}, v_flex() {}, h_flex() {},
     InputState: { new: () => ({ on() {}, focus() {}, set_value() {} }) }, Input: {},
     home: () => "/home/test", readTextFile: async () => null,
-    theme() {}, props: () => ({}), closeOverlay() {},
+    theme() {}, props: () => ({}), closeOverlay() {}, window: () => ({ platform }),
     openOverlay: (...args: unknown[]) => overlays.push(args),
     exec: async (_cmd: string, _args: string[], options: any) => {
       probes.push(options.on);
@@ -48,7 +48,7 @@ function setup(result: any) {
   };
 }
 
-for (const kind of ["hc_missing", "incompatible", "login_needed", "auth_failed", "host_key"]) {
+for (const kind of ["h0x_core_missing", "incompatible", "login_needed", "auth_failed", "host_key"]) {
   test(`${kind} gives terminal instructions without starting a terminal`, async () => {
     const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind, message: "needs attention" } }) });
     await s.add();
@@ -145,4 +145,50 @@ test("a core that cannot be run gives an error message, not instructions", async
   await s.add();
   expect(s.view.state["my-host"]).toBe("no route to host");
   expect(s.view.pending.size).toBe(0);
+});
+
+test("a missing remote core (kind h0x_core_missing) gives instructions", async () => {
+  const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "h0x_core_missing", message: "h0x-core is not installed there" } }) });
+  await s.add();
+  expect(s.view.state["my-host"]).toContain("`h0x-core machine add my-host`");
+  expect(s.view.pending.has("my-host")).toBe(true);
+});
+
+const awkward = [
+  "me@my host", "a,b", "it's", "it\u2019s", "a$b", "$(whoami)", "a`b", "a;b", "a&b", "a|b", "a\"b", "a\b",
+  "C:\Users\me\My Documents\host", "host';echo $HOME",
+];
+
+for (const target of awkward) {
+  test(`posix quoting keeps ${JSON.stringify(target)} one literal argument`, async () => {
+    const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "host_key" } }) }, "linux");
+    await s.add(target);
+    const quoted = s.view.state[target].match(/`h0x-core machine add (.*)`\. /)![1];
+    if (!Bun.which("sh")) return;
+    const shell = Bun.spawnSync(["sh", "-c", `printf '%s' ${quoted}`]);
+    expect(shell.stdout.toString()).toBe(target);
+  });
+
+  test(`powershell quoting keeps ${JSON.stringify(target)} one literal argument`, async () => {
+    const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "host_key" } }) }, "windows");
+    await s.add(target);
+    const quoted = s.view.state[target].match(/`h0x-core machine add (.*)`\. /)![1];
+    expect(quoted.startsWith("'") && quoted.endsWith("'")).toBe(true);
+    // Inside single quotes only a doubled quote character may appear.
+    expect(quoted.slice(1, -1).replace(/(['\u2018\u2019\u201A\u201B])\1/g, "")).not.toMatch(/['\u2018\u2019\u201A\u201B]/);
+    const ps = Bun.which("pwsh") ?? Bun.which("powershell");
+    if (!ps) return;
+    const script = `[Console]::OutputEncoding=[Text.Encoding]::UTF8; [Console]::Out.Write(${quoted})`;
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
+    const shell = Bun.spawnSync([ps, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]);
+    expect(shell.stdout.toString()).toBe(target);
+  });
+}
+
+test("plain targets are not quoted on either platform", async () => {
+  for (const platform of ["linux", "windows"]) {
+    const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "host_key" } }) }, platform);
+    await s.add("user@host.example.com:2222");
+    expect(s.view.state["user@host.example.com:2222"]).toContain("`h0x-core machine add user@host.example.com:2222`");
+  }
 });
