@@ -459,8 +459,10 @@ mod tests {
         // Context child (with an image pane frame), a Context float and an agent.
         let mut node = serde_json::json!({"id":"leaf","type":"block","content":{"terminal":"t1"},"background":image});
         for depth in 0..40 {
-            node = serde_json::json!({"id": format!("n{depth}"), "type": ["stack", "column", "row"][depth % 3],
-                "background": if depth % 2 == 0 { image.clone() } else { gradient.clone() },
+            let kind = ["stack", "column", "row"][depth % 3];
+            let paint = if depth % 2 == 0 { image.clone() } else { gradient.clone() };
+            node = serde_json::json!({"id": format!("n{depth}"), "type": kind,
+                "background": paint,
                 "children":[{"id": format!("c{depth}"),"type":"block","content":{"context":"active","pane":{"background":image}}},
                             node,
                             {"id": format!("a{depth}"),"type":"block","content":{"agent":"focused"}}],
