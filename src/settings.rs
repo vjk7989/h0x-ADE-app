@@ -393,6 +393,10 @@ pub struct Person {
     pub pane_scrollbars: bool,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
+    /// Scrollback lines kept per terminal pane (new panes). Anything not a whole
+    /// number in SCROLLBACK_MIN..=SCROLLBACK_MAX falls back to the default.
+    #[serde(skip_serializing_if = "is_default_scrollback", deserialize_with = "scrollback_or_default")]
+    pub scrollback_lines: u32,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
     #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
     pub option_as_alt: OptionAsAlt,
@@ -449,6 +453,22 @@ impl OptionAsAlt {
     }
 }
 
+/// Scrollback per terminal pane. The default keeps the long-standing 10,000
+/// lines; the range keeps a pane between ~1 MB and ~100 MB (see `Vt::new`).
+pub const SCROLLBACK_DEFAULT: u32 = 10_000;
+pub const SCROLLBACK_MIN: u32 = 1_000;
+pub const SCROLLBACK_MAX: u32 = 100_000;
+
+fn is_default_scrollback(n: &u32) -> bool {
+    *n == SCROLLBACK_DEFAULT
+}
+
+/// A whole number in range, else the default (never an error: a typo here must not discard the file).
+fn scrollback_or_default<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_u64().filter(|n| (SCROLLBACK_MIN as u64..=SCROLLBACK_MAX as u64).contains(n)).map_or(SCROLLBACK_DEFAULT, |n| n as u32))
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -471,6 +491,7 @@ impl Default for Person {
             check_updates: true,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
+            scrollback_lines: SCROLLBACK_DEFAULT,
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
             theme: None,
@@ -510,6 +531,8 @@ pub struct Settings {
     pub clipboard_write: bool,
     pub check_updates: bool,
     pub minimum_contrast: f32,
+    /// Scrollback lines per new terminal pane.
+    pub scrollback_lines: u32,
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
 }
@@ -553,6 +576,7 @@ impl Default for Settings {
             clipboard_write: false,
             check_updates: true,
             minimum_contrast: 1.0,
+            scrollback_lines: SCROLLBACK_DEFAULT,
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
         }
@@ -593,6 +617,7 @@ impl Settings {
             clipboard_write: person.clipboard_write,
             check_updates: person.check_updates,
             minimum_contrast: person.minimum_contrast,
+            scrollback_lines: person.scrollback_lines,
             option_as_alt: person.option_as_alt,
         }
     }
@@ -935,6 +960,24 @@ mod tests {
             assert_eq!(serde_json::to_value(person).unwrap()["minimum_contrast"], serde_json::json!(ratio));
             assert_eq!(settings.problems().is_empty(), (1.0..=21.0).contains(&ratio));
         }
+    }
+
+    #[test]
+    fn scrollback_lines_defaults_to_ten_thousand_and_bad_values_fall_back() {
+        assert_eq!(SCROLLBACK_DEFAULT, 10_000);
+        assert_eq!(Settings::default().scrollback_lines, 10_000);
+        let lines = |text: &str| serde_json::from_str::<Person>(text).unwrap().scrollback_lines;
+        assert_eq!(lines("{}"), 10_000);
+        assert_eq!(lines(r#"{"scrollback_lines": 1000}"#), 1_000);
+        assert_eq!(lines(r#"{"scrollback_lines": 100000}"#), 100_000);
+        assert_eq!(lines(r#"{"scrollback_lines": 50000}"#), 50_000);
+        for bad in ["999", "100001", "0", "-5", "5000.5", "\"5000\"", "null", "true", "[]", "99999999999"] {
+            assert_eq!(lines(&format!(r#"{{"scrollback_lines": {bad}}}"#)), 10_000, "{bad}");
+        }
+        let person: Person = serde_json::from_str(r#"{"scrollback_lines": 2000}"#).unwrap();
+        assert_eq!(Settings::compose(&person, &crate::layout::Look::default(), true).scrollback_lines, 2_000);
+        assert_eq!(serde_json::to_value(&person).unwrap()["scrollback_lines"], serde_json::json!(2000));
+        assert!(serde_json::to_value(Person::default()).unwrap().get("scrollback_lines").is_none());
     }
 
     #[test]

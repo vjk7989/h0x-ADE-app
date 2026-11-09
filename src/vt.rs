@@ -646,9 +646,9 @@ const SYNC_OUTPUT: GhosttyMode = 2026;
 const GRAPHEME_CLUSTER: GhosttyMode = 2027;
 const BRACKETED_PASTE: GhosttyMode = 2004;
 const MAX_HOLD: Duration = Duration::from_millis(1000);
-const SCROLLBACK_MAX_LINES: usize = 10_000;
-// Bound memory per terminal; wide or heavily styled rows may hit this first.
-const SCROLLBACK_MAX_BYTES: usize = 10_000_000;
+// Bound memory per terminal at 1000 bytes per scrollback line (10,000 lines = 10 MB);
+// wide or heavily styled rows may hit this first.
+const SCROLLBACK_BYTES_PER_LINE: usize = 1000;
 /// Units per pixel for selection gestures (see `select`).
 const SUBPIXEL: f32 = 64.0;
 
@@ -698,8 +698,10 @@ impl Vt {
             let mut colors = GhosttyRenderStateColors { size: std::mem::size_of::<GhosttyRenderStateColors>(), ..Default::default() };
             ghostty_render_state_get(state, GHOSTTY_RENDER_STATE_DATA_COLORS, &mut colors as *mut _ as *mut c_void);
 
-            ok(ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &SCROLLBACK_MAX_BYTES as *const _ as *const c_void), "scrollback_max_bytes");
-            ok(ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &SCROLLBACK_MAX_LINES as *const _ as *const c_void), "scrollback_max_lines");
+            let scrollback_lines = crate::settings::get().scrollback_lines as usize;
+            let scrollback_bytes = scrollback_lines * SCROLLBACK_BYTES_PER_LINE;
+            ok(ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &scrollback_bytes as *const _ as *const c_void), "scrollback_max_bytes");
+            ok(ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &scrollback_lines as *const _ as *const c_void), "scrollback_max_lines");
 
             let mut gesture = std::ptr::null_mut();
             ok(ghostty_selection_gesture_new(std::ptr::null(), &mut gesture), "selection_gesture_new");
@@ -1966,6 +1968,27 @@ mod tests {
                 vt.scroll_viewport(25);
             }
         }
+    }
+
+    #[test]
+    fn a_new_terminal_keeps_the_configured_scrollback() {
+        let original = crate::settings::get();
+        let top_line = |lines: u32| {
+            crate::settings::set(crate::settings::Settings { scrollback_lines: lines, ..(*original).clone() });
+            let mut vt = Vt::new(40, 10);
+            for line in 1..=3000 {
+                vt.write(format!("{line:04}
+").as_bytes());
+            }
+            vt.scroll_viewport(-10_000);
+            let first: String = vt.frame().rows[0].iter().map(|c| c.text.as_str()).collect();
+            first.trim().parse::<u32>().unwrap()
+        };
+        let small = top_line(1_000);
+        let default = top_line(crate::settings::SCROLLBACK_DEFAULT);
+        crate::settings::set((*original).clone());
+        assert!(small > 1_000, "1,000 lines drop most of the oldest of 3,000, top is {small}");
+        assert_eq!(default, 1, "the default keeps all 3,000");
     }
 
     #[test]

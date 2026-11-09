@@ -740,6 +740,11 @@ What's about the user, never a look:
   `p` writes Linux primary selection. `s` is ignored; cut buffers `0`–`7`
   are treated as the system clipboard.
   Clipboard reads (`?`) are never allowed.
+- `scrollback_lines`: lines of scrollback kept per terminal pane, `10000`
+  (default; about 10 MB per pane, 1 KB per line). A whole number from `1000`
+  to `100000`; anything else, or leaving it out, means `10000`. Applies to
+  panes opened or reconnected after the change; panes already open keep
+  theirs. Also in Settings → Terminal.
 - `check_updates`: `false` stops the automatic update checks (default `true`);
   Check now in Settings → Updates still works.
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal

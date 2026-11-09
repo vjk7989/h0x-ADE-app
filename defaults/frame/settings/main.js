@@ -498,6 +498,10 @@ export default class Settings extends View {
     const s = settings();
     const p = this.person;
     const clipboardOn = p.clipboard_write === true;
+    // The settings file holds any number; the app uses it only inside this range, else 10,000.
+    const stops = [1000, 2000, 5000, 10000, 20000, 50000, 100000];
+    const lines = Number.isInteger(p.scrollback_lines) && p.scrollback_lines >= 1000 && p.scrollback_lines <= 100000 ? p.scrollback_lines : 10000;
+    const stopAt = (dir) => (dir < 0 ? [...stops].reverse().find((n) => n < lines) : stops.find((n) => n > lines)) ?? lines;
     const own = (key, composed, def) => (p[key] ?? def) !== composed;
     const size = (key, value, d, cx) => this.change((q) => (q[key] = Math.max(8, Math.min(32, (q[key] ?? value) + d))), cx);
     const fontRow = (which, sizeKey, title, family, def, sizeNow) =>
@@ -553,6 +557,14 @@ export default class Settings extends View {
           "Let programs copy to the clipboard",
           "Terminal programs, including ones on remote machines, can replace what you copied. Off unless you turn it on.",
           this.toggle(t, "st-clipboard-write", clipboardOn, (_e, cx) => this.change((p) => { p.clipboard_write = !clipboardOn; }, cx)),
+        ),
+      )
+      .child(
+        this.row(
+          t,
+          "Scrollback lines per pane",
+          "How far back each terminal pane keeps its output (1,000 to 100,000; about 1 KB per line). Applies to panes opened after the change.",
+          this.stepper(t, "st-scrollback", lines.toLocaleString("en-US"), (_e, cx) => this.change((p) => { p.scrollback_lines = stopAt(-1); }, cx), (_e, cx) => this.change((p) => { p.scrollback_lines = stopAt(1); }, cx)),
         ),
       );
   }
