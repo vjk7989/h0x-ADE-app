@@ -96,6 +96,14 @@ taffy = { path = "vendor/taffy" }
 [patch."https://github.com/longbridge/quickjs-jit"]
 quickjs-jit-runtime = { path = "vendor/quickjs-jit-runtime" }
 
+# Thin LTO and 4 codegen units: smaller, faster binary. Fat LTO / 1 unit is
+# avoided: the app is large and earlier builds ran out of memory (ADR-039).
+# No panic=abort. strip = true drops the symbol table too.
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true
+
 # With --target (CI builds Intel Macs on Apple Silicon), stripping a macOS
 # proc-macro loses what rustc loads from it: "can't find crate". Build-time
 # code only; the app itself is still stripped.
