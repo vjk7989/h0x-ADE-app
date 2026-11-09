@@ -5579,6 +5579,8 @@ mod tests {
             this.model.add_tab("sp1", crate::model::Tab::new("tb3", "", "p4", "t4"));
             this.model.select_tab("tb1");
             assert!(this.model.split("p1", crate::layout::Axis::Row, "p2", "t2"));
+            // The offline core never reports this machine's layout: closing needs it readable.
+            this.documents.entry(String::new()).or_default().available = true;
             this.sync(window, cx);
             // A window overlay never holds the keyboard: the key closes the focused pane.
             this.open_overlay("float".into(), json!({"kind": "window"}), window, cx);
