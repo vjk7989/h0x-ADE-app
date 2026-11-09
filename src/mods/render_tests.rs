@@ -1127,6 +1127,64 @@ fn option_key_settings_are_only_shown_on_macos(cx: &mut TestAppContext) {
     }
 }
 
+// Settings → Terminal's scrollback stepper with `person` as settings.json; `steps` presses − and +
+// on a copy of it and shows what each would write instead of the value.
+fn scrollback_stepper(cx: &mut TestAppContext, staged: &Staged, person: &Value, steps: bool) -> String {
+    let mut p = props();
+    p["section"] = json!("look");
+    let mut setup = "const look = this.look.bind(this); this.look = (t, cx) => { this.person = PERSON; return look(t, cx); };".to_owned();
+    if steps {
+        setup.push_str(concat!(
+            "const stepper = this.stepper.bind(this);",
+            "this.stepper = (t, id, value, minus, plus) => {",
+            "  if (id !== 'st-scrollback') return stepper(t, id, value, minus, plus);",
+            "  const seen = []; const change = this.change;",
+            "  this.change = (edit) => { const q = JSON.parse(JSON.stringify(this.person)); edit(q); seen.push(`${q.scrollback_lines}${q.font_ligatures === true ? '+kept' : '+lost'}`); };",
+            "  try { minus(null, null); plus(null, null); } finally { this.change = change; }",
+            "  return stepper(t, id, `steps ${seen.join(' ')}`, minus, plus);",
+            "};",
+        ));
+    }
+    let setup = setup.replace("PERSON", &person.to_string());
+    describe(cx, staged, "frame/settings", true, p, updates("current", "current"), Some(&setup)).unwrap()
+}
+
+#[gpui::test]
+fn scrollback_stepper_moves_to_the_next_stop_keeps_the_ends_and_the_other_settings(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (lines, minus, plus) in [
+        // Set by hand between two stops: − and + go to the stops around it.
+        (json!(7500), 5000, 10000),
+        (json!(1000), 1000, 2000),
+        (json!(100000), 50000, 100000),
+        // Values the app does not use show and step from the default.
+        (json!(999), 5000, 20000),
+        (json!(100001), 5000, 20000),
+        (json!("7500"), 5000, 20000),
+        (json!(2000.5), 5000, 20000),
+        (Value::Null, 5000, 20000),
+    ] {
+        let mut person = json!({"font_ligatures": true});
+        if !lines.is_null() {
+            person["scrollback_lines"] = lines.clone();
+        }
+        let tree = scrollback_stepper(cx, &staged, &person, true);
+        assert!(tree.contains("st-scrollback-minus") && tree.contains("st-scrollback-plus"), "{lines}: {tree}");
+        assert!(tree.contains(&format!("steps {minus}+kept {plus}+kept")), "{lines}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn scrollback_stepper_shows_the_count_with_thousands_separators(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (person, shown) in [(json!({"scrollback_lines": 7500}), "7,500"), (json!({}), "10,000"), (json!({"scrollback_lines": 100000}), "100,000")] {
+        let tree = scrollback_stepper(cx, &staged, &person, false);
+        assert!(tree.contains(shown), "{person} should show {shown}: {tree}");
+    }
+}
+
 #[gpui::test]
 fn settings_sections_and_updates(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);

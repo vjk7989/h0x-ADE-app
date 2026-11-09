@@ -1991,6 +1991,90 @@ mod tests {
         assert_eq!(default, 1, "the default keeps all 3,000");
     }
 
+    /// The scrollback limits ghostty was given: (lines, bytes).
+    fn scrollback_limits(vt: &Vt) -> (usize, usize) {
+        let (mut lines, mut bytes) = (0usize, 0usize);
+        unsafe {
+            ok(ghostty_terminal_get(vt.term, GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_LINES, &mut lines as *mut _ as *mut c_void), "get scrollback_max_lines");
+            ok(ghostty_terminal_get(vt.term, GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_BYTES, &mut bytes as *mut _ as *mut c_void), "get scrollback_max_bytes");
+        }
+        (lines, bytes)
+    }
+
+    #[test]
+    fn scrollback_limits_are_a_thousand_bytes_per_line_from_the_smallest_to_the_largest_setting() {
+        use crate::settings::{SCROLLBACK_DEFAULT, SCROLLBACK_MAX, SCROLLBACK_MIN};
+        let original = crate::settings::get();
+        let limits = |lines: u32| {
+            crate::settings::set(crate::settings::Settings { scrollback_lines: lines, ..(*original).clone() });
+            scrollback_limits(&Vt::new(80, 24))
+        };
+        let (min, default, max) = (limits(SCROLLBACK_MIN), limits(SCROLLBACK_DEFAULT), limits(SCROLLBACK_MAX));
+        crate::settings::set((*original).clone());
+        assert_eq!(min, (1_000, 1_000_000));
+        assert_eq!(default, (10_000, 10_000_000), "the long-standing default");
+        // Ghostty frees whole ~400 KB pages, so a pane stays within ~100 MB at the top setting.
+        assert_eq!(max, (100_000, 100_000_000));
+    }
+
+    #[test]
+    fn open_terminals_keep_their_scrollback_when_the_setting_changes() {
+        let original = crate::settings::get();
+        let with = |lines: u32| crate::settings::set(crate::settings::Settings { scrollback_lines: lines, ..(*original).clone() });
+        let top_line = |vt: &mut Vt| {
+            vt.scroll_viewport(-200_000);
+            let first: String = vt.frame().rows[0].iter().map(|c| c.text.as_str()).collect();
+            first.trim().parse::<u32>().unwrap_or_else(|e| panic!("{first:?}: {e}"))
+        };
+        with(crate::settings::SCROLLBACK_MIN);
+        let mut open = Vt::new(40, 10);
+        for line in 1..=1500 {
+            open.write(format!("{line:04}\r\n").as_bytes());
+        }
+        // The settings file is reloaded while the pane is open.
+        with(crate::settings::SCROLLBACK_MAX);
+        for line in 1501..=3000 {
+            open.write(format!("{line:04}\r\n").as_bytes());
+        }
+        // A pane opened (or reattached) after the change gets the new value.
+        let mut reopened = Vt::new(40, 10);
+        for line in 1..=3000 {
+            reopened.write(format!("{line:04}\r\n").as_bytes());
+        }
+        let (open_limits, reopened_limits) = (scrollback_limits(&open), scrollback_limits(&reopened));
+        crate::settings::set((*original).clone());
+        assert_eq!(open_limits, (1_000, 1_000_000), "an open pane keeps its own limit");
+        assert_eq!(reopened_limits, (100_000, 100_000_000));
+        let (open_top, reopened_top) = (top_line(&mut open), top_line(&mut reopened));
+        assert!(open_top > 1, "the open pane still drops its oldest lines, top is {open_top}");
+        assert_eq!(reopened_top, 1, "the new pane keeps all 3,000");
+    }
+
+    #[test]
+    fn wide_panes_and_long_lines_keep_fewer_lines_than_the_setting_says() {
+        let original = crate::settings::get();
+        crate::settings::set(crate::settings::Settings { scrollback_lines: crate::settings::SCROLLBACK_MIN, ..(*original).clone() });
+        // 300 columns: a row takes ~2.4 KB of page memory, so the 1 MB byte cap
+        // is reached long before 1,000 rows.
+        let mut wide = Vt::new(300, 10);
+        for line in 1..=3000 {
+            wide.write(format!("{line:04} {}\r\n", "x".repeat(290)).as_bytes());
+        }
+        // 80 columns, 4 KB lines: each line wraps into ~50 rows, and the limit counts rows.
+        let mut long = Vt::new(80, 10);
+        for line in 1..=300 {
+            long.write(format!("{line:04}{}\r\n", "x".repeat(3996)).as_bytes());
+        }
+        let kept = |vt: &Vt| {
+            let sb = vt.scrollbar();
+            sb.total - sb.len
+        };
+        let (wide_rows, long_rows) = (kept(&wide), kept(&long));
+        crate::settings::set((*original).clone());
+        assert!(wide_rows > 0 && wide_rows < 1_000, "300 columns keep {wide_rows} rows");
+        assert!(long_rows > 0 && long_rows < 2_000, "4 KB lines keep {long_rows} rows: fewer than 40 of the 300 lines");
+    }
+
     #[test]
     fn vs16_makes_an_emoji_two_cells_wide() {
         let mut vt = Vt::new(10, 2);
