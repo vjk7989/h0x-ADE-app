@@ -740,6 +740,14 @@ What's about the user, never a look:
   `p` writes Linux primary selection. `s` is ignored; cut buffers `0`–`7`
   are treated as the system clipboard.
   Clipboard reads (`?`) are never allowed.
+- `scrollback_lines`: lines of scrollback kept per terminal pane, `10000`
+  (default). Each pane keeps up to that many lines within a memory cap of
+  1,000 bytes per line (10 MB at the default); wide panes and long wrapped
+  lines use more per line and so keep fewer. A whole number from `1000` to
+  `100000` (`2000.0` counts, `2000.5` doesn't); anything else, or leaving it
+  out, means `10000`. Applies to
+  panes opened or reconnected after the change; panes already open keep
+  theirs. Also in Settings → Terminal.
 - `check_updates`: `false` stops the automatic update checks (default `true`);
   Check now in Settings → Updates still works.
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
@@ -813,7 +821,7 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
 - A copy starts the first time it shows, then stays alive while its block is in
   the layout, shown or not (a hidden column, the other child of a stack, a pane
   in another tab or behind a zoom): switching back finds it as it was. Its
-  timers keep running while hidden, so poll gently. Another layout starts its
+  timers keep running while hidden, so poll gently. They also keep running while the window is minimized or hidden (`window().visible` is false, i.e. minimized or hidden; an unfocused window is still visible): check `windowVisible()` (it records no dependency, unlike `window()`), return early if the tick only redraws or polls, and catch up when it is back. Another layout starts its
   mods fresh (pane mods belong to their tab and stay); a block removed or given
   another mod or props starts over. `<mod>.<command>` reaches shown copies only.
 - Images and SVGs are referenced from `~/.config/h0x-ade`:
