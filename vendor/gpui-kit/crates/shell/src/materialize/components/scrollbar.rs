@@ -48,7 +48,7 @@ pub(in crate::materialize) fn scrollbar(
     // `Scrollbar` is a painted element, not a control: it has no focus handle,
     // no role and no `Interactivity` for one to be set on.
     warn_unhonoured_a11y(&behavior, "Scrollbar", &[]);
-    // HERDR: a check draws outside any view, where a bar has no area to read.
+    // HyperOx: a check draws outside any view, where a bar has no area to read.
     if crate::materialize::checking() {
         return div().into_any_element();
     }
@@ -113,7 +113,7 @@ pub(in crate::materialize) fn track_scroll_position<E: StatefulInteractiveElemen
     window: &mut Window,
     cx: &mut App,
 ) -> E {
-    // HERDR: a check draws outside any view, where there's no element state.
+    // HyperOx: a check draws outside any view, where there's no element state.
     if crate::materialize::checking() {
         return element;
     }

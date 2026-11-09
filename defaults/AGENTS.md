@@ -722,12 +722,14 @@ What's about the user, never a look:
   background; this is a threshold, not a guaranteed resulting ratio.
   Box/block, Powerline and sprite glyph colors are never adjusted.
   Changes apply immediately, including text already on screen.
-- `clipboard_write`: `false` blocks terminal programs from writing the local
-  clipboard (default `true`, including remote terminals attached in this window).
+- `clipboard_write`: `true` allows terminal programs to write the local
+  clipboard via OSC 52 (default `false`, including remote terminals attached in this window).
   OSC 52 accepts base64 UTF-8 text up to 1 MiB: `c` writes the system clipboard,
   `p` writes Linux primary selection. `s` is ignored; cut buffers `0`–`7`
   are treated as the system clipboard.
   Clipboard reads (`?`) are never allowed.
+- `check_updates`: `false` stops the automatic update checks (default `true`);
+  Check now in Settings → Updates still works.
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and

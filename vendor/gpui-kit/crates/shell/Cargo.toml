@@ -18,7 +18,7 @@ name = "gpui-shell"
 path = "src/bin/gpui-shell.rs"
 
 [features]
-# HERDR: retained, description-only checks for embedded applications.
+# HyperOx: retained, description-only checks for embedded applications.
 render-test-support = []
 gpui-fast = ["dep:gpui-fast", "dep:gpui-fast-platform", "gpui-base/gpui-fast", "gpui-fps/gpui-fast"]
 default = ["quickjs"]
@@ -71,7 +71,7 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 smallvec.workspace = true
-# HERDR: pure-Rust syntax engine (workspace uses regex-fancy, including Windows).
+# HyperOx: pure-Rust syntax engine (workspace uses regex-fancy, including Windows).
 syntect.workspace = true
 smol.workspace = true
 # Only to find the files an SVG image references; GPUI's version, which renders it.

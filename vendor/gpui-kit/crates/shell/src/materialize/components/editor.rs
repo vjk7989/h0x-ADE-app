@@ -1,4 +1,4 @@
-// HERDR: source editor surface; read-only state still accepts focus, selection and copy.
+// HyperOx: source editor surface; read-only state still accepts focus, selection and copy.
 use std::rc::Rc;
 
 use gpui::{
@@ -29,7 +29,7 @@ pub(in crate::materialize) fn editor(
         tracing::error!("editor handle {handle} is no longer live");
         return div().into_any_element();
     };
-    // HERDR: GPUI needs a concrete font family, not CSS's generic "monospace".
+    // HyperOx: GPUI needs a concrete font family, not CSS's generic "monospace".
     let typography = &gpui_base::Theme::global(cx).tokens.typography;
     let (font_family, font_size) = runtime.entities().editor_font(handle);
     let font_family = font_family

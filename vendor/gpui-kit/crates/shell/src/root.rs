@@ -159,7 +159,7 @@ pub struct ShellRoot {
     /// The performance HUD, while a script has asked for one. See
     /// [`ShellRoot::show_fps_monitor`].
     fps_hud: Option<FpsHudRequest>,
-    /// HERDR: size to the content instead of filling the parent (floating views).
+    /// HyperOx: size to the content instead of filling the parent (floating views).
     fit_content: bool,
 }
 
@@ -243,7 +243,7 @@ impl ShellRoot {
         }
     }
 
-    /// HERDR: lays the view out at its content's size rather than filling its
+    /// HyperOx: lays the view out at its content's size rather than filling its
     /// parent, for views that float and size themselves.
     pub fn set_fit_content(&mut self, fit: bool, cx: &mut Context<Self>) {
         if self.fit_content != fit {
@@ -876,10 +876,10 @@ impl Render for ShellRoot {
             )
             .relative()
             .when(!self.fit_content, |root| root.size_full())
-            // HERDR: a fitted view still stops at its container's height: a
+            // HyperOx: a fitted view still stops at its container's height: a
             // column that can shrink, so a root with `min_h(0)` scrolls.
             .when(self.fit_content, |root| root.flex().flex_col().min_h_0())
-            // HERDR: no background of its own. The host draws behind every view,
+            // HyperOx: no background of its own. The host draws behind every view,
             // and a floating view's rounded corners must show what's under it.
             .text_color(colors.foreground)
             // Painted back to front; see the stacking order on `ShellRoot`.
@@ -892,7 +892,7 @@ impl Render for ShellRoot {
                     .cached(StyleRefinement::default().size_full())
                     .into_any_element()
             })
-            // HERDR: its view's spinners, so a step doesn't rebuild the view.
+            // HyperOx: its view's spinners, so a step doesn't rebuild the view.
             .child({
                 crate::materialize::show_spins_of(self.content.entity_id());
                 crate::materialize::spin_layer(self.content.entity_id())

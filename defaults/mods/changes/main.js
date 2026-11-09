@@ -101,7 +101,7 @@ export default class Changes extends View {
         if (status.code !== 0) throw new Error(status.stderr);
         const head = await git(["rev-parse", "--verify", "HEAD"]);
         const stats = {};
-        const results = head.code === 0 ? [await git(["diff", "HEAD", "--numstat", "-z", "--no-renames"])] : [await git(["diff", "--cached", "--numstat", "-z", "--no-renames"]), await git(["diff", "--numstat", "-z", "--no-renames"])];
+        const results = head.code === 0 ? [await git(["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--numstat", "-z", "--no-renames"])] : [await git(["diff", "--no-ext-diff", "--no-textconv", "--cached", "--numstat", "-z", "--no-renames"]), await git(["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-z", "--no-renames"])];
         for (const result of results) {
           if (result.code !== 0) throw new Error(result.stderr);
           for (const entry of result.stdout.split("\0")) {

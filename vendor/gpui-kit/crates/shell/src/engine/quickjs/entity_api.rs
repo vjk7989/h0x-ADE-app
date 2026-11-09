@@ -429,7 +429,7 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         ),
     )?;
 
-    // HERDR: retained source editors with built-in syntax and validated semantic colors.
+    // HyperOx: retained source editors with built-in syntax and validated semantic colors.
     let create_editor = runtime.clone();
     globals.set(
         "__editor_state_new",
@@ -438,7 +438,7 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                 refuse_creation_in_render(&ctx, "EditorState.new(...)")?;
                 let options: crate::entities::EditorOptions = serde_json::from_str(&json)
                     .map_err(|error| Exception::throw_type(&ctx, &error.to_string()))?;
-                // HERDR: reject invalid editor font sizes before retaining state.
+                // HyperOx: reject invalid editor font sizes before retaining state.
                 if options
                     .font_size
                     .is_some_and(|size| !size.is_finite() || size <= 0.)
@@ -1272,7 +1272,7 @@ fn live(
         .ok_or_else(|| Exception::throw_type(ctx, "this input state has been released"))
 }
 
-// HERDR: a distinct resolver prevents mixing code-editor and textarea handles.
+// HyperOx: a distinct resolver prevents mixing code-editor and textarea handles.
 fn live_editor(
     ctx: &Ctx<'_>,
     runtime: &Weak<ShellRuntime>,

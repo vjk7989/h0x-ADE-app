@@ -1,5 +1,5 @@
 # Vendored from https://github.com/longbridge/gpui-kit at 1ccf011: only the
-# crates Herdr uses. Herdr patches are marked `HERDR:`.
+# crates Herdr uses. Herdr patches are marked `HyperOx:`.
 [workspace]
 members = [
     "crates/base",

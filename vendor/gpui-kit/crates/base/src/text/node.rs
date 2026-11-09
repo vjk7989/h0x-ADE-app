@@ -2833,7 +2833,7 @@ fn block_element_id(kind: &'static str, span: Option<Span>, ix: usize) -> Elemen
 /// animation. The leaf key is unique per paragraph in a parsed Markdown
 /// document; the HTML parser records no spans, so its paragraphs fall back to
 /// the paragraph's address, stable while the parsed document lives.
-/// HERDR: was a shared "p", so two inline flows in one HTML block shared
+/// HyperOx: was a shared "p", so two inline flows in one HTML block shared
 /// layout state and the first painted the second's layout (index panic).
 fn leaf_element_id(fade_key: Option<TextLeafKey>, paragraph: &Paragraph) -> ElementId {
     fade_key.map_or_else(

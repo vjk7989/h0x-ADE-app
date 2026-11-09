@@ -9,7 +9,7 @@ use crate::error::{Result as ShellResult, ShellError};
 use gpui::{Hsla, Pixels, px, rgba};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-// HERDR: one app-wide zoom applied to every pixel length a script writes, so
+// HyperOx: one app-wide zoom applied to every pixel length a script writes, so
 // zooming the host app zooms every script view with it.
 static PIXEL_SCALE: AtomicU32 = AtomicU32::new(0x3f80_0000); // 1.0
 
