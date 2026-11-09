@@ -11,14 +11,14 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   const availability = [{ name: null as string | null, layout: "ready" }];
   const moves: { id: string; index: number }[] = [];
   const handlers: Record<string, (...args: any[]) => void> = {};
-  const win = { active: true };
+  const win = { visible: true };
   const revision = { n: 0 };
   const reads = { spaces: 0, panes: 0 };
   const element: any = new Proxy({}, { get: (_, method) => (...args: any[]) => {
     if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
     return element;
   } });
-  const Spaces = new Function("View", "core", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "window", "revision", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "core", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "windowVisible", "revision", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -32,7 +32,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
       expect(name).toBe("space.move");
       moves.push(args);
     },
-    ...Array(4).fill(() => element), () => null, () => availability, () => win, () => revision.n,
+    ...Array(4).fill(() => element), () => null, () => availability, () => win.visible, () => revision.n,
   );
   const view = new Spaces();
   view.reconnecting = {};
@@ -294,7 +294,7 @@ function watching(active = true) {
   h.view.refreshMachines = () => { refreshes.machines++; };
   h.view.refreshGit = () => { refreshes.git++; };
   h.view.git = {};
-  h.win.active = active;
+  h.win.visible = active;
   h.view.init({}, cx);
   const started = refreshes.machines;
   refreshes.machines = 0;
@@ -352,7 +352,7 @@ test("a new space is noticed while the window is in the background", () => {
   h.view.checkNew(h.cx);
   h.view.shown = new Set(["a"]);
   h.view.wake = Infinity;
-  h.win.active = false;
+  h.win.visible = false;
   h.snapshot.push({ id: "b", folder: "/b" });
   h.revision.n++;
   h.view.checkNew(h.cx);
@@ -362,11 +362,11 @@ test("a new space is noticed while the window is in the background", () => {
 
 test("machines are not refreshed while the window is in the background, and catch up at once when it is back", () => {
   const h = watching();
-  h.win.active = false;
+  h.win.visible = false;
   h.timers[15000](h.cx);
   h.timers[250](h.cx);
   expect(h.refreshes.machines).toBe(0);
-  h.win.active = true;
+  h.win.visible = true;
   h.revision.n++; // the window snapshot changed
   h.timers[250](h.cx);
   expect(h.refreshes.machines).toBe(1);
@@ -388,7 +388,7 @@ test("started while the window is in the background: machines are asked once at 
   for (let i = 0; i < 4; i++) h.timers[15000](h.cx);
   h.timers[250](h.cx);
   expect(h.refreshes.machines).toBe(0);
-  h.win.active = true;
+  h.win.visible = true;
   h.revision.n++;
   h.timers[250](h.cx);
   h.timers[250](h.cx);
@@ -400,7 +400,7 @@ test("an hour in the background ends in one machines refresh and one look, while
   h.view.checkNew(h.cx);
   h.view.shown = new Set(["a"]);
   h.view.wake = Infinity;
-  h.win.active = false;
+  h.win.visible = false;
   h.revision.n++; // the window snapshot
   for (let i = 0; i < 3600 * 4; i++) {
     if (i === 7200) {
@@ -414,9 +414,19 @@ test("an hour in the background ends in one machines refresh and one look, while
   expect(h.refreshes.machines).toBe(0);
   expect(h.due).toHaveLength(3); // the first look, the window going away, the new space
   expect(h.view.ids).toEqual(["a", "b"]);
-  h.win.active = true;
+  h.win.visible = true;
   h.revision.n++;
   for (let i = 0; i < 10; i++) h.timers[250](h.cx);
   expect(h.refreshes.machines).toBe(1);
   expect(h.due).toHaveLength(4);
+});
+
+test("a visible but unfocused window keeps refreshing machines; a minimized one does not", () => {
+  const h = watching();
+  (h.win as any).active = false; // focus is not what the timers look at
+  h.timers[15000](h.cx);
+  expect(h.refreshes.machines).toBe(1);
+  h.win.visible = false;
+  h.timers[15000](h.cx);
+  expect(h.refreshes.machines).toBe(1);
 });

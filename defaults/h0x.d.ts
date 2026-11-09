@@ -263,9 +263,10 @@ export function commands(): { name: string; args: { name: string; required: bool
 
 /** The window, for layouts that draw their own title bar (`"titlebar": "none"`). `buttons`:
  *  the system draws no window buttons, so draw them (`window.minimize`, `window.maximize`,
- *  `window.close`); on macOS the traffic lights always stay. Live. `active` is false while the
- *  window is unfocused or minimized: the host does not slow a mod's `cx.timer`, so a timer that
- *  only redraws should return early then (and draw once when `active` is back). */
+ *  `window.close`); on macOS the traffic lights always stay. Live. `active`: the window has
+ *  the keyboard focus (use it for focus styling). `visible`: the window is presented, so false
+ *  when it is minimized or hidden (macOS also when fully covered); an unfocused window on
+ *  screen is still visible. A missing `visible` counts as visible. */
 export function window(): {
   platform: "linux" | "macos" | "windows";
   titlebar: "system" | "none";
@@ -273,7 +274,14 @@ export function window(): {
   maximized: boolean;
   fullscreen: boolean;
   active: boolean;
+  visible: boolean;
 };
+
+/** Whether `window().visible` is not false. Unlike `window()`, reading it does not make the mod
+ *  draw again when the window changes (focus, size): use it in `cx.timer` callbacks. The host does
+ *  not slow a mod's `cx.timer`, so a timer that only redraws or polls should return early while
+ *  this is false, and catch up once it is true again. */
+export function windowVisible(): boolean;
 
 /** For a floating mod: where it sits now. `vertical` on the left/right edges, horizontal on
  *  top/bottom; while dragged, where it would land. `hovered` is true while the pointer is on it

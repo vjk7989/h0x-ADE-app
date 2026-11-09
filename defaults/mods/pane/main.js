@@ -6,7 +6,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, spaces, props, run, theme, home, busyVerb, window } from "h0x";
+import { panes, spaces, props, run, theme, home, busyVerb, windowVisible } from "h0x";
 
 function icon(p, size, color) {
   if (!p?.icon) return null;
@@ -25,7 +25,7 @@ export default class Pane extends View {
     // The busy verb rotates while the agent works (not while the window is in the background;
     // the first tick after it is back draws once).
     cx.timer.every(1000, (cx) => {
-      const resting = window()?.active === false, back = this.rested && !resting;
+      const resting = !windowVisible(), back = this.rested && !resting;
       this.rested = resting;
       if (!resting && (back || this.me()?.status === "working")) cx.notify();
     });

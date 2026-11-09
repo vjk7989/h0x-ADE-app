@@ -2,7 +2,7 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, busyVerb } from "h0x";
+import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, busyVerb, windowVisible } from "h0x";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -86,10 +86,10 @@ export default class Agents extends View {
     // while the window is in the background they rest; the first tick after it is back
     // draws once at once (the relative times and verbs are then current).
     // Relative times move only for agents that are shown.
-    cx.timer.every(30000, (cx) => { if (window()?.active !== false && agents().length) cx.notify(); });
+    cx.timer.every(30000, (cx) => { if (windowVisible() && agents().length) cx.notify(); });
     // The busy verbs rotate while an agent works.
     cx.timer.every(1000, (cx) => {
-      const resting = window()?.active === false, back = this.rested && !resting;
+      const resting = !windowVisible(), back = this.rested && !resting;
       this.rested = resting;
       if (!resting && (back || agents().some((a) => a.status === "working"))) cx.notify();
     });

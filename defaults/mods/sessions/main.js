@@ -10,7 +10,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { spaces, panes, terminals, tree, core, exec, home, knownAgents, run, openOverlay, notify, nextCommand, shared, setShared, theme, window, layout } from "h0x";
+import { spaces, panes, terminals, tree, core, exec, home, knownAgents, run, openOverlay, notify, nextCommand, shared, setShared, theme, window, windowVisible, layout } from "h0x";
 
 const placed = (n) => n?.content?.mod === "sessions" || (n?.children ?? []).some(placed);
 
@@ -171,7 +171,7 @@ export default class Sessions extends View {
   // Another space, or the window back in front: ask again.
   // Hidden (another panel tab, a closed panel): asks nothing until shown again.
   check(cx) {
-    const active = window()?.active !== false;
+    const active = windowVisible();
     const back = active && this.active === false;
     this.active = active;
     if (!active) return; // nothing to look at; `back` asks again

@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, layout } from "h0x";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, windowVisible, layout } from "h0x";
 
 // Whether the layout shows this panel (as the sessions panel asks): no hidden
 // node on the way, and the selected child of each stack. Not in the layout: shown.
@@ -62,7 +62,7 @@ export default class Changes extends View {
   // background: no git until shown or back, then at once.
   tick(cx) {
     this.ticks = ((this.ticks ?? 0) + 1) % 10;
-    if (!shown(layout()) || window()?.active === false) this.missed = true;
+    if (!shown(layout()) || !windowVisible()) this.missed = true;
     else if (!this.ticks || this.missed) {
       this.missed = false;
       this.refresh(cx);

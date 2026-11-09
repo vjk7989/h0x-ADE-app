@@ -807,6 +807,12 @@ pub fn publish_focused(v: Value) -> bool {
     publish("focused", |s| (std::mem::replace(&mut s.focused, v.clone()), v))
 }
 
+/// Whether the window is presented (not minimized or hidden); a missing field counts as visible.
+/// Reads no dependency: a timer asking must not make its copy draw again on every window change.
+fn window_visible() -> bool {
+    SNAPSHOT.with(|s| s.borrow().window.get("visible").and_then(Value::as_bool).unwrap_or(true))
+}
+
 /// A number that changes whenever the spaces, panes, machines or window snapshot does: lets
 /// a mod's frequent timer skip comparing them. Compare for equality only.
 fn snapshot_revision() -> f64 {
@@ -1286,6 +1292,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         })
         .function("window", reader(reads.clone(), "window", |s| &s.window))
         .function("revision", |_| Ok(HostValue::Number(snapshot_revision())))
+        .function("windowVisible", |_| Ok(HostValue::Bool(window_visible())))
         .function("theme", |_| Ok(to_host(&serde_json::to_value(&*crate::settings::theme()).unwrap_or(Value::Null))))
         .function("settings", |_| Ok(to_host(&serde_json::to_value(&*crate::settings::get()).unwrap_or(Value::Null))))
         .function("keys", |_| {
@@ -1659,6 +1666,32 @@ mod tests {
             assert!(publish_focused(json!({"pane":"p1"})));
             assert!(publish_floats(json!({"f":{"edge":"top"}})));
             assert_eq!(snapshot_revision(), still);
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn window_visible_reads_no_dependency_and_only_false_means_hidden() {
+        std::thread::spawn(|| {
+            assert!(window_visible(), "no window snapshot yet");
+            let reads = Rc::new(RefCell::new(LiveReads::default()));
+            LIVE_READS.with_borrow_mut(|copies| { copies.insert(1, Rc::downgrade(&reads)); });
+            assert!(publish_window(json!({"active":true,"visible":true})));
+            assert!(window_visible());
+            // Unfocused but still on screen: visible. Minimized: not.
+            assert!(publish_window(json!({"active":false,"visible":true})));
+            assert!(window_visible());
+            assert!(publish_window(json!({"active":false})));
+            assert!(window_visible(), "a missing field counts as visible");
+            assert!(publish_window(json!({"active":false,"visible":false})));
+            assert!(!window_visible());
+            // Asking never subscribes the copy: a focus change leaves it alone.
+            assert!(!snapshot_changed(1));
+            assert!(publish_window(json!({"active":true,"visible":false})));
+            assert!(!snapshot_changed(1));
+            // Reading window() does subscribe it.
+            read(&reads, "window", |s| &s.window);
+            assert!(publish_window(json!({"active":false,"visible":false})));
+            assert!(snapshot_changed(1));
         }).join().unwrap();
     }
 

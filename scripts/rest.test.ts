@@ -1,8 +1,8 @@
 import { test, expect } from "bun:test";
 import { readFile } from "node:fs/promises";
 
-// The timers of the default mods rest while the window is unfocused or minimized
-// (`window().active` is false): the host does not slow `cx.timer`, so they must do it themselves,
+// The timers of the default mods rest while the window is minimized or hidden
+// (`window().visible` is false: minimized or hidden; merely unfocused does not count): the host does not slow `cx.timer`, so they must do it themselves,
 // and catch up at their next tick once the window is back.
 
 async function load(mod: string, name: string, globals: Record<string, unknown>) {
@@ -28,10 +28,10 @@ function clock() {
 const View = class {};
 const tree = (mod: string) => ({ id: "root", type: "row", children: [{ id: "x", content: { mod } }] });
 
-async function agentsMod(win: { active?: boolean } | null, list: { status: string }[]) {
+async function agentsMod(win: { visible?: boolean; active?: boolean } | null, list: { status: string }[]) {
   const Agents = await load("agents", "Agents", {
     View, localStorage: { getItem: () => null, setItem() {}, removeItem() {} }, props: () => ({}),
-    window: () => win, agents: () => list,
+    windowVisible: () => win?.visible !== false, agents: () => list,
   });
   const c = clock();
   const view = new Agents();
@@ -40,14 +40,14 @@ async function agentsMod(win: { active?: boolean } | null, list: { status: strin
 }
 
 test("agents: the redraw timers rest while the window is in the background", async () => {
-  const win = { active: false };
+  const win = { visible: false };
   const a = await agentsMod(win, [{ status: "working" }]);
   for (let i = 0; i < 5; i++) { a.tick(1000); a.tick(30000); }
   expect(a.seen.notify).toBe(0);
 });
 
 test("agents: a working agent still redraws every second while the window is active", async () => {
-  const a = await agentsMod({ active: true }, [{ status: "working" }]);
+  const a = await agentsMod({ visible: true }, [{ status: "working" }]);
   a.tick(1000);
   a.tick(1000);
   expect(a.seen.notify).toBe(2);
@@ -56,17 +56,17 @@ test("agents: a working agent still redraws every second while the window is act
 });
 
 test("agents: nothing working and window active: no redraw", async () => {
-  const a = await agentsMod({ active: true }, [{ status: "idle" }, { status: "done" }]);
+  const a = await agentsMod({ visible: true }, [{ status: "idle" }, { status: "done" }]);
   a.tick(1000);
   expect(a.seen.notify).toBe(0);
 });
 
 test("agents: going from inactive to active draws once at the next tick, even if nothing is working", async () => {
-  const win = { active: false };
+  const win = { visible: false };
   const a = await agentsMod(win, [{ status: "done" }]);
   a.tick(1000);
   expect(a.seen.notify).toBe(0);
-  win.active = true;
+  win.visible = true;
   a.tick(1000);
   expect(a.seen.notify).toBe(1);
   a.tick(1000);
@@ -74,19 +74,19 @@ test("agents: going from inactive to active draws once at the next tick, even if
 });
 
 test("agents: an agent that finishes while the window is inactive is drawn on return", async () => {
-  const win = { active: false };
+  const win = { visible: false };
   const list = [{ status: "working" }];
   const a = await agentsMod(win, list);
   a.tick(1000);
   list[0].status = "done"; // the alert came from the app; the list only has to catch up
   a.tick(1000);
   expect(a.seen.notify).toBe(0);
-  win.active = true;
+  win.visible = true;
   a.tick(1000);
   expect(a.seen.notify).toBe(1);
 });
 
-test("agents: a window state without `active` (or no window) counts as active", async () => {
+test("agents: a window state without `visible` (or no window) counts as active", async () => {
   for (const win of [{}, null]) {
     const a = await agentsMod(win, [{ status: "working" }]);
     a.tick(1000);
@@ -94,9 +94,9 @@ test("agents: a window state without `active` (or no window) counts as active", 
   }
 });
 
-async function busyMod(mod: "pane" | "peek", win: { active: boolean }, status: { v: string }) {
+async function busyMod(mod: "pane" | "peek", win: { visible: boolean; active?: boolean }, status: { v: string }) {
   const name = mod === "pane" ? "Pane" : "Peek";
-  const M = await load(mod, name, { View, window: () => win });
+  const M = await load(mod, name, { View, windowVisible: () => win?.visible !== false });
   const c = clock();
   const view = new M();
   view.me = () => ({ status: status.v });
@@ -107,15 +107,15 @@ async function busyMod(mod: "pane" | "peek", win: { active: boolean }, status: {
 
 for (const mod of ["pane", "peek"] as const) {
   test(`${mod}: the busy verb rests while the window is in the background and draws once on return`, async () => {
-    const win = { active: true }, status = { v: "working" };
+    const win = { visible: true }, status = { v: "working" };
     const m = await busyMod(mod, win, status);
     m.tick(1000);
     expect(m.seen.notify).toBe(1);
-    win.active = false;
+    win.visible = false;
     for (let i = 0; i < 5; i++) m.tick(1000);
     expect(m.seen.notify).toBe(1);
     status.v = "idle";
-    win.active = true;
+    win.visible = true;
     m.tick(1000);
     expect(m.seen.notify).toBe(2);
     m.tick(1000);
@@ -123,9 +123,9 @@ for (const mod of ["pane", "peek"] as const) {
   });
 }
 
-async function listing(mod: "changes" | "files", win: { active: boolean }, layout: unknown) {
+async function listing(mod: "changes" | "files", win: { visible: boolean; active?: boolean }, layout: unknown) {
   const name = mod === "changes" ? "Changes" : "Files";
-  const M = await load(mod, name, { View, window: () => win, layout: () => layout });
+  const M = await load(mod, name, { View, windowVisible: () => win?.visible !== false, layout: () => layout });
   const view = new M();
   const calls = { refresh: 0, flush: 0 };
   view.refresh = () => { calls.refresh++; };
@@ -135,11 +135,11 @@ async function listing(mod: "changes" | "files", win: { active: boolean }, layou
 
 for (const mod of ["changes", "files"] as const) {
   test(`${mod}: no refresh while the window is in the background, one at the next tick when it is back`, async () => {
-    const win = { active: false };
+    const win = { visible: false };
     const { view, calls, cx } = await listing(mod, win, tree(mod));
     for (let i = 0; i < 25; i++) view.tick(cx);
     expect(calls.refresh).toBe(0);
-    win.active = true;
+    win.visible = true;
     view.tick(cx);
     expect(calls.refresh).toBe(1);
     view.tick(cx);
@@ -147,24 +147,24 @@ for (const mod of ["changes", "files"] as const) {
   });
 
   test(`${mod}: still refreshes every 10 ticks while the window is active`, async () => {
-    const { view, calls, cx } = await listing(mod, { active: true }, tree(mod));
+    const { view, calls, cx } = await listing(mod, { visible: true }, tree(mod));
     for (let i = 0; i < 20; i++) view.tick(cx);
     expect(calls.refresh).toBe(2);
   });
 }
 
 test("files: notes to agents still go out every 10 ticks while the window is in the background", async () => {
-  const { view, calls, cx } = await listing("files", { active: false }, tree("files"));
+  const { view, calls, cx } = await listing("files", { visible: false }, tree("files"));
   for (let i = 0; i < 30; i++) view.tick(cx);
   expect(calls.flush).toBe(3);
   expect(calls.refresh).toBe(0);
 });
 
 test("sessions: no look at the space while the window is in the background, a refresh when it is back", async () => {
-  const win = { active: false };
+  const win = { visible: false };
   const space = { id: "s", active: true, folder: "/x" };
   const Sessions = await load("sessions", "Sessions", {
-    View, window: () => win, spaces: () => [space], layout: () => tree("sessions"),
+    View, windowVisible: () => win?.visible !== false, spaces: () => [space], layout: () => tree("sessions"),
   });
   const view = new Sessions();
   const calls = { refresh: 0 };
@@ -172,7 +172,7 @@ test("sessions: no look at the space while the window is in the background, a re
   view.key = JSON.stringify([null, "/x"]);
   view.check({});
   expect(calls.refresh).toBe(0);
-  win.active = true;
+  win.visible = true;
   view.check({});
   expect(calls.refresh).toBe(1);
   view.check({});
@@ -181,12 +181,12 @@ test("sessions: no look at the space while the window is in the background, a re
 
 for (const mod of ["pane", "peek"] as const) {
   test(`${mod}: started while the window is in the background, it draws once when the window is back`, async () => {
-    const win = { active: false }, status = { v: "idle" };
+    const win = { visible: false }, status = { v: "idle" };
     const m = await busyMod(mod, win, status);
     m.tick(1000);
     m.tick(1000);
     expect(m.seen.notify).toBe(0);
-    win.active = true;
+    win.visible = true;
     m.tick(1000);
     expect(m.seen.notify).toBe(1);
     m.tick(1000);
@@ -195,12 +195,12 @@ for (const mod of ["pane", "peek"] as const) {
 }
 
 test("agents: a working agent rotates its verb every second again after a long rest", async () => {
-  const win = { active: false };
+  const win = { visible: false };
   const a = await agentsMod(win, [{ status: "working" }]);
   for (let i = 0; i < 600; i++) a.tick(1000);
   for (let i = 0; i < 20; i++) a.tick(30000);
   expect(a.seen.notify).toBe(0);
-  win.active = true;
+  win.visible = true;
   a.tick(1000);
   a.tick(1000);
   a.tick(1000);
@@ -210,7 +210,7 @@ test("agents: a working agent rotates its verb every second again after a long r
 });
 
 test("an hour in the background ends in one catch-up per mod on the same tick, not one per missed tick", async () => {
-  const win = { active: false }, status = { v: "working" };
+  const win = { visible: false }, status = { v: "working" };
   const list = [{ status: "working" }];
   const a = await agentsMod(win, list);
   const busy = await Promise.all([busyMod("pane", win, status), busyMod("pane", win, status), busyMod("peek", win, status)]);
@@ -228,7 +228,7 @@ test("an hour in the background ends in one catch-up per mod on the same tick, n
   // Everything finished while away; the window comes back.
   list[0].status = "done";
   status.v = "idle";
-  win.active = true;
+  win.visible = true;
   a.tick(1000);
   for (const m of busy) m.tick(1000);
   for (const l of lists) l.view.tick(l.cx);
@@ -243,10 +243,10 @@ test("an hour in the background ends in one catch-up per mod on the same tick, n
   for (const l of lists) expect(l.calls.refresh).toBe(1);
 });
 
-async function sessionsMod(win: { active: boolean } | null, layout: () => unknown) {
+async function sessionsMod(win: { visible: boolean; active?: boolean } | null, layout: () => unknown) {
   const space = { id: "s", active: true, folder: "/x" };
   const Sessions = await load("sessions", "Sessions", {
-    View, window: () => win, spaces: () => [space], layout,
+    View, windowVisible: () => win?.visible !== false, spaces: () => [space], layout,
   });
   const view = new Sessions();
   const calls = { refresh: 0 };
@@ -255,13 +255,13 @@ async function sessionsMod(win: { active: boolean } | null, layout: () => unknow
 }
 
 test("sessions: back while its panel is hidden waits, then refreshes once when shown", async () => {
-  const win = { active: false };
+  const win = { visible: false };
   const hidden = { id: "root", type: "stack", active: "other", children: [{ id: "other", content: { mod: "files" } }, { id: "x", content: { mod: "sessions" } }] };
   let layout: unknown = hidden;
   const { view, calls } = await sessionsMod(win, () => layout);
   view.key = JSON.stringify([null, "/x"]);
   view.check({});
-  win.active = true;
+  win.visible = true;
   view.check({});
   view.check({});
   expect(calls.refresh).toBe(0);
@@ -275,6 +275,49 @@ test("sessions: back while its panel is hidden waits, then refreshes once when s
 test("sessions: no window snapshot counts as active, so another space is still asked about", async () => {
   const { view, calls } = await sessionsMod(null, () => tree("sessions"));
   view.key = JSON.stringify([null, "/elsewhere"]);
+  view.check({});
+  expect(calls.refresh).toBe(1);
+});
+
+// `active` is focus: a window that is on screen but unfocused (a second monitor, beside an
+// editor, under a file dialog) keeps ticking. Only a minimized or hidden one (`visible: false`) rests.
+test("agents: visible but unfocused keeps redrawing; minimized rests", async () => {
+  const win = { visible: true, active: false };
+  const a = await agentsMod(win, [{ status: "working" }]);
+  a.tick(1000);
+  a.tick(30000);
+  expect(a.seen.notify).toBe(2);
+  win.visible = false;
+  a.tick(1000);
+  a.tick(30000);
+  expect(a.seen.notify).toBe(2);
+});
+
+for (const mod of ["pane", "peek"] as const) {
+  test(`${mod}: visible but unfocused keeps the busy verb moving`, async () => {
+    const m = await busyMod(mod, { visible: true, active: false }, { v: "working" });
+    m.tick(1000);
+    m.tick(1000);
+    expect(m.seen.notify).toBe(2);
+  });
+}
+
+for (const mod of ["changes", "files"] as const) {
+  test(`${mod}: visible but unfocused still refreshes; minimized does not`, async () => {
+    const win = { visible: true, active: false };
+    const { view, calls, cx } = await listing(mod, win, tree(mod));
+    for (let i = 0; i < 20; i++) view.tick(cx);
+    expect(calls.refresh).toBe(2);
+    win.visible = false;
+    for (let i = 0; i < 20; i++) view.tick(cx);
+    expect(calls.refresh).toBe(2);
+  });
+}
+
+test("sessions: visible but unfocused still looks at the space", async () => {
+  const win = { visible: true, active: false };
+  const { view, calls } = await sessionsMod(win, () => tree("sessions"));
+  view.key = "elsewhere";
   view.check({});
   expect(calls.refresh).toBe(1);
 });

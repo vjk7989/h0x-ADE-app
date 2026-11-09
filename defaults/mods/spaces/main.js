@@ -5,7 +5,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, revision, run, openOverlay, exec, core, theme, shared, setShared, watchFolder, window, layout } from "h0x";
+import { spaces, machines, panes, revision, windowVisible, run, openOverlay, exec, core, theme, shared, setShared, watchFolder, layout } from "h0x";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -72,7 +72,7 @@ export default class Spaces extends View {
     // Not while the window is in the background (nobody sees the list); the next look after it
     // comes back catches up (`checkNew`).
     cx.timer.every(15000, cx => {
-      if (window().active) this.refreshMachines(cx);
+      if (windowVisible()) this.refreshMachines(cx);
       else this.machinesStale = true;
     });
     // `git status` walks the whole tree, on another machine a process there:
@@ -86,7 +86,7 @@ export default class Spaces extends View {
     // focus, every space shown) and no clock due: nothing to check. The host's
     // revision stands for those four; any other number than the last one counts.
     const look = revision();
-    if (this.machinesStale && window().active) {
+    if (this.machinesStale && windowVisible()) {
       this.machinesStale = false;
       this.refreshMachines(cx);
     }
@@ -126,7 +126,7 @@ export default class Spaces extends View {
       this.ready[m.name] = ready;
     }
     this.wake = Infinity; // the next fallback
-    if (window().active) {
+    if (windowVisible()) {
       for (const k of keys) {
         const asks = this.git[k] || this.unsure.has(k);
         if (asks) this.wake = Math.min(this.wake, (this.checked[k] ?? 0) + FALLBACK);

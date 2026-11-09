@@ -5,7 +5,7 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { agents, terminals, panes, spaces, run, theme, props, closeOverlay, busyVerb, window } from "h0x";
+import { agents, terminals, panes, spaces, run, theme, props, closeOverlay, busyVerb, windowVisible } from "h0x";
 
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 // The icon from the app's program table: a one-color glyph or a picture.
@@ -20,7 +20,7 @@ export default class Peek extends View {
     // The busy verb rotates while the agent works (not while the window is in the background;
     // the first tick after it is back draws once).
     cx.timer.every(1000, (cx) => {
-      const resting = window()?.active === false, back = this.rested && !resting;
+      const resting = !windowVisible(), back = this.rested && !resting;
       this.rested = resting;
       if (!resting && (back || this.status() === "working")) cx.notify();
     });
