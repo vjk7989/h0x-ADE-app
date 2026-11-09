@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-11-09
+
+Fixes ported from upstream herdr-app, hardened and tested. Bundles h0x-core 0.1.11.
+
+### Changed
+
+- When h0x-core is installed but fails to start, the app shows its error with a Retry button instead of the install screen; a core that never answers is stopped after 20 seconds.
+- Add machine prints the exact command to run, quoted for PowerShell on Windows and for your shell elsewhere.
+- Mods reuse their code across copies, fixing a slow memory leak that eventually stopped all mods; an edited mod still asks for your OK, and old code versions are released.
+- Layouts can choose the notifications mod; `pane.swap` swaps panes by id.
+
+### Fixed
+
+- A terminal that ends or can't be reached keeps its place in the layout.
+- Replays wait for the pane's size, so long lines are no longer cut.
+- Ctrl+W (Cmd+W) closes the open dialog, not the terminal behind it.
+- The app only uses an h0x-core at an absolute path, never one in the current folder or on a relative PATH entry.
+- Add machine shows its instructions when h0x-core is missing on the other machine.
+- Layouts from another machine can no longer choose your notification or terminal-menu mods.
+
 ## [0.1.12] - 2026-11-09
 
 Security release from the second audit (Cloudflare security-audit tool).
