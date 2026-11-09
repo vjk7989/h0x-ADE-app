@@ -76,15 +76,31 @@ impl Drop for Slot {
     }
 }
 
+/// The SID of the user running this process, from `whoami /user`: names (and
+/// domains) are looked up by icacls and can differ or be spoofed by the environment.
+#[cfg(windows)]
+fn current_user_sid() -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("whoami").args(["/user", "/fo", "csv", "/nh"]).creation_flags(0x0800_0000).output().map_err(|e| e.to_string())?;
+    sid_from_whoami(&String::from_utf8_lossy(&out.stdout)).ok_or_else(|| "no user SID".to_owned())
+}
+
+/// `"DOMAIN\user","S-1-5-21-…"` to the SID.
+#[cfg(windows)]
+fn sid_from_whoami(csv: &str) -> Option<String> {
+    let sid = csv.trim().rsplit(',').next()?.trim_matches('"');
+    // S-1-<digits>(-<digits>)+
+    let parts = sid.strip_prefix("S-1-")?.split('-');
+    let all_digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    let parts: Vec<&str> = parts.collect();
+    (parts.len() >= 2 && parts.into_iter().all(all_digits)).then(|| sid.to_owned())
+}
+
 /// The ACL of the socket file: this user and SYSTEM only, nothing inherited.
 #[cfg(windows)]
 fn restrict_to_owner(path: &std::path::Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
-    let user = std::env::var("USERNAME").map_err(|e| format!("no user name: {e}"))?;
-    let user = match std::env::var("USERDOMAIN") {
-        Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
-        _ => user,
-    };
+    let user = current_user_sid()?;
     let icacls = |build: &dyn Fn(&mut std::process::Command)| {
         let mut command = std::process::Command::new("icacls");
         command.arg(path).creation_flags(0x0800_0000);
@@ -97,7 +113,7 @@ fn restrict_to_owner(path: &std::path::Path) -> Result<(), String> {
         c.arg("/reset");
     })?;
     icacls(&|c| {
-        c.args(["/inheritance:r", "/grant:r"]).arg(format!("{user}:F")).arg("*S-1-5-18:F").args(["/remove:g", "*S-1-5-32-544"]);
+        c.args(["/inheritance:r", "/grant:r"]).arg(format!("*{user}:F")).arg("*S-1-5-18:F").args(["/remove:g", "*S-1-5-32-544"]);
     })
 }
 
@@ -514,6 +530,11 @@ mod windows_tests {
         let out = std::process::Command::new("icacls").arg(&path).output().unwrap();
         let acl = String::from_utf8_lossy(&out.stdout).to_lowercase();
         let user = std::env::var("USERNAME").unwrap().to_lowercase();
+        let sid = current_user_sid().unwrap();
+        assert!(sid.starts_with("S-1-5-"), "{sid}");
+        assert_eq!(sid_from_whoami("\"PC\\me\",\"S-1-5-21-1-2-3-1001\"\r\n").as_deref(), Some("S-1-5-21-1-2-3-1001"));
+        assert_eq!(sid_from_whoami("ERROR: nothing"), None);
+        assert_eq!(sid_from_whoami(""), None);
         assert!(acl.contains(&format!("{user}:(f)")), "{acl}");
         assert!(acl.contains("system:(f)"), "{acl}");
         for other in ["everyone", "users:", "authenticated users", "administrators", "(i)"] {
@@ -522,5 +543,39 @@ mod windows_tests {
         // Nothing to restrict: an error, so listen() serves nothing.
         assert!(restrict_to_owner(&dir.join("missing.sock")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_sid_comes_from_odd_whoami_output_and_anything_that_is_not_a_sid_is_refused() {
+        for (out, sid) in [
+            // With the header row, unquoted, LF only, padded, a localized or odd account name.
+            ("\"User Name\",\"SID\"\r\n\"PC\\me\",\"S-1-5-21-1-2-3-1001\"\r\n", "S-1-5-21-1-2-3-1001"),
+            ("PC\\me,S-1-5-21-7-1001", "S-1-5-21-7-1001"),
+            ("\"PC\\me\",\"S-1-5-21-7-1001\"\n", "S-1-5-21-7-1001"),
+            ("  \"PC\\me\",\"S-1-5-21-7-1001\"  \r\n\r\n", "S-1-5-21-7-1001"),
+            ("\"BÜRO\\José Müller\",\"S-1-5-21-4-1001\"\r\n", "S-1-5-21-4-1001"),
+            ("\"PC\\a,\"\"b\"\"\",\"S-1-5-21-9-1001\"\r\n", "S-1-5-21-9-1001"),
+            ("\"NT AUTHORITY\\SYSTEM\",\"S-1-5-18\"", "S-1-5-18"),
+        ] {
+            assert_eq!(sid_from_whoami(out).as_deref(), Some(sid), "{out:?}");
+        }
+        // Fails closed: an extra column, a lower-case or star-prefixed SID, anything icacls would read as more
+        // than a SID, or no SID at all.
+        for out in [
+            "\"PC\\me\",\"S-1-5-21-1-1001\",\"extra\"",
+            "\"PC\\me\",\"s-1-5-21-1-1001\"",
+            "\"PC\\me\",\"*S-1-5-21-1-1001\"",
+            "\"PC\\me\",\"S-1-5-21-1-1001:F\"",
+            "\"PC\\me\",\"S-1-5-21-1-1001 /grant Everyone\"",
+            "\"PC\\me\",\"S-1-5-21-1-1001\t\"x",
+            "\"PC\\me\",\"\"",
+            "\"PC\\me\"",
+            "\"\"",
+            ",",
+            "\r\n",
+            "INFO: Der Benutzer konnte nicht gefunden werden.",
+        ] {
+            assert_eq!(sid_from_whoami(out), None, "{out:?}");
+        }
     }
 }

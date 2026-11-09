@@ -112,9 +112,12 @@ pub async fn next_change(path: String) -> Result<Vec<String>, String> {
 mod linux {
     use super::*;
 
+    /// Hardened like the panels' git calls: no index lock, and no repo-configured fsmonitor command.
+    pub(super) const LS_FILES_ARGS: [&str; 9] = ["--no-optional-locks", "-c", "core.fsmonitor=false", "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"];
+
     /// Git supplies its own ignore semantics, including global and nested rules.
     fn ignored_directories(root: &Path) -> HashSet<PathBuf> {
-        let Ok(output) = std::process::Command::new("git").arg("-C").arg(root).args(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]).output() else {
+        let Ok(output) = std::process::Command::new("git").arg("-C").arg(root).args(LS_FILES_ARGS).output() else {
             return HashSet::new();
         };
         if !output.status.success() {
@@ -429,6 +432,31 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn a_repo_configured_fsmonitor_command_does_not_run_while_ignored_folders_are_still_pruned() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = test_repo("fsmonitor");
+        std::fs::create_dir_all(root.join("target/deep")).unwrap();
+        std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(root.join("a"), "t").unwrap();
+        // An index, so git has something to ask the fsmonitor about.
+        assert!(std::process::Command::new("git").arg("-C").arg(&root).args(["add", "a"]).status().unwrap().success());
+        let hook = root.with_extension("fsmonitor-hook");
+        let marker = root.with_extension("fsmonitor-ran");
+        let _ = std::fs::remove_file(&marker);
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(std::process::Command::new("git").arg("-C").arg(&root).arg("config").arg("core.fsmonitor").arg(&hook).status().unwrap().success());
+        let paths = watch_directories(&root).unwrap();
+        assert!(!marker.exists(), "the repo's fsmonitor command ran");
+        assert!(!paths.contains(&root.join("target")));
+        assert!(paths.contains(&root.join(".git/refs/heads")));
+        std::fs::remove_dir_all(&root).unwrap();
+        let _ = std::fs::remove_file(&hook);
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn new_directories_and_changed_ignore_rules_update_live_watches() {
         use std::time::{Duration, Instant};
         let root = test_repo("dynamic");
@@ -624,5 +652,15 @@ mod tests {
         wait_for_change(&dir, &dir.join("b.md"));
         folders().remove(&dir);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod ls_files_tests {
+    #[test]
+    fn ls_files_runs_hardened() {
+        let args = super::linux::LS_FILES_ARGS;
+        assert_eq!(&args[..3], ["--no-optional-locks", "-c", "core.fsmonitor=false"]);
+        assert!(args[3..].contains(&"ls-files"));
     }
 }
