@@ -183,7 +183,7 @@ for (const target of awkward) {
     const encoded = Buffer.from(script, "utf16le").toString("base64");
     const shell = Bun.spawnSync([ps, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]);
     expect(shell.stdout.toString()).toBe(target);
-  });
+  }, 60000); // the first PowerShell start can take longer than the 5 s default
 }
 
 test("plain targets are not quoted on either platform", async () => {
