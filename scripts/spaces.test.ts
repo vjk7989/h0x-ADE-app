@@ -15,7 +15,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
     if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
     return element;
   } });
-  const Spaces = new Function("View", "core", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "core", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "window", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -29,7 +29,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
       expect(name).toBe("space.move");
       moves.push(args);
     },
-    ...Array(4).fill(() => element), () => null, () => availability,
+    ...Array(4).fill(() => element), () => null, () => availability, () => ({ active: true }),
   );
   const view = new Spaces();
   view.reconnecting = {};
