@@ -5752,6 +5752,93 @@ export default class Probe extends View {
     }
 
     #[test]
+    fn a_context_guard_is_released_when_drawing_unwinds_and_is_per_thread() {
+        let unwound = std::panic::catch_unwind(|| {
+            let _outer = super::ContextDepth::enter().expect("the first Context block draws");
+            // Refused twice: a refused guard releases nothing.
+            assert!(super::ContextDepth::enter().is_none());
+            assert!(super::ContextDepth::enter().is_none());
+            panic!("drawing the tab failed");
+        });
+        assert!(unwound.is_err());
+        let again = super::ContextDepth::enter().expect("the unwind released the guard");
+        // Another thread draws its own Context block.
+        std::thread::spawn(|| assert!(super::ContextDepth::enter().is_some())).join().unwrap();
+        assert!(super::ContextDepth::enter().is_none());
+        drop(again);
+    }
+
+    #[test]
+    fn background_images_through_links_out_of_the_app_home_draw_nothing() {
+        let tmp = std::env::temp_dir().join(format!("h0x-ade-bg-link-{}", std::process::id()));
+        let home = tmp.join("home");
+        let outside = tmp.join("outside");
+        std::fs::create_dir_all(home.join("bg")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(home.join("bg").join("sky.jpg"), b"x").unwrap();
+        std::fs::write(outside.join("x.png"), b"x").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, home.join("out")).unwrap();
+            std::os::unix::fs::symlink(outside.join("x.png"), home.join("bg").join("x.png")).unwrap();
+            std::os::unix::fs::symlink(home.join("bg"), home.join("in")).unwrap();
+            assert_eq!(super::confined_image(&home, "bg/x.png"), None);
+        }
+        #[cfg(windows)]
+        {
+            // A junction needs no privilege, unlike a symlink.
+            let junction = |link: &std::path::Path, target: &std::path::Path| {
+                let out = std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(link).arg(target).output().unwrap();
+                assert!(out.status.success(), "mklink /J {}: {}", link.display(), String::from_utf8_lossy(&out.stderr));
+            };
+            junction(&home.join("out"), &outside);
+            junction(&home.join("in"), &home.join("bg"));
+        }
+        assert_eq!(super::confined_image(&home, "out/x.png"), None);
+        assert_eq!(super::confined_image(&home, "out"), None);
+        // A link that stays inside the home still draws.
+        let inside = super::confined_image(&home, "in/sky.jpg").expect("a link inside the home");
+        assert!(inside.starts_with(home.canonicalize().unwrap()));
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn background_image_names_that_are_odd_device_like_or_too_long_draw_nothing() {
+        let tmp = std::env::temp_dir().join(format!("h0x-ade-bg-odd-{}", std::process::id()));
+        let home = tmp.join("home");
+        std::fs::create_dir_all(home.join("bg")).unwrap();
+        std::fs::write(home.join("bg").join("sky.jpg"), b"x").unwrap();
+        std::fs::write(home.join("bg").join("天空 ☁.png"), b"x").unwrap();
+        // Unicode and spaces inside the home are fine.
+        let sky = super::confined_image(&home, "bg/天空 ☁.png").expect("a unicode name in the home");
+        assert!(sky.starts_with(home.canonicalize().unwrap()));
+        let long = format!("bg/{}.png", "a".repeat(5000));
+        for bad in [
+            " ",
+            "\t",
+            "bg/sky.jpg ",
+            "bg/sky.jpg.",
+            "CON",
+            "bg/NUL",
+            "//?/C:/x.png",
+            r"\\.\C:\x.png",
+            "//./pipe/x",
+            r"\??\C:\x.png",
+            "/??/C:/x.png",
+            r"\x.png",
+            "bg/sky.jpg/..",
+            r"bg\..\..\x.png",
+            "../home/bg/sky.jpg",
+            long.as_str(),
+        ] {
+            assert_eq!(super::confined_image(&home, bad), None, "{bad:?}");
+        }
+        // A home that does not exist names no image.
+        assert_eq!(super::confined_image(&tmp.join("missing"), "bg/sky.jpg"), None);
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
     fn a_finished_terminal_is_not_put_back_in_its_tab() {
         let record = |state: &str| serde_json::json!({ "state": state, "labels": { "h0x.space": "sp1", "h0x.tab": "tb1" } });
         assert!(super::adoptable(&record("live"), "sp1", Some("tb1"), None));

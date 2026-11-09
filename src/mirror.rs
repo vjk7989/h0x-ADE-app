@@ -452,6 +452,50 @@ mod tests {
         assert_eq!(Document::capture(&m, None), local);
     }
     #[test]
+    fn remote_layouts_lose_images_and_context_blocks_at_any_depth() {
+        let image = serde_json::json!({"image": "bg/sky.jpg", "fit": "contain"});
+        let gradient = serde_json::json!({"gradient": ["#000000", "surface"], "angle": 90});
+        // Containers nested 40 deep (stack, column, row in turn), each with a
+        // Context child (with an image pane frame), a Context float and an agent.
+        let mut node = serde_json::json!({"id":"leaf","type":"block","content":{"terminal":"t1"},"background":image});
+        for depth in 0..40 {
+            node = serde_json::json!({"id": format!("n{depth}"), "type": ["stack", "column", "row"][depth % 3],
+                "background": if depth % 2 == 0 { image.clone() } else { gradient.clone() },
+                "children":[{"id": format!("c{depth}"),"type":"block","content":{"context":"active","pane":{"background":image}}},
+                            node,
+                            {"id": format!("a{depth}"),"type":"block","content":{"agent":"focused"}}],
+                "floating":[{"id": format!("f{depth}"),"content":{"tab":"active"}},{"id": format!("g{depth}"),"content":{"terminal":"t2"}}]});
+        }
+        let mut doc = layout_with(node);
+        doc.drop_remote_mods();
+        let mut n = root(&doc);
+        for depth in (0..40).rev() {
+            assert_eq!(n.id, format!("n{depth}"));
+            if depth % 2 == 0 {
+                assert_eq!(n.background, None, "image kept at depth {depth}");
+            } else {
+                assert!(matches!(n.background, Some(Background::Gradient { .. })), "gradient lost at depth {depth}");
+            }
+            let floats: Vec<&str> = n.floating.iter().map(|f| f.id.as_str()).collect();
+            assert_eq!(floats, [format!("g{depth}")]);
+            let inner = if depth == 0 { "leaf".to_owned() } else { format!("n{}", depth - 1) };
+            let kids: Vec<&str> = n.children().iter().map(|c| c.id.as_str()).collect();
+            assert_eq!(kids, [inner, format!("a{depth}")]);
+            n = &n.children()[0];
+        }
+        assert_eq!(n.id, "leaf");
+        assert_eq!(n.background, None);
+        // Nothing to strip: an empty document and a space without tabs stay as they are.
+        let mut empty: Document = serde_json::from_value(serde_json::json!({"spaces":[]})).unwrap();
+        let before = empty.clone();
+        empty.drop_remote_mods();
+        assert_eq!(empty, before);
+        let mut bare: Document = serde_json::from_value(serde_json::json!({"spaces":[{"id":"s","tabs":[]}]})).unwrap();
+        let before = bare.clone();
+        bare.drop_remote_mods();
+        assert_eq!(bare, before);
+    }
+    #[test]
     fn fresh_ids_are_not_a_per_screen_counter() {
         assert_ne!(Model::default().fresh_id("p"), Model::default().fresh_id("p"));
     }
