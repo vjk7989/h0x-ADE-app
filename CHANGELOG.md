@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-11-09
+
+Security release from the second audit (Cloudflare security-audit tool).
+
+### Changed
+
+- Mods you added yourself may ask for your OK once more: the check now covers every file a mod can run, mods can no longer load their helper files as code, and a mod with more than 20,000 files or 512 MiB is refused.
+- Files dropped or pasted into a terminal are quoted for the shell actually running there (PowerShell, cmd, fish, POSIX shells); behind ssh, tmux or similar, unsafe names are refused.
+
+### Fixed
+
+- Layouts from another machine can no longer load images from network shares or crash the app.
+- Pasted images go to a private temporary folder.
+- The Files panel's git calls no longer run repository hooks; the app's control socket uses your account's SID.
+
+### Requires
+
+- h0x-core 0.1.10.
+
 ## [0.1.11] - 2026-11-09
 
 Security release from a full audit.
