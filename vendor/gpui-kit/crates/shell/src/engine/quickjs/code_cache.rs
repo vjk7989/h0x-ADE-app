@@ -174,6 +174,30 @@ mod tests {
         assert_eq!(value(&runtime, &tree), "2");
     }
 
+    // HyperOx: a new code version replaces the old one in the cache. Open copies hold their own
+    // handle, so nothing needs the old entry; keeping it grows the cache (and the resolver's
+    // registrations) with every edit or watcher revision for the runtime's lifetime.
+    #[test]
+    fn a_new_code_version_evicts_the_old_cache_entry() {
+        for watched in [false, true] {
+            let runtime = ShellRuntime::new_isolated().unwrap();
+            let revision = Rc::new(Cell::new(0u64));
+            if watched {
+                let provider = revision.clone();
+                runtime.set_source_revision_provider(move |_| Some(provider.get()));
+            }
+            let tree = Tree::new();
+            for version in 0..20u64 {
+                tree.write("main.js", format!("export default class {{ static value = '{version:02}'; }}"));
+                revision.set(version);
+                assert_eq!(value(&runtime, &tree), format!("{version:02}"));
+                let entries: usize = runtime.code_cache.borrow().values().map(Vec::len).sum();
+                assert_eq!(entries, 1, "watched {watched}, version {version}");
+            }
+            assert_eq!(runtime.app_modules.registration_count(), 1, "watched {watched}");
+        }
+    }
+
     #[test]
     fn interrupted_and_out_of_memory_evaluations_can_retry_unchanged_source() {
         for oom in [false, true] {

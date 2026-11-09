@@ -446,6 +446,50 @@ mod tests {
         assert_eq!(revision(Path::new("/outside")), None);
     }
 
+    // HyperOx: a watcher revision belongs to exactly one mod folder. A folder whose name only
+    // extends another (`a`, `ab`) keeps its own, and anything that is not a mod folder of this
+    // home (deeper, shallower, `..`, a look-alike home, a relative path) has none and is walked.
+    #[test]
+    fn source_revisions_keep_prefix_related_mods_apart_and_answer_only_for_mod_folders() {
+        let (_, changes) = async_channel::unbounded();
+        let events = FileEvents { changes, root: PathBuf::from("/home/probe"), revisions: Default::default() };
+        let revision = events.revision_provider();
+        let a = Path::new("/home/probe/mods/a");
+        let ab = Path::new("/home/probe/mods/ab");
+        events.revisions.lock().unwrap().changed(&vec!["mods/a/main.js".into()], false);
+        assert_eq!(revision(a), Some(1));
+        assert_eq!(revision(ab), Some(0), "an edit in a is not an edit in ab");
+        events.revisions.lock().unwrap().changed(&vec!["mods/ab/lib/part.js".into()], false);
+        assert_eq!(revision(ab), Some(2));
+        assert_eq!(revision(a), Some(1), "an edit in ab is not an edit in a");
+        for root in ["/home/probe", "/home/probe/mods", "/home/probe/mods/a/lib", "/home/probe/../probe/mods/a", "/home/probeX/mods/a", "/home/probe/other/a", "mods/a", ""] {
+            assert_eq!(revision(Path::new(root)), None, "{root}");
+        }
+    }
+
+    // HyperOx: Windows spellings that are not the watched home's own (another case, a share, the
+    // verbatim form) never borrow a mod's revision; they fall back to walking the folder.
+    #[cfg(windows)]
+    #[test]
+    fn source_revisions_answer_only_for_the_homes_own_windows_spelling() {
+        let (_, changes) = async_channel::unbounded();
+        let events = FileEvents { changes, root: PathBuf::from(r"C:\Users\u\.config\h0x-ade"), revisions: Default::default() };
+        let revision = events.revision_provider();
+        let one = Path::new(r"C:\Users\u\.config\h0x-ade\mods\one");
+        events.revisions.lock().unwrap().changed(&vec![PathBuf::from(r"mods\one\main.js")], false);
+        assert_eq!(revision(one), Some(1));
+        for root in [
+            r"c:\users\u\.config\h0x-ade\mods\one",
+            r"C:\Users\u\.config\h0x-ade\Mods\one",
+            r"\\remote\share\h0x-ade\mods\one",
+            r"\\?\C:\Users\u\.config\h0x-ade\mods\one",
+            r"D:\Users\u\.config\h0x-ade\mods\one",
+            r"C:\Users\u\.config\h0x-ade\mods\one\lib",
+        ] {
+            assert_eq!(revision(Path::new(root)), None, "{root}");
+        }
+    }
+
     #[test]
     fn unattributed_events_revalidate_code_without_reloading_mods() {
         let base = Path::new("/home/probe");
