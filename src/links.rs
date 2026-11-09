@@ -119,7 +119,7 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
 /// UNC, `//host`, device and NT object paths (`\??\UNC\host\…`) in any slash
 /// mix, which can name another machine. On Windows any prefix but a drive
 /// letter is refused too.
-fn network(path: &Path) -> bool {
+pub(crate) fn network(path: &Path) -> bool {
     let text = path.as_os_str().to_string_lossy();
     let slash = ['/', '\\'];
     let unc_or_nt = text
