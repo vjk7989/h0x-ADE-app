@@ -1127,10 +1127,29 @@ fn image_file(item: &ClipboardItem) -> Option<std::path::PathBuf> {
         ImageFormat::Svg => "svg",
         _ => "png",
     };
+    static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let dir = DIR.get_or_init(|| private_dir(&std::env::temp_dir())).as_ref()?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
-    let path = std::env::temp_dir().join(format!("h0x-paste-{stamp}.{ext}"));
-    std::fs::write(&path, bytes).ok()?;
-    Some(path)
+    write_new(&dir.join(format!("paste-{stamp}.{ext}")), &bytes)
+}
+
+/// A directory only this user can enter, new in `parent`, with a name no one can predict.
+fn private_dir(parent: &std::path::Path) -> Option<std::path::PathBuf> {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    let dir = parent.join(format!("h0x-paste-{}-{stamp}", std::process::id()));
+    let mut make = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut make, 0o700);
+    make.create(&dir).ok()?;
+    Some(dir)
+}
+
+/// The bytes in a file that must not exist yet (no truncating someone else's file or link).
+fn write_new(path: &std::path::Path, bytes: &[u8]) -> Option<std::path::PathBuf> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).ok()?;
+    file.write_all(bytes).ok()?;
+    Some(path.to_owned())
 }
 
 fn paste_image_bytes(format: ImageFormat, bytes: &[u8]) -> Option<(ImageFormat, std::borrow::Cow<'_, [u8]>)> {
@@ -3214,6 +3233,28 @@ mod tests {
         // A thumb's painted top reads back as its own offset.
         let (top, _) = thumb(80, 25, 40, track, min).unwrap();
         assert_eq!(row_at(80, 40, track, min, top), 25);
+    }
+
+    #[test]
+    fn pasted_images_go_to_a_fresh_private_directory_and_never_overwrite() {
+        let parent = std::env::temp_dir().join(format!("h0x-ade-paste-test-{}", std::process::id()));
+        std::fs::create_dir_all(&parent).unwrap();
+        let one = super::private_dir(&parent).unwrap();
+        let two = super::private_dir(&parent).unwrap();
+        assert_ne!(one, two);
+        assert!(one.starts_with(&parent) && one.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&one).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        let file = one.join("paste-1.png");
+        assert_eq!(super::write_new(&file, b"png bytes").as_deref(), Some(file.as_path()));
+        assert_eq!(std::fs::read(&file).unwrap(), b"png bytes");
+        // An existing file (or planted link) is refused and left as it was.
+        assert_eq!(super::write_new(&file, b"other"), None);
+        assert_eq!(std::fs::read(&file).unwrap(), b"png bytes");
+        std::fs::remove_dir_all(&parent).unwrap();
     }
 
     #[test]
