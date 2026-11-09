@@ -5560,6 +5560,50 @@ mod tests {
     }
 
     #[test]
+    fn close_keys_still_close_the_terminal_when_no_dialog_holds_the_keyboard() {
+        in_own_process("close_keys_without_dialog");
+    }
+
+    #[gpui::test]
+    fn close_keys_without_dialog(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("close_keys_without_dialog") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.model.add_tab("sp1", crate::model::Tab::new("tb2", "", "p3", "t3"));
+            this.model.add_tab("sp1", crate::model::Tab::new("tb3", "", "p4", "t4"));
+            this.model.select_tab("tb1");
+            assert!(this.model.split("p1", crate::layout::Axis::Row, "p2", "t2"));
+            this.sync(window, cx);
+            // A window overlay never holds the keyboard: the key closes the focused pane.
+            this.open_overlay("float".into(), json!({"kind": "window"}), window, cx);
+            assert!(this.model.focus_pane("p2"));
+            this.run_action("pane.close", window, cx);
+            assert!(this.model.tab("tb1").is_some_and(|t| t.root.find("p2").is_none() && t.root.find("p1").is_some()));
+            assert!(this.overlays.iter().any(|o| o.id == "float"));
+            // A named target is closed even with a dialog open, and the dialog stays.
+            this.open_overlay("dlg".into(), json!({"kind": "dialog"}), window, cx);
+            this.run_key("tab.close", json!({"id": "tb2"}), window, cx);
+            assert!(this.model.tab("tb2").is_none());
+            assert!(this.overlays.iter().any(|o| o.id == "dlg"));
+            // A 0.1.0 keys.json still says context.close: that closes the dialog too.
+            // Once the dialog is gone, the key closes the shown tab.
+            this.run_action("context.close", window, cx);
+            assert!(!this.overlays.iter().any(|o| o.id == "dlg"));
+            assert!(this.model.tab("tb1").is_some());
+            this.run_action("tab.close", window, cx);
+            assert!(this.model.tab("tb1").is_none());
+            assert!(this.model.tab("tb3").is_some());
+            assert!(this.overlays.iter().any(|o| o.id == "float"));
+        }));
+    }
+
+    #[test]
     fn a_second_rename_press_closes_the_prompt() {
         in_own_process("rename_prompt_opens_once");
     }
@@ -5802,6 +5846,12 @@ export default class SystemToast extends View {
         let (id, name) = notify(cx);
         assert_eq!(name, "toast");
         assert!(shown(&id, cx), "an unknown mod falls back to the shipped toast, which stays");
+
+        // An empty name names no mod either.
+        view.update(cx, |this, _| this.chrome.toast = Some(String::new()));
+        let (id, name) = notify(cx);
+        assert_eq!(name, "toast");
+        assert!(shown(&id, cx), "an empty mod name falls back to the shipped toast");
     }
 
     #[test]
@@ -5964,6 +6014,32 @@ export default class SystemToast extends View {
             assert_eq!(super::swap_by(&neither), Err("pane.swap needs direction or target".into()), "{neither}");
         }
         assert_eq!(super::swap_by(&json!({"direction": "sideways"})), Err("pane.swap direction is left, right, up or down, not \"sideways\"".into()));
+    }
+
+    #[test]
+    fn pane_swap_treats_empty_and_odd_cased_values_as_given() {
+        use super::SwapBy;
+        use serde_json::json;
+        // An empty target is a target (the model then finds no such pane), not a missing one.
+        assert_eq!(super::swap_by(&json!({"target": ""})), Ok(SwapBy::Target("")));
+        assert_eq!(super::swap_by(&json!({"direction": "", "target": "p2"})), Err("pane.swap takes direction or target, not both".into()));
+        for dir in ["", "Left", "UP", " down"] {
+            assert_eq!(super::swap_by(&json!({"direction": dir})), Err(format!("pane.swap direction is left, right, up or down, not {dir:?}")), "{dir:?}");
+        }
+    }
+
+    #[test]
+    fn a_focused_pane_swap_without_a_neighbor_changes_nothing() {
+        let mut m = swap_model();
+        let before = swap_state(&m);
+        // Not explicit: the focused pane at the edge of its tab just stays.
+        assert_eq!(super::swap_with_neighbor(&mut m, "x1", false, None), Ok(()));
+        assert_eq!(swap_state(&m), before);
+        // A pane id with backslashes or a remote prefix is just an id that names no pane.
+        for pane in [r"C:\work\x1", "box/x1", ""] {
+            assert_eq!(super::swap_with_neighbor(&mut m, pane, true, Some("x2".into())), Err(format!("no pane {pane:?}")), "{pane}");
+            assert_eq!(swap_state(&m), before, "{pane}");
+        }
     }
 
     #[test]

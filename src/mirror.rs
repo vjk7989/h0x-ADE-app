@@ -498,6 +498,23 @@ mod tests {
         assert_eq!(bare, before);
     }
     #[test]
+    fn remote_layouts_cannot_choose_the_notification_mod() {
+        for toast in ["worktree", "toast", "", "no-such-mod"] {
+            let mut doc = layout_with(serde_json::json!({"id":"r","type":"row","toast":toast,
+                "children":[{"id":"c","type":"column","toast":toast,"children":[{"id":"p","type":"block","content":{"terminal":"t1"}}]}]}));
+            doc.drop_remote_mods();
+            assert_eq!(root(&doc).toast, None, "{toast:?}");
+            assert_eq!(root(&doc).children()[0].toast, None, "{toast:?}");
+            // The structure around it stays.
+            assert_eq!(root(&doc).children()[0].children()[0].id, "p", "{toast:?}");
+        }
+        // A local document keeps its choice.
+        let local = layout_with(serde_json::json!({"id":"r","type":"row","toast":"system-toast","children":[]}));
+        let mut m = Model::default();
+        local.replace(&mut m, None);
+        assert_eq!(Document::capture(&m, None), local);
+    }
+    #[test]
     fn fresh_ids_are_not_a_per_screen_counter() {
         assert_ne!(Model::default().fresh_id("p"), Model::default().fresh_id("p"));
     }

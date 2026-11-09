@@ -579,6 +579,25 @@ mod tests {
         assert_eq!(key(None, &[r"C:\Windows\powershell.exe"]), "shell");
     }
 
+    #[test]
+    fn kimi_code_names_map_to_kimi_and_near_misses_do_not() {
+        for app in ["kimi", "kimi-code", "kimicodecli", "Kimi-Code", "KIMICODECLI"] {
+            assert_eq!(key(Some(app), &["/bin/zsh"]), "kimi", "{app}");
+        }
+        assert_eq!(key(None, &["kimi-code", "--resume"]), "kimi");
+        assert_eq!(key(None, &["/usr/local/bin/kimicodecli"]), "kimi");
+        assert_eq!(key(None, &[r"C:\Users\me\.local\bin\kimi-code.exe"]), "kimi");
+        assert_eq!(key(Some("kimi-coder"), &[]), "agent");
+        assert_eq!(key(None, &["kimicode"]), "program");
+        // An empty app name is no agent name: the program decides.
+        assert_eq!(key(Some(""), &["kimi-code"]), "kimi");
+    }
+
+    #[test]
+    fn no_commands_checks_nothing_on_this_machine() {
+        assert!(installed(&[], None).is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn installed_checks_functions_and_quoted_names_but_not_aliases() {

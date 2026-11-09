@@ -2340,6 +2340,94 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_zero_sized_fit_still_attaches_at_the_last_usable_size(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::core_link::offline(), "t1".into(), (120, 40), cx));
+        cx.run_until_parked();
+        terminal.update(cx, |terminal, _| terminal.fit(0, 0, size(px(8.), px(18.)), 1.));
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, _| {
+            assert!(terminal.lost, "a laid-out pane attaches even at no size");
+            assert_eq!(terminal.dimensions(), (120, 40));
+        });
+    }
+
+    #[gpui::test]
+    fn an_empty_size_hint_attaches_at_the_smallest_screen(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::core_link::offline(), "t1".into(), (0, 0), cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, _| {
+            assert!(terminal.lost);
+            assert_eq!(terminal.dimensions(), (2, 1));
+        });
+    }
+
+    #[gpui::test]
+    fn a_size_arriving_after_the_deadline_resizes_without_attaching_again(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::core_link::offline(), "t1".into(), (120, 40), cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        terminal.update(cx, |terminal, _| {
+            assert!(terminal.lost);
+            terminal.lost = false;
+            terminal.fit(100, 30, size(px(8.), px(18.)), 1.);
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, _| {
+            assert!(!terminal.lost, "the late size must not start a second attach");
+            assert_eq!(terminal.dimensions(), (100, 30));
+        });
+    }
+
+    #[gpui::test]
+    fn a_resize_after_a_matching_replay_keeps_its_channel(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::core_link::offline(), "t1".into(), (120, 40), cx));
+        let (_tx, rx) = async_channel::unbounded();
+        terminal.update(cx, |terminal, cx| {
+            let attached = crate::core_link::Attached { channel: 7, stream: rx, terminal: json!({"title": "current replay"}) };
+            assert!(terminal.attached(Ok(attached), (120, 40), cx).is_some());
+            assert_eq!(terminal.grid.borrow().channel, Some(7));
+            assert_eq!(terminal.title, "current replay");
+            // Resizing while the replay streams in resizes the program, on the same channel.
+            terminal.fit(100, 30, size(px(8.), px(18.)), 1.);
+            assert_eq!(terminal.grid.borrow().channel, Some(7));
+            assert_eq!(terminal.dimensions(), (100, 30));
+        });
+    }
+
+    #[gpui::test]
+    fn a_discarded_replay_attaches_again_at_the_new_pane_size(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::core_link::offline(), "t1".into(), (120, 40), cx));
+        let (_tx, rx) = async_channel::unbounded();
+        terminal.update(cx, |terminal, cx| {
+            terminal.fit(114, 30, size(px(8.), px(18.)), 1.);
+            let attached = crate::core_link::Attached { channel: 7, stream: rx, terminal: json!({}) };
+            assert!(terminal.attached(Ok(attached), (120, 40), cx).is_none());
+            assert!(!terminal.lost);
+        });
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, _| {
+            assert!(terminal.lost, "the new attach at the fitted size must be tried");
+            assert!(terminal.grid.borrow().channel.is_none());
+            assert_eq!(terminal.dimensions(), (114, 30));
+        });
+    }
+
+    #[gpui::test]
     fn terminal_release_ends_window_text_selection(cx: &mut gpui::TestAppContext) {
         use gpui::*;
         use gpui_base::{TextSelectionLayer, TextView, TextViewState};
