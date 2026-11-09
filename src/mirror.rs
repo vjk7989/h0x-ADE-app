@@ -114,6 +114,9 @@ fn remote_header(header: &mut Option<Header>) {
 }
 
 fn strip_node(node: &mut Node) {
+    // Another machine's layout never selects which local mods show notifications or menus.
+    node.toast = None;
+    node.terminal_menu = None;
     node.floating.retain(|f| remote_content(&f.content));
     // An image is read from this machine's disk: another machine names none.
     if matches!(node.background, Some(Background::Image { .. })) {
@@ -510,6 +513,22 @@ mod tests {
         }
         // A local document keeps its choice.
         let local = layout_with(serde_json::json!({"id":"r","type":"row","toast":"system-toast","children":[]}));
+        let mut m = Model::default();
+        local.replace(&mut m, None);
+        assert_eq!(Document::capture(&m, None), local);
+    }
+    #[test]
+    fn remote_layouts_cannot_choose_the_terminal_menu_mod() {
+        for menu in ["worktree", "menu", "", "no-such-mod"] {
+            let mut doc = layout_with(serde_json::json!({"id":"r","type":"row","terminal_menu":menu,
+                "children":[{"id":"c","type":"column","terminal_menu":menu,"children":[{"id":"p","type":"block","content":{"terminal":"t1"}}]}]}));
+            doc.drop_remote_mods();
+            assert_eq!(root(&doc).terminal_menu, None, "{menu:?}");
+            assert_eq!(root(&doc).children()[0].terminal_menu, None, "{menu:?}");
+            assert_eq!(root(&doc).children()[0].children()[0].id, "p", "{menu:?}");
+        }
+        // A local document keeps its choice.
+        let local = layout_with(serde_json::json!({"id":"r","type":"row","terminal_menu":"personal-menu","children":[]}));
         let mut m = Model::default();
         local.replace(&mut m, None);
         assert_eq!(Document::capture(&m, None), local);

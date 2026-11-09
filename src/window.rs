@@ -5532,6 +5532,9 @@ mod tests {
         }));
         cx.update(|window, cx| view.update(cx, |this, cx| {
             this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            // The offline core never reports this machine's layout: closing needs it readable,
+            // so the checks below prove the dialog took the key rather than a refused close.
+            this.documents.entry(String::new()).or_default().available = true;
             this.sync(window, cx);
             this.open_overlay("bottom".into(), json!({"kind": "dialog"}), window, cx);
             for kind in ["dialog", "popup"] {
