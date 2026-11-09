@@ -1127,7 +1127,10 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     let feedback_from = inst.props.get("from").and_then(Value::as_str).unwrap_or("person").to_owned();
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
     let (cmd_tx, commands) = async_channel::unbounded::<String>();
-    COMMANDS.with(|c| c.borrow_mut().push((copy, inst.name.clone(), cmd_tx)));
+    COMMANDS.with_borrow_mut(|commands| {
+        commands.retain(|(_, _, tx)| !tx.is_closed());
+        commands.push((copy, inst.name.clone(), cmd_tx));
+    });
     HostModule::new("h0x")
         .declarations(DECLARATIONS)
         .async_function("exec", |a| {
@@ -1587,6 +1590,22 @@ mod tests {
     }
 
     #[test]
+    fn loading_copies_reclaims_closed_command_channels_without_dispatch() {
+        std::thread::spawn(|| {
+            let inst = Instance { name: "test".into(), props: Value::Null };
+            let live = module(inst.clone(), 1);
+            for copy in 2..102 {
+                drop(module(inst.clone(), copy));
+                COMMANDS.with_borrow(|commands| assert!(commands.len() <= 2));
+            }
+            drop(live);
+            let last = module(inst, 102);
+            COMMANDS.with_borrow(|commands| assert_eq!(commands.len(), 1));
+            drop(last);
+        }).join().unwrap();
+    }
+
+    #[test]
     fn keyboard_focus_is_opt_in_and_commands_only_reach_the_shown_copy() {
         for metadata in [json!({}), json!({"focusable": false})] {
             assert!(!serde_json::from_value::<Hint>(metadata).unwrap().focusable);
@@ -1779,6 +1798,29 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&staged).unwrap();
+    }
+
+    #[test]
+    fn an_edit_that_keeps_size_and_modified_time_still_asks_again() {
+        // Shared mod code is keyed by content, like the consent: a same-size edit with the old
+        // modified time (what a tool that restores times does) must not pass as the consented file.
+        let root = std::env::temp_dir().join(format!("h0x-ade-samesize-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("main.js"), "export default 1;").unwrap();
+        let before = std::fs::metadata(root.join("main.js")).unwrap().modified().unwrap();
+        let found = Found { id: "x".into(), dir: root.clone(), hint: Hint::default(), stamp: SystemTime::now() };
+        let hash = content_hash(&root);
+        let allowed: BTreeMap<String, crate::settings::ModChoice> = [("x".to_owned(), crate::settings::ModChoice { hash: hash.clone(), allow: true })].into();
+        assert_eq!(trust(&found, &allowed), Trust::Allowed);
+        std::fs::write(root.join("main.js"), "export default 2;").unwrap();
+        let file = std::fs::File::options().write(true).open(root.join("main.js")).unwrap();
+        file.set_modified(before).unwrap();
+        drop(file);
+        assert_eq!(std::fs::metadata(root.join("main.js")).unwrap().modified().unwrap(), before);
+        assert_eq!(trust(&found, &allowed), Trust::Ask(content_hash(&root)));
+        assert_ne!(content_hash(&root), hash);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
