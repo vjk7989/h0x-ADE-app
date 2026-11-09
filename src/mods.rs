@@ -342,8 +342,12 @@ pub fn trust(found: &Found, choices: &BTreeMap<String, crate::settings::ModChoic
     if declares_dependencies(&found.dir) {
         return Trust::Denied;
     }
-    // The hash leaves the editor helpers out, so a mod that runs one can't be answered for.
+    // The hash leaves the generated editor helpers out, so a mod that runs one can't be answered for.
     if entry_is_helper(&found.dir) {
+        return Trust::Denied;
+    }
+    if walk_mod(&found.dir, true).1 {
+        eprintln!("mod {}: denied, it has more than {MAX_FILES} files or {} MiB (links included)", found.id, MAX_BYTES >> 20);
         return Trust::Denied;
     }
     decide(choices, &found.id, content_hash(&found.dir))
@@ -383,10 +387,13 @@ fn is_shipped(dir: &Path, shipped: &[(&str, &[u8])]) -> bool {
 }
 
 /// SHA-256 over every file of a mod (names and bytes), dot files included:
-/// the code a person's answer is for. The editor helpers don't count.
+/// the code a person's answer is for. The generated editor helpers don't count.
 pub fn content_hash(dir: &Path) -> String {
     let mut all = Vec::new();
-    for f in mod_files(dir, true).into_iter().filter(|f| !matches!(f.as_str(), "gpui-kit.d.ts" | "jsconfig.json")) {
+    // gpui-shell rewrites gpui-kit.d.ts and writes a jsconfig.json once; a jsconfig.json
+    // that is not JSON can't be an editor config (the loader refuses to import it, but it is hashed anyway).
+    let helper_config = std::fs::read(dir.join("jsconfig.json")).is_ok_and(|b| serde_json::from_slice::<Value>(&b).is_ok());
+    for f in mod_files(dir, true).into_iter().filter(|f| f != "gpui-kit.d.ts" && !(helper_config && f == "jsconfig.json")) {
         let bytes = std::fs::read(dir.join(&f)).unwrap_or_default();
         all.extend_from_slice(format!("{f}\0{}\0", bytes.len()).as_bytes());
         all.extend_from_slice(&bytes);
@@ -394,10 +401,20 @@ pub fn content_hash(dir: &Path) -> String {
     crate::update::sha256(&all)
 }
 
+/// What the consent walk reads at most: a link to a drive root must not hang it.
+const MAX_FILES: usize = 20_000;
+const MAX_BYTES: u64 = 512 * 1024 * 1024;
+
 /// A mod's files, `/`-separated and sorted (dot files only when asked). Folder
 /// links are followed (a mod may link its fonts elsewhere), each real folder once.
 fn mod_files(root: &Path, dots: bool) -> Vec<String> {
+    walk_mod(root, dots).0
+}
+
+/// `mod_files`, and whether the walk stopped at `MAX_FILES` or `MAX_BYTES`.
+fn walk_mod(root: &Path, dots: bool) -> (Vec<String>, bool) {
     let mut out = Vec::new();
+    let mut bytes = 0u64;
     let mut seen = std::collections::HashSet::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
@@ -412,12 +429,17 @@ fn mod_files(root: &Path, dots: bool) -> Vec<String> {
             if path.is_dir() {
                 pending.push(path);
             } else if let Some(rel) = path.strip_prefix(root).ok().and_then(|r| r.to_str()) {
+                bytes += std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                if out.len() >= MAX_FILES || bytes > MAX_BYTES {
+                    out.sort();
+                    return (out, true);
+                }
                 out.push(rel.replace('\\', "/"));
             }
         }
     }
     out.sort();
-    out
+    (out, false)
 }
 
 /// Whether the manifest's `entry` is one of the editor helpers, which the

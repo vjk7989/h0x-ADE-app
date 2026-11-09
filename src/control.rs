@@ -89,7 +89,11 @@ fn current_user_sid() -> Result<String, String> {
 #[cfg(windows)]
 fn sid_from_whoami(csv: &str) -> Option<String> {
     let sid = csv.trim().rsplit(',').next()?.trim_matches('"');
-    (sid.starts_with("S-1-") && sid.bytes().all(|b| b.is_ascii_digit() || b == b'-' || b == b'S')).then(|| sid.to_owned())
+    // S-1-<digits>(-<digits>)+
+    let parts = sid.strip_prefix("S-1-")?.split('-');
+    let all_digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    let parts: Vec<&str> = parts.collect();
+    (parts.len() >= 2 && parts.into_iter().all(all_digits)).then(|| sid.to_owned())
 }
 
 /// The ACL of the socket file: this user and SYSTEM only, nothing inherited.
