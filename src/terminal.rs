@@ -1062,9 +1062,13 @@ pub enum Quoting {
 
 impl Quoting {
     /// From `programs::of`: a known shell by its name, a known agent or tool as a
-    /// POSIX shell (it reads pasted paths itself), anything else unknown.
+    /// POSIX shell (it reads pasted paths itself), anything else unknown. A pane
+    /// running ssh, tmux (zellij, screen), mosh or wsl has an unknown shell behind it.
     pub fn of(program: &serde_json::Value) -> Self {
         let key = program["key"].as_str().unwrap_or_default();
+        if key.is_empty() || key == "ssh" || key == "tmux" {
+            return Self::Unknown;
+        }
         if key != "shell" && key != "program" {
             return Self::Posix;
         }
@@ -1083,22 +1087,29 @@ impl Quoting {
 /// is left out; with none left the text is empty.
 fn quote_paths(paths: impl IntoIterator<Item = String>, shell: Quoting) -> String {
     let quote = |p: String| -> Option<String> {
-        let plain = |extra: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(c));
+        if p.is_empty() {
+            return None;
+        }
+        let plain = |extra: &str| p.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(c));
+        // Shells expand a leading `~` (home) and, in zsh, `=` (a command's path).
+        let expands = p.starts_with(['~', '=']);
         match shell {
             Quoting::Unknown => (plain("/._-+:") && !p.starts_with('-')).then_some(p),
             Quoting::Cmd => {
                 if p.contains(['&', '|', '<', '>', '^', '%', '"', '!', '\n', '\r']) {
                     return None;
                 }
-                Some(if plain("/\\._-+:~") { p } else { format!("\"{p}\"") })
+                // A `\` right before the closing quote would read as an escaped quote.
+                let slashes = p.len() - p.trim_end_matches('\\').len();
+                Some(if plain("/\\._-+:~") { p } else { format!("\"{p}{}\"", "\\".repeat(slashes)) })
             }
             Quoting::PowerShell => {
                 // PowerShell reads a leading `-` as a parameter, `@` as a splat and `,` as an array.
                 let syntax = p.starts_with(['-', '@']) || p.contains(',');
-                Some(if plain("/._-+=,:@%~") && !syntax { p } else { crate::programs::powershell_quote(&p) })
+                Some(if plain("/._-+=,:@%~") && !syntax && !expands { p } else { crate::programs::powershell_quote(&p) })
             }
-            Quoting::Fish => Some(if plain("/._-+=,:@%~") { p } else { format!("'{}'", p.replace('\\', "\\\\").replace('\'', "\\'")) }),
-            Quoting::Posix => Some(if plain("/._-+=,:@%~") { p } else { format!("'{}'", p.replace('\'', "'\\''")) }),
+            Quoting::Fish => Some(if plain("/._-+=,:@%~") && !expands { p } else { format!("'{}'", p.replace('\\', "\\\\").replace('\'', "\\'")) }),
+            Quoting::Posix => Some(if plain("/._-+=,:@%~") && !expands { p } else { format!("'{}'", p.replace('\'', "'\\''")) }),
         }
     };
     paths.into_iter().filter_map(quote).map(|p| p + " ").collect()
@@ -3331,8 +3342,8 @@ mod tests {
         // Every quote kind at once, at both ends, and a path of nothing but quotes.
         assert_eq!(q(&["'\u{2018}\u{2019}\u{201A}\u{201B}"]), "'''\u{2018}\u{2018}\u{2019}\u{2019}\u{201A}\u{201A}\u{201B}\u{201B}' ");
         assert_eq!(q(&["\u{201B}x\u{2018}"]), "'\u{201B}\u{201B}x\u{2018}\u{2018}' ");
-        // Several paths: each is its own literal; an empty one is still an (empty) literal.
-        assert_eq!(q(&["a'b", "", "c\u{2019}d"]), "'a''b' '' 'c\u{2019}\u{2019}d' ");
+        // Several paths: each is its own literal; an empty one is skipped.
+        assert_eq!(q(&["a'b", "", "c\u{2019}d"]), "'a''b' 'c\u{2019}\u{2019}d' ");
         assert_eq!(q(&["C:/plain.png"]), "C:/plain.png ");
     }
 
@@ -3375,11 +3386,32 @@ mod tests {
         for shell in [Quoting::Posix, Quoting::Fish, Quoting::PowerShell] {
             assert_eq!(q(shell, &["/a", "/b c"]).matches(' ').count(), 3, "{shell:?}");
         }
-        // An empty path: an empty literal for a shell that quotes, nothing otherwise.
-        assert_eq!(q(Quoting::Posix, &[""]), "'' ");
-        assert_eq!(q(Quoting::Fish, &[""]), "'' ");
-        assert_eq!(q(Quoting::Cmd, &[""]), "\"\" ");
-        assert_eq!(q(Quoting::Unknown, &[""]), "");
+        // An empty path is never typed, whatever the shell.
+        for shell in [Quoting::Posix, Quoting::Fish, Quoting::PowerShell, Quoting::Cmd, Quoting::Unknown] {
+            assert_eq!(q(shell, &[""]), "", "{shell:?}");
+            assert_eq!(q(shell, &["", "/a"]), "/a ", "{shell:?}");
+        }
+    }
+
+    #[test]
+    fn leading_tilde_and_equals_are_quoted_and_cmd_keeps_a_trailing_backslash_literal() {
+        let q = |shell, v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), shell);
+        for shell in [Quoting::Posix, Quoting::Fish, Quoting::PowerShell] {
+            assert_eq!(q(shell, &["~/a.png", "=ls", "/a~b=c"]), "'~/a.png' '=ls' /a~b=c ", "{shell:?}");
+        }
+        assert_eq!(q(Quoting::Cmd, &[r"C:\my dir\"]), "\"C:\\my dir\\\\\" ");
+        assert_eq!(q(Quoting::Cmd, &[r"C:\my dir\\"]), "\"C:\\my dir\\\\\\\\\" ");
+        assert_eq!(q(Quoting::Cmd, &[r"C:\dir\"]), r"C:\dir\ ");
+    }
+
+    #[test]
+    fn panes_behind_ssh_tmux_and_friends_have_an_unknown_shell() {
+        let of = |argv: &[&str]| Quoting::of(&crate::programs::of(None, &argv.iter().map(|s| s.to_string()).collect::<Vec<_>>()));
+        for argv in [&["ssh", "host"][..], &["tmux"], &["screen"], &["mosh", "h"], &["wsl"], &["zellij"]] {
+            assert_eq!(of(argv), Quoting::Unknown, "{argv:?}");
+        }
+        assert_eq!(Quoting::of(&serde_json::Value::Null), Quoting::Unknown);
+        assert_eq!(Quoting::of(&serde_json::json!({})), Quoting::Unknown);
     }
 
     #[test]
