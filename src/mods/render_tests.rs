@@ -756,18 +756,20 @@ fn editing_a_mod_many_times_keeps_one_cached_version_and_one_registration(cx: &m
     std::fs::create_dir_all(&root).unwrap();
     let runtime = ShellRuntime::new_isolated().unwrap();
     let window = cx.add_window(|_, _| Empty);
-    window.update(cx, |_, window, cx| {
-        for version in 0..20 {
-            std::fs::write(root.join("main.js"), format!(
-                "import {{ View, div }} from 'gpui-kit'; export default class Panel extends View {{ render() {{ return div().child('v{version:02}'); }} }}"
-            )).unwrap();
+    for version in 0..20 {
+        std::fs::write(root.join("main.js"), format!(
+            "import {{ View, div }} from 'gpui-kit'; export default class Panel extends View {{ render() {{ return div().child('v{version:02}'); }} }}"
+        )).unwrap();
+        window.update(cx, |_, window, cx| {
             for _ in 0..3 {
                 let mut session = DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx).unwrap();
                 assert!(session.describe(window, cx).unwrap().contains(&format!("v{version:02}")));
             }
-            assert_eq!(runtime.code_cache_counts(), (1, 1), "after edit {version}");
-        }
-    }).unwrap();
+        }).unwrap();
+        // Closed copies release their code when the window settles.
+        cx.run_until_parked();
+        assert_eq!(runtime.code_cache_counts(), (1, 1), "after edit {version}");
+    }
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
     cx.run_until_parked();
 }
