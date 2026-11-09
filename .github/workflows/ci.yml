@@ -133,6 +133,9 @@ jobs:
         run: |
           ~/.bun/bin/bun test scripts/docs.test.ts
           ~/.bun/bin/bun scripts/docs.ts check
+      - name: Check mod scripts
+        if: matrix.platform == 'linux-x86_64'
+        run: ~/.bun/bin/bun test scripts/files.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/spaces.test.ts scripts/worktree.test.ts
 
   # Keep the required check name stable while requiring every platform.
   test:
