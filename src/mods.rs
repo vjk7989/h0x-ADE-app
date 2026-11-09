@@ -1620,6 +1620,66 @@ mod tests {
     }
 
     #[test]
+    fn revision_starts_at_zero_and_ignores_publishes_equal_to_the_empty_defaults() {
+        std::thread::spawn(|| {
+            assert_eq!(snapshot_revision(), 0.0);
+            assert!(!publish_spaces(json!([])));
+            assert!(!publish_panes(json!([])));
+            assert!(!publish_machines(json!([])));
+            assert!(!publish_window(Value::Null));
+            assert_eq!(snapshot_revision(), 0.0);
+            assert!(publish_window(json!({"active":true})));
+            assert!(publish_window(Value::Null), "a window snapshot going away is a change too");
+            assert_eq!(snapshot_revision(), 2.0);
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn revision_counts_changes_in_one_tick_separately_and_a_return_to_an_earlier_snapshot() {
+        std::thread::spawn(|| {
+            assert!(publish_spaces(json!([{"id":"a"}])));
+            let before = snapshot_revision();
+            // Two snapshots in the same tick: the sum cannot cancel out, every counter only goes up.
+            assert!(publish_spaces(json!([{"id":"a"},{"id":"b"}])));
+            assert!(publish_panes(json!([{"pane":"p1"}])));
+            assert_eq!(snapshot_revision(), before + 2.0);
+            // A -> B -> A between two looks: the old stringify saw nothing, the revision still moves.
+            let mid = snapshot_revision();
+            assert!(publish_spaces(json!([{"id":"a"}])));
+            assert!(publish_spaces(json!([{"id":"a"},{"id":"b"}])));
+            assert!(snapshot_revision() > mid);
+            // Only `active` was compared before; any other window field now moves it too.
+            assert!(publish_window(json!({"active":true,"maximized":false})));
+            let window = snapshot_revision();
+            assert!(publish_window(json!({"active":true,"maximized":true})));
+            assert_ne!(snapshot_revision(), window);
+            // The other snapshots do not.
+            let still = snapshot_revision();
+            assert!(publish_tree(json!({"id":"s1","tabs":[]})));
+            assert!(publish_focused(json!({"pane":"p1"})));
+            assert!(publish_floats(json!({"f":{"edge":"top"}})));
+            assert_eq!(snapshot_revision(), still);
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn revision_stays_exact_up_to_the_largest_safe_js_integer() {
+        std::thread::spawn(|| {
+            // JS numbers are f64: the sum must still move by one right below 2^53.
+            REVISIONS.with_borrow_mut(|r| {
+                r.insert("spaces", (1u64 << 52) - 1);
+                r.insert("window", (1u64 << 52) - 2);
+            });
+            let before = snapshot_revision();
+            assert_eq!(before, ((1u64 << 53) - 3) as f64);
+            assert!(publish_window(json!({"active":false})));
+            assert_eq!(snapshot_revision(), before + 1.0);
+            assert!(publish_window(json!({"active":true})));
+            assert_eq!(snapshot_revision(), 9_007_199_254_740_991.0, "Number.MAX_SAFE_INTEGER");
+        }).join().unwrap();
+    }
+
+    #[test]
     fn loading_copies_reclaims_closed_command_channels_without_dispatch() {
         std::thread::spawn(|| {
             let inst = Instance { name: "test".into(), props: Value::Null };

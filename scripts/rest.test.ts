@@ -178,3 +178,103 @@ test("sessions: no look at the space while the window is in the background, a re
   view.check({});
   expect(calls.refresh).toBe(1);
 });
+
+for (const mod of ["pane", "peek"] as const) {
+  test(`${mod}: started while the window is in the background, it draws once when the window is back`, async () => {
+    const win = { active: false }, status = { v: "idle" };
+    const m = await busyMod(mod, win, status);
+    m.tick(1000);
+    m.tick(1000);
+    expect(m.seen.notify).toBe(0);
+    win.active = true;
+    m.tick(1000);
+    expect(m.seen.notify).toBe(1);
+    m.tick(1000);
+    expect(m.seen.notify).toBe(1);
+  });
+}
+
+test("agents: a working agent rotates its verb every second again after a long rest", async () => {
+  const win = { active: false };
+  const a = await agentsMod(win, [{ status: "working" }]);
+  for (let i = 0; i < 600; i++) a.tick(1000);
+  for (let i = 0; i < 20; i++) a.tick(30000);
+  expect(a.seen.notify).toBe(0);
+  win.active = true;
+  a.tick(1000);
+  a.tick(1000);
+  a.tick(1000);
+  expect(a.seen.notify).toBe(3);
+  a.tick(30000);
+  expect(a.seen.notify).toBe(4);
+});
+
+test("an hour in the background ends in one catch-up per mod on the same tick, not one per missed tick", async () => {
+  const win = { active: false }, status = { v: "working" };
+  const list = [{ status: "working" }];
+  const a = await agentsMod(win, list);
+  const busy = await Promise.all([busyMod("pane", win, status), busyMod("pane", win, status), busyMod("peek", win, status)]);
+  const lists = await Promise.all((["changes", "files"] as const).map((m) => listing(m, win, tree(m))));
+  for (let i = 0; i < 3600; i++) {
+    a.tick(1000);
+    if (i % 30 === 0) a.tick(30000);
+    for (const m of busy) m.tick(1000);
+    for (const l of lists) l.view.tick(l.cx);
+  }
+  expect(a.seen.notify).toBe(0);
+  for (const m of busy) expect(m.seen.notify).toBe(0);
+  for (const l of lists) expect(l.calls.refresh).toBe(0);
+  expect(lists[1].calls.flush).toBe(360); // notes to agents kept going out
+  // Everything finished while away; the window comes back.
+  list[0].status = "done";
+  status.v = "idle";
+  win.active = true;
+  a.tick(1000);
+  for (const m of busy) m.tick(1000);
+  for (const l of lists) l.view.tick(l.cx);
+  expect(a.seen.notify).toBe(1);
+  for (const m of busy) expect(m.seen.notify).toBe(1);
+  for (const l of lists) expect(l.calls.refresh).toBe(1);
+  a.tick(1000);
+  for (const m of busy) m.tick(1000);
+  for (const l of lists) l.view.tick(l.cx);
+  expect(a.seen.notify).toBe(1);
+  for (const m of busy) expect(m.seen.notify).toBe(1);
+  for (const l of lists) expect(l.calls.refresh).toBe(1);
+});
+
+async function sessionsMod(win: { active: boolean } | null, layout: () => unknown) {
+  const space = { id: "s", active: true, folder: "/x" };
+  const Sessions = await load("sessions", "Sessions", {
+    View, window: () => win, spaces: () => [space], layout,
+  });
+  const view = new Sessions();
+  const calls = { refresh: 0 };
+  view.refresh = () => { calls.refresh++; };
+  return { view, calls };
+}
+
+test("sessions: back while its panel is hidden waits, then refreshes once when shown", async () => {
+  const win = { active: false };
+  const hidden = { id: "root", type: "stack", active: "other", children: [{ id: "other", content: { mod: "files" } }, { id: "x", content: { mod: "sessions" } }] };
+  let layout: unknown = hidden;
+  const { view, calls } = await sessionsMod(win, () => layout);
+  view.key = JSON.stringify([null, "/x"]);
+  view.check({});
+  win.active = true;
+  view.check({});
+  view.check({});
+  expect(calls.refresh).toBe(0);
+  layout = tree("sessions");
+  view.check({});
+  expect(calls.refresh).toBe(1);
+  view.check({});
+  expect(calls.refresh).toBe(1);
+});
+
+test("sessions: no window snapshot counts as active, so another space is still asked about", async () => {
+  const { view, calls } = await sessionsMod(null, () => tree("sessions"));
+  view.key = JSON.stringify([null, "/elsewhere"]);
+  view.check({});
+  expect(calls.refresh).toBe(1);
+});

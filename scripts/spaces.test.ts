@@ -286,7 +286,7 @@ test("no reconciliation without a rendered sidebar", () => {
 
 // checkNew runs every 250 ms: it must cost nothing while the host's revision stands still, and
 // keep reacting to events (a new space, a finished command) while the window is in the background.
-function watching() {
+function watching(active = true) {
   const h = harness([], new Map(), [{ id: "a", folder: "/a" }]);
   const timers: Record<number, (cx: unknown) => void> = {};
   const cx = { timer: { every(ms: number, f: (cx: unknown) => void) { timers[ms] = f; } }, notify() {}, spawn() {} };
@@ -294,11 +294,13 @@ function watching() {
   h.view.refreshMachines = () => { refreshes.machines++; };
   h.view.refreshGit = () => { refreshes.git++; };
   h.view.git = {};
+  h.win.active = active;
   h.view.init({}, cx);
+  const started = refreshes.machines;
   refreshes.machines = 0;
   const due: Set<string>[] = [];
   h.view.due = () => { const d = new Set<string>(); due.push(d); return d; };
-  return { ...h, timers, refreshes, due, cx };
+  return { ...h, timers, refreshes, due, cx, started };
 }
 
 test("checkNew reads no snapshot while the revision is unchanged, then looks again", () => {
@@ -378,4 +380,43 @@ test("the machines timer refreshes as before while the window is active", () => 
   h.timers[15000](h.cx);
   h.timers[15000](h.cx);
   expect(h.refreshes.machines).toBe(2);
+});
+
+test("started while the window is in the background: machines are asked once at start and once when it is back", () => {
+  const h = watching(false);
+  expect(h.started).toBe(1);
+  for (let i = 0; i < 4; i++) h.timers[15000](h.cx);
+  h.timers[250](h.cx);
+  expect(h.refreshes.machines).toBe(0);
+  h.win.active = true;
+  h.revision.n++;
+  h.timers[250](h.cx);
+  h.timers[250](h.cx);
+  expect(h.refreshes.machines).toBe(1);
+});
+
+test("an hour in the background ends in one machines refresh and one look, while new spaces are still noticed", () => {
+  const h = watching();
+  h.view.checkNew(h.cx);
+  h.view.shown = new Set(["a"]);
+  h.view.wake = Infinity;
+  h.win.active = false;
+  h.revision.n++; // the window snapshot
+  for (let i = 0; i < 3600 * 4; i++) {
+    if (i === 7200) {
+      h.snapshot.push({ id: "b", folder: "/b" });
+      h.revision.n += 2; // spaces and panes in the same tick
+      h.view.shown.add("b");
+    }
+    h.timers[250](h.cx);
+    if (i % 60 === 0) h.timers[15000](h.cx);
+  }
+  expect(h.refreshes.machines).toBe(0);
+  expect(h.due).toHaveLength(3); // the first look, the window going away, the new space
+  expect(h.view.ids).toEqual(["a", "b"]);
+  h.win.active = true;
+  h.revision.n++;
+  for (let i = 0; i < 10; i++) h.timers[250](h.cx);
+  expect(h.refreshes.machines).toBe(1);
+  expect(h.due).toHaveLength(4);
 });
