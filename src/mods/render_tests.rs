@@ -3,6 +3,7 @@ use super::*;
 use gpui::TestAppContext;
 use gpui_shell::{ShellRuntime, plugin::DescriptionSession, policy::Policy};
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
@@ -218,6 +219,559 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         });
     }
     module.declarations(DECLARATIONS)
+}
+
+#[gpui::test]
+fn mod_copies_share_code_without_sharing_props_state_or_lifetime(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("cache");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { props, mark, next } from 'copy';
+const evaluation = mark();
+const row = globalThis.__template(value => div().child(value));
+export default class Panel extends View {
+  init(_, cx) {
+    if (props() === 'bad') throw Error('bad props');
+    this.count = 0;
+    this.count++;
+    this.async = 'waiting';
+    cx.spawn(async cx => { await next(); this.async = props(); cx.notify(); });
+  }
+  render() { return row(props() + ':' + this.count + ':' + evaluation + ':' + this.async); }
+}
+"#).unwrap();
+    let marks = Rc::new(Cell::new(0));
+    let policy = |name: &'static str| {
+        let marks = marks.clone();
+        Policy::new().with_host_module(HostModule::new("copy")
+            .function("props", move |_| Ok(name.into()))
+            .function("mark", move |_| { marks.set(marks.get() + 1); Ok((marks.get() as f64).into()) })
+            .async_function("next", |_| Ok(std::future::ready(Ok(HostValue::Null))))
+        ).unwrap()
+    };
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let (first, mut second) = window.update(cx, |_, window, cx| {
+        let mut first = DescriptionSession::load(runtime.clone(), &root, policy("A"), window, cx).unwrap();
+        let mut second = DescriptionSession::load(runtime.clone(), &root, policy("B"), window, cx).unwrap();
+        assert!(first.describe(window, cx).unwrap().contains("A:1:1"));
+        assert!(second.describe(window, cx).unwrap().contains("B:1:1"));
+        assert!(DescriptionSession::load(runtime.clone(), &root, policy("bad"), window, cx).is_err());
+        (first, second)
+    }).unwrap();
+    cx.run_until_parked();
+    drop(first);
+    cx.run_until_parked();
+    window.update(cx, |_, window, cx| {
+        let tree = second.describe(window, cx).unwrap();
+        assert!(tree.contains("B:1:1:B"), "{tree}");
+    }).unwrap();
+    drop(second);
+    cx.run_until_parked();
+    window.update(cx, |_, window, cx| {
+        let mut reopened = DescriptionSession::load(runtime.clone(), &root, policy("C"), window, cx).unwrap();
+        assert!(reopened.describe(window, cx).unwrap().contains("C:1:1"));
+    }).unwrap();
+    assert_eq!(marks.get(), 1, "reopening and failed init must reuse evaluated code");
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn mod_code_revisions_share_successes_and_failures_without_poisoning_old_copies(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("cache");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { version } from './part.js';
+export default class Panel extends View { render() { return div().child('version:' + version); } }
+"#).unwrap();
+    std::fs::write(root.join("part.js"), "import { mark } from 'copy'; mark(); export const version = 1;").unwrap();
+    let marks = Rc::new(Cell::new(0));
+    let policy = || {
+        let marks = marks.clone();
+        Policy::new().with_host_module(HostModule::new("copy").function("mark", move |_| {
+            marks.set(marks.get() + 1); Ok(HostValue::Null)
+        })).unwrap()
+    };
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let mut old = DescriptionSession::load(runtime.clone(), &root, policy(), window, cx).unwrap();
+        for version in [2, 3] {
+            std::fs::write(root.join("part.js"), format!("import {{ mark }} from 'copy'; mark(); export const version = {version};{}", " ".repeat(version))).unwrap();
+            for _ in 0..20 {
+                let mut new = DescriptionSession::load(runtime.clone(), &root, policy(), window, cx).unwrap();
+                assert!(new.describe(window, cx).unwrap().contains(&format!("version:{version}")));
+            }
+        }
+        assert_eq!(marks.get(), 3);
+        std::fs::write(root.join("part.js"), "import { mark } from 'copy'; mark(); throw Error('broken save'); export const version = 4;").unwrap();
+        for _ in 0..20 {
+            assert!(DescriptionSession::load(runtime.clone(), &root, policy(), window, cx).is_err());
+        }
+        assert_eq!(marks.get(), 4, "a failed revision evaluates once, not on every open");
+        assert!(old.describe(window, cx).unwrap().contains("version:1"));
+        std::fs::write(root.join("part.js"), "import { mark } from 'copy'; mark(); export const version = 5;").unwrap();
+        let mut fixed = DescriptionSession::load(runtime.clone(), &root, policy(), window, cx).unwrap();
+        assert!(fixed.describe(window, cx).unwrap().contains("version:5"));
+        assert_eq!(marks.get(), 5);
+        assert!(DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx).is_err(),
+            "an ungranted host module must not reuse another policy's linked class");
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn mod_host_imports_keep_sync_async_and_missing_export_surfaces_distinct(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("cache");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { value } from 'copy';
+export default class Panel extends View {
+  init() { this.kind = typeof value(); }
+  render() { return div().child('kind:' + this.kind); }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let sync = HostModule::new("copy").function("value", |_| Ok(HostValue::Number(1.0)));
+        let mut a = DescriptionSession::load(runtime.clone(), &root, Policy::new().with_host_module(sync).unwrap(), window, cx).unwrap();
+        assert!(a.describe(window, cx).unwrap().contains("kind:number"));
+        let asynchronous = HostModule::new("copy").async_function("value", |_| Ok(std::future::ready(Ok(HostValue::Null))));
+        let mut b = DescriptionSession::load(runtime.clone(), &root, Policy::new().with_host_module(asynchronous).unwrap(), window, cx).unwrap();
+        assert!(b.describe(window, cx).unwrap().contains("kind:object"));
+        let missing = HostModule::new("copy").function("other", |_| Ok(HostValue::Null));
+        assert!(DescriptionSession::load(runtime.clone(), &root, Policy::new().with_host_module(missing).unwrap(), window, cx).is_err());
+        assert!(a.describe(window, cx).unwrap().contains("kind:number"));
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+// HyperOx: the shared code of one mod is never another mod's. Each root keeps its own module
+// state, and a file imported by one mod can't be reached by the other's cache entry.
+#[gpui::test]
+fn different_mods_never_share_module_state_and_a_copy_of_each_shares_its_own(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let source = r#"
+import { View, div } from 'gpui-kit';
+import { mark } from 'copy';
+import { tag } from './part.js';
+const evaluation = mark();
+export default class Panel extends View {
+  render() { return div().child(tag + ':' + evaluation); }
+}
+"#;
+    let roots = ["one", "two"].map(|name| {
+        let root = staged.0.join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("main.js"), source).unwrap();
+        std::fs::write(root.join("part.js"), format!("export const tag = '{name}';")).unwrap();
+        root
+    });
+    let marks = Rc::new(Cell::new(0));
+    let policy = || {
+        let marks = marks.clone();
+        Policy::new().with_host_module(HostModule::new("copy").function("mark", move |_| {
+            marks.set(marks.get() + 1);
+            Ok((marks.get() as f64).into())
+        })).unwrap()
+    };
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let mut sessions = Vec::new();
+        for _ in 0..3 {
+            for root in &roots {
+                sessions.push(DescriptionSession::load(runtime.clone(), root, policy(), window, cx).unwrap());
+            }
+        }
+        // Six copies of two mods evaluate the code twice: once per mod.
+        assert_eq!(marks.get(), 2, "copies of one mod share its evaluated code; two mods do not");
+        for (index, session) in sessions.iter_mut().enumerate() {
+            let tree = session.describe(window, cx).unwrap();
+            let (tag, evaluation) = if index % 2 == 0 { ("one", 1) } else { ("two", 2) };
+            assert!(tree.contains(&format!("{tag}:{evaluation}")), "{index}: {tree}");
+        }
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+// HyperOx: the editor helpers at a mod's root are never code (the consent hash leaves the generated
+// ones out), and sharing evaluated code between copies must not open that door again.
+#[gpui::test]
+fn a_mod_still_cannot_import_the_editor_helpers_after_code_sharing(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("helpers");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("part.js"), "export const value = 1;").unwrap();
+    std::fs::write(root.join("gpui-kit.d.ts"), "export const value = 2;").unwrap();
+    let entry = |imported: &str| format!("import {{ View, div }} from 'gpui-kit'; import {{ value }} from '{imported}'; export default class Panel extends View {{ render() {{ return div().child('v' + value); }} }}");
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        std::fs::write(root.join("main.js"), entry("./part.js")).unwrap();
+        for _ in 0..2 {
+            let mut ok = DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx).unwrap();
+            assert!(ok.describe(window, cx).unwrap().contains("v1"));
+        }
+        for imported in ["./gpui-kit.d.ts", "./GPUI-KIT.D.TS"] {
+            std::fs::write(root.join("main.js"), entry(imported)).unwrap();
+            for _ in 0..2 {
+                assert!(DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx).is_err(), "{imported}");
+            }
+        }
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+// HyperOx: shared code is keyed by content, like the consent hash (ADR-048). With every watcher
+// event lost, an edit that keeps the size and modified time, anywhere the code imports (the entry,
+// a helper, a file deeper than the watcher's scan, a file replaced by a link), asks again and never
+// reuses the old code; a missing import that appears later is picked up without an event.
+#[gpui::test]
+fn same_size_edits_anywhere_in_the_import_graph_ask_again_and_never_reuse_stale_code(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("graph");
+    let nested = ["d"; 12].join("/");
+    let deep = format!("lib/{nested}/deep.js");
+    std::fs::create_dir_all(root.join(&deep).parent().unwrap()).unwrap();
+    let source = |file: &str, version: char| match file {
+        "main.js" => format!("import {{ View, div }} from 'gpui-kit'; import {{ mark }} from 'copy'; import {{ helper }} from './lib/helper.js'; mark(); const entry = 'e{version}'; export default class Panel extends View {{ render() {{ return div().child(entry + helper); }} }}"),
+        "lib/helper.js" => format!("import {{ deep }} from './{nested}/deep.js'; export const helper = '-h{version}' + deep;"),
+        _ => format!("export const deep = '-d{version}';"),
+    };
+    // Same byte count, and the modified time put back the way a tool that restores times does.
+    let rewrite = |file: &str, text: String| {
+        let path = root.join(file);
+        let before = std::fs::metadata(&path).unwrap();
+        assert_eq!(before.len(), text.len() as u64, "{file}");
+        std::fs::write(&path, text).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(before.modified().unwrap()).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before.modified().unwrap(), "{file}");
+    };
+    std::fs::write(root.join("main.js"), source("main.js", '1')).unwrap();
+    std::fs::write(root.join("lib/helper.js"), source("lib/helper.js", '1')).unwrap();
+    let marks = Rc::new(Cell::new(0));
+    let policy = || {
+        let marks = marks.clone();
+        Policy::new().with_host_module(HostModule::new("copy").function("mark", move |_| {
+            marks.set(marks.get() + 1);
+            Ok(HostValue::Null)
+        })).unwrap()
+    };
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    // The OS watcher missed every event: the mod's revision never moves.
+    runtime.set_source_revision_provider(|_| Some(0));
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let mut text = || match DescriptionSession::load(runtime.clone(), &root, policy(), window, cx) {
+            Ok(mut session) => Some(session.describe(window, cx).unwrap()),
+            Err(_) => None,
+        };
+        assert_eq!(text(), None, "the deep import is missing");
+        assert_eq!(text(), None, "the deep import is missing");
+        std::fs::write(root.join(&deep), source(deep.as_str(), '1')).unwrap();
+        let first = text().expect("the missing import appeared");
+        assert!(first.contains("e1-h1-d1"), "{first}");
+        let evaluations = marks.get();
+        assert!(text().unwrap().contains("e1-h1-d1"));
+        assert_eq!(marks.get(), evaluations, "unchanged code is shared by copies");
+        for (file, shown) in [("main.js", "e2-h1-d1"), ("lib/helper.js", "e2-h2-d1"), (deep.as_str(), "e2-h2-d2")] {
+            let consented = content_hash(&root);
+            let evaluations = marks.get();
+            rewrite(file, source(file, '2'));
+            assert_ne!(content_hash(&root), consented, "{file}: the edit must ask again");
+            let tree = text().expect(file);
+            assert!(tree.contains(shown), "{file}: stale code ran after a same-size edit: {tree}");
+            assert_eq!(marks.get(), evaluations + 1, "{file}");
+        }
+        // The editor config is not code: the answer leaves a JSON one out, and nothing runs it.
+        let consented = content_hash(&root);
+        std::fs::write(root.join("jsconfig.json"), r#"{"compilerOptions":{"checkJs":false}}"#).unwrap();
+        assert_eq!(content_hash(&root), consented);
+        assert!(text().unwrap().contains("e2-h2-d2"));
+        #[cfg(unix)]
+        {
+            let path = root.join(&deep);
+            let other = root.join("other.js");
+            std::fs::write(&other, source(deep.as_str(), '3')).unwrap();
+            let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+            std::fs::File::options().write(true).open(&other).unwrap().set_modified(before).unwrap();
+            let consented = content_hash(&root);
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&other, &path).unwrap();
+            assert_ne!(content_hash(&root), consented, "a file replaced by a link must ask again");
+            let tree = text().unwrap();
+            assert!(tree.contains("e2-h2-d3"), "stale code ran after a file became a link: {tree}");
+        }
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+// HyperOx: one folder is one mod. The same files in two folders, folders whose names share a
+// prefix (`a`, `ab`), and a folder taken over by another mod after a rename never share code.
+#[gpui::test]
+fn identical_mods_in_prefix_related_or_renamed_folders_never_share_code(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let main = r#"
+import { View, div } from 'gpui-kit';
+import { mark } from 'copy';
+import { tag } from './part.js';
+const evaluation = mark();
+export default class Panel extends View {
+  render() { return div().child(tag + ':' + evaluation); }
+}
+"#;
+    let write = |name: &str, tag: &str| {
+        let root = staged.0.join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("main.js"), main).unwrap();
+        std::fs::write(root.join("part.js"), format!("export const tag = '{tag}';")).unwrap();
+        root
+    };
+    let a = write("a", "same");
+    let ab = write("ab", "same");
+    let marks = Rc::new(Cell::new(0));
+    let policy = || {
+        let marks = marks.clone();
+        Policy::new().with_host_module(HostModule::new("copy").function("mark", move |_| {
+            marks.set(marks.get() + 1);
+            Ok((marks.get() as f64).into())
+        })).unwrap()
+    };
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    // Both folders sit at the same watcher revision.
+    runtime.set_source_revision_provider(|_| Some(0));
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let mut text = |root: &Path| {
+            let mut session = DescriptionSession::load(runtime.clone(), root, policy(), window, cx).unwrap();
+            session.describe(window, cx).unwrap()
+        };
+        for _ in 0..2 {
+            let tree = text(a.as_path());
+            assert!(tree.contains("same:1"), "{tree}");
+            let tree = text(ab.as_path());
+            assert!(tree.contains("same:2"), "identical files in a and ab are two mods: {tree}");
+        }
+        assert_eq!(marks.get(), 2);
+        let moved = staged.0.join("moved");
+        std::fs::rename(&a, &moved).unwrap();
+        write("a", "next");
+        let tree = text(a.as_path());
+        assert!(tree.contains("next:3"), "the new folder a is another mod: {tree}");
+        let tree = text(moved.as_path());
+        assert!(tree.contains("same:4"), "a moved mod runs from its new folder: {tree}");
+        let tree = text(ab.as_path());
+        assert!(tree.contains("same:2"), "{tree}");
+        assert_eq!(marks.get(), 4);
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+// HyperOx: on Windows one folder spelled in another case is the same mod (one evaluation), and a
+// folder whose name only extends it is not.
+#[cfg(windows)]
+#[gpui::test]
+fn a_mod_folder_spelled_in_another_case_on_windows_is_one_mod(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let main = "import { View, div } from 'gpui-kit'; import { mark } from 'copy'; const evaluation = mark(); export default class Panel extends View { render() { return div().child('case:' + evaluation); } }";
+    for name in ["CaseMod", "CaseMod2"] {
+        std::fs::create_dir_all(staged.0.join(name)).unwrap();
+        std::fs::write(staged.0.join(name).join("main.js"), main).unwrap();
+    }
+    let marks = Rc::new(Cell::new(0));
+    let policy = || {
+        let marks = marks.clone();
+        Policy::new().with_host_module(HostModule::new("copy").function("mark", move |_| {
+            marks.set(marks.get() + 1);
+            Ok((marks.get() as f64).into())
+        })).unwrap()
+    };
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let spellings = [
+            staged.0.join("CaseMod"),
+            staged.0.join("casemod"),
+            PathBuf::from(staged.0.join("CaseMod").to_string_lossy().to_uppercase()),
+        ];
+        for root in &spellings {
+            let mut session = DescriptionSession::load(runtime.clone(), root, policy(), window, cx).unwrap();
+            let tree = session.describe(window, cx).unwrap();
+            assert!(tree.contains("case:1"), "{}: {tree}", root.display());
+        }
+        let mut session = DescriptionSession::load(runtime.clone(), &staged.0.join("CaseMod2"), policy(), window, cx).unwrap();
+        let tree = session.describe(window, cx).unwrap();
+        assert!(tree.contains("case:2"), "{tree}");
+        assert_eq!(marks.get(), 2);
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+// HyperOx: module code is shared by copies (defaults/AGENTS.md), but a function defined at module
+// scope acts for the copy that calls it: one copy's storage is never another copy's, and what the
+// module scope wrote once stays with the copy that evaluated it.
+#[gpui::test]
+fn shared_module_code_reaches_only_the_calling_copys_storage(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("storage");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { props } from 'copy';
+sessionStorage.setItem('module', props());
+const read = key => sessionStorage.getItem(key) ?? 'none';
+export default class Panel extends View {
+  init() {
+    const before = read('who');
+    sessionStorage.setItem('who', props());
+    this.text = props() + '|' + before + '|' + read('who') + '|' + read('module');
+  }
+  render() { return div().child(this.text); }
+}
+"#).unwrap();
+    let policy = |name: &'static str| {
+        Policy::new().with_host_module(HostModule::new("copy").function("props", move |_| Ok(name.into()))).unwrap()
+    };
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let mut first = DescriptionSession::load(runtime.clone(), &root, policy("A"), window, cx).unwrap();
+        let mut second = DescriptionSession::load(runtime.clone(), &root, policy("B"), window, cx).unwrap();
+        let tree = first.describe(window, cx).unwrap();
+        assert!(tree.contains("A|none|A|A"), "{tree}");
+        let tree = second.describe(window, cx).unwrap();
+        assert!(tree.contains("B|none|B|none"), "copy B saw copy A's storage: {tree}");
+        drop(first);
+        let mut third = DescriptionSession::load(runtime.clone(), &root, policy("C"), window, cx).unwrap();
+        let tree = third.describe(window, cx).unwrap();
+        assert!(tree.contains("C|none|C|none"), "a reopened copy saw an old copy's storage: {tree}");
+        let tree = second.describe(window, cx).unwrap();
+        assert!(tree.contains("B|none|B|none"), "{tree}");
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+// HyperOx: the editor-helper refusal (v0.1.12) holds for every way the resolver can name a root
+// helper: relative, through `..`, bare, absolute, a `file:` URL, another case, a re-export from a
+// sub folder and links; the same names elsewhere in the mod still load.
+#[gpui::test]
+fn the_editor_helper_refusal_holds_for_every_way_an_import_can_name_it(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("helper-paths");
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("part.js"), "export const value = 1;").unwrap();
+    std::fs::write(root.join("jsconfig.json"), "export const value = 2;").unwrap();
+    std::fs::write(root.join("lib/jsconfig.json"), "export const value = 4;").unwrap();
+    std::fs::write(root.join("lib/again.js"), "export { value } from '../jsconfig.json';").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.join("jsconfig.json"), root.join("alias.js")).unwrap();
+        std::os::unix::fs::symlink(&root, root.join("self")).unwrap();
+    }
+    let canonical = root.canonicalize().unwrap();
+    // A JS string needs Windows separators escaped.
+    let absolute = |file: &str| canonical.join(file).display().to_string().replace('\\', "\\\\");
+    let entry = |imported: &str| format!("import {{ View, div }} from 'gpui-kit'; import {{ value }} from '{imported}'; export default class Panel extends View {{ render() {{ return div().child('v' + value); }} }}");
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let mut load = |imported: &str| {
+            std::fs::write(root.join("main.js"), entry(imported)).unwrap();
+            // Twice: the second answer comes from the shared code.
+            let mut answers = Vec::new();
+            for _ in 0..2 {
+                answers.push(match DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx) {
+                    Ok(mut session) => Some(session.describe(window, cx).unwrap()),
+                    Err(_) => None,
+                });
+            }
+            assert_eq!(answers[0].is_some(), answers[1].is_some(), "{imported}");
+            answers.pop().unwrap()
+        };
+        let mut allowed = vec![("./part.js".to_owned(), "v1"), ("./lib/jsconfig.json".to_owned(), "v4"), (absolute("part.js"), "v1")];
+        #[cfg(unix)]
+        allowed.push(("./self/part.js".to_owned(), "v1"));
+        for (imported, shown) in &allowed {
+            let tree = load(imported.as_str()).unwrap_or_else(|| panic!("{imported} must load"));
+            assert!(tree.contains(*shown), "{imported}: {tree}");
+        }
+        let mut refused = vec![
+            "./jsconfig.json".to_owned(),
+            "./sub/../jsconfig.json".to_owned(),
+            "../helper-paths/jsconfig.json".to_owned(),
+            "jsconfig.json".to_owned(),
+            "./lib/again.js".to_owned(),
+            "./JSCONFIG.JSON".to_owned(),
+            "./JsConfig.Json".to_owned(),
+            absolute("jsconfig.json"),
+            format!("file://{}", canonical.join("jsconfig.json").display().to_string().replace('\\', "/")),
+        ];
+        #[cfg(unix)]
+        refused.extend(["./alias.js".to_owned(), "./self/jsconfig.json".to_owned()]);
+        for imported in &refused {
+            assert_eq!(load(imported.as_str()), None, "{imported} reached the root editor config");
+        }
+        let tree = load("./part.js").unwrap();
+        assert!(tree.contains("v1"), "a refusal must not poison the shared code: {tree}");
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+// HyperOx: editing a mod must not grow what the runtime keeps. Vendor tests of the shell crate do not
+// run in CI, so the app gates the code cache here: one evaluated version and one registration per root.
+#[gpui::test]
+fn editing_a_mod_many_times_keeps_one_cached_version_and_one_registration(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("edited");
+    std::fs::create_dir_all(&root).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    for version in 0..20 {
+        std::fs::write(root.join("main.js"), format!(
+            "import {{ View, div }} from 'gpui-kit'; export default class Panel extends View {{ render() {{ return div().child('v{version:02}'); }} }}"
+        )).unwrap();
+        window.update(cx, |_, window, cx| {
+            for _ in 0..3 {
+                let mut session = DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx).unwrap();
+                assert!(session.describe(window, cx).unwrap().contains(&format!("v{version:02}")));
+            }
+        }).unwrap();
+        // Closed copies release their code when the window settles.
+        cx.run_until_parked();
+        assert_eq!(runtime.code_cache_counts(), (1, 1), "after edit {version}");
+    }
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
 }
 
 struct Empty;
@@ -452,6 +1006,24 @@ fn confirm_dialog_with_its_own_buttons_or_none_keeps_the_rounded_corners(cx: &mu
         assert_eq!(shown, choices, "the buttons given, no Confirm added: {tree}");
         assert!(!tree.contains(":id[Str(\"yes\")]"), "{tree}");
     }
+}
+
+#[gpui::test]
+fn layout_previews_stay_inside_their_cards(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["section"] = json!("look");
+    let mut values = fixture(true, p, updates("current", "current"));
+    values.insert("layouts".into(), json!(["main"]));
+    let tree = describe_with_values(
+        cx, &staged, "frame/settings", values,
+        Some("this.previews = { main: 'layouts/portrait.png' }; this.previewsOf = 'main';"),
+    ).unwrap();
+    let lines: Vec<&str> = tree.lines().collect();
+    let image = lines.iter().position(|l| l.contains("layouts/portrait.png")).unwrap();
+    assert!(lines[image].contains(".h[Number(62.0)]"), "a preview keeps the card's height: {}", lines[image]);
+    assert!(lines[image - 1].contains(".overflow_hidden"), "a preview cannot spill out of its card: {}", lines[image - 1]);
 }
 
 #[gpui::test]
