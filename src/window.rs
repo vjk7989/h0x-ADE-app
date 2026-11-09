@@ -438,6 +438,8 @@ pub struct AppWindow {
     tab_shown: bool,
     pane_history: Vec<String>,
     window_active: bool,
+    /// Whether the platform presents the window's frames (not minimized or hidden).
+    window_visible: bool,
     /// The system's appearance; a layout with a light and a dark theme follows it.
     system_dark: bool,
     /// The OS tells us when files change (`files.rs`); else the disk is polled.
@@ -536,6 +538,7 @@ impl AppWindow {
             tab_shown: true,
             pane_history: Vec::new(),
             window_active: true,
+            window_visible: true,
             system_dark: is_dark(window.appearance()),
             file_events,
             polls: 0,
@@ -3856,7 +3859,13 @@ impl AppWindow {
         for id in expired {
             self.close_overlay(&id, window, cx);
         }
+        let visible = window.is_visible();
+        let visibility_changed = visible != self.window_visible;
+        self.window_visible = visible;
         let active = window.is_window_active();
+        if visibility_changed && active == self.window_active && mods::publish_window(self.window_json(window)) {
+            self.refresh_snapshot_mods(cx);
+        }
         if active != self.window_active {
             self.window_active = active;
             if active {
