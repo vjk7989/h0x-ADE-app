@@ -19,6 +19,15 @@ function shellQuote(target, windows) {
   return windows ? "'" + target.replace(/['‘’‚‛]/g, (q) => q + q) + "'" : "'" + target.replace(/'/g, "'\\''") + "'";
 }
 
+// Whether the person has to answer something themselves. The core's message
+// repeats the target they typed, so it only decides when the core's own kind
+// doesn't (ssh's words arrive under "unreachable"); a rejected target (or one
+// that ssh would read as an option) is never turned into a command to run.
+function needsYou(target, why) {
+  if (target.startsWith("-") || ["invalid_params", "name_taken", "already_added"].includes(why.kind)) return false;
+  return ["h0x_core_missing", "incompatible", "login_needed", "auth_failed", "host_key"].includes(why.kind) || /password|passphrase|host key|permission denied|login/i.test(why.message ?? "");
+}
+
 const I = (name) => `mods/workspace-chrome/${name}.svg`;
 
 // An Include's files, as ssh finds them: ~ is home, a relative path is
@@ -140,7 +149,7 @@ export default class MachineAdd extends View {
         this.typed = "";
         await this.refresh();
         await this.checkMac(target);
-      } else if (["h0x_core_missing", "incompatible", "login_needed", "auth_failed", "host_key"].includes(why.kind) || /password|passphrase|host key|permission denied|login/i.test(why.message ?? "")) {
+      } else if (needsYou(target, why)) {
         const quoted = shellQuote(target, window()?.platform === "windows");
         this.pending.add(target);
         this.state[target] = `Couldn't add ${target} here: it needs you to answer something (a password, a new host key, or installing h0x-core there). Run \`h0x-core machine add ${quoted}\` in a terminal. \`h0x-core machine --help\` shows the options.`;

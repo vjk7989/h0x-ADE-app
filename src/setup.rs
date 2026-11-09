@@ -40,15 +40,32 @@ impl Need {
     /// one that can't be run or read at all gets the install screen.
     pub fn connection(error: anyhow::Error) -> Self {
         match error.downcast_ref::<crate::core_link::ConnectError>() {
-            Some(error) => Self::Connect(error.to_string()),
+            Some(error) => Self::Connect(plain_text(&error.to_string())),
             None => Self::Install,
         }
     }
 }
 
+/// The core's words as shown to the person: no control characters (new lines
+/// stay) and no bidi or zero-width characters that could disguise the text.
+fn plain_text(text: &str) -> String {
+    let hidden = |c: char| matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{FEFF}');
+    text.chars().filter(|&c| c == '\n' || !(c.is_control() || hidden(c))).collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Need;
+    use super::{Need, plain_text};
+
+    #[test]
+    fn the_cores_words_are_shown_without_control_or_bidi_characters() {
+        assert_eq!(plain_text("a\u{1b}[31mred\u{7}\r\n\tb"), "a[31mred\nb");
+        assert_eq!(plain_text("x\u{202E}gpj.exe\u{2066}y\u{200B}z\u{200F}\u{FEFF}"), "xgpj.exeyz");
+        assert_eq!(plain_text("line\n\nhint \u{e9} \u{4e2d}"), "line\n\nhint \u{e9} \u{4e2d}");
+        assert_eq!(plain_text(""), "");
+        let error = anyhow::Error::new(crate::core_link::ConnectError("bad\u{202E}\u{1b}\n\nhint".into()));
+        assert!(matches!(Need::connection(error), Need::Connect(text) if text == "bad\n\nhint"));
+    }
 
     #[test]
     fn unreadable_core_connections_offer_installation_instead_of_retry() {

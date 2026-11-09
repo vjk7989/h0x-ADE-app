@@ -124,7 +124,7 @@ test("success refreshes the list and clears the typed target without opening any
   expect(s.overlays).toEqual([]);
 });
 
-for (const target of ["me@my host", "ssh://user@host/path with spaces", "C:\Users\me\host", "user@host:2222", "host.example.com", ""]) {
+for (const target of ["me@my host", "ssh://user@host/path with spaces", "C:\\Users\\me\\host", "user@host:2222", "host.example.com", ""]) {
   test(`instructions for ${JSON.stringify(target)} keep one argument or add nothing`, async () => {
     const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "host_key" } }) });
     await s.add(target);
@@ -155,9 +155,9 @@ test("a missing remote core (kind h0x_core_missing) gives instructions", async (
 });
 
 const awkward = [
-  "me@my host", "a,b", "it's", "it\u2019s", "a$b", "$(whoami)", "a`b", "a;b", "a&b", "a|b", "a\"b", "a\b",
-  "C:\Users\me\My Documents\host", "host';echo $HOME",
-  "C:\\Users\\me\\My Documents\\host", "\\\\server\\share\\host",
+  "me@my host", "a,b", "it's", "it\u2019s", "a$b", "$(whoami)", "a`b", "a;b", "a&b", "a|b", "a\"b", "a\\b",
+  "C:\\Users\\me\\My Documents\\host", "host';echo $HOME",
+  "\\\\server\\share\\host",
 ];
 
 for (const target of awkward) {
@@ -214,4 +214,25 @@ test("a target rejected as an ssh option gets the core's message, not a command 
   expect(s.calls.find((args) => args[1] === "add")).toEqual(["machine", "add", target, "--json"]);
   expect(s.view.state[target]).toBe(message);
   expect(s.view.pending.size).toBe(0);
+});
+
+test("a target that spells a keyword the core echoes still gets only the core's message when rejected", async () => {
+  const message = 'bad target "login"';
+  const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "invalid_params", message } }) });
+  await s.add("login");
+  expect(s.view.state["login"]).toBe(message);
+  expect(s.view.pending.size).toBe(0);
+});
+
+test("a target starting with a dash never gets a command to run, whatever the kind", async () => {
+  const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "host_key", message: "new host key" } }) });
+  await s.add("-oProxyCommand=x");
+  expect(s.view.state["-oProxyCommand=x"]).toBe("new host key");
+  expect(s.view.pending.size).toBe(0);
+});
+
+test("ssh's own words under the unreachable kind still give instructions", async () => {
+  const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "unreachable", message: "Permission denied (publickey,password)" } }) });
+  await s.add();
+  expect(s.view.state["my-host"]).toContain("`h0x-core machine add my-host`");
 });

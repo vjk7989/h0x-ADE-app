@@ -36,7 +36,8 @@ pub fn path() -> PathBuf {
 /// Uses this core from now on, and puts its folder first on PATH so mods'
 /// `core()` and anything the app runs find the same one.
 pub fn use_core(bin: PathBuf) {
-    if let Some(dir) = bin.parent() {
+    // Only an absolute folder goes on PATH: a relative or empty one means "here".
+    if let Some(dir) = bin.parent().filter(|d| d.is_absolute()) {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
         dirs.extend(std::env::split_paths(&path).filter(|d| d != dir));
@@ -83,7 +84,7 @@ pub fn version(bin: &Path) -> Option<String> {
 /// The first h0x-core found, or None.
 pub fn find(configured: Option<&str>) -> Option<PathBuf> {
     let home = crate::mods::home();
-    let pick = |candidates: Vec<PathBuf>| candidates.into_iter().filter(|c| c.is_file()).find(|c| version(c).is_some());
+    let pick = |candidates: Vec<PathBuf>| candidates.into_iter().filter(|c| c.is_absolute() && c.is_file()).find(|c| version(c).is_some());
     if let Some(found) = pick(configured.map(|c| vec![expand(c, &home)]).unwrap_or_default()) {
         return Some(found);
     }
@@ -108,8 +109,10 @@ fn core_in(dir: &Path) -> PathBuf {
     dir.join(format!("h0x-core{}", std::env::consts::EXE_SUFFIX))
 }
 
+/// The absolute folders on a PATH: an empty or relative entry means the
+/// current folder, where a planted h0x-core must never be found.
 fn dirs_on(path: &std::ffi::OsStr) -> impl Iterator<Item = PathBuf> + '_ {
-    std::env::split_paths(path)
+    std::env::split_paths(path).filter(|d| d.is_absolute())
 }
 
 /// Where h0x-core gets installed: its own installer (~/.local/bin),
@@ -166,6 +169,9 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
 /// `.minisig` is the release key's signature, and run as one argument; values
 /// reach it through the environment, never a command string.
 pub fn install() -> Result<PathBuf, String> {
+    if let Some(dir) = std::env::var_os("H0X_CORE_INSTALL_DIR").map(PathBuf::from).filter(|d| !d.is_absolute()) {
+        return Err(format!("H0X_CORE_INSTALL_DIR must be an absolute folder, not {}", dir.display()));
+    }
     let releases = crate::update::core_releases();
     let script = if cfg!(windows) { "install.ps1" } else { "install.sh" };
     let home = crate::mods::ensure_app_dir().map_err(|e| format!("{}: {e}", crate::mods::app_dir().display()))?;
@@ -369,6 +375,11 @@ echo '{hello}'
         use_core(PathBuf::from("h0x-core"));
         let path = std::env::var_os("PATH").unwrap();
         assert!(std::env::split_paths(&path).all(|d| d.is_absolute()), "a relative core put {path:?} on PATH");
+        // A relative install folder is refused before anything is downloaded.
+        // SAFETY: this child process runs only this test.
+        unsafe { std::env::set_var("H0X_CORE_INSTALL_DIR", "relative/bin") };
+        let error = install().unwrap_err();
+        assert!(error.contains("absolute") && error.contains("relative/bin"), "{error}");
     }
 
     #[test]
