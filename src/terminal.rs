@@ -101,6 +101,8 @@ pub struct TerminalView {
     selection_scroll: Option<Task<()>>,
     /// The terminal's folder, for links to relative paths.
     pub cwd: Option<PathBuf>,
+    /// How the program in this pane reads a dropped path.
+    pub quoting: Quoting,
     /// The link under the pointer while the link modifier is held.
     link: Option<LinkTarget>,
     /// Right-clicks go to the program when it takes the mouse (Shift: the menu).
@@ -231,6 +233,7 @@ impl TerminalView {
             selection_pointer: Point::default(),
             selection_scroll: None,
             cwd: None,
+            quoting: Quoting::default(),
             link: None,
             right_click_to_program: false,
             grid: Rc::new(RefCell::new(Grid {
@@ -543,7 +546,10 @@ impl TerminalView {
     /// gets each file copied there first (`h0x-core put`), and its path there.
     fn dropped(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
         if !self.address.contains('/') {
-            let text = quote_paths(paths.iter().map(|p| p.to_string_lossy().into_owned()));
+            let text = quote_paths(paths.iter().map(|p| p.to_string_lossy().into_owned()), self.quoting);
+            if text.is_empty() {
+                return;
+            }
             let bytes = self.grid.borrow().vt.paste_bytes(&text);
             return self.send(&bytes);
         }
@@ -554,6 +560,7 @@ impl TerminalView {
     /// paths there; `copies`: the local files were only for sending.
     fn put_there(&self, paths: Vec<std::path::PathBuf>, copies: bool, cx: &mut Context<Self>) {
         let addr = self.address.clone();
+        let shell = self.quoting;
         cx.spawn(async move |this, cx| {
             let there = cx
                 .background_executor()
@@ -574,7 +581,11 @@ impl TerminalView {
                 .await;
             if !there.is_empty() {
                 let _ = this.update(cx, |this, _| {
-                    let bytes = this.grid.borrow().vt.paste_bytes(&quote_paths(there));
+                    let text = quote_paths(there, shell);
+                    if text.is_empty() {
+                        return;
+                    }
+                    let bytes = this.grid.borrow().vt.paste_bytes(&text);
                     this.send(&bytes);
                 });
             }
@@ -1037,20 +1048,60 @@ pub(crate) fn shown_title(title: &str) -> &str {
     if rest.is_empty() || !title[..led].chars().any(spinner) || !title[..led].ends_with(char::is_whitespace) { title } else { rest }
 }
 
-/// Paths as a shell reads them, space-separated with a trailing space: bare
-/// when plain, else single-quoted (`'` escaped as the shell wants it).
-fn quote_paths(paths: impl IntoIterator<Item = String>) -> String {
-    let quote = |p: String| {
-        // PowerShell reads a leading `-` as a parameter, `@` as a splat and `,` as an array.
-        let powershell_syntax = cfg!(windows) && (p.starts_with(['-', '@']) || p.contains(','));
-        if !p.is_empty() && !powershell_syntax && p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=,:@%~".contains(c)) {
-            return p;
+/// How the program a pane runs reads a dropped or pasted path.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Quoting {
+    Posix,
+    Fish,
+    Cmd,
+    PowerShell,
+    /// A program HyperOx can't quote for: only paths with no metacharacter are typed.
+    #[default]
+    Unknown,
+}
+
+impl Quoting {
+    /// From `programs::of`: a known shell by its name, a known agent or tool as a
+    /// POSIX shell (it reads pasted paths itself), anything else unknown.
+    pub fn of(program: &serde_json::Value) -> Self {
+        let key = program["key"].as_str().unwrap_or_default();
+        if key != "shell" && key != "program" {
+            return Self::Posix;
         }
-        if cfg!(windows) { crate::programs::powershell_quote(&p) } else { format!("'{}'", p.replace('\'', "'\\''")) }
+        match program["name"].as_str().unwrap_or_default().to_ascii_lowercase().as_str() {
+            "zsh" | "bash" | "sh" | "dash" | "ksh" => Self::Posix,
+            "fish" => Self::Fish,
+            "cmd" => Self::Cmd,
+            "pwsh" | "powershell" => Self::PowerShell,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Paths as the pane's shell reads them, space-separated with a trailing space:
+/// bare when plain, else quoted its way. A path the shell can't take literally
+/// is left out; with none left the text is empty.
+fn quote_paths(paths: impl IntoIterator<Item = String>, shell: Quoting) -> String {
+    let quote = |p: String| -> Option<String> {
+        let plain = |extra: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(c));
+        match shell {
+            Quoting::Unknown => (plain("/._-+:") && !p.starts_with('-')).then_some(p),
+            Quoting::Cmd => {
+                if p.contains(['&', '|', '<', '>', '^', '%', '"', '!', '\n', '\r']) {
+                    return None;
+                }
+                Some(if plain("/\\._-+:~") { p } else { format!("\"{p}\"") })
+            }
+            Quoting::PowerShell => {
+                // PowerShell reads a leading `-` as a parameter, `@` as a splat and `,` as an array.
+                let syntax = p.starts_with(['-', '@']) || p.contains(',');
+                Some(if plain("/._-+=,:@%~") && !syntax { p } else { crate::programs::powershell_quote(&p) })
+            }
+            Quoting::Fish => Some(if plain("/._-+=,:@%~") { p } else { format!("'{}'", p.replace('\\', "\\\\").replace('\'', "\\'")) }),
+            Quoting::Posix => Some(if plain("/._-+=,:@%~") { p } else { format!("'{}'", p.replace('\'', "'\\''")) }),
+        }
     };
-    let mut out: String = paths.into_iter().map(quote).collect::<Vec<_>>().join(" ");
-    out.push(' ');
-    out
+    paths.into_iter().filter_map(quote).map(|p| p + " ").collect()
 }
 
 /// Files on the clipboard: their text is only the bare path, which an agent
@@ -3049,7 +3100,7 @@ mod tests {
         assert_eq!(shown_title("\u{2717} build"), "\u{2717} build");
     }
 
-    use super::key_bytes;
+    use super::{Quoting, key_bytes};
     use crate::vt::Vt;
     use gpui::{KeyDownEvent, Keystroke, Modifiers};
 
@@ -3166,18 +3217,60 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(windows))]
-    fn dropped_paths_are_typed_as_the_shell_reads_them() {
-        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()));
+    fn dropped_paths_are_typed_as_the_posix_shell_reads_them() {
+        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), Quoting::Posix);
         assert_eq!(q(&["/tmp/shot.png"]), "/tmp/shot.png ");
         assert_eq!(q(&["/tmp/my shot.png", "/a/b"]), "'/tmp/my shot.png' /a/b ");
         assert_eq!(q(&["/tmp/it's.png"]), "'/tmp/it'\\''s.png' ");
+        assert_eq!(q(&["/a/b&c.png", r"C:\x\y.png"]), r"'/a/b&c.png' 'C:\x\y.png' ");
+        assert_eq!(q(&[]), "");
     }
 
     #[test]
-    #[cfg(windows)]
+    fn dropped_paths_for_fish_escape_backslash_and_quote() {
+        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), Quoting::Fish);
+        assert_eq!(q(&["/tmp/shot.png"]), "/tmp/shot.png ");
+        assert_eq!(q(&["/tmp/it's.png"]), "'/tmp/it\\'s.png' ");
+        assert_eq!(q(&[r"/tmp/a\b c.png"]), r"'/tmp/a\\b c.png' ");
+        assert_eq!(q(&["/a&b $x.png"]), "'/a&b $x.png' ");
+    }
+
+    #[test]
+    fn dropped_paths_for_cmd_refuse_what_cmd_would_run() {
+        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), Quoting::Cmd);
+        assert_eq!(q(&[r"C:\a\b.png"]), r"C:\a\b.png ");
+        assert_eq!(q(&[r"C:\my files\b.png"]), "\"C:\\my files\\b.png\" ");
+        for bad in ["a&calc.png", "a|b", "a<b", "a>b", "a^b", "%PATH%.png", "a\"b", "a!b", "a\nb"] {
+            assert_eq!(q(&[bad]), "", "{bad:?}");
+        }
+        assert_eq!(q(&["a&b", "ok.png"]), "ok.png ");
+    }
+
+    #[test]
+    fn dropped_paths_for_an_unknown_program_refuse_metacharacters() {
+        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), Quoting::Unknown);
+        assert_eq!(q(&["/tmp/shot-1.png"]), "/tmp/shot-1.png ");
+        for bad in ["/a b", "/a'b", "/a&b", "/a;b", "/a$b", "/a`b", "/a(b)", "/a*b", "-rf", "", "/a\u{2019}b", r"C:\x"] {
+            assert_eq!(q(&[bad]), "", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_pane_program_picks_the_quoting() {
+        let of = |key: &str, name: &str| Quoting::of(&serde_json::json!({ "key": key, "name": name }));
+        assert_eq!(of("shell", "bash"), Quoting::Posix);
+        assert_eq!(of("shell", "fish"), Quoting::Fish);
+        assert_eq!(of("shell", "cmd"), Quoting::Cmd);
+        assert_eq!(of("shell", "pwsh"), Quoting::PowerShell);
+        assert_eq!(of("shell", "PowerShell"), Quoting::PowerShell);
+        assert_eq!(of("shell", "nu"), Quoting::Unknown);
+        assert_eq!(of("program", "vim"), Quoting::Unknown);
+        assert_eq!(of("claude", "Claude Code"), Quoting::Posix);
+    }
+
+    #[test]
     fn dropped_paths_for_powershell_double_every_single_quote() {
-        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()));
+        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), Quoting::PowerShell);
         assert_eq!(q(&["C:/a b.png"]), "'C:/a b.png' ");
         assert_eq!(q(&["it's.png"]), "'it''s.png' ");
         assert_eq!(q(&["-Force", "@list.txt", "a,b.txt", "C:/plain/x-y.png"]), "'-Force' '@list.txt' 'a,b.txt' C:/plain/x-y.png ");
@@ -3188,9 +3281,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn dropped_windows_paths_stay_one_literal_each_for_powershell() {
-        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()));
+        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()), Quoting::PowerShell);
         // Backslash, UNC and long-path forms are quoted whole; `$`, backticks and `;` stay literal.
         assert_eq!(q(&[r"C:\Users\me\it's here.png"]), r"'C:\Users\me\it''s here.png' ");
         assert_eq!(q(&[r"\\server\share\a b.png", r"\\?\C:\x.png"]), r"'\\server\share\a b.png' '\\?\C:\x.png' ");

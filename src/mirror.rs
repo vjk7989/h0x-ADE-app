@@ -1,6 +1,6 @@
 //! Machine-owned layout documents and this screen's private view.
 use crate::{
-    layout::{Content, Header, HeaderContent, Kind, Node},
+    layout::{Background, Content, Header, HeaderContent, Kind, Node},
     model::{Agent, Model, Recent, Space, Tab},
 };
 use serde::{Deserialize, Serialize};
@@ -94,8 +94,14 @@ fn remote_mod(name: &str) -> bool {
     REMOTE_MODS.contains(&name)
 }
 
+/// A Context block shows this machine's own tab, so another machine's layout
+/// has no business placing one (inside a tab it would show itself without end).
 fn remote_content(content: &Content) -> bool {
-    !matches!(content, Content::Mod { name, .. } if !remote_mod(name))
+    match content {
+        Content::Context { .. } => false,
+        Content::Mod { name, .. } => remote_mod(name),
+        _ => true,
+    }
 }
 
 /// A header mod from another machine falls back to the built-in header.
@@ -109,10 +115,12 @@ fn remote_header(header: &mut Option<Header>) {
 
 fn strip_node(node: &mut Node) {
     node.floating.retain(|f| remote_content(&f.content));
-    match &mut node.kind {
-        Kind::Block { content: Content::Context { pane: Some(pane), .. } } => remote_header(&mut pane.header),
-        Kind::Stack { header, .. } => remote_header(header),
-        _ => {}
+    // An image is read from this machine's disk: another machine names none.
+    if matches!(node.background, Some(Background::Image { .. })) {
+        node.background = None;
+    }
+    if let Kind::Stack { header, .. } = &mut node.kind {
+        remote_header(header);
     }
     if let Some(children) = node.children_mut() {
         children.retain(|c| !matches!(&c.kind, Kind::Block { content } if !remote_content(content)));
@@ -124,7 +132,8 @@ fn strip_node(node: &mut Node) {
 
 impl Document {
     /// Another machine's layout: mod blocks and header mods it placed are
-    /// dropped (their props could name a program to run here).
+    /// dropped (their props could name a program to run here), and so are
+    /// Context blocks and background images (a path on this machine).
     pub fn drop_remote_mods(&mut self) {
         for tab in self.spaces.iter_mut().flat_map(|s| &mut s.tabs) {
             if let Kind::Block { content } = &tab.root.kind
@@ -413,6 +422,34 @@ mod tests {
         let before = doc.clone();
         doc.drop_remote_mods();
         assert_eq!(doc, before);
+    }
+    #[test]
+    fn remote_layouts_lose_background_images_and_context_blocks() {
+        let image = |p: &str| serde_json::json!({"image": p});
+        let paths = [r"\\evil\share\x.png", "//evil/share/x.png", "/etc/passwd", r"C:\x.png", "../../x.png", "bg/sky.jpg"];
+        for path in paths {
+            let mut doc = layout_with(serde_json::json!({"id":"r","type":"row","background":image(path),
+                "children":[{"id":"p","type":"block","content":{"terminal":"t1"},"background":image(path)},
+                            {"id":"c","type":"block","content":{"tab":"active"}}],
+                "floating":[{"id":"fc","content":{"tab":"active"}}]}));
+            doc.drop_remote_mods();
+            assert_eq!(root(&doc).background, None, "{path}");
+            assert_eq!(root(&doc).children().len(), 1, "{path}");
+            assert_eq!(root(&doc).children()[0].background, None, "{path}");
+            assert!(root(&doc).floating.is_empty(), "{path}");
+        }
+        // Colors stay; a lone Context block (either spelling) leaves an empty tab.
+        let mut doc = layout_with(serde_json::json!({"id":"r","type":"row","background":"surface","children":[]}));
+        doc.drop_remote_mods();
+        assert_eq!(root(&doc).background, Some(Background::Color("surface".into())));
+        let mut doc = layout_with(serde_json::json!({"id":"c","type":"block","content":{"context":"active"}}));
+        doc.drop_remote_mods();
+        assert!(matches!(root(&doc).kind, Kind::Row { .. }));
+        // A local document keeps its relative image and Context block.
+        let local = layout_with(serde_json::json!({"id":"r","type":"row","background":image("bg/sky.jpg"),"children":[{"id":"c","type":"block","content":{"tab":"active"}}]}));
+        let mut m = Model::default();
+        local.replace(&mut m, None);
+        assert_eq!(Document::capture(&m, None), local);
     }
     #[test]
     fn fresh_ids_are_not_a_per_screen_counter() {
