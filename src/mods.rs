@@ -342,8 +342,8 @@ pub fn trust(found: &Found, choices: &BTreeMap<String, crate::settings::ModChoic
     if declares_dependencies(&found.dir) {
         return Trust::Denied;
     }
-    // The hash can't cover the editor helpers or what sits behind a folder link.
-    if entry_is_helper(&found.dir) || mod_tree(&found.dir, true).1 {
+    // The hash leaves the editor helpers out, so a mod that runs one can't be answered for.
+    if entry_is_helper(&found.dir) {
         return Trust::Denied;
     }
     decide(choices, &found.id, content_hash(&found.dir))
@@ -394,34 +394,30 @@ pub fn content_hash(dir: &Path) -> String {
     crate::update::sha256(&all)
 }
 
-/// A mod's files, `/`-separated and sorted (dot files only when asked).
-fn mod_files(dir: &Path, dots: bool) -> Vec<String> {
-    mod_tree(dir, dots).0
-}
-
-/// `mod_files`, and whether a folder link (symlink or junction) was met: those
-/// are never followed, so the files behind one can't be part of a hash.
-fn mod_tree(root: &Path, dots: bool) -> (Vec<String>, bool) {
-    let (mut out, mut linked) = (Vec::new(), false);
+/// A mod's files, `/`-separated and sorted (dot files only when asked). Folder
+/// links are followed (a mod may link its fonts elsewhere), each real folder once.
+fn mod_files(root: &Path, dots: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
+        if !seen.insert(std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
+            continue;
+        }
         for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             if !dots && e.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
             let path = e.path();
-            let Ok(kind) = e.file_type() else { continue };
-            if kind.is_symlink() && path.is_dir() {
-                linked = true;
-            } else if kind.is_dir() {
+            if path.is_dir() {
                 pending.push(path);
-            } else if let Ok(rel) = path.strip_prefix(root) {
-                out.push(rel.to_string_lossy().replace('\\', "/"));
+            } else if let Some(rel) = path.strip_prefix(root).ok().and_then(|r| r.to_str()) {
+                out.push(rel.replace('\\', "/"));
             }
         }
     }
     out.sort();
-    (out, linked)
+    out
 }
 
 /// Whether the manifest's `entry` is one of the editor helpers, which the
@@ -1746,7 +1742,7 @@ mod tests {
     }
 
     #[test]
-    fn the_hash_covers_files_at_any_depth_and_refuses_what_it_cannot_cover() {
+    fn the_hash_covers_files_at_any_depth_and_through_links_and_refuses_a_helper_entry() {
         let root = std::env::temp_dir().join(format!("h0x-ade-deep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut deep = root.clone();
@@ -1776,20 +1772,25 @@ mod tests {
         std::fs::write(root.join("gpui-shell.json"), r#"{"id":"x","name":"x","entry":"main.js"}"#).unwrap();
         assert_eq!(trust(&found, &allowed(content_hash(&root))), Trust::Allowed);
 
-        // A folder link (symlink or junction) is never followed: the mod is refused.
+        // A file reachable only through a folder link (symlink or junction) is hashed too.
         let outside = std::env::temp_dir().join(format!("h0x-ade-outside-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&outside);
         std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("evil.js"), "1").unwrap();
+        std::fs::write(outside.join("far.js"), "1").unwrap();
         let link = root.join("linked");
         #[cfg(unix)]
         let made = std::os::unix::fs::symlink(&outside, &link).is_ok();
         #[cfg(windows)]
         let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&outside).output().is_ok_and(|o| o.status.success());
         if made {
-            assert!(mod_tree(&root, true).1);
-            assert!(!mod_files(&root, true).iter().any(|f| f.contains("evil.js")));
-            assert_eq!(trust(&found, &allowed(content_hash(&root))), Trust::Denied);
+            let hash = content_hash(&root);
+            assert!(mod_files(&root, true).contains(&"linked/far.js".to_owned()));
+            std::fs::write(outside.join("far.js"), "2").unwrap();
+            assert_ne!(content_hash(&root), hash);
+            // A link back up is a loop: it ends, and the hash still comes out.
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&root, outside.join("up")).unwrap();
+            assert_eq!(content_hash(&root).len(), 64);
         }
         let _ = std::fs::remove_dir_all(&outside);
         let _ = std::fs::remove_dir_all(&root);
