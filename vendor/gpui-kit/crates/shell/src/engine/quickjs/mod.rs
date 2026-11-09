@@ -5430,7 +5430,15 @@ impl AppModules {
 
         for candidate in [joined.clone(), joined.with_extension("js")] {
             if candidate.is_file() {
-                return candidate.canonicalize().ok().map(|path| (path, boundary));
+                let path = candidate.canonicalize().ok()?;
+                // HyperOx: the editor helpers at an application's root are never code (the
+                // consent hash to run a mod leaves generated ones out), so they can't be imported.
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                let helper = name.eq_ignore_ascii_case(crate::typings::CONFIG_FILE_NAME) || name.eq_ignore_ascii_case("gpui-kit.d.ts");
+                if helper && application.root.canonicalize().ok().as_deref() == path.parent() {
+                    return None;
+                }
+                return Some((path, boundary));
             }
         }
         None

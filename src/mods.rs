@@ -342,6 +342,14 @@ pub fn trust(found: &Found, choices: &BTreeMap<String, crate::settings::ModChoic
     if declares_dependencies(&found.dir) {
         return Trust::Denied;
     }
+    // The hash leaves the generated editor helpers out, so a mod that runs one can't be answered for.
+    if entry_is_helper(&found.dir) {
+        return Trust::Denied;
+    }
+    if walk_mod(&found.dir, true).1 {
+        eprintln!("mod {}: denied, it has more than {MAX_FILES} files or {} MiB (links included)", found.id, MAX_BYTES >> 20);
+        return Trust::Denied;
+    }
     decide(choices, &found.id, content_hash(&found.dir))
 }
 
@@ -379,10 +387,13 @@ fn is_shipped(dir: &Path, shipped: &[(&str, &[u8])]) -> bool {
 }
 
 /// SHA-256 over every file of a mod (names and bytes), dot files included:
-/// the code a person's answer is for. The editor helpers don't count.
+/// the code a person's answer is for. The generated editor helpers don't count.
 pub fn content_hash(dir: &Path) -> String {
     let mut all = Vec::new();
-    for f in mod_files(dir, true).into_iter().filter(|f| !matches!(f.as_str(), "gpui-kit.d.ts" | "jsconfig.json")) {
+    // gpui-shell rewrites gpui-kit.d.ts and writes a jsconfig.json once; a jsconfig.json
+    // that is not JSON can't be an editor config (the loader refuses to import it, but it is hashed anyway).
+    let helper_config = std::fs::read(dir.join("jsconfig.json")).is_ok_and(|b| serde_json::from_slice::<Value>(&b).is_ok());
+    for f in mod_files(dir, true).into_iter().filter(|f| f != "gpui-kit.d.ts" && !(helper_config && f == "jsconfig.json")) {
         let bytes = std::fs::read(dir.join(&f)).unwrap_or_default();
         all.extend_from_slice(format!("{f}\0{}\0", bytes.len()).as_bytes());
         all.extend_from_slice(&bytes);
@@ -390,28 +401,63 @@ pub fn content_hash(dir: &Path) -> String {
     crate::update::sha256(&all)
 }
 
-/// A mod's files, `/`-separated and sorted (dot files only when asked).
-fn mod_files(dir: &Path, dots: bool) -> Vec<String> {
-    fn walk(root: &Path, dir: &Path, dots: bool, depth: u32, out: &mut Vec<String>) {
-        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+/// What the consent walk reads at most: a link to a drive root must not hang it.
+const MAX_FILES: usize = 20_000;
+const MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+/// A mod's files, `/`-separated and sorted (dot files only when asked). Folder
+/// links are followed (a mod may link its fonts elsewhere), each real folder once.
+fn mod_files(root: &Path, dots: bool) -> Vec<String> {
+    walk_mod(root, dots).0
+}
+
+/// `mod_files`, and whether the walk stopped at `MAX_FILES` or `MAX_BYTES`.
+fn walk_mod(root: &Path, dots: bool) -> (Vec<String>, bool) {
+    let mut out = Vec::new();
+    let mut bytes = 0u64;
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        if !seen.insert(std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
+            continue;
+        }
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             if !dots && e.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
             let path = e.path();
             if path.is_dir() {
-                // A symlink loop ends here.
-                if depth < 16 {
-                    walk(root, &path, dots, depth + 1, out);
+                pending.push(path);
+            } else if let Some(rel) = path.strip_prefix(root).ok().and_then(|r| r.to_str()) {
+                bytes += std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                if out.len() >= MAX_FILES || bytes > MAX_BYTES {
+                    out.sort();
+                    return (out, true);
                 }
-            } else if let Ok(rel) = path.strip_prefix(root) {
-                out.push(rel.to_string_lossy().replace('\\', "/"));
+                out.push(rel.replace('\\', "/"));
             }
         }
     }
-    let mut out = Vec::new();
-    walk(dir, dir, dots, 0, &mut out);
     out.sort();
-    out
+    (out, false)
+}
+
+/// Whether the manifest's `entry` is one of the editor helpers, which the
+/// consent hash leaves out because gpui-shell rewrites them on every load.
+fn entry_is_helper(dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join("gpui-shell.json")) else { return false };
+    let Some(entry) = serde_json::from_str::<Value>(&text).ok().and_then(|v| v.get("entry")?.as_str().map(str::to_owned)) else { return false };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in entry.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            p => parts.push(p),
+        }
+    }
+    parts.len() == 1 && (parts[0].eq_ignore_ascii_case("jsconfig.json") || parts[0].eq_ignore_ascii_case("gpui-kit.d.ts"))
 }
 
 /// Mods asked about this run (id and hash): one prompt each.
@@ -1715,6 +1761,243 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&staged).unwrap();
+    }
+
+    #[test]
+    fn the_hash_covers_files_at_any_depth_and_through_links_and_refuses_a_helper_entry() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-deep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut deep = root.clone();
+        for i in 0..17 {
+            deep.push(format!("d{i}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(root.join("main.js"), "a").unwrap();
+        std::fs::write(deep.join("x.js"), "1").unwrap();
+        let hash = content_hash(&root);
+        std::fs::write(deep.join("x.js"), "2").unwrap();
+        assert_ne!(content_hash(&root), hash, "a 17-level-deep file is hashed");
+        std::fs::remove_dir_all(&root).unwrap();
+
+        // A manifest whose entry is an editor helper (any spelling) is refused.
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("main.js"), "a").unwrap();
+        let found = Found { id: "x".into(), dir: root.clone(), hint: Hint::default(), stamp: SystemTime::now() };
+        let allowed = |h: String| -> BTreeMap<String, crate::settings::ModChoice> { [("x".to_owned(), crate::settings::ModChoice { hash: h, allow: true })].into() };
+        for entry in ["jsconfig.json", "./jsconfig.json", "lib/../JSConfig.json", "sub\\..\\gpui-kit.d.ts"] {
+            std::fs::write(root.join("gpui-shell.json"), format!(r#"{{"id":"x","name":"x","entry":{}}}"#, serde_json::to_string(entry).unwrap())).unwrap();
+            assert!(entry_is_helper(&root), "{entry}");
+            assert_eq!(trust(&found, &allowed(content_hash(&root))), Trust::Denied, "{entry}");
+        }
+        std::fs::write(root.join("gpui-shell.json"), r#"{"id":"x","name":"x","entry":"lib/jsconfig.json"}"#).unwrap();
+        assert!(!entry_is_helper(&root));
+        std::fs::write(root.join("gpui-shell.json"), r#"{"id":"x","name":"x","entry":"main.js"}"#).unwrap();
+        assert_eq!(trust(&found, &allowed(content_hash(&root))), Trust::Allowed);
+
+        // A file reachable only through a folder link (symlink or junction) is hashed too.
+        let outside = std::env::temp_dir().join(format!("h0x-ade-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("far.js"), "1").unwrap();
+        let link = root.join("linked");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&outside, &link).is_ok();
+        #[cfg(windows)]
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&outside).output().is_ok_and(|o| o.status.success());
+        if made {
+            let hash = content_hash(&root);
+            assert!(mod_files(&root, true).contains(&"linked/far.js".to_owned()));
+            std::fs::write(outside.join("far.js"), "2").unwrap();
+            assert_ne!(content_hash(&root), hash);
+            // A link back up is a loop: it ends, and the hash still comes out.
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&root, outside.join("up")).unwrap();
+            assert_eq!(content_hash(&root).len(), 64);
+        }
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A folder link at `link` to `target`: a symlink, or a junction on Windows (no privilege needed).
+    fn link_folder(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(link).arg(target).output().unwrap().status.success(), "junction {}", link.display());
+    }
+
+    #[test]
+    fn a_helper_entry_is_refused_however_it_is_spelled_and_nothing_else_is() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-entry-spellings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("main.js"), "export default 1;\n").unwrap();
+        let manifest = |entry: Value| std::fs::write(root.join("gpui-shell.json"), json!({"id": "x", "name": "x", "entry": entry}).to_string()).unwrap();
+        for entry in ["jsconfig.json/", ".//jsconfig.json", "./sub/.././jsconfig.json", "a/b/../../GPUI-KIT.D.TS", "a\\b\\..\\..\\Gpui-Kit.d.ts", "../jsconfig.json"] {
+            manifest(json!(entry));
+            assert!(entry_is_helper(&root), "{entry:?}");
+        }
+        // Not a helper: empty, the root itself, a folder, other names, nested helpers (they are hashed),
+        // and percent escapes (no one decodes them).
+        for entry in ["", ".", "./", "lib", "main.js", "jsconfig", "jsconfig.json.js", "gpui-kit.d.ts.bak", "lib/gpui-kit.d.ts", "lib\\jsconfig.json", "%2e%2e/jsconfig.json", "jsconfig%2ejson"] {
+            manifest(json!(entry));
+            assert!(!entry_is_helper(&root), "{entry:?}");
+        }
+        // An entry that is not a string, a missing entry, a broken manifest, or no manifest: nothing to refuse here.
+        for entry in [json!(null), json!(42), json!(["jsconfig.json"]), json!({"path": "jsconfig.json"})] {
+            manifest(entry.clone());
+            assert!(!entry_is_helper(&root), "{entry}");
+        }
+        std::fs::write(root.join("gpui-shell.json"), r#"{"id":"x","name":"x"}"#).unwrap();
+        assert!(!entry_is_helper(&root));
+        std::fs::write(root.join("gpui-shell.json"), r#"{"id":"x","entry":"jsconfig.json""#).unwrap();
+        assert!(!entry_is_helper(&root));
+        std::fs::write(root.join("gpui-shell.json"), "").unwrap();
+        assert!(!entry_is_helper(&root));
+        std::fs::remove_file(root.join("gpui-shell.json")).unwrap();
+        assert!(!entry_is_helper(&root));
+        // An empty entry is not refused: it is asked about like any other code.
+        manifest(json!(""));
+        let found = Found { id: "x".into(), dir: root.clone(), hint: Hint::default(), stamp: SystemTime::now() };
+        assert_eq!(trust(&found, &BTreeMap::new()), Trust::Ask(content_hash(&root)));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_helper_file_the_mods_code_imports_is_covered_by_the_answer() {
+        // The module resolver loads any file in the mod as a module, the root editor helpers included,
+        // and gpui-shell keeps a jsconfig.json that is already there.
+        let root = std::env::temp_dir().join(format!("h0x-ade-helper-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("gpui-shell.json"), r#"{"id":"x","name":"x","entry":"main.js"}"#).unwrap();
+        std::fs::write(root.join("main.js"), "import \"./jsconfig.json\";\nexport default 1;\n").unwrap();
+        std::fs::write(root.join("jsconfig.json"), "globalThis.answer = 1;\n").unwrap();
+        let found = Found { id: "x".into(), dir: root.clone(), hint: Hint::default(), stamp: SystemTime::now() };
+        let hash = content_hash(&root);
+        let choices: BTreeMap<String, crate::settings::ModChoice> = [("x".to_owned(), crate::settings::ModChoice { hash, allow: true })].into();
+        assert_eq!(trust(&found, &choices), Trust::Allowed);
+        std::fs::write(root.join("jsconfig.json"), "globalThis.answer = 2;\n").unwrap();
+        assert_ne!(trust(&found, &choices), Trust::Allowed, "imported code changed after the answer");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_folder_link_to_the_mod_itself_ends_with_each_file_listed_once() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-self-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("main.js"), "a").unwrap();
+        std::fs::write(root.join("sub/a.js"), "b").unwrap();
+        link_folder(&root, &root.join("self"));
+        link_folder(&root, &root.join("sub").join("back"));
+        assert_eq!(mod_files(&root, true), ["main.js", "sub/a.js"]);
+        assert_eq!(content_hash(&root).len(), 64);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_folder_link_to_a_parent_hashes_the_files_outside_the_mod_but_not_the_mod_twice() {
+        let parent = std::env::temp_dir().join(format!("h0x-ade-parent-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        let root = parent.join("mod");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(parent.join("other")).unwrap();
+        std::fs::write(root.join("main.js"), "a").unwrap();
+        std::fs::write(parent.join("other/f.js"), "1").unwrap();
+        link_folder(&parent, &root.join("up"));
+        assert_eq!(mod_files(&root, true), ["main.js", "up/other/f.js"]);
+        let hash = content_hash(&root);
+        std::fs::write(parent.join("other/f.js"), "2").unwrap();
+        assert_ne!(content_hash(&root), hash);
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn two_links_to_one_folder_list_it_once_and_two_mods_sharing_it_both_answer_for_it() {
+        let base = std::env::temp_dir().join(format!("h0x-ade-shared-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let shared = base.join("shared");
+        let (a, b) = (base.join("a"), base.join("b"));
+        for dir in [&shared, &a, &b] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(shared.join("f.js"), "1").unwrap();
+        std::fs::write(a.join("main.js"), "a").unwrap();
+        std::fs::write(b.join("main.js"), "b").unwrap();
+        link_folder(&shared, &a.join("one"));
+        link_folder(&shared, &a.join("two"));
+        link_folder(&shared, &b.join("fonts"));
+        let files = mod_files(&a, true);
+        assert_eq!(files.len(), 2, "{files:?}");
+        assert!(files.contains(&"one/f.js".to_owned()) != files.contains(&"two/f.js".to_owned()), "{files:?}");
+        assert_eq!(mod_files(&b, true), ["fonts/f.js", "main.js"]);
+        let (hash_a, hash_b) = (content_hash(&a), content_hash(&b));
+        std::fs::write(shared.join("f.js"), "2").unwrap();
+        assert_ne!(content_hash(&a), hash_a);
+        assert_ne!(content_hash(&b), hash_b);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_dangling_folder_link_still_gives_a_hash() {
+        let base = std::env::temp_dir().join(format!("h0x-ade-dangling-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (root, gone) = (base.join("mod"), base.join("gone"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&gone).unwrap();
+        std::fs::write(root.join("main.js"), "a").unwrap();
+        link_folder(&gone, &root.join("fonts"));
+        std::fs::remove_dir_all(&gone).unwrap();
+        assert!(mod_files(&root, true).contains(&"main.js".to_owned()));
+        assert_eq!(content_hash(&root).len(), 64);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn thousands_of_files_and_deep_folders_are_all_hashed() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in 0..40 {
+            let dir = root.join(format!("d{d}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            for f in 0..50 {
+                std::fs::write(dir.join(format!("f{f}.js")), format!("{d}/{f}")).unwrap();
+            }
+        }
+        let mut deep = root.clone();
+        for _ in 0..48 {
+            deep.push("n");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("x.js"), "1").unwrap();
+        let files = mod_files(&root, true);
+        assert_eq!(files.len(), 40 * 50 + 1);
+        assert!(files.contains(&format!("{}x.js", "n/".repeat(48))));
+        let hash = content_hash(&root);
+        std::fs::write(deep.join("x.js"), "2").unwrap();
+        assert_ne!(content_hash(&root), hash, "the 48-deep file counts");
+        std::fs::write(deep.join("x.js"), "1").unwrap();
+        std::fs::write(root.join("d39/f49.js"), "changed").unwrap();
+        assert_ne!(content_hash(&root), hash, "the last of 2000 files counts");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_shipped_mod_with_a_linked_folder_of_files_is_not_built_in() {
+        let base = std::env::temp_dir().join(format!("h0x-ade-builtin-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let shipped: &[(&str, &[u8])] = &[("tool/main.js", b"export default 1;\n")];
+        let (dir, outside) = (base.join("tool"), base.join("outside"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(dir.join("main.js"), b"export default 1;\n").unwrap();
+        // A link to an empty folder adds nothing.
+        link_folder(&outside, &dir.join("fonts"));
+        assert!(is_shipped(&dir, shipped));
+        std::fs::write(outside.join("extra.js"), b"x").unwrap();
+        assert!(!is_shipped(&dir, shipped));
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
