@@ -496,6 +496,7 @@ export default class Settings extends View {
   look(t, cx) {
     const s = settings();
     const p = this.person;
+    const clipboardOn = p.clipboard_write === true;
     const own = (key, composed, def) => (p[key] ?? def) !== composed;
     const size = (key, value, d, cx) => this.change((q) => (q[key] = Math.max(8, Math.min(32, (q[key] ?? value) + d))), cx);
     const fontRow = (which, sizeKey, title, family, def, sizeNow) =>
@@ -542,7 +543,17 @@ export default class Settings extends View {
         ),
       )
       .child(fontRow("font", "font_size", "Terminal font", s.font_family, DEFAULT_FONT, s.font_size))
-      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT));
+      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT))
+      .child(div().h(18))
+      .child(this.heading(t, "Terminal"))
+      .child(
+        this.row(
+          t,
+          "Let programs copy to the clipboard",
+          "Terminal programs, including ones on remote machines, can replace what you copied. Off unless you turn it on.",
+          this.toggle(t, "st-clipboard-write", clipboardOn, (_e, cx) => this.change((p) => { p.clipboard_write = !clipboardOn; }, cx)),
+        ),
+      );
   }
 
   keyboard(t) {
@@ -880,6 +891,7 @@ export default class Settings extends View {
         .when(Boolean(this.webQr?.rows), (e) => e.child(this.qrGrid(this.webQr)))
         .when(Boolean(this.webQr) && !this.webQr.rows, (e) => e.child(div().text_size(12.5).text_color(t.dim).child("Cannot draw the QR code; use the link below.")))
         .child(div().text_size(12.5).text_color(t.muted).child("Scan with your phone"))
+        .when(typeof this.webLink?.warning === "string" && this.webLink.warning !== "", (e) => e.child(div().id("st-r-warning").text_size(12.5).line_height("18px").text_color(t.ansi3).child(this.webLink.warning)))
         .child(div().id("st-r-link").text_size(12).text_color(t.dim).child(this.webLink?.pair ?? this.webLink?.url ?? ""))));
   }
 
@@ -1004,8 +1016,19 @@ export default class Settings extends View {
             : u.checks
               ? [result, check("st-check-core")]
               : ["Not checked: a build from source looks for no updates.", null];
+    const autoOn = this.person.check_updates !== false;
     return v_flex()
       .w_full()
+      .child(this.heading(t, "Checking"))
+      .child(
+        this.row(
+          t,
+          "Check for updates automatically",
+          "Look for HyperOx and h0x-core updates every hour. Off: they are looked for only when you press Check now.",
+          this.toggle(t, "st-check-updates", autoOn, (_e, cx) => this.change((p) => { p.check_updates = !autoOn; }, cx)),
+        ),
+      )
+      .child(div().h(18))
       .child(this.heading(t, "HyperOx"))
       .child(this.row(t, `HyperOx ${u.app.version}`, app[0], h_flex().gap(8).flex_none()
         .child(this.button(t, "st-whats-new", "What's new", () => { closeOverlay(props()?.overlay); run("app.whats_new"); }))
@@ -1013,7 +1036,7 @@ export default class Settings extends View {
       .child(div().h(18))
       .child(this.heading(t, "h0x-core"))
       .child(this.row(t, `h0x-core ${c.version ?? ""}`, coreRow[0], coreRow[1] ?? div()))
-      .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("HyperOx looks for both every hour and tells you in the corner. h0x-core runs your terminals, so they keep running through its updates."));
+      .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("HyperOx looks for both every hour (unless automatic checks are off) and tells you in the corner. h0x-core runs your terminals, so they keep running through its updates."));
   }
 
   // ----------------------------------------------------------------------
