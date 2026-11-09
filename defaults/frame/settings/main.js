@@ -45,6 +45,8 @@ export default class Settings extends View {
     });
     this.person = {};
     this.raw = null;
+    this.unreadable = false;
+    this.error = null;
     this.previews = {}; // layout name -> its "preview" picture
     this.previewsOf = "";
     this.machineList = null;
@@ -134,10 +136,17 @@ export default class Settings extends View {
 
   async load() {
     this.raw = await readTextFile(this.file());
+    // A missing file is empty (it may be created); one that is there but can't be read as an
+    // object is never written over: that would drop everything else in it.
+    this.unreadable = false;
+    this.person = {};
+    if (this.raw === null || this.raw === undefined) return;
     try {
-      this.person = this.raw ? JSON.parse(this.raw) : {};
+      const person = JSON.parse(this.raw.replace(/^\uFEFF/, ""));
+      if (person === null || typeof person !== "object" || Array.isArray(person)) throw new Error("not an object");
+      this.person = person;
     } catch {
-      this.person = {};
+      this.unreadable = true;
     }
   }
 
@@ -147,6 +156,11 @@ export default class Settings extends View {
     cx.spawn(async (cx) => {
       for (let attempt = 0; attempt < 3; attempt++) {
         await this.load();
+        if (this.unreadable) {
+          this.error = "settings.json can't be read (empty or not valid JSON), so nothing was changed. Fix or delete the file, then try again.";
+          break;
+        }
+        this.error = null;
         const next = JSON.parse(JSON.stringify(this.person));
         edit(next);
         try {
@@ -498,6 +512,10 @@ export default class Settings extends View {
     const s = settings();
     const p = this.person;
     const clipboardOn = p.clipboard_write === true;
+    // The settings file holds any number; the app uses it only inside this range, else 10,000.
+    const stops = [1000, 2000, 5000, 10000, 20000, 50000, 100000];
+    const lines = Number.isInteger(p.scrollback_lines) && p.scrollback_lines >= 1000 && p.scrollback_lines <= 100000 ? p.scrollback_lines : 10000;
+    const stopAt = (dir) => (dir < 0 ? [...stops].reverse().find((n) => n < lines) : stops.find((n) => n > lines)) ?? lines;
     const own = (key, composed, def) => (p[key] ?? def) !== composed;
     const size = (key, value, d, cx) => this.change((q) => (q[key] = Math.max(8, Math.min(32, (q[key] ?? value) + d))), cx);
     const fontRow = (which, sizeKey, title, family, def, sizeNow) =>
@@ -553,6 +571,14 @@ export default class Settings extends View {
           "Let programs copy to the clipboard",
           "Terminal programs, including ones on remote machines, can replace what you copied. Off unless you turn it on.",
           this.toggle(t, "st-clipboard-write", clipboardOn, (_e, cx) => this.change((p) => { p.clipboard_write = !clipboardOn; }, cx)),
+        ),
+      )
+      .child(
+        this.row(
+          t,
+          "Scrollback lines per pane",
+          "How far back each terminal pane keeps its output (1,000 to 100,000). Wide panes or long wrapped lines keep fewer. Applies to panes opened after the change.",
+          this.stepper(t, "st-scrollback", String(lines).replace(/\B(?=(\d{3})+(?!\d))/g, ","), (_e, cx) => this.change((p) => { p.scrollback_lines = stopAt(-1); }, cx), (_e, cx) => this.change((p) => { p.scrollback_lines = stopAt(1); }, cx)),
         ),
       );
   }
@@ -1126,6 +1152,7 @@ export default class Settings extends View {
                 div()
                   .px(28)
                   .py(22)
+                  .when(Boolean(this.error), (el) => el.child(div().pb(12).text_size(12.5).text_color(t.blocked).child(this.error)))
                   .child(
                     this.section === "look"
                       ? this.look(t, cx)

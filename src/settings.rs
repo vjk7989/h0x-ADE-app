@@ -393,6 +393,10 @@ pub struct Person {
     pub pane_scrollbars: bool,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
+    /// Scrollback lines kept per terminal pane (new panes). Anything not a whole
+    /// number in SCROLLBACK_MIN..=SCROLLBACK_MAX falls back to the default.
+    #[serde(skip_serializing_if = "is_default_scrollback", deserialize_with = "scrollback_or_default")]
+    pub scrollback_lines: u32,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
     #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
     pub option_as_alt: OptionAsAlt,
@@ -449,6 +453,22 @@ impl OptionAsAlt {
     }
 }
 
+/// Scrollback per terminal pane. The default keeps the long-standing 10,000
+/// lines; the range keeps a pane between ~1 MB and ~100 MB (see `Vt::new`).
+pub const SCROLLBACK_DEFAULT: u32 = 10_000;
+pub const SCROLLBACK_MIN: u32 = 1_000;
+pub const SCROLLBACK_MAX: u32 = 100_000;
+
+fn is_default_scrollback(n: &u32) -> bool {
+    *n == SCROLLBACK_DEFAULT
+}
+
+/// A whole number in range (2000.0 and 2e3 count), else the default (never an error: a typo here must not discard the file).
+fn scrollback_or_default<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_f64().filter(|n| n.fract() == 0.0 && (SCROLLBACK_MIN as f64..=SCROLLBACK_MAX as f64).contains(n)).map_or(SCROLLBACK_DEFAULT, |n| n as u32))
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -471,6 +491,7 @@ impl Default for Person {
             check_updates: true,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
+            scrollback_lines: SCROLLBACK_DEFAULT,
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
             theme: None,
@@ -510,6 +531,8 @@ pub struct Settings {
     pub clipboard_write: bool,
     pub check_updates: bool,
     pub minimum_contrast: f32,
+    /// Scrollback lines per new terminal pane.
+    pub scrollback_lines: u32,
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
 }
@@ -553,6 +576,7 @@ impl Default for Settings {
             clipboard_write: false,
             check_updates: true,
             minimum_contrast: 1.0,
+            scrollback_lines: SCROLLBACK_DEFAULT,
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
         }
@@ -593,6 +617,7 @@ impl Settings {
             clipboard_write: person.clipboard_write,
             check_updates: person.check_updates,
             minimum_contrast: person.minimum_contrast,
+            scrollback_lines: person.scrollback_lines,
             option_as_alt: person.option_as_alt,
         }
     }
@@ -685,8 +710,12 @@ pub fn load_person() -> Result<Person, String> {
     if !p.exists() {
         let _ = crate::persist::write_atomic(&p, serde_json::to_string_pretty(&Person::default()).unwrap() + "\n");
     }
-    let text = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    let person: Person = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    parse_person(&std::fs::read_to_string(&p).map_err(|e| e.to_string())?)
+}
+
+/// settings.json's text as the person's settings; a leading UTF-8 BOM (some editors add one) is ignored.
+fn parse_person(text: &str) -> Result<Person, String> {
+    let person: Person = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| e.to_string())?;
     if !(ZOOM_MIN..=ZOOM_MAX).contains(&person.zoom) {
         return Err(format!("zoom {} is outside {ZOOM_MIN}..{ZOOM_MAX}", person.zoom));
     }
@@ -934,6 +963,115 @@ mod tests {
             assert_eq!(settings.minimum_contrast, ratio);
             assert_eq!(serde_json::to_value(person).unwrap()["minimum_contrast"], serde_json::json!(ratio));
             assert_eq!(settings.problems().is_empty(), (1.0..=21.0).contains(&ratio));
+        }
+    }
+
+    #[test]
+    fn scrollback_lines_defaults_to_ten_thousand_and_bad_values_fall_back() {
+        assert_eq!(SCROLLBACK_DEFAULT, 10_000);
+        assert_eq!(Settings::default().scrollback_lines, 10_000);
+        let lines = |text: &str| serde_json::from_str::<Person>(text).unwrap().scrollback_lines;
+        assert_eq!(lines("{}"), 10_000);
+        assert_eq!(lines(r#"{"scrollback_lines": 1000}"#), 1_000);
+        assert_eq!(lines(r#"{"scrollback_lines": 100000}"#), 100_000);
+        assert_eq!(lines(r#"{"scrollback_lines": 50000}"#), 50_000);
+        // A whole number written with a fraction part or an exponent is still that number.
+        for whole in ["2000.0", "2e3", "2.0E3", "1000.0", "100000.0", "1e5"] {
+            let want = whole.parse::<f64>().unwrap() as u32;
+            assert_eq!(lines(&format!(r#"{{"scrollback_lines": {whole}}}"#)), want, "{whole}");
+        }
+        for bad in ["2000.5", "999.0", "100001.0", "1e6", "1e-3"] {
+            assert_eq!(lines(&format!(r#"{{"scrollback_lines": {bad}}}"#)), 10_000, "{bad}");
+        }
+        for bad in ["999", "100001", "0", "-5", "5000.5", "\"5000\"", "null", "true", "[]", "99999999999"] {
+            assert_eq!(lines(&format!(r#"{{"scrollback_lines": {bad}}}"#)), 10_000, "{bad}");
+        }
+        let person: Person = serde_json::from_str(r#"{"scrollback_lines": 2000}"#).unwrap();
+        assert_eq!(Settings::compose(&person, &crate::layout::Look::default(), true).scrollback_lines, 2_000);
+        assert_eq!(serde_json::to_value(&person).unwrap()["scrollback_lines"], serde_json::json!(2000));
+        assert!(serde_json::to_value(Person::default()).unwrap().get("scrollback_lines").is_none());
+    }
+
+    #[test]
+    fn a_settings_file_with_a_byte_order_mark_loads() {
+        let person = parse_person("\u{feff}{\"scrollback_lines\": 2000, \"font_ligatures\": true}").unwrap();
+        assert_eq!((person.scrollback_lines, person.font_ligatures), (2_000, true));
+        assert_eq!(parse_person("\u{feff}{}").unwrap(), Person::default());
+        assert!(parse_person("\u{feff}").is_err(), "an empty file is still reported");
+        assert!(parse_person("{\"zoom\": 9}").is_err());
+    }
+
+    #[test]
+    fn a_hand_edited_scrollback_value_with_whitespace_and_crlf_still_applies() {
+        let lines = |text: &str| serde_json::from_str::<Person>(text).unwrap_or_else(|e| panic!("{text:?}: {e}")).scrollback_lines;
+        assert_eq!(lines("{\r\n  \"scrollback_lines\" :\t 7500 \r\n}\r\n"), 7_500);
+        assert_eq!(lines("\n\n{\"scrollback_lines\":1000}\n\n"), 1_000);
+        // Whitespace inside a quoted number is still a string, not a whole number.
+        for padded in ["\" 7500\"", "\"7500 \"", "\"\"", "\"1e3\""] {
+            assert_eq!(lines(&format!("{{\"scrollback_lines\": {padded}}}")), SCROLLBACK_DEFAULT, "{padded}");
+        }
+    }
+
+    #[test]
+    fn a_bad_scrollback_value_keeps_the_rest_of_the_settings_and_a_good_one_survives_other_out_of_range_values() {
+        let bad = serde_json::from_str::<Person>(
+            r#"{"scrollback_lines": 999, "font_ligatures": true, "clipboard_write": true, "minimum_contrast": 4.5, "zoom": 1.5, "font": "Mono"}"#,
+        )
+        .unwrap();
+        assert_eq!(bad.scrollback_lines, SCROLLBACK_DEFAULT);
+        assert!(bad.font_ligatures && bad.clipboard_write);
+        assert_eq!((bad.minimum_contrast, bad.zoom, bad.font.as_deref()), (4.5, 1.5, Some("Mono")));
+        let s = Settings::compose(&bad, &crate::layout::Look::default(), true);
+        assert_eq!((s.scrollback_lines, s.font_family.as_str()), (SCROLLBACK_DEFAULT, "Mono"));
+        assert!(s.problems().is_empty(), "a fallen-back scrollback value is not a problem: {:?}", s.problems());
+
+        // Other values out of range are reported, and the good scrollback value stays.
+        let good = serde_json::from_str::<Person>(r#"{"scrollback_lines": 2000, "minimum_contrast": 50, "font_size": 100}"#).unwrap();
+        let s = Settings::compose(&good, &crate::layout::Look::default(), true);
+        assert_eq!(s.scrollback_lines, 2_000);
+        let problems = s.problems();
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems.iter().all(|p| !p.contains("scrollback")), "{problems:?}");
+
+        // A wrongly typed other key still rejects the whole file (the app keeps what it had).
+        assert!(serde_json::from_str::<Person>(r#"{"scrollback_lines": 2000, "check_updates": "yes"}"#).is_err());
+    }
+
+    #[test]
+    fn scrollback_lines_written_by_the_stepper_round_trip_through_the_settings_file() {
+        // The stepper's stops, plus a value set by hand between two of them.
+        for n in [1_000, 2_000, 5_000, 7_500, 10_000, 20_000, 50_000, 100_000] {
+            let person = Person { scrollback_lines: n, font_ligatures: true, ..Person::default() };
+            let file = serde_json::to_string_pretty(&person).unwrap() + "\n";
+            let back: Person = serde_json::from_str(&file).unwrap_or_else(|e| panic!("{n}: {e}\n{file}"));
+            assert_eq!(back.scrollback_lines, n, "{file}");
+            assert!(back.font_ligatures, "{file}");
+            assert_eq!(file.contains("scrollback_lines"), n != SCROLLBACK_DEFAULT, "only a non-default value is written: {file}");
+            assert_eq!(Settings::compose(&back, &crate::layout::Look::default(), false).scrollback_lines, n);
+        }
+    }
+
+    #[test]
+    fn an_empty_settings_file_is_an_error_and_an_empty_object_means_the_default() {
+        // load_person reports these (settings.error) and the app keeps the settings it had.
+        for empty in ["", "\n", "  \r\n"] {
+            assert!(serde_json::from_str::<Person>(empty).is_err(), "{empty:?}");
+        }
+        let person: Person = serde_json::from_str("{}").unwrap();
+        assert_eq!(person.scrollback_lines, SCROLLBACK_DEFAULT);
+        assert!(!serde_json::to_string_pretty(&person).unwrap().contains("scrollback_lines"));
+    }
+
+    #[test]
+    fn a_layout_cannot_change_the_scrollback() {
+        // Layouts (local, a mod's, or a remote machine's) carry only a Look;
+        // a scrollback key in one is ignored and the person's value is used.
+        let look: crate::layout::Look = serde_json::from_str(r#"{"scrollback_lines": 1000, "font_size": 20}"#).unwrap();
+        assert_eq!(look.font_size, Some(20.0));
+        let person = Person { scrollback_lines: 50_000, ..Person::default() };
+        for dark in [true, false] {
+            assert_eq!(Settings::compose(&person, &look, dark).scrollback_lines, 50_000);
+            assert_eq!(Settings::compose(&Person::default(), &look, dark).scrollback_lines, SCROLLBACK_DEFAULT);
         }
     }
 
