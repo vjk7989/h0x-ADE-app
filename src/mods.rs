@@ -342,6 +342,10 @@ pub fn trust(found: &Found, choices: &BTreeMap<String, crate::settings::ModChoic
     if declares_dependencies(&found.dir) {
         return Trust::Denied;
     }
+    // The hash can't cover the editor helpers or what sits behind a folder link.
+    if entry_is_helper(&found.dir) || mod_tree(&found.dir, true).1 {
+        return Trust::Denied;
+    }
     decide(choices, &found.id, content_hash(&found.dir))
 }
 
@@ -392,26 +396,50 @@ pub fn content_hash(dir: &Path) -> String {
 
 /// A mod's files, `/`-separated and sorted (dot files only when asked).
 fn mod_files(dir: &Path, dots: bool) -> Vec<String> {
-    fn walk(root: &Path, dir: &Path, dots: bool, depth: u32, out: &mut Vec<String>) {
-        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+    mod_tree(dir, dots).0
+}
+
+/// `mod_files`, and whether a folder link (symlink or junction) was met: those
+/// are never followed, so the files behind one can't be part of a hash.
+fn mod_tree(root: &Path, dots: bool) -> (Vec<String>, bool) {
+    let (mut out, mut linked) = (Vec::new(), false);
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             if !dots && e.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
             let path = e.path();
-            if path.is_dir() {
-                // A symlink loop ends here.
-                if depth < 16 {
-                    walk(root, &path, dots, depth + 1, out);
-                }
+            let Ok(kind) = e.file_type() else { continue };
+            if kind.is_symlink() && path.is_dir() {
+                linked = true;
+            } else if kind.is_dir() {
+                pending.push(path);
             } else if let Ok(rel) = path.strip_prefix(root) {
                 out.push(rel.to_string_lossy().replace('\\', "/"));
             }
         }
     }
-    let mut out = Vec::new();
-    walk(dir, dir, dots, 0, &mut out);
     out.sort();
-    out
+    (out, linked)
+}
+
+/// Whether the manifest's `entry` is one of the editor helpers, which the
+/// consent hash leaves out because gpui-shell rewrites them on every load.
+fn entry_is_helper(dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join("gpui-shell.json")) else { return false };
+    let Some(entry) = serde_json::from_str::<Value>(&text).ok().and_then(|v| v.get("entry")?.as_str().map(str::to_owned)) else { return false };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in entry.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            p => parts.push(p),
+        }
+    }
+    parts.len() == 1 && (parts[0].eq_ignore_ascii_case("jsconfig.json") || parts[0].eq_ignore_ascii_case("gpui-kit.d.ts"))
 }
 
 /// Mods asked about this run (id and hash): one prompt each.
@@ -1715,6 +1743,56 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&staged).unwrap();
+    }
+
+    #[test]
+    fn the_hash_covers_files_at_any_depth_and_refuses_what_it_cannot_cover() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-deep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut deep = root.clone();
+        for i in 0..17 {
+            deep.push(format!("d{i}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(root.join("main.js"), "a").unwrap();
+        std::fs::write(deep.join("x.js"), "1").unwrap();
+        let hash = content_hash(&root);
+        std::fs::write(deep.join("x.js"), "2").unwrap();
+        assert_ne!(content_hash(&root), hash, "a 17-level-deep file is hashed");
+        std::fs::remove_dir_all(&root).unwrap();
+
+        // A manifest whose entry is an editor helper (any spelling) is refused.
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("main.js"), "a").unwrap();
+        let found = Found { id: "x".into(), dir: root.clone(), hint: Hint::default(), stamp: SystemTime::now() };
+        let allowed = |h: String| -> BTreeMap<String, crate::settings::ModChoice> { [("x".to_owned(), crate::settings::ModChoice { hash: h, allow: true })].into() };
+        for entry in ["jsconfig.json", "./jsconfig.json", "lib/../JSConfig.json", "sub\\..\\gpui-kit.d.ts"] {
+            std::fs::write(root.join("gpui-shell.json"), format!(r#"{{"id":"x","name":"x","entry":{}}}"#, serde_json::to_string(entry).unwrap())).unwrap();
+            assert!(entry_is_helper(&root), "{entry}");
+            assert_eq!(trust(&found, &allowed(content_hash(&root))), Trust::Denied, "{entry}");
+        }
+        std::fs::write(root.join("gpui-shell.json"), r#"{"id":"x","name":"x","entry":"lib/jsconfig.json"}"#).unwrap();
+        assert!(!entry_is_helper(&root));
+        std::fs::write(root.join("gpui-shell.json"), r#"{"id":"x","name":"x","entry":"main.js"}"#).unwrap();
+        assert_eq!(trust(&found, &allowed(content_hash(&root))), Trust::Allowed);
+
+        // A folder link (symlink or junction) is never followed: the mod is refused.
+        let outside = std::env::temp_dir().join(format!("h0x-ade-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("evil.js"), "1").unwrap();
+        let link = root.join("linked");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&outside, &link).is_ok();
+        #[cfg(windows)]
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&outside).output().is_ok_and(|o| o.status.success());
+        if made {
+            assert!(mod_tree(&root, true).1);
+            assert!(!mod_files(&root, true).iter().any(|f| f.contains("evil.js")));
+            assert_eq!(trust(&found, &allowed(content_hash(&root))), Trust::Denied);
+        }
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

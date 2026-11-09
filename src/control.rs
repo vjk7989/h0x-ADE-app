@@ -76,15 +76,27 @@ impl Drop for Slot {
     }
 }
 
+/// The SID of the user running this process, from `whoami /user`: names (and
+/// domains) are looked up by icacls and can differ or be spoofed by the environment.
+#[cfg(windows)]
+fn current_user_sid() -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("whoami").args(["/user", "/fo", "csv", "/nh"]).creation_flags(0x0800_0000).output().map_err(|e| e.to_string())?;
+    sid_from_whoami(&String::from_utf8_lossy(&out.stdout)).ok_or_else(|| "no user SID".to_owned())
+}
+
+/// `"DOMAIN\user","S-1-5-21-…"` to the SID.
+#[cfg(windows)]
+fn sid_from_whoami(csv: &str) -> Option<String> {
+    let sid = csv.trim().rsplit(',').next()?.trim_matches('"');
+    (sid.starts_with("S-1-") && sid.bytes().all(|b| b.is_ascii_digit() || b == b'-' || b == b'S')).then(|| sid.to_owned())
+}
+
 /// The ACL of the socket file: this user and SYSTEM only, nothing inherited.
 #[cfg(windows)]
 fn restrict_to_owner(path: &std::path::Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
-    let user = std::env::var("USERNAME").map_err(|e| format!("no user name: {e}"))?;
-    let user = match std::env::var("USERDOMAIN") {
-        Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
-        _ => user,
-    };
+    let user = current_user_sid()?;
     let icacls = |build: &dyn Fn(&mut std::process::Command)| {
         let mut command = std::process::Command::new("icacls");
         command.arg(path).creation_flags(0x0800_0000);
@@ -97,7 +109,7 @@ fn restrict_to_owner(path: &std::path::Path) -> Result<(), String> {
         c.arg("/reset");
     })?;
     icacls(&|c| {
-        c.args(["/inheritance:r", "/grant:r"]).arg(format!("{user}:F")).arg("*S-1-5-18:F").args(["/remove:g", "*S-1-5-32-544"]);
+        c.args(["/inheritance:r", "/grant:r"]).arg(format!("*{user}:F")).arg("*S-1-5-18:F").args(["/remove:g", "*S-1-5-32-544"]);
     })
 }
 
@@ -514,6 +526,11 @@ mod windows_tests {
         let out = std::process::Command::new("icacls").arg(&path).output().unwrap();
         let acl = String::from_utf8_lossy(&out.stdout).to_lowercase();
         let user = std::env::var("USERNAME").unwrap().to_lowercase();
+        let sid = current_user_sid().unwrap();
+        assert!(sid.starts_with("S-1-5-"), "{sid}");
+        assert_eq!(sid_from_whoami("\"PC\\me\",\"S-1-5-21-1-2-3-1001\"\r\n").as_deref(), Some("S-1-5-21-1-2-3-1001"));
+        assert_eq!(sid_from_whoami("ERROR: nothing"), None);
+        assert_eq!(sid_from_whoami(""), None);
         assert!(acl.contains(&format!("{user}:(f)")), "{acl}");
         assert!(acl.contains("system:(f)"), "{acl}");
         for other in ["everyone", "users:", "authenticated users", "administrators", "(i)"] {

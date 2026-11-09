@@ -112,9 +112,12 @@ pub async fn next_change(path: String) -> Result<Vec<String>, String> {
 mod linux {
     use super::*;
 
+    /// Hardened like the panels' git calls: no index lock, and no repo-configured fsmonitor command.
+    pub(super) const LS_FILES_ARGS: [&str; 9] = ["--no-optional-locks", "-c", "core.fsmonitor=false", "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"];
+
     /// Git supplies its own ignore semantics, including global and nested rules.
     fn ignored_directories(root: &Path) -> HashSet<PathBuf> {
-        let Ok(output) = std::process::Command::new("git").arg("-C").arg(root).args(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]).output() else {
+        let Ok(output) = std::process::Command::new("git").arg("-C").arg(root).args(LS_FILES_ARGS).output() else {
             return HashSet::new();
         };
         if !output.status.success() {
@@ -624,5 +627,15 @@ mod tests {
         wait_for_change(&dir, &dir.join("b.md"));
         folders().remove(&dir);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod ls_files_tests {
+    #[test]
+    fn ls_files_runs_hardened() {
+        let args = super::linux::LS_FILES_ARGS;
+        assert_eq!(&args[..3], ["--no-optional-locks", "-c", "core.fsmonitor=false"]);
+        assert!(args[3..].contains(&"ls-files"));
     }
 }
