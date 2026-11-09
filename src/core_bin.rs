@@ -84,6 +84,8 @@ pub fn version(bin: &Path) -> Option<String> {
 /// The first h0x-core found, or None.
 pub fn find(configured: Option<&str>) -> Option<PathBuf> {
     let home = crate::mods::home();
+    // Absolute only: an empty or relative PATH entry or configured path means the
+    // current folder, where a planted h0x-core must never be found.
     let pick = |candidates: Vec<PathBuf>| candidates.into_iter().filter(|c| c.is_absolute() && c.is_file()).find(|c| version(c).is_some());
     if let Some(found) = pick(configured.map(|c| vec![expand(c, &home)]).unwrap_or_default()) {
         return Some(found);
@@ -109,10 +111,8 @@ fn core_in(dir: &Path) -> PathBuf {
     dir.join(format!("h0x-core{}", std::env::consts::EXE_SUFFIX))
 }
 
-/// The absolute folders on a PATH: an empty or relative entry means the
-/// current folder, where a planted h0x-core must never be found.
 fn dirs_on(path: &std::ffi::OsStr) -> impl Iterator<Item = PathBuf> + '_ {
-    std::env::split_paths(path).filter(|d| d.is_absolute())
+    std::env::split_paths(path)
 }
 
 /// Where h0x-core gets installed: its own installer (~/.local/bin),
