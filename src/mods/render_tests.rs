@@ -1129,6 +1129,111 @@ fn option_key_settings_are_only_shown_on_macos(cx: &mut TestAppContext) {
     }
 }
 
+// Settings → Terminal's scrollback stepper with `person` as settings.json; `steps` presses − and +
+// on a copy of it and shows what each would write instead of the value.
+fn scrollback_stepper(cx: &mut TestAppContext, staged: &Staged, person: &Value, steps: bool) -> String {
+    let mut p = props();
+    p["section"] = json!("look");
+    let mut setup = "const look = this.look.bind(this); this.look = (t, cx) => { this.person = PERSON; return look(t, cx); };".to_owned();
+    if steps {
+        setup.push_str(concat!(
+            "const stepper = this.stepper.bind(this);",
+            "this.stepper = (t, id, value, minus, plus) => {",
+            "  if (id !== 'st-scrollback') return stepper(t, id, value, minus, plus);",
+            "  const seen = []; const change = this.change;",
+            "  this.change = (edit) => { const q = JSON.parse(JSON.stringify(this.person)); edit(q); seen.push(`${q.scrollback_lines}${q.font_ligatures === true ? '+kept' : '+lost'}`); };",
+            "  try { minus(null, null); plus(null, null); } finally { this.change = change; }",
+            "  return stepper(t, id, `steps ${seen.join(' ')}`, minus, plus);",
+            "};",
+        ));
+    }
+    let setup = setup.replace("PERSON", &person.to_string());
+    describe(cx, staged, "frame/settings", true, p, updates("current", "current"), Some(&setup)).unwrap()
+}
+
+#[gpui::test]
+fn scrollback_stepper_moves_to_the_next_stop_keeps_the_ends_and_the_other_settings(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (lines, minus, plus) in [
+        // Set by hand between two stops: − and + go to the stops around it.
+        (json!(7500), 5000, 10000),
+        (json!(1000), 1000, 2000),
+        (json!(100000), 50000, 100000),
+        // Values the app does not use show and step from the default.
+        (json!(999), 5000, 20000),
+        (json!(100001), 5000, 20000),
+        (json!("7500"), 5000, 20000),
+        (json!(2000.5), 5000, 20000),
+        (Value::Null, 5000, 20000),
+    ] {
+        let mut person = json!({"font_ligatures": true});
+        if !lines.is_null() {
+            person["scrollback_lines"] = lines.clone();
+        }
+        let tree = scrollback_stepper(cx, &staged, &person, true);
+        assert!(tree.contains("st-scrollback-minus") && tree.contains("st-scrollback-plus"), "{lines}: {tree}");
+        assert!(tree.contains(&format!("steps {minus}+kept {plus}+kept")), "{lines}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn scrollback_stepper_shows_the_count_with_thousands_separators(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (person, shown) in [(json!({"scrollback_lines": 7500}), "7,500"), (json!({}), "10,000"), (json!({"scrollback_lines": 100000}), "100,000")] {
+        let tree = scrollback_stepper(cx, &staged, &person, false);
+        assert!(tree.contains(shown), "{person} should show {shown}: {tree}");
+    }
+}
+
+// Settings → Remote (any page runs init) with settings.json holding `file` (None: missing), after a stepper
+// press that sets scrollback_lines to 2000. Returns the page and every write made.
+fn press_stepper_with_settings_file(cx: &mut TestAppContext, staged: &Staged, file: Option<&str>) -> (String, Vec<(String, String)>) {
+    let path = "/fixture/app/settings.json";
+    let replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+    let files: Vec<(&str, &str)> = file.map(|f| (path, f)).into_iter().collect();
+    let setup = "this.change((p) => { p.scrollback_lines = 2000; }, cx);";
+    let (tree, calls) = describe_remote_with(cx, staged, &replies, setup, "/fixture/app", &files);
+    let c = calls.borrow();
+    if let Some(f) = file.filter(|_| c.writes.is_empty()) {
+        assert_eq!(c.files.get(path).map(String::as_str), Some(f), "the file is byte-identical");
+    }
+    (tree, c.writes.clone())
+}
+
+#[gpui::test]
+fn settings_never_overwrite_a_file_they_could_not_read_and_say_so(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for bad in ["", "   ", "{not json", "[1, 2]", "null", "\u{feff}{\"font_ligatures\": tru", "\u{feff}"] {
+        let (tree, writes) = press_stepper_with_settings_file(cx, &staged, Some(bad));
+        assert!(writes.is_empty(), "{bad:?}: nothing is written over it: {writes:?}");
+        assert!(tree.contains("can't be read"), "{bad:?}: the page says why nothing changed: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_change_keeps_every_other_key_in_a_file_with_a_byte_order_mark(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (tree, writes) = press_stepper_with_settings_file(cx, &staged, Some("\u{feff}{\"font_ligatures\": true, \"zoom\": 1.5}"));
+    assert!(!tree.contains("can't be read"), "{tree}");
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    let written: Value = serde_json::from_str(&writes[0].1).unwrap();
+    assert_eq!(written, json!({"font_ligatures": true, "zoom": 1.5, "scrollback_lines": 2000}));
+}
+
+#[gpui::test]
+fn settings_change_creates_a_missing_file(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (tree, writes) = press_stepper_with_settings_file(cx, &staged, None);
+    assert!(!tree.contains("can't be read"), "{tree}");
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(serde_json::from_str::<Value>(&writes[0].1).unwrap(), json!({"scrollback_lines": 2000}));
+}
+
 #[gpui::test]
 fn settings_sections_and_updates(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
@@ -1192,6 +1297,8 @@ fn scripted(calls: &Rc<RefCell<Calls>>, name: &str, first: &Value, text: Option<
             c.writes.push((path, text));
             Some(Value::Null)
         }
+        // A file put on disk by the test reads back; anything else falls through to the defaults.
+        "readTextFile" => Some(json!(c.files.get(first.as_str()?)?)),
         "removeAppFile" => {
             c.removes.push(first.as_str()?.into());
             // A `removeAppFile refuses` reply makes every removal reject.
