@@ -157,6 +157,7 @@ test("a missing remote core (kind h0x_core_missing) gives instructions", async (
 const awkward = [
   "me@my host", "a,b", "it's", "it\u2019s", "a$b", "$(whoami)", "a`b", "a;b", "a&b", "a|b", "a\"b", "a\b",
   "C:\Users\me\My Documents\host", "host';echo $HOME",
+  "C:\\Users\\me\\My Documents\\host", "\\\\server\\share\\host",
 ];
 
 for (const target of awkward) {
@@ -191,4 +192,26 @@ test("plain targets are not quoted on either platform", async () => {
     await s.add("user@host.example.com:2222");
     expect(s.view.state["user@host.example.com:2222"]).toContain("`h0x-core machine add user@host.example.com:2222`");
   }
+});
+
+for (const platform of ["linux", "windows"]) {
+  test(`a target with a newline stays one quoted argument on ${platform}`, async () => {
+    const target = "host\nrm -rf ~";
+    const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "host_key" } }) }, platform);
+    await s.add(target);
+    const quoted = s.view.state[target].match(/`h0x-core machine add (.*)`\. /s)![1];
+    expect(quoted).toBe(`'${target}'`);
+  });
+}
+
+// The core rejects a target that ssh would read as an option; its message
+// repeats the target, which must not decide that the person should run it.
+test("a target rejected as an ssh option gets the core's message, not a command to run", async () => {
+  const target = "-oProxyCommand=login";
+  const message = `bad ssh target "${target}"`;
+  const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "invalid_params", message } }) });
+  await s.add(target);
+  expect(s.calls.find((args) => args[1] === "add")).toEqual(["machine", "add", target, "--json"]);
+  expect(s.view.state[target]).toBe(message);
+  expect(s.view.pending.size).toBe(0);
 });

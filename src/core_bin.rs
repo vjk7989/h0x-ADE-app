@@ -284,6 +284,93 @@ echo '{hello}'
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    // BIN and PATH are process-wide: runs in a child process.
+    #[test]
+    fn the_core_path_survives_a_poisoned_lock_and_concurrent_replacement() {
+        const CHILD: &str = "H0X_TEST_CORE_PATH_LOCK";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "core_bin::tests::the_core_path_survives_a_poisoned_lock_and_concurrent_replacement", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let (a, b) = if cfg!(windows) {
+            (PathBuf::from(r"C:\Users\me\AppData\Local\Programs\h0x-core\h0x-core.exe"), PathBuf::from(r"D:\Tools\h0x core\h0x-core.exe"))
+        } else {
+            (PathBuf::from("/home/me/.local/bin/h0x-core"), PathBuf::from("/opt/h0x core/bin/h0x-core"))
+        };
+        // A thread that panicked while holding the lock must not take the core away.
+        let _ = std::thread::spawn(|| {
+            let _held = BIN.lock().unwrap();
+            panic!("poisons the lock");
+        })
+        .join();
+        assert!(BIN.is_poisoned());
+        assert_eq!(path(), PathBuf::from("h0x-core"));
+        use_core(a.clone());
+        assert_eq!(path(), a);
+        // Readers during replacements see one whole path or the other.
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let (a, b) = (a.clone(), b.clone());
+                std::thread::spawn(move || (0..2000).all(|_| [&a, &b].contains(&&path())))
+            })
+            .collect();
+        for i in 0..2000 {
+            use_core(if i % 2 == 0 { b.clone() } else { a.clone() });
+        }
+        assert!(readers.into_iter().all(|r| r.join().unwrap()));
+        assert_eq!(path(), a);
+        // Each replacement moves its folder to the front without piling up PATH entries.
+        use_core(b.clone());
+        let dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH").unwrap()).collect();
+        assert_eq!(dirs[0], b.parent().unwrap());
+        assert_eq!(dirs.iter().filter(|d| d.as_path() == a.parent().unwrap()).count(), 1, "{dirs:?}");
+        assert_eq!(dirs.iter().filter(|d| d.as_path() == b.parent().unwrap()).count(), 1, "{dirs:?}");
+    }
+
+    // The committed fixture core sits in the child's current folder, with `.`
+    // and an empty entry on PATH. BIN, PATH and the folder are process-wide.
+    #[cfg(unix)]
+    #[test]
+    fn a_core_in_the_current_folder_or_on_a_relative_path_is_never_used() {
+        const CHILD: &str = "H0X_TEST_RELATIVE_CORE";
+        if std::env::var_os(CHILD).is_none() {
+            let home = std::env::temp_dir().join(format!("h0x-core-relative-home-{}", std::process::id()));
+            std::fs::create_dir_all(&home).unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "core_bin::tests::a_core_in_the_current_folder_or_on_a_relative_path_is_never_used", "--nocapture"])
+                .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core-bin"))
+                .env(CHILD, "1")
+                .env("PATH", ".:")
+                .env("HOME", &home)
+                .env("SHELL", "/nonexistent/sh")
+                .env_remove("H0X_CORE_DIRS")
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&home);
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let here = std::env::current_dir().unwrap();
+        assert!(here.join("h0x-core").is_file());
+        let safe = |found: &Option<PathBuf>| found.as_deref().is_none_or(|p| p.is_absolute() && !p.starts_with(&here));
+        let found = find(None);
+        assert!(safe(&found), "found {found:?} through a relative PATH entry");
+        for configured in ["h0x-core", "./h0x-core"] {
+            let found = find(Some(configured));
+            assert!(safe(&found), "configured {configured:?} gave {found:?}");
+        }
+        // SAFETY: this child process runs only this test.
+        unsafe { std::env::set_var("PATH", "/usr/bin:/bin") };
+        use_core(PathBuf::from("h0x-core"));
+        let path = std::env::var_os("PATH").unwrap();
+        assert!(std::env::split_paths(&path).all(|d| d.is_absolute()), "a relative core put {path:?} on PATH");
+    }
+
     #[test]
     fn startup_path_keeps_shell_order_and_falls_back_to_usual_dirs() {
         let usual = [PathBuf::from("/home/test/.local/bin"), PathBuf::from("/opt/homebrew/bin")];

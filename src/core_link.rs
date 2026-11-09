@@ -563,6 +563,121 @@ stop it with h0x-core server stop in an elevated terminal");
     }
 
     #[test]
+    fn startup_error_json_counts_only_as_one_top_level_error_object() {
+        let text = |stderr: &str| connect_error(stderr).map(|e| e.to_string());
+        assert_eq!(text(r#"{"result":{"error":{"message":"nested"}}}"#), None);
+        assert_eq!(text(r#"{"error":"boom"}"#), None);
+        assert_eq!(text(r#"[{"error":{"message":"in an array"}}]"#), None);
+        assert_eq!(text(r#""{\"error\":{\"message\":\"a string\"}}""#), None);
+        assert_eq!(text("null"), None);
+        assert_eq!(text("18446744073709551616"), None);
+        // Duplicate keys: the last one wins, as serde_json reads them.
+        assert_eq!(text(r#"{"error":{"message":"first","message":"second"}}"#).as_deref(), Some("second"));
+        assert_eq!(text(r#"{"error":{"message":"a"},"error":{"message":"b","hint":"h"}}"#).as_deref(), Some("b\n\nh"));
+        // Fields the app doesn't read can hold anything, even a number past u64.
+        assert_eq!(text(r#"{"error":{"message":"m","code":184467440737095516160000,"data":[[[{}]]]}}"#).as_deref(), Some("m"));
+        assert_eq!(text(r#"{"error":{"message":"m","hint":{"text":"h"}}}"#).as_deref(), Some("m"));
+        // A message that is JSON itself is shown as it is, not read again.
+        assert_eq!(text(r#"{"error":{"message":"{\"error\":{\"message\":\"inner\"}}"}}"#).as_deref(), Some(r#"{"error":{"message":"inner"}}"#));
+        // Windows line ends after the JSON are trimmed; inside the hint they stay.
+        assert_eq!(text("{\"error\":{\"message\":\"m\",\"hint\":\"a\\r\\nb\"}}\r\n").as_deref(), Some("m\n\na\r\nb"));
+        // Several JSON lines (a log line before the error) are not one document: none wins.
+        let two = format!("{}\n{}", json!({"error": {"message": "first"}}), json!({"error": {"message": "second"}}));
+        assert_eq!(text(&two), None);
+    }
+
+    // Fakes the core with shell scripts. BIN is process-wide: runs in a child process.
+    #[cfg(unix)]
+    #[test]
+    fn startup_errors_on_stderr_reach_the_setup_screen_and_retry_reconnects() {
+        const CHILD: &str = "H0X_TEST_CORE_STDERR";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "core_link::tests::startup_errors_on_stderr_reach_the_setup_screen_and_retry_reconnects", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            // The fake cores' stderr is echoed (64 KiB lines): show only its end.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail: String = stderr.chars().skip(stderr.chars().count().saturating_sub(4000)).collect();
+            assert!(output.status.success(), "{}\n{tail}", String::from_utf8_lossy(&output.stdout));
+            return;
+        }
+        use crate::setup::Need;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
+        let root = std::env::temp_dir().join(format!("h0x-core-stderr-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        // A fake core that writes `stderr` to its stderr, then runs `body`.
+        let fake = |name: &str, stderr: &[u8], body: &str| {
+            let bin = root.join(name);
+            std::fs::write(root.join(format!("{name}.err")), stderr).unwrap();
+            std::fs::write(&bin, format!("#!/bin/sh\ncat \"$0.err\" >&2\n{body}\n")).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            bin
+        };
+        // Some(text): the retry screen with that text; None: the install screen.
+        let screen = |bin: &Path| -> Option<String> {
+            crate::core_bin::use_core(bin.to_path_buf());
+            let started = std::time::Instant::now();
+            let error = match Core::connect() {
+                Ok(_) => panic!("{} connected", bin.display()),
+                Err(e) => e,
+            };
+            assert!(started.elapsed() < Duration::from_secs(10), "{} took {:?}", bin.display(), started.elapsed());
+            match Need::connection(error) {
+                Need::Connect(text) => Some(text),
+                Need::Install => None,
+                Need::Fix(_) => panic!("a connection error is never a version mismatch"),
+            }
+        };
+        let error = json!({"error": {"kind": "unavailable", "message": "the core pipe cannot be accessed", "hint": "run it unelevated"}}).to_string();
+        let shown = Some("the core pipe cannot be accessed\n\nrun it unelevated");
+        assert_eq!(screen(&fake("crlf", format!("{error}\r\n").as_bytes(), "exit 1")).as_deref(), shown);
+
+        // One long line of exactly 64 KiB is kept whole; one byte more is cut and is no longer JSON.
+        let frame = r#"{"error":{"message":""}}"#.len();
+        let at_cap = format!(r#"{{"error":{{"message":"{}"}}}}"#, "x".repeat(65536 - frame));
+        assert_eq!(at_cap.len(), 65536);
+        assert_eq!(screen(&fake("at-cap", at_cap.as_bytes(), "exit 1")).map(|t| t.len()), Some(65536 - frame));
+        let over = format!(r#"{{"error":{{"message":"{}"}}}}"#, "x".repeat(65537 - frame));
+        assert_eq!(screen(&fake("over-cap", over.as_bytes(), "exit 1")), None);
+
+        // Invalid UTF-8 in the message becomes U+FFFD; the error still shows.
+        let mut invalid = br#"{"error":{"message":"bad "#.to_vec();
+        invalid.push(0xff);
+        invalid.extend_from_slice(br#" byte"}}"#);
+        assert_eq!(screen(&fake("invalid-utf8", &invalid, "exit 1")).as_deref(), Some("bad \u{fffd} byte"));
+
+        // Stderr closed before the hello fails: nothing to show, so install.
+        assert_eq!(screen(&fake("closed", b"", "exec 2>&-\nread hello\necho not-json")), None);
+
+        // A core that answers garbage and would never exit is killed, and its error still shows.
+        let pid = root.join("hung.pid");
+        let hung = fake("hung", error.as_bytes(), &format!("echo $$ > '{}'\nread hello\necho not-json\nexec sleep 20", pid.display()));
+        assert_eq!(screen(&hung).as_deref(), shown);
+        let pid = std::fs::read_to_string(&pid).unwrap();
+        let alive = std::process::Command::new("kill").args(["-0", pid.trim()]).stderr(Stdio::null()).status().unwrap().success();
+        assert!(!alive, "the hung core {} still runs", pid.trim());
+
+        // A refused hello, a missing core and a bare name not on PATH: install.
+        assert_eq!(screen(&fake("refuses", error.as_bytes(), "read hello\necho '{\"error\":{\"message\":\"no\"}}'")), None);
+        assert_eq!(screen(&root.join("missing")), None);
+        assert_eq!(screen(Path::new("no-such-h0x-core")), None);
+
+        // Retry, once the person has fixed the core, reconnects to the same one.
+        let fixed = root.join("retry.fixed");
+        let retry = fake("retry", error.as_bytes(), &format!("[ -f '{}' ] || exit 1\nread hello\necho '{{\"result\":{{\"retried\":true}}}}'", fixed.display()));
+        assert_eq!(screen(&retry).as_deref(), shown);
+        std::fs::write(&fixed, "").unwrap();
+        let core = Core::connect().unwrap_or_else(|e| panic!("retry: {e:#}"));
+        assert_eq!(crate::core_bin::path(), retry);
+        assert_eq!(core.hello["retried"], true);
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn the_event_stream_keeps_the_terminals_as_the_core_has_them() {
         let event = |seq: u64, kind: &str, t: &str, data: Value| {
             format!("{}\n", json!({"method": "event", "params": {"seq": seq, "type": kind, "terminal": t, "data": data}}))
