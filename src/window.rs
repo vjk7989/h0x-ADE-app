@@ -4808,7 +4808,7 @@ struct ContextDepth;
 
 impl ContextDepth {
     fn enter() -> Option<Self> {
-        (!IN_CONTEXT.replace(true)).then_some(Self)
+        (!IN_CONTEXT.replace(true)).then(|| Self)
     }
 }
 
