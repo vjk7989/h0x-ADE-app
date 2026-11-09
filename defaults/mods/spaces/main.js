@@ -5,7 +5,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, run, openOverlay, exec, core, theme, shared, setShared, watchFolder, window, layout } from "h0x";
+import { spaces, machines, panes, revision, run, openOverlay, exec, core, theme, shared, setShared, watchFolder, window, layout } from "h0x";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -59,6 +59,7 @@ export default class Spaces extends View {
     this.watching = new Set(); // local repos' git folders
     // Spaces made while this runs wait (at most a moment) for their git, so a
     // worktree appears under its repo instead of jumping there.
+    this.ids = []; // the spaces at the last look (`checkNew`)
     this.shown = new Set(spaces().map((s) => s.id));
     this.born = {};
     this.pressed = null;
@@ -68,7 +69,12 @@ export default class Spaces extends View {
     for (const state of Object.values(this.reconnecting)) state.busy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
     this.refreshMachines(cx);
-    cx.timer.every(15000, cx => this.refreshMachines(cx));
+    // Not while the window is in the background (nobody sees the list); the next look after it
+    // comes back catches up (`checkNew`).
+    cx.timer.every(15000, cx => {
+      if (window().active) this.refreshMachines(cx);
+      else this.machinesStale = true;
+    });
     // `git status` walks the whole tree, on another machine a process there:
     // only when its answer could have changed (see `due`).
     cx.timer.every(250, (cx) => this.checkNew(cx));
@@ -76,12 +82,18 @@ export default class Spaces extends View {
 
   checkNew(cx) {
     const now = Date.now();
-    const sp = spaces(), ps = panes();
     // Nothing new since the last look (the same spaces, panes, machines and
-    // focus, every space shown) and no clock due: nothing to check.
-    const look = JSON.stringify([sp, ps, machines(), window().active]);
-    if (look === this.look && now < this.wake && sp.every((s) => this.shown.has(s.id)) && !this.orderingDue(now)) return;
+    // focus, every space shown) and no clock due: nothing to check. The host's
+    // revision stands for those four; any other number than the last one counts.
+    const look = revision();
+    if (this.machinesStale && window().active) {
+      this.machinesStale = false;
+      this.refreshMachines(cx);
+    }
+    if (look === this.look && now < this.wake && this.ids.every((id) => this.shown.has(id)) && !this.orderingDue(now)) return;
     this.look = look;
+    const sp = spaces(), ps = panes();
+    this.ids = sp.map((s) => s.id);
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
     const due = this.due(now, sp, ps);
     if (due.size) this.refreshGit(due, cx);

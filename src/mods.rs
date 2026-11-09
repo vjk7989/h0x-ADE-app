@@ -807,6 +807,12 @@ pub fn publish_focused(v: Value) -> bool {
     publish("focused", |s| (std::mem::replace(&mut s.focused, v.clone()), v))
 }
 
+/// A number that changes whenever the spaces, panes, machines or window snapshot does: lets
+/// a mod's frequent timer skip comparing them. Compare for equality only.
+fn snapshot_revision() -> f64 {
+    REVISIONS.with_borrow(|r| ["spaces", "panes", "machines", "window"].iter().map(|k| r.get(k).copied().unwrap_or(0)).sum::<u64>() as f64)
+}
+
 #[derive(Default)]
 struct LiveReads(HashMap<&'static str, u64>);
 
@@ -1279,6 +1285,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             Ok(to_host(&Value::Array(list)))
         })
         .function("window", reader(reads.clone(), "window", |s| &s.window))
+        .function("revision", |_| Ok(HostValue::Number(snapshot_revision())))
         .function("theme", |_| Ok(to_host(&serde_json::to_value(&*crate::settings::theme()).unwrap_or(Value::Null))))
         .function("settings", |_| Ok(to_host(&serde_json::to_value(&*crate::settings::get()).unwrap_or(Value::Null))))
         .function("keys", |_| {
@@ -1586,6 +1593,29 @@ mod tests {
             assert!(!snapshot_changed(1));
             drop(reads);
             assert!(!snapshot_changed(1));
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn revision_moves_only_when_spaces_panes_machines_or_window_change() {
+        std::thread::spawn(|| {
+            let start = snapshot_revision();
+            assert!(publish_spaces(json!([{"id":"s1"}])));
+            let spaces = snapshot_revision();
+            assert_ne!(spaces, start);
+            assert!(!publish_spaces(json!([{"id":"s1"}])), "equal snapshot");
+            assert_eq!(snapshot_revision(), spaces);
+            assert!(publish_agents(json!([{"address":"t1"}])));
+            assert!(publish_terminals(json!([{"address":"t1"}])));
+            assert_eq!(snapshot_revision(), spaces, "agents and terminals are not watched");
+            assert!(publish_window(json!({"active":false})));
+            let inactive = snapshot_revision();
+            assert_ne!(inactive, spaces);
+            assert!(publish_window(json!({"active":true})));
+            assert_ne!(snapshot_revision(), inactive, "switching back moves it too");
+            assert!(publish_panes(json!([{"pane":"p1"}])));
+            assert!(publish_machines(json!([{"name":null,"layout":"ready"}])));
+            assert_eq!(snapshot_revision(), start + 5.0);
         }).join().unwrap();
     }
 

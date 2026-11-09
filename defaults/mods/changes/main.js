@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, layout } from "h0x";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, layout } from "h0x";
 
 // Whether the layout shows this panel (as the sessions panel asks): no hidden
 // node on the way, and the selected child of each stack. Not in the layout: shown.
@@ -58,11 +58,11 @@ export default class Changes extends View {
     cx.timer.every(1000, (cx) => this.tick(cx));
   }
 
-  // Every 10 s while shown. Hidden (another panel tab, a closed panel): no git
-  // until shown again, then at once.
+  // Every 10 s while shown. Hidden (another panel tab, a closed panel) or the window in the
+  // background: no git until shown or back, then at once.
   tick(cx) {
     this.ticks = ((this.ticks ?? 0) + 1) % 10;
-    if (!shown(layout())) this.missed = true;
+    if (!shown(layout()) || window()?.active === false) this.missed = true;
     else if (!this.ticks || this.missed) {
       this.missed = false;
       this.refresh(cx);

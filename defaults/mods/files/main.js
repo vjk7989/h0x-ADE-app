@@ -72,11 +72,11 @@ export default class Files extends View {
     cx.timer.every(1000, cx => this.tick(cx));
   }
 
-  // Every 10 s while shown. Hidden (another panel tab, a closed panel): no
-  // listing or git until shown again, then at once; unsent notes still go out.
+  // Every 10 s while shown. Hidden (another panel tab, a closed panel) or the window in the
+  // background: no listing or git until shown or back, then at once; unsent notes still go out.
   tick(cx) {
     this.ticks = ((this.ticks ?? 0) + 1) % 10;
-    if (!shown(layout())) {
+    if (!shown(layout()) || window()?.active === false) {
       this.missed = true;
       if (!this.ticks) this.flush(cx);
     } else if (!this.ticks || this.missed) {

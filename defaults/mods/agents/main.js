@@ -82,10 +82,17 @@ export default class Agents extends View {
     this.pendingPins = JSON.parse(localStorage.getItem("pins") ?? "[]");
     if (!this.pendingPins.length) localStorage.removeItem("pins");
     this.migratingPins = new Set();
+    // Both timers only redraw. Alerts (toasts, sounds) come from the app, not from here, so
+    // while the window is in the background they rest; the first tick after it is back
+    // draws once at once (the relative times and verbs are then current).
     // Relative times move only for agents that are shown.
-    cx.timer.every(30000, (cx) => { if (agents().length) cx.notify(); });
+    cx.timer.every(30000, (cx) => { if (window()?.active !== false && agents().length) cx.notify(); });
     // The busy verbs rotate while an agent works.
-    cx.timer.every(1000, (cx) => { if (agents().some((a) => a.status === "working")) cx.notify(); });
+    cx.timer.every(1000, (cx) => {
+      const resting = window()?.active === false, back = this.rested && !resting;
+      this.rested = resting;
+      if (!resting && (back || agents().some((a) => a.status === "working"))) cx.notify();
+    });
   }
 
   // Stamps agents whose state changed. Done and idle count as one: looking at a

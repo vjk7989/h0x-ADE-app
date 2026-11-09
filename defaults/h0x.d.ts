@@ -145,6 +145,11 @@ export function machines(): { name: string | null; layout: "loading" | "ready" |
 /** Spaces in order. Mods re-render when they change. */
 export function spaces(): SpaceInfo[];
 
+/** A number that changes whenever `spaces()`, `panes()`, `machines()` or `window()` change, and
+ *  only then. Compare it for equality with the last one (it only ever goes up, but do not rely on
+ *  that): a frequent timer can skip reading and comparing the lists when it is the same. */
+export function revision(): number;
+
 /** How a terminal shows, from the app's program table (programs.json): the agent's own
  *  report, else the program it runs. Draw `icon` with `svg(icon)` in a color when `tint`
  *  (a one-color glyph), else `image(icon)`. `tile` / `color`: a colored tile with the glyph
@@ -258,7 +263,9 @@ export function commands(): { name: string; args: { name: string; required: bool
 
 /** The window, for layouts that draw their own title bar (`"titlebar": "none"`). `buttons`:
  *  the system draws no window buttons, so draw them (`window.minimize`, `window.maximize`,
- *  `window.close`); on macOS the traffic lights always stay. Live. */
+ *  `window.close`); on macOS the traffic lights always stay. Live. `active` is false while the
+ *  window is unfocused or minimized: the host does not slow a mod's `cx.timer`, so a timer that
+ *  only redraws should return early then (and draw once when `active` is back). */
 export function window(): {
   platform: "linux" | "macos" | "windows";
   titlebar: "system" | "none";

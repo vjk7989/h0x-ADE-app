@@ -813,7 +813,7 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
 - A copy starts the first time it shows, then stays alive while its block is in
   the layout, shown or not (a hidden column, the other child of a stack, a pane
   in another tab or behind a zoom): switching back finds it as it was. Its
-  timers keep running while hidden, so poll gently. Another layout starts its
+  timers keep running while hidden, so poll gently. They also keep running while the window is unfocused or minimized (`window().active` is false): return early then if the tick only redraws or polls, and catch up when it is back. Another layout starts its
   mods fresh (pane mods belong to their tab and stay); a block removed or given
   another mod or props starts over. `<mod>.<command>` reaches shown copies only.
 - Images and SVGs are referenced from `~/.config/h0x-ade`:

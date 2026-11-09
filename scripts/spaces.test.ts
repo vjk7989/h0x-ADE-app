@@ -11,11 +11,14 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   const availability = [{ name: null as string | null, layout: "ready" }];
   const moves: { id: string; index: number }[] = [];
   const handlers: Record<string, (...args: any[]) => void> = {};
+  const win = { active: true };
+  const revision = { n: 0 };
+  const reads = { spaces: 0, panes: 0 };
   const element: any = new Proxy({}, { get: (_, method) => (...args: any[]) => {
     if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
     return element;
   } });
-  const Spaces = new Function("View", "core", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "window", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "core", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "window", "revision", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -24,19 +27,19 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
       return reply ?? { code: 0, stdout: "{}", stderr: "" };
     },
     { setItem(key: string, value: string) { storage.set(key, value); }, getItem(key: string) { return storage.get(key) ?? null; } },
-    () => snapshot, () => [],
+    () => { reads.spaces++; return snapshot; }, () => { reads.panes++; return []; },
     (name: string, args: { id: string; index: number }) => {
       expect(name).toBe("space.move");
       moves.push(args);
     },
-    ...Array(4).fill(() => element), () => null, () => availability, () => ({ active: true }),
+    ...Array(4).fill(() => element), () => null, () => availability, () => win, () => revision.n,
   );
   const view = new Spaces();
   view.reconnecting = {};
   view.folded = new Set(["cloud"]);
   view.refreshMachines = () => {};
   const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
-  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability };
+  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability, win, revision, reads };
 }
 
 const machine = { name: "cloud", id: "old", target: "user@host", session: null, via: false };
@@ -279,4 +282,100 @@ test("no reconciliation without a rendered sidebar", () => {
   h.rows();
   h.flush();
   expect(h.order()).toEqual(["main", "topic"]);
+});
+
+// checkNew runs every 250 ms: it must cost nothing while the host's revision stands still, and
+// keep reacting to events (a new space, a finished command) while the window is in the background.
+function watching() {
+  const h = harness([], new Map(), [{ id: "a", folder: "/a" }]);
+  const timers: Record<number, (cx: unknown) => void> = {};
+  const cx = { timer: { every(ms: number, f: (cx: unknown) => void) { timers[ms] = f; } }, notify() {}, spawn() {} };
+  const refreshes = { machines: 0, git: 0 };
+  h.view.refreshMachines = () => { refreshes.machines++; };
+  h.view.refreshGit = () => { refreshes.git++; };
+  h.view.git = {};
+  h.view.init({}, cx);
+  refreshes.machines = 0;
+  const due: Set<string>[] = [];
+  h.view.due = () => { const d = new Set<string>(); due.push(d); return d; };
+  return { ...h, timers, refreshes, due, cx };
+}
+
+test("checkNew reads no snapshot while the revision is unchanged, then looks again", () => {
+  const h = watching();
+  h.view.checkNew(h.cx);
+  expect(h.due).toHaveLength(1);
+  h.view.shown = new Set(["a"]);
+  h.view.wake = Infinity;
+  const reads = h.reads.spaces + h.reads.panes;
+  for (let i = 0; i < 20; i++) h.view.checkNew(h.cx);
+  expect(h.due).toHaveLength(1);
+  expect(h.reads.spaces + h.reads.panes).toBe(reads);
+  h.revision.n++;
+  h.view.checkNew(h.cx);
+  expect(h.due).toHaveLength(2);
+  h.view.checkNew(h.cx);
+  expect(h.due).toHaveLength(2);
+});
+
+test("a revision that goes down or wraps still counts as a change", () => {
+  const h = watching();
+  h.revision.n = 5;
+  h.view.checkNew(h.cx);
+  h.view.shown = new Set(["a"]);
+  h.view.wake = Infinity;
+  h.revision.n = 0; // the host restarted its count
+  h.view.checkNew(h.cx);
+  expect(h.due).toHaveLength(2);
+  h.revision.n = Number.MAX_SAFE_INTEGER;
+  h.view.checkNew(h.cx);
+  expect(h.due).toHaveLength(3);
+  h.revision.n = 0; // wrapped
+  h.view.checkNew(h.cx);
+  expect(h.due).toHaveLength(4);
+});
+
+test("a space that is not yet shown keeps being looked at without a new revision", () => {
+  const h = watching();
+  h.view.checkNew(h.cx);
+  h.view.wake = Infinity;
+  expect(h.view.ids).toEqual(["a"]);
+  h.view.shown = new Set(); // still waiting for its git
+  h.view.checkNew(h.cx);
+  expect(h.due).toHaveLength(2);
+});
+
+test("a new space is noticed while the window is in the background", () => {
+  const h = watching();
+  h.view.checkNew(h.cx);
+  h.view.shown = new Set(["a"]);
+  h.view.wake = Infinity;
+  h.win.active = false;
+  h.snapshot.push({ id: "b", folder: "/b" });
+  h.revision.n++;
+  h.view.checkNew(h.cx);
+  expect(h.due).toHaveLength(2);
+  expect(h.view.ids).toEqual(["a", "b"]);
+});
+
+test("machines are not refreshed while the window is in the background, and catch up at once when it is back", () => {
+  const h = watching();
+  h.win.active = false;
+  h.timers[15000](h.cx);
+  h.timers[250](h.cx);
+  expect(h.refreshes.machines).toBe(0);
+  h.win.active = true;
+  h.revision.n++; // the window snapshot changed
+  h.timers[250](h.cx);
+  expect(h.refreshes.machines).toBe(1);
+  h.timers[250](h.cx);
+  h.timers[15000](h.cx);
+  expect(h.refreshes.machines).toBe(2); // the regular timer is back to normal
+});
+
+test("the machines timer refreshes as before while the window is active", () => {
+  const h = watching();
+  h.timers[15000](h.cx);
+  h.timers[15000](h.cx);
+  expect(h.refreshes.machines).toBe(2);
 });

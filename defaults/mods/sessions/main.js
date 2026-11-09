@@ -171,10 +171,11 @@ export default class Sessions extends View {
   // Another space, or the window back in front: ask again.
   // Hidden (another panel tab, a closed panel): asks nothing until shown again.
   check(cx) {
-    const s = spaces().find((x) => x.active);
-    const active = Boolean(window()?.active);
+    const active = window()?.active !== false;
     const back = active && this.active === false;
     this.active = active;
+    if (!active) return; // nothing to look at; `back` asks again
+    const s = spaces().find((x) => x.active);
     if (!shown(layout())) {
       this.missed ||= back;
       return;
