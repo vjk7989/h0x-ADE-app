@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-11-11
+
+Open HyperOx where you are. Bundles h0x-core 0.1.14.
+
+### Added
+
+- Typing `h0x-ade` in a terminal opens HyperOx in that terminal's folder: the window shows a space for the folder (an existing one is reused) with its terminal there. The terminal says `HyperOx started in <folder>.` and a "HyperOx has been launched" notification appears.
+- When HyperOx is already open, `h0x-ade` brings the window to the front and opens the folder in it, then gives the terminal back.
+
+### Changed
+
+- Opening HyperOx from the Start menu, Desktop, Dock or file manager works as before.
+
+### Fixed
+
+- Windows: the window no longer risks running out of stack space while it opens.
+
 ## [0.1.15] - 2026-11-11
 
 Security release from the final QA round. Bundles h0x-core 0.1.14.
