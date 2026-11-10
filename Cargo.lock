@@ -10337,7 +10337,3 @@ dependencies = [
  "syn 3.0.4",
  "winnow 1.0.4",
 ]
-
-[[patch.unused]]
-name = "rquickjs"
-version = "0.12.9"
