@@ -113,7 +113,7 @@ Starting, reading and waiting on terminals is `h0x-core`'s job: `h0x-core --skil
 
 ## Build from source
 
-Rust 1.95 and Zig 0.16.0 (for cross builds and the C dependencies).
+Rust 1.95 and Zig 0.17.0 (for cross builds and the C dependencies).
 
 ```sh
 git clone --recurse-submodules https://github.com/vjk7989/h0x-ADE-app
