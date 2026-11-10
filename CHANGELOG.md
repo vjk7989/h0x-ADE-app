@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-11-10
+
+Performance release. Bundles h0x-core 0.1.13 (opt-in `keep_awake` in core's config.toml).
+
+### Changed
+
+- Scrollback per pane is a setting (Settings → Look → Terminal, 1,000 to 100,000 lines; default unchanged at 10,000). Wide panes and long wrapped lines keep fewer lines than the number set.
+- Mods pause their timers while the window is minimized or hidden, and catch up when it's back; a visible but unfocused window keeps updating.
+- Smaller release builds (thin link-time optimization, stripped symbols).
+
+### Fixed
+
+- Settings never overwrites a settings.json it can't read (it used to replace it with a single key, losing your other settings); a settings file with a byte-order mark loads.
+
 ## [0.1.13] - 2026-11-09
 
 Fixes ported from upstream herdr-app, hardened and tested. Bundles h0x-core 0.1.11.
