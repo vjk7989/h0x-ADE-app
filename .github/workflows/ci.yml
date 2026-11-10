@@ -167,6 +167,96 @@ jobs:
         if: matrix.platform == 'linux-x86_64'
         run: ~/.bun/bin/bun test scripts/files.test.ts scripts/machine-add.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/rest.test.ts scripts/spaces.test.ts scripts/worktree.test.ts
 
+  # The real app, typed into a terminal: it opens in that folder (tests/launch_folder.rs).
+  # Needs a desktop (Xvfb on Linux) and the pinned h0x-core release, whose
+  # signature the test checks against the release key before anything in it runs.
+  launch-e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x86_64, runner: ubuntu-22.04, core: h0x-core-linux-x86_64.tar.gz }
+          - { platform: macos-aarch64, runner: macos-15, core: h0x-core-macos-aarch64.tar.gz }
+          - { platform: windows-x86_64, runner: windows-2022, core: h0x-core-windows-x86_64.zip }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # The platform-tests cache, restored only: same key, same build flags.
+      - name: Restore build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ci-v2-${{ matrix.platform }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'vendor/**', 'crates/**', '.github/workflows/ci.yml') }}
+          restore-keys: ci-v2-${{ matrix.platform }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
+      - name: Restore Zig packages
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache
+          key: zig-pkg-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.ZIG_VERSION }}-${{ hashFiles('vendor/ghostty/**/build.zig.zon') }}
+      - name: Fetch Zig packages
+        timeout-minutes: 20
+        run: scripts/zig-fetch vendor/ghostty
+      - name: Linux build and desktop dependencies
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          sudo apt-get $apt update
+          sudo apt-get $apt install -y --no-install-recommends \
+            pkg-config clang libclang-dev \
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libvulkan-dev mesa-vulkan-drivers libfontconfig-dev libfreetype-dev \
+            xvfb xauth
+      - name: Windows build dependencies
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+      - name: Keep unchanged sources fresh
+        run: scripts/ci-sources restore
+      - name: Build the app and the test
+        timeout-minutes: 25
+        run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test launch_folder --no-run
+      # Downloaded only; tests/launch_folder.rs checks the .minisig before unpacking.
+      - name: Fetch the pinned h0x-core release
+        timeout-minutes: 5
+        run: |
+          version=$(tr -d '[:space:]' < distribution/core-version)
+          dir="$RUNNER_TEMP/h0x-core-release"
+          mkdir -p "$dir"
+          base="https://github.com/vjk7989/h0x-ADE-core/releases/download/v$version/${{ matrix.core }}"
+          curl -fsSL --retry 3 --proto '=https' --proto-redir '=https' -o "$dir/${{ matrix.core }}" "$base"
+          curl -fsSL --retry 3 --proto '=https' --proto-redir '=https' -o "$dir/${{ matrix.core }}.minisig" "$base.minisig"
+          echo "H0X_E2E_CORE_ARCHIVE=$dir/${{ matrix.core }}" >> "$GITHUB_ENV"
+      - name: Launch from a shell, end to end
+        timeout-minutes: 15
+        env:
+          H0X_E2E: "1"
+        run: |
+          run=(cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test launch_folder -- --ignored --nocapture)
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s "-screen 0 1600x1000x24" "${run[@]}"
+          else
+            "${run[@]}"
+          fi
+
   # Security advisories (RustSec) in the dependencies: deny.toml.
   advisories:
     runs-on: ubuntu-latest
@@ -181,9 +271,9 @@ jobs:
 
   # Keep the required check name stable while requiring every platform.
   test:
-    needs: [platform-tests, advisories]
+    needs: [platform-tests, launch-e2e, advisories]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - run: '[ "${{ needs.platform-tests.result }}" = success ] && [ "${{ needs.advisories.result }}" = success ]'
+      - run: '[ "${{ needs.platform-tests.result }}" = success ] && [ "${{ needs.launch-e2e.result }}" = success ] && [ "${{ needs.advisories.result }}" = success ]'

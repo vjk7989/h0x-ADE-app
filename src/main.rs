@@ -8,6 +8,7 @@ mod core_bin;
 mod files;
 mod core_link;
 mod keys;
+mod launch;
 mod layout;
 mod layout_sync;
 mod links;
@@ -20,6 +21,7 @@ mod persist;
 mod macos;
 mod mods;
 mod mod_files;
+mod os_notice;
 mod process_cwd;
 mod programs;
 mod remote_shell;
@@ -63,14 +65,17 @@ Home: ~/.config/h0x-ade (H0X_ADE_HOME picks another).
 /// A Windows window app has no console: answers to `h0x-ade ls` and the
 /// like go to the terminal it was started from. Output already piped (agents,
 /// scripts) keeps its pipes.
+/// True when started from a shell: the output is already a pipe or file, or
+/// the parent's console was attached.
 #[cfg(windows)]
-fn attach_console() {
+fn attach_console() -> bool {
     use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_OUTPUT_HANDLE};
     // Attaching would point the output at the console instead of the pipe or file.
     let out = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
     if out.is_null() || out == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-        unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+        return unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } != 0;
     }
+    true
 }
 
 fn main() {
@@ -91,8 +96,24 @@ fn main() {
     // Anything else from a shell answers in the shell; only a bare launch opens the window.
     match args.get(1).map(String::as_str) {
         // Already open on this home: that window comes to the front.
-        None if control::raise_running() => return,
-        None => {}
+        None => {
+            let from_shell = launch::from_shell();
+            launch::init(from_shell);
+            let folder = launch::folder();
+            if control::raise_running(folder.as_deref()) {
+                // This process exits now: wait for the notification, or it is lost; never more than 2 s.
+                if from_shell && let Some(notice) = launch::announce(&launch::running_line(folder.as_deref()), folder.as_deref()) {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while !notice.is_finished() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                }
+                return;
+            }
+            if from_shell {
+                let _ = launch::announce(&launch::started_line(folder.as_deref()), folder.as_deref());
+            }
+        }
         Some("-h" | "--help" | "help") => return print!("{HELP}"),
         Some("--skill") => return print!("{}", include_str!("SKILL.md")),
         Some("-V" | "--version" | "version") => return println!("h0x-ade {}", env!("CARGO_PKG_VERSION")),
