@@ -172,14 +172,18 @@ fn serve(stream: UnixStream, tx: async_channel::Sender<Request>) {
 /// One HyperOx per home: a second launch brings the running window to the
 /// front and quits. True when one is running (even one too busy to answer:
 /// a second window would ring every alert twice).
-pub fn raise_running() -> bool {
-    raise_running_at(&socket())
+pub fn raise_running(folder: Option<&str>) -> bool {
+    raise_running_at(&socket(), folder)
 }
 
-fn raise_running_at(path: &std::path::Path) -> bool {
+fn raise_running_at(path: &std::path::Path, folder: Option<&str>) -> bool {
     let Ok(mut stream) = UnixStream::connect(path) else { return false };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-    if stream.write_all(format!("{}\n", json!({ "raise": true })).as_bytes()).is_ok() {
+    let mut ask = json!({ "raise": true });
+    if let Some(folder) = folder {
+        ask["folder"] = json!(folder);
+    }
+    if stream.write_all(format!("{ask}\n").as_bytes()).is_ok() {
         let _ = BufReader::new(&stream).read_line(&mut String::new());
     }
     true
@@ -499,7 +503,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("h0x-ade.sock");
         // Nothing running: this launch opens its own window.
-        assert!(!raise_running_at(&path));
+        assert!(!raise_running_at(&path, None));
         // One running: it gets asked to come to the front.
         let listener = UnixListener::bind(&path).unwrap();
         let asked = std::thread::spawn(move || {
@@ -509,7 +513,7 @@ mod tests {
             (&stream).write_all(b"{\"ok\":true}\n").unwrap();
             serde_json::from_str::<Value>(&line).unwrap()
         });
-        assert!(raise_running_at(&path));
+        assert!(raise_running_at(&path, None));
         assert_eq!(asked.join().unwrap(), json!({ "raise": true }));
         let _ = std::fs::remove_dir_all(&dir);
     }

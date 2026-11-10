@@ -423,6 +423,8 @@ pub struct AppWindow {
     /// Each machine owns a document; the empty key is this core.
     documents: std::collections::BTreeMap<String, crate::mirror_sync::Slot>,
     initial_view: Option<crate::mirror::View>,
+    /// The folder HyperOx was launched from, until the first listing has placed the restored spaces.
+    launch_pending: Option<String>,
     pointer: Point<Pixels>,
     /// Where a press on a `window_drag` node started, until it moves the window.
     drag_from: Option<Point<Pixels>>,
@@ -528,6 +530,7 @@ impl AppWindow {
                 [(String::new(), local)].into()
             },
             initial_view: std::fs::read_to_string(file("view.json")).ok().and_then(|s| serde_json::from_str(&s).ok()),
+            launch_pending: crate::launch::folder(),
             pointer: Point::default(),
             drag_from: None,
             titlebar_applied: None,
@@ -2026,6 +2029,43 @@ impl AppWindow {
         if terminals_changed {
             self.refresh_snapshot_mods(cx);
         }
+        // Once this core's layout is loaded and its terminals are being adopted: the launch folder, once.
+        if self.documents.get("").is_some_and(|s| s.document.is_some()) && let Some(folder) = self.launch_pending.take() {
+            self.open_launch_folder(&folder, window, cx);
+        }
+    }
+
+    /// `h0x-ade` was run in `folder`: shows this machine's space for it, making one if none is there.
+    fn open_launch_folder(&mut self, folder: &str, window: &mut Window, cx: &mut Context<Self>) -> Option<String> {
+        if !std::path::Path::new(folder).is_dir() {
+            return None;
+        }
+        let found = self.model.spaces.iter().filter(|s| s.machine.is_none()).find(|s| {
+            let live = s.active_tab().and_then(|c| c.focused_pane()).and_then(|f| self.model.address_of(&f)).and_then(|a| self.cwds.get(&a));
+            same_folder(&s.folder, folder) || live.is_some_and(|c| same_folder(c, folder))
+        }).map(|s| s.id.clone());
+        let id = match found {
+            Some(id) => {
+                self.model.active = Some(id.clone());
+                id
+            }
+            None => {
+                if let Err(error) = self.require_document(None) {
+                    tracing::debug!("launch folder not opened: {error}");
+                    return None;
+                }
+                match self.new_space(&space_name_for(folder), Some(folder.to_owned()), None, None, None, None, window) {
+                    Ok(made) => made["space"].as_str()?.to_owned(),
+                    Err(error) => {
+                        tracing::debug!("launch folder not opened: {error}");
+                        return None;
+                    }
+                }
+            }
+        };
+        self.flush_documents(false, window, cx);
+        cx.notify();
+        Some(id)
     }
 
     /// Every tick, with or without news from the core: where the terminals go
@@ -3748,7 +3788,11 @@ impl AppWindow {
         if cmd.get("raise").is_some() {
             cx.activate(true);
             window.activate_window();
-            return json!({ "ok": true });
+            let space = cmd.get("folder").and_then(Value::as_str).filter(|f| !f.is_empty()).and_then(|f| self.open_launch_folder(f, window, cx));
+            return match space {
+                Some(space) => json!({ "ok": true, "space": space }),
+                None => json!({ "ok": true }),
+            };
         }
         if cmd.get("ls").is_some() {
             return self.world();
@@ -4711,6 +4755,31 @@ fn new_space_machine(args: &Value, person: bool, model: &Model) -> Option<String
         None => here,
     }
     .filter(|m| !m.is_empty()).map(str::to_owned)
+}
+
+/// Whether two paths name the same folder: trailing separators don't count
+/// (`/`, `D:\` and `D:` are roots and still match themselves); on Windows case
+/// and `/` against `\` don't count either.
+fn same_folder(a: &str, b: &str) -> bool {
+    let key = |p: &str| {
+        let p = if cfg!(windows) { p.replace('/', "\\").to_ascii_lowercase() } else { p.to_owned() };
+        match p.trim_end_matches(['/', '\\']) {
+            "" => p.chars().take(1).collect::<String>(),
+            trimmed => trimmed.to_owned(),
+        }
+    };
+    key(a) == key(b)
+}
+
+/// A space's name for a folder: its last part; a root (`D:\`, `D:`, `/`, `\\server\share`) is its own name.
+fn space_name_for(folder: &str) -> String {
+    let trimmed = folder.trim_end_matches(['/', '\\']);
+    let unc_root = folder.starts_with("\\\\") && trimmed.get(2..).is_some_and(|rest| rest.matches(['/', '\\']).count() < 2);
+    let root = trimmed.is_empty() || (trimmed.len() == 2 && trimmed.ends_with(':')) || unc_root;
+    match trimmed.rsplit(['/', '\\']).next() {
+        Some(last) if !root && !last.is_empty() => last.to_owned(),
+        _ => folder.to_owned(),
+    }
 }
 
 fn home() -> String {
