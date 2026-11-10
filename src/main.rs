@@ -139,6 +139,10 @@ fn main() {
     if core.is_ok() {
         update::after_update();
     }
+    // A first run: no update check before the welcome has shown the setting.
+    if mods::shared("frame.welcomed").is_none() {
+        update::hold_until_welcomed();
+    }
     update::start();
     bench::start();
     if let Err(e) = mods::write_workspace() {

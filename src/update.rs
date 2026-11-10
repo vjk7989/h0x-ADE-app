@@ -263,6 +263,25 @@ static CHECKING: AtomicBool = AtomicBool::new(false);
 /// only "Check now" looks.
 static AUTO: AtomicBool = AtomicBool::new(true);
 
+/// On a first run the schedule waits until the welcome screen is dismissed, so
+/// no check goes out before the person has seen the update setting. "Check now"
+/// is never held.
+static HELD: AtomicBool = AtomicBool::new(false);
+
+pub fn hold_until_welcomed() {
+    HELD.store(true, Ordering::Relaxed);
+}
+
+/// The welcome screen was dismissed (shared key `frame.welcomed`).
+pub fn welcomed() {
+    HELD.store(false, Ordering::Relaxed);
+}
+
+/// Whether the schedule may look: automatic checks are on and no welcome is pending.
+fn scheduled(auto: bool, held: bool) -> bool {
+    auto && !held
+}
+
 /// Turning automatic checks back on checks now, not at the next hour; setting
 /// the value it already has does nothing.
 pub fn set_auto(on: bool) {
@@ -361,9 +380,10 @@ pub fn start() {
     std::thread::spawn(move || {
         let mut asked = sleep(Duration::from_secs(10));
         loop {
-            if !due(AUTO.load(Ordering::Relaxed), asked) {
+            if !due(scheduled(AUTO.load(Ordering::Relaxed), HELD.load(Ordering::Relaxed)), asked) {
                 CHECKING.store(false, Ordering::Relaxed);
-                asked = sleep(EVERY);
+                // Held for the welcome: look again soon, so the first check follows its dismissal.
+                asked = sleep(if HELD.load(Ordering::Relaxed) { Duration::from_secs(5) } else { EVERY });
                 continue;
             }
             CHECKING.store(true, Ordering::Relaxed);
@@ -1289,6 +1309,18 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         assert!(due(true, true));
         assert!(!due(false, false), "automatic checks off: nothing runs on the schedule");
         assert!(due(false, true), "Check now still works with automatic checks off");
+    }
+
+    #[test]
+    fn the_first_scheduled_check_waits_for_the_welcome_but_asking_does_not() {
+        assert!(!scheduled(true, true), "nothing runs on the schedule before the welcome is dismissed");
+        assert!(due(scheduled(true, true), true), "Check now is never held");
+        assert!(scheduled(true, false));
+        assert!(!scheduled(false, false), "the off switch still wins after the welcome");
+        hold_until_welcomed();
+        assert!(HELD.load(Ordering::Relaxed));
+        welcomed();
+        assert!(!HELD.load(Ordering::Relaxed));
     }
 
     #[test]

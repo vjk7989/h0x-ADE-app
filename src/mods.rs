@@ -610,6 +610,9 @@ pub fn shared(key: &str) -> Option<Value> {
 
 /// Sets a value every mod can read (persisted in shared.json); mods re-render.
 pub fn set_shared(key: String, value: Value) {
+    if key == "frame.welcomed" {
+        crate::update::welcomed();
+    }
     if with_shared(|s| s.set(key, value)) {
         request(Request::Refresh);
     }
