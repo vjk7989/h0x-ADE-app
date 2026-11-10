@@ -1323,6 +1323,47 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         assert!(!HELD.load(Ordering::Relaxed));
     }
 
+    // HELD and the shared values are process-wide: runs in a child process on an empty app home.
+    #[test]
+    fn dismissing_the_welcome_mid_run_releases_the_hold_and_no_other_key_does() {
+        const CHILD: &str = "H0X_TEST_WELCOME_HOLD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = std::env::temp_dir().join(format!("h0x-welcome-hold-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&home);
+            std::fs::create_dir_all(&home).unwrap();
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "update::tests::dismissing_the_welcome_mid_run_releases_the_hold_and_no_other_key_does", "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1")
+                .env("H0X_ADE_HOME", &home)
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&home);
+            let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && log.contains("1 passed"), "{log}");
+            return;
+        }
+        let held = || HELD.load(Ordering::Relaxed);
+        // A first run: the welcome was never finished.
+        assert_eq!(crate::mods::shared("frame.welcomed"), None);
+        hold_until_welcomed();
+        // Keys that only look like it leave the hold on.
+        for key in ["frame.welcome", "welcomed", "frame.welcomed.", "Frame.Welcomed", ""] {
+            crate::mods::set_shared(key.into(), serde_json::json!(true));
+            assert!(held(), "{key:?} lifted the hold");
+        }
+        assert!(!due(scheduled(true, held()), false), "nothing on the schedule while held");
+        assert!(due(scheduled(true, held()), true), "Check now works while held");
+        assert!(due(scheduled(false, held()), true), "Check now works while held with automatic checks off");
+        // Dismissed mid-run: the next scheduled round looks.
+        crate::mods::set_shared("frame.welcomed".into(), serde_json::json!(true));
+        assert!(!held());
+        assert!(due(scheduled(true, held()), false));
+        assert!(!due(scheduled(false, held()), false), "check_updates off stays off after the welcome");
+        // Dismissing twice is harmless.
+        crate::mods::set_shared("frame.welcomed".into(), serde_json::json!(true));
+        assert!(!held());
+    }
+
     #[test]
     fn turning_automatic_checks_back_on_wakes_the_checker() {
         let woken = || std::mem::take(&mut *WAKE.0.lock().unwrap());

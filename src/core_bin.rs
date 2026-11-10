@@ -349,6 +349,61 @@ echo '{hello}'
         assert_eq!(dirs.iter().filter(|d| d.as_path() == b.parent().unwrap()).count(), 1, "{dirs:?}");
     }
 
+    // BIN and PATH are process-wide: runs in a child process.
+    #[test]
+    fn the_core_folder_goes_first_once_whatever_its_name() {
+        const CHILD: &str = "H0X_TEST_PATH_WITH_CORE";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "core_bin::tests::the_core_folder_goes_first_once_whatever_its_name", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let log = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success() && log.contains("1 passed"), "{log}");
+            return;
+        }
+        let (dir, written, others) = if cfg!(windows) {
+            (r"C:\Users\Zoë\Programme mit Leerzeichen\h0x-核心", r"C:\Users\Zoë\Programme mit Leerzeichen\h0x-核心\", [r"C:\Windows\System32", r"C:\Tools"])
+        } else {
+            ("/home/zoë/my tools/h0x-核心", "/home/zoë/my tools/h0x-核心/", ["/usr/bin", "/bin"])
+        };
+        let dir = PathBuf::from(dir);
+        // SAFETY: this child process runs only this test.
+        unsafe { std::env::set_var("PATH", std::env::join_paths([others[0], written, others[1]]).unwrap()) };
+        let before = std::env::var_os("PATH");
+        use_core(dir.join(if cfg!(windows) { "h0x-core.exe" } else { "h0x-core" }));
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path_with_core().unwrap()).collect();
+        // Already on PATH (here with a trailing separator): moved to the front, not added twice.
+        assert_eq!(dirs, [dir.clone(), PathBuf::from(others[0]), PathBuf::from(others[1])], "{dirs:?}");
+        assert_eq!(std::env::var_os("PATH"), before, "the process's own PATH is left alone");
+    }
+
+    // BIN and PATH are process-wide: runs in a child process.
+    #[test]
+    fn an_empty_or_unset_path_gets_the_core_folder_and_never_the_current_one() {
+        const CHILD: &str = "H0X_TEST_PATH_WITH_CORE_EMPTY";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "core_bin::tests::an_empty_or_unset_path_gets_the_core_folder_and_never_the_current_one", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let log = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success() && log.contains("1 passed"), "{log}");
+            return;
+        }
+        let dir = PathBuf::from(if cfg!(windows) { r"C:\Users\me\AppData\Local\Programs\h0x-core" } else { "/home/me/.local/bin" });
+        use_core(dir.join("h0x-core"));
+        // An empty PATH entry means the current folder: a mod's program must not be looked up there.
+        // SAFETY: this child process runs only this test.
+        unsafe { std::env::set_var("PATH", "") };
+        assert_eq!(path_with_core(), Some(dir.clone().into_os_string()), "PATH empty");
+        // SAFETY: this child process runs only this test.
+        unsafe { std::env::remove_var("PATH") };
+        assert_eq!(path_with_core(), Some(dir.into_os_string()), "PATH unset");
+    }
+
     // The committed fixture core sits in the child's current folder, with `.`
     // and an empty entry on PATH. BIN, PATH and the folder are process-wide.
     #[cfg(unix)]
