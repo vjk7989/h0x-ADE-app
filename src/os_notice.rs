@@ -127,9 +127,16 @@ mod platform {
             (0..list.Length().unwrap()).map(|i| list.Item(i).unwrap().InnerText().unwrap().to_string()).collect()
         }
 
+        // One test thread for all WinRT use: the windows crate caches its factories
+        // process-wide, and two test threads each joining COM crashed the run.
         #[test]
-        fn the_toast_text_is_escaped_and_reads_back_literally() {
+        fn the_toast_xml_keeps_its_text_literal() {
             winrt(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() }).unwrap();
+            the_toast_text_is_escaped_and_reads_back_literally();
+            an_empty_body_gives_a_title_only_toast();
+        }
+
+        fn the_toast_text_is_escaped_and_reads_back_literally() {
             let title = "HyperOx has been launched";
             let body = r#"D:\a <b> & "c" 'd' </text><text>x</text>"#;
             let xml = notification_xml(title, body).unwrap();
@@ -148,9 +155,7 @@ mod platform {
             assert_eq!(texts(&again), [title, body]);
         }
 
-        #[test]
         fn an_empty_body_gives_a_title_only_toast() {
-            winrt(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() }).unwrap();
             assert_eq!(texts(&notification_xml("HyperOx has been launched", "").unwrap()), ["HyperOx has been launched"]);
             // A unicode or UNC folder is kept as it is.
             let body = "\\\\server\\share\\caf\u{e9} \u{65e5}\u{672c}";
