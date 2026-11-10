@@ -2,8 +2,8 @@ HyperOx third-party notices
 =========================
 Regenerate with just notices. See licenses/README.md.
 
-Input-SHA256: c46669ecab585e4e73ea1092a1bb2ee5c30b130cf54f239c2da32bda138e9f5f Cargo.lock
-Input-SHA256: f1381e288e0fd28034ec7bd84e93b62c09aa1c17a6b33559fa2cf4535b1b766d Cargo.toml
+Input-SHA256: 771d6c6c6e75a52db16d006326b793a1afb10e6ed67c6ea4ffeccb0604c8119e Cargo.lock
+Input-SHA256: f996bbac9d2b229b5deebd11e4544738dcf0a4f7a1cd80c2615b1637bc527044 Cargo.toml
 Input-SHA256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 LICENSE
 Input-SHA256: e58cb0de2dde300bcda769ca993fde2737f42c0274082f038621ab22975a49e2 about.toml
 Input-SHA256: 84a7a98c82140fb12c37fe42b93805baa16024cb3e5acc599b7ffe612c55d847 assets/fonts/LICENSE-SymbolsNerdFont.txt
@@ -28,7 +28,7 @@ Input-SHA256: f8ac2c75e7f629a87565c80d61ff9fe5aa15cdea0bda997d52a4dc13fdbd19cb l
 Input-SHA256: 5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177 licenses/Zig.txt
 Input-SHA256: d25e82e26acd42ca3ccc9993622631163425b869b9e16284226d534cff6470f2 licenses/highway-BSD3.txt
 Input-SHA256: 43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1 licenses/highway.txt
-Input-SHA256: 49bcfc86775f45cfa81274f062fabc72f6af4e7a8d846c08e8f19ed21e25459f licenses/inventory.json
+Input-SHA256: 7b36d9008dd8d40527a09a8bdf11a67e75e504886532c1073654e813993454a2 licenses/inventory.json
 Input-SHA256: f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af licenses/musl.txt
 Input-SHA256: 204bbed08ddeeecb362b4da36d3479a0167b7356a9d6024a24f9833affbe228a licenses/simdutf-TH.txt
 Input-SHA256: fc8dbc04e03ad4efc08a647ffe7f995b811a95bc04c0e85a56d5277c6593fa5f licenses/simdutf.txt
@@ -53,8 +53,8 @@ Input-SHA256: d1b0449e5478c574ba4f686c2656df7fe77d66821a61f8b6ed3378a58ed9a811 v
 Input-SHA256: f2eefb822738db27e4ce4b28601c4491f258c51ae52e57d11c98ae03a6100081 vendor/gpui-kit/crates/base/examples/native/Cargo.toml
 Input-SHA256: 81001a9f6c3d868140e0c7c66abcbff8deb4dc00e0fbb68d4a2506d2e2385ea8 vendor/gpui-kit/crates/base/examples/wasm/Cargo.toml
 Input-SHA256: 2ca4d3969f5a62ea841f25868efe6a4c38866f244caffc0affa4af1b25400dad vendor/gpui-kit/crates/fps/Cargo.toml
-Input-SHA256: fa155c6e952077c81f8af5e8256776de7641a34c6ec1d8c01da7b3e7555bc34e vendor/gpui-kit/crates/shell/Cargo.toml
-Input-SHA256: cd6a0e1b53913eb4f2559b79aae3b7877b41e9c559c56a0231501cbd0fe2ad3a vendor/gpui-kit/crates/shell/rquickjs-compat/Cargo.toml
+Input-SHA256: 6228004b172b49dbbf9257e3ecbdbcad2fddbc6d1cdf6c3a40b249609da09520 vendor/gpui-kit/crates/shell/Cargo.toml
+Input-SHA256: 2fa52b64649215d57731a19049b28afb30ec88429b7c54a9c7cd037373dcd12b vendor/gpui-kit/crates/shell/rquickjs-compat/Cargo.toml
 Input-SHA256: f00df50e0e437e56cd8475bc78289f57ef00e5d0af0a1a056bf215438bfe5529 vendor/gpui-pre-apple/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-apple/LICENSE-APACHE
 Input-SHA256: 0035e237c09464dce9426e0be2b66b1d69052a33c572c9114c31fb95c429b336 vendor/gpui-pre-linux/Cargo.toml
@@ -67,7 +67,7 @@ Input-SHA256: 729c498e73ac5cfdd158f04d1781dda3dbc6acf85f72910be64c12639a19a4b4 v
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-windows/LICENSE-APACHE
 Input-SHA256: 2c32d9cb11e942a607b3a98ae918ef6a1bbfdefd111f3a99a71711622d7bf972 vendor/gpui-pre/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre/LICENSE-APACHE
-Input-SHA256: d98d4bb75c6a1f9fcd3d8db8febb95eaa15dbddf1e5ce02c06fd1bf41d33b751 vendor/quickjs-jit-runtime/Cargo.toml
+Input-SHA256: 2096fb8da47b5d216ad22ee259ee1bf5128ffc00f23f44050fdb66d42958ed98 vendor/quickjs-jit-runtime/Cargo.toml
 Input-SHA256: 976ad3d07927343ab99b31510625acba89eac8e0e517c712925620ddeda91b70 vendor/quickjs-jit-runtime/LICENSE
 Input-SHA256: b5f726d2bd6269550f37f6c87697958ed7f43d18c104350211a7b3a6cedcf5d7 vendor/taffy/Cargo.toml
 Input-SHA256: f97daf1a0124413dccf399a4e6626b4b74acd05282f80b6d64ac82225650b77a vendor/taffy/LICENSE
@@ -702,10 +702,217 @@ Apache License 2.0 (Apache-2.0)
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
+  quickjs-jit-stdlib 0.14.1 — https://github.com/longbridge/quickjs-jit
+
+
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+----------------------------------------------------------------------
+Apache License 2.0 (Apache-2.0)
   as-raw-xcb-connection 1.0.1 — https://github.com/psychon/as-raw-xcb-connection
   clang-sys 1.9.1 — https://github.com/KyleMayes/clang-sys
   cmov 0.5.4 — https://github.com/RustCrypto/utils
-  ctutils 0.4.2 — https://github.com/RustCrypto/utils
+  ctutils 0.4.8 — https://github.com/RustCrypto/utils
   encoding_rs 0.8.35 — https://github.com/hsivonen/encoding_rs
   halfbrown 0.4.0 — https://github.com/Licenser/halfbrown
   kurbo 0.13.1 — https://github.com/linebender/kurbo
@@ -2752,7 +2959,7 @@ Apache License 2.0 (Apache-2.0)
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
-  h0x-ade 0.1.0
+  h0x-ade 0.1.14
 
                                  Apache License
                            Version 2.0, January 2004
@@ -2958,7 +3165,7 @@ Apache License 2.0 (Apache-2.0)
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
-  h0x-ade 0.1.0
+  h0x-ade 0.1.14
   codespan-reporting 0.13.1 — https://github.com/brendanzab/codespan
   crypto-primes 0.7.2 — https://github.com/entropyxyz/crypto-primes
   self_cell 1.3.0 — https://github.com/Voultapher/self_cell
@@ -7135,7 +7342,7 @@ Apache License 2.0 (Apache-2.0)
   async-recursion 1.1.1 — https://github.com/dcchut/async-recursion
   core_detect 1.0.0 — https://github.com/thomcc/core_detect
   gif 0.14.2 — https://github.com/image-rs/image-gif
-  rsa 0.10.0-rc.18 — https://github.com/RustCrypto/RSA
+  rsa 0.10.0-rc.19 — https://github.com/RustCrypto/RSA
   weezl 0.1.12 — https://github.com/image-rs/weezl
 
                               Apache License
@@ -7439,7 +7646,6 @@ Apache License 2.0 (Apache-2.0)
   io-surface 0.16.1 — https://github.com/servo/core-foundation-rs
   itertools 0.13.0 — https://github.com/rust-itertools/itertools
   itertools 0.14.0 — https://github.com/rust-itertools/itertools
-  jobserver 0.1.35 — https://github.com/rust-lang/jobserver-rs
   js-sys 0.3.98 — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys
   khronos-egl 6.0.0 — https://github.com/timothee-haudebourg/khronos-egl
   lazy_static 1.5.0 — https://github.com/rust-lang-nursery/lazy-static.rs
@@ -7495,7 +7701,7 @@ Apache License 2.0 (Apache-2.0)
   rustix 1.1.4 — https://github.com/bytecodealliance/rustix
   rustls-native-certs 0.8.4 — https://github.com/rustls/rustls-native-certs
   rustls-pemfile 2.2.0 — https://github.com/rustls/pemfile
-  rustls 0.23.43 — https://github.com/rustls/rustls
+  rustls 0.23.46 — https://github.com/rustls/rustls
   rusty-fork 0.3.1 — https://github.com/altsysrq/rusty-fork
   scoped-tls 1.0.1 — https://github.com/alexcrichton/scoped-tls
   scopeguard 1.2.0 — https://github.com/bluss/scopeguard
@@ -8399,17 +8605,19 @@ Apache License 2.0 (Apache-2.0)
   cbc 0.1.2 — https://github.com/RustCrypto/block-modes
   cbc 0.2.1 — https://github.com/RustCrypto/block-modes
   chacha20 0.10.2 — https://github.com/RustCrypto/stream-ciphers
+  chacha20poly1305 0.11.0 — https://github.com/RustCrypto/AEADs
   cipher 0.4.4 — https://github.com/RustCrypto/traits
   cipher 0.5.2 — https://github.com/RustCrypto/traits
   const-oid 0.10.2 — https://github.com/RustCrypto/formats
   cpubits 0.1.1 — https://github.com/RustCrypto/utils
   cpufeatures 0.2.17 — https://github.com/RustCrypto/utils
   cpufeatures 0.3.1 — https://github.com/RustCrypto/utils
-  crypto-bigint 0.7.5 — https://github.com/RustCrypto/crypto-bigint
+  crypto-bigint 0.7.10 — https://github.com/RustCrypto/crypto-bigint
   crypto-common 0.1.7 — https://github.com/RustCrypto/traits
   crypto-common 0.2.2 — https://github.com/RustCrypto/traits
+  cshake 0.2.1 — https://github.com/RustCrypto/XOFs
   ctr 0.10.1 — https://github.com/RustCrypto/block-modes
-  der 0.8.1 — https://github.com/RustCrypto/formats
+  der 0.8.3 — https://github.com/RustCrypto/formats
   der_derive 0.8.0 — https://github.com/RustCrypto/formats
   digest 0.10.7 — https://github.com/RustCrypto/traits
   digest 0.11.3 — https://github.com/RustCrypto/traits
@@ -8420,6 +8628,7 @@ Apache License 2.0 (Apache-2.0)
   hybrid-array 0.4.14 — https://github.com/RustCrypto/hybrid-array
   inout 0.1.4 — https://github.com/RustCrypto/utils
   inout 0.2.2 — https://github.com/RustCrypto/utils
+  keccak 0.2.2 — https://github.com/RustCrypto/sponges
   md-5 0.10.6 — https://github.com/RustCrypto/hashes
   md-5 0.11.0 — https://github.com/RustCrypto/hashes
   p256 0.14.0 — https://github.com/RustCrypto/elliptic-curves
@@ -8428,8 +8637,9 @@ Apache License 2.0 (Apache-2.0)
   pbkdf2 0.12.2 — https://github.com/RustCrypto/password-hashes/tree/master/pbkdf2
   pbkdf2 0.13.0 — https://github.com/RustCrypto/password-hashes
   pem-rfc7468 1.0.0 — https://github.com/RustCrypto/formats
-  pkcs1 0.8.0-rc.4 — https://github.com/RustCrypto/formats
+  pkcs1 0.8.0 — https://github.com/RustCrypto/formats
   pkcs8 0.11.0 — https://github.com/RustCrypto/formats
+  poly1305 0.9.1 — https://github.com/RustCrypto/universal-hashes
   polyval 0.7.3 — https://github.com/RustCrypto/universal-hashes
   primefield 0.14.0 — https://github.com/RustCrypto/elliptic-curves
   primeorder 0.14.0 — https://github.com/RustCrypto/elliptic-curves
@@ -8438,8 +8648,11 @@ Apache License 2.0 (Apache-2.0)
   sha1 0.11.0 — https://github.com/RustCrypto/hashes
   sha2 0.10.9 — https://github.com/RustCrypto/hashes
   sha2 0.11.0 — https://github.com/RustCrypto/hashes
+  sha3 0.12.0 — https://github.com/RustCrypto/hashes
+  shake 0.1.0 — https://github.com/RustCrypto/XOFs
   signature 3.0.0 — https://github.com/RustCrypto/traits
-  spki 0.8.0 — https://github.com/RustCrypto/formats
+  spki 0.8.1 — https://github.com/RustCrypto/formats
+  sponge-cursor 0.1.0 — https://github.com/RustCrypto/utils
   universal-hash 0.6.1 — https://github.com/RustCrypto/traits
   wnaf 0.14.0 — https://github.com/RustCrypto/elliptic-curves
 
@@ -11774,24 +11987,6 @@ limitations under the License.
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
-  llrt_abort 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_async_hooks 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_buffer 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_build 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_compression 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_context 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_crypto 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_encoding 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_events 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_exceptions 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_hooking 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_json 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_path 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_stream_web 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_timers 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_url 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_utils 0.9.0-beta — https://github.com/awslabs/llrt
-  llrt_zlib 0.9.0-beta — https://github.com/awslabs/llrt
   ghostty-sys 0.0.0
   gpui-fps 0.7.1 — https://github.com/longbridge/gpui-kit/tree/main/crates/fps
   gpui-shell 0.7.1 — https://github.com/longbridge/gpui-kit
@@ -11823,7 +12018,6 @@ Apache License 2.0 (Apache-2.0)
   gpu-descriptor-types 0.2.0 — https://github.com/zakarumych/gpu-descriptor
   gpu-descriptor 0.3.2 — https://github.com/zakarumych/gpu-descriptor
   half 2.7.1 — https://github.com/VoidStarKat/half-rs
-  ident_case 1.0.1 — https://github.com/TedDriggs/ident_case
   image-webp 0.2.4 — https://github.com/image-rs/image-webp
   image 0.25.10 — https://github.com/image-rs/image
   inventory 0.3.24 — https://github.com/dtolnay/inventory
@@ -11933,8 +12127,6 @@ Apache License 2.0 (Apache-2.0)
   wgpu 29.0.4 — https://github.com/gfx-rs/wgpu
   winapi-i686-pc-windows-gnu 0.4.0 — https://github.com/retep998/winapi-rs
   winapi-x86_64-pc-windows-gnu 0.4.0 — https://github.com/retep998/winapi-rs
-  zstd-safe 7.2.4 — https://github.com/gyscos/zstd-rs
-  zstd-sys 2.0.16+zstd.1.5.7 — https://github.com/gyscos/zstd-rs
   zune-inflate 0.2.54
 
 Apache License
@@ -12014,12 +12206,12 @@ limitations under the License.
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
-  h0x-ade 0.1.0
-  h0x-ade 0.1.0
-  h0x-ade 0.1.0
-  h0x-ade 0.1.0
-  h0x-ade 0.1.0
-  h0x-ade 0.1.0
+  h0x-ade 0.1.14
+  h0x-ade 0.1.14
+  h0x-ade 0.1.14
+  h0x-ade 0.1.14
+  h0x-ade 0.1.14
+  h0x-ade 0.1.14
   gpui-pre 0.3.8 — https://github.com/zed-industries/zed
   gpui-pre-apple 0.3.8 — https://github.com/zed-industries/zed
   gpui-pre-linux 0.3.8 — https://github.com/zed-industries/zed
@@ -12269,8 +12461,8 @@ Apache License
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
-  h0x-ade 0.1.0
-  h0x-ade 0.1.0
+  h0x-ade 0.1.14
+  h0x-ade 0.1.14
   gpui-base 0.7.1 — https://github.com/longbridge/gpui-kit
 
 Copyright 2024 - 2026 Longbridge <https://longbridge.com>
@@ -12878,8 +13070,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ----------------------------------------------------------------------
 BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (BSD-3-Clause)
-  alloc-no-stdlib 2.0.4 — https://github.com/dropbox/rust-alloc-no-stdlib
-  brotli 8.0.4 — https://github.com/dropbox/rust-brotli
+  alloc-no-stdlib 3.0.0 — https://github.com/dropbox/rust-alloc-no-stdlib
+  brotli 9.1.1 — https://github.com/dropbox/rust-brotli
 
 Copyright (c) 2016 Dropbox, Inc.
 All rights reserved.
@@ -13101,7 +13293,7 @@ USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ----------------------------------------------------------------------
 BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (BSD-3-Clause)
-  alloc-stdlib 0.2.4 — https://github.com/dropbox/rust-alloc-no-stdlib
+  alloc-stdlib 0.3.0 — https://github.com/dropbox/rust-alloc-no-stdlib
   exr 1.74.2 — https://github.com/johannesvollmer/exrs
   sha1_smol 1.0.1 — https://github.com/mitsuhiko/sha1-smol
 
@@ -14127,7 +14319,7 @@ THIS SOFTWARE.
 
 ----------------------------------------------------------------------
 ISC License (ISC)
-  rustls-webpki 0.103.15 — https://github.com/rustls/webpki
+  rustls-webpki 0.103.16 — https://github.com/rustls/webpki
 
 Except as otherwise noted, this project is licensed under the following
 (ISC-style) terms:
@@ -14777,7 +14969,7 @@ FT_END_HEADER
 
 ----------------------------------------------------------------------
 MIT License (MIT)
-  brotli 8.0.4 — https://github.com/dropbox/rust-brotli
+  brotli 9.1.1 — https://github.com/dropbox/rust-brotli
 
 Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
 
@@ -16064,8 +16256,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ----------------------------------------------------------------------
 MIT License (MIT)
-  quickjs-jit 0.12.11 — https://github.com/longbridge/rquickjs.git
-  quickjs-jit-runtime 0.12.11 — https://github.com/longbridge/rquickjs.git
+  quickjs-jit 0.14.1 — https://github.com/longbridge/rquickjs.git
+  quickjs-jit-runtime 0.14.1 — https://github.com/longbridge/rquickjs.git
 
 MIT License
 
@@ -16394,6 +16586,7 @@ SOFTWARE.
 MIT License (MIT)
   convert_case 0.10.0 — https://github.com/rutrum/convert-case
   convert_case 0.11.0 — https://github.com/rutrum/convert-case
+  convert_case 0.12.0 — https://github.com/rutrum/convert-case
 
 MIT License
 
@@ -16419,18 +16612,17 @@ SOFTWARE.
 
 ----------------------------------------------------------------------
 MIT License (MIT)
-  quickjs-jit-stdlib 0.12.7 — https://github.com/longbridge/quickjs-jit
-  quickjs-jit-core 0.12.11 — https://github.com/longbridge/rquickjs.git
-  quickjs-jit-macro 0.12.11 — https://github.com/longbridge/rquickjs.git
-  rquickjs 0.12.9
+  quickjs-jit-core 0.14.1 — https://github.com/longbridge/rquickjs.git
+  quickjs-jit-macro 0.14.1 — https://github.com/longbridge/rquickjs.git
   base64-simd 0.8.0 — https://github.com/Nugine/simd
   block2 0.6.2 — https://github.com/madsmtm/objc2
   block 0.1.6 — http://github.com/SSheldon/rust-block
-  brotli-decompressor 5.0.3 — https://github.com/dropbox/rust-brotli-decompressor
+  brotli-decompressor 6.3.1 — https://github.com/dropbox/rust-brotli-decompressor
   harfrust 0.5.2 — https://github.com/harfbuzz/harfrust
   hex-simd 0.8.0 — https://github.com/Nugine/simd
   libm 0.2.16 — https://github.com/rust-lang/compiler-builtins
   malloc_buf 0.0.6 — https://github.com/SSheldon/malloc_buf
+  minisign-verify 0.3.0 — https://github.com/jedisct1/rust-minisign-verify
   objc-sys 0.3.5 — https://github.com/madsmtm/objc2
   objc2-app-kit 0.2.2 — https://github.com/madsmtm/objc2
   objc2-encode 4.1.0 — https://github.com/madsmtm/objc2
@@ -16493,7 +16685,7 @@ SOFTWARE.
 ----------------------------------------------------------------------
 MIT License (MIT)
   tokio-util 0.7.19 — https://github.com/tokio-rs/tokio
-  tokio 1.53.1 — https://github.com/tokio-rs/tokio
+  tokio 1.54.1 — https://github.com/tokio-rs/tokio
 
 MIT License
 
@@ -17361,8 +17553,8 @@ SOFTWARE.
 
 ----------------------------------------------------------------------
 MIT License (MIT)
-  quickjs-jit 0.12.11 — https://github.com/longbridge/rquickjs.git
-  quickjs-jit-sys 0.12.11 — https://github.com/longbridge/rquickjs.git
+  quickjs-jit 0.14.1 — https://github.com/longbridge/rquickjs.git
+  quickjs-jit-sys 0.14.1 — https://github.com/longbridge/rquickjs.git
 
 The MIT License (MIT)
  
@@ -17419,20 +17611,6 @@ HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
 WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
-
-
-----------------------------------------------------------------------
-MIT License (MIT)
-  zstd 0.13.3 — https://github.com/gyscos/zstd-rs
-
-The MIT License (MIT)
-Copyright (c) 2016 Alexandre Bury
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ----------------------------------------------------------------------
@@ -18495,70 +18673,6 @@ the following restrictions:
     misrepresented as being the original software.
 
 3. This notice may not be removed or altered from any source distribution.
-
-----------------------------------------------------------------------
-MIT License (MIT)
-  minisign-verify 0.3.0 — https://github.com/jedisct1/rust-minisign-verify
-
-Copyright (c) 2019-2025 Frank Denis
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
---
-
-Code in the src/crypto folder is derived from the rust-crypto project:
-https://github.com/DaGenix/rust-crypto
-
-Original ISC license follows:
-
-Copyright (c) 2006-2009 Graydon Hoare
-Copyright (c) 2009-2013 Mozilla Foundation
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
 
 ----------------------------------------------------------------------
 bzip2 and libbzip2 License v1.0.6 (bzip2-1.0.6)

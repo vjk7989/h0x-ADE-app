@@ -182,7 +182,8 @@ fn parse_body<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<Vec<u8>> {
             "fetch(url, options).body expects a string or Uint8Array",
         )
     })?;
-    let bytes = bytes.as_bytes().ok_or_else(|| {
+    // SAFETY: the slice is copied before any JavaScript can run.
+    let bytes = unsafe { bytes.as_bytes() }.ok_or_else(|| {
         Exception::throw_type(
             ctx,
             "fetch(url, options).body received a detached Uint8Array",

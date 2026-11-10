@@ -194,8 +194,8 @@ pub(super) fn write_file<'js>(
                 "fs.writeFile(path, contents) expects a string or Uint8Array",
             )
         })?;
-        bytes
-            .as_bytes()
+        // SAFETY: the slice is copied before any JavaScript can run.
+        unsafe { bytes.as_bytes() }
             .ok_or_else(|| {
                 Exception::throw_type(
                     &ctx,
