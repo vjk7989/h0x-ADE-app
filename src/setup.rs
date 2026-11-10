@@ -21,10 +21,6 @@ const ICON: &[u8] = include_bytes!("../assets/icons/h0x-ade-icon.png");
 const APP_INSTALL: &str = "curl -fsSL https://github.com/vjk7989/h0x-ADE-app/releases/latest/download/install.sh | sh";
 #[cfg(windows)]
 const APP_INSTALL: &str = "powershell -c \"irm https://github.com/vjk7989/h0x-ADE-app/releases/latest/download/install.ps1 | iex\"";
-#[cfg(not(windows))]
-const CORE_INSTALL: &str = "curl -fsSL https://github.com/vjk7989/h0x-ADE-core/releases/latest/download/install.sh | sh";
-#[cfg(windows)]
-const CORE_INSTALL: &str = "powershell -c \"irm https://github.com/vjk7989/h0x-ADE-core/releases/latest/download/install.ps1 | iex\"";
 const CORE_PLACE: &str = if cfg!(windows) { r"%LOCALAPPDATA%\Programs\h0x-core" } else { "~/.local/bin" };
 
 /// What's missing before the main window can open.
@@ -206,7 +202,7 @@ impl Setup {
             Need::Install => (
                 "HyperOx needs h0x-core".into(),
                 "h0x-core runs your terminals and agents, and keeps them alive when this window closes. HyperOx couldn't find it on this computer.".into(),
-                format!("Install it for me puts it in {CORE_PLACE}, like its own installer: {CORE_INSTALL}"),
+                format!("Install it for me puts it in {CORE_PLACE}, like its own installer, after checking the release's signature."),
             ),
             Need::Connect(error) => (
                 "HyperOx can't connect to h0x-core".into(),
