@@ -2716,4 +2716,153 @@ mod tests {
         let bottom = visible(&mut vt);
         assert!(bottom.iter().any(|row| row.starts_with("0050")), "{bottom:?}");
     }
+
+    /// GHSA-jqr7-69mm-v35h: narrowing a page 65535 columns wide overflowed its
+    /// 16-bit row count. The primary screen (reflowed) and the alternate screen
+    /// (resized in place) must both narrow cleanly and keep working.
+    #[test]
+    fn a_terminal_65535_columns_wide_narrows_to_a_few_columns_and_keeps_working() {
+        let text = |row: &[Cell]| row.iter().map(|c| c.text.as_str()).collect::<String>();
+        for alt in [false, true] {
+            for (rows, narrow) in [(4u16, 4u16), (4, 1), (1, 4)] {
+                let case = format!("alt screen {alt}, {rows} rows, 65535 -> {narrow} columns");
+                let mut vt = Vt::new(u16::MAX, rows);
+                if alt {
+                    vt.write(b"\x1b[?1049h");
+                }
+                vt.write(b"\x1b[1;31mabcdefgh\x1b[0m");
+                vt.resize(narrow, rows, 8, 16);
+                vt.scroll_to_top();
+                let f = vt.frame();
+                assert_eq!(f.rows.len(), rows as usize, "{case}");
+                assert!(f.rows.iter().all(|row| row.len() == narrow as usize), "{case}");
+                assert_eq!(text(&f.rows[0]), "abcdefgh"[..narrow as usize], "{case}: the oldest row keeps its text");
+                assert!(f.rows[0][0].bold && f.rows[0][0].fg == theme().palette16[1], "{case}: and its style");
+                let sb = vt.scrollbar();
+                assert!(sb.total >= u64::from(rows) && sb.total <= 32, "{case}: {} rows after narrowing", sb.total);
+                // Output after the narrowing still lands, and widening again works.
+                vt.scroll_to_bottom();
+                vt.write(b"\x1b[2J\x1b[Hok");
+                vt.resize(80, rows, 8, 16);
+                let f = vt.frame();
+                assert!(f.rows.iter().all(|row| row.len() == 80), "{case}");
+                // Widening may join "ok" to history it was wrapped from; the alternate
+                // screen never reflows, so one column leaves "o" and "k" on two rows.
+                let screen: Vec<String> = f.rows.iter().map(|row| text(row).trim_end().to_owned()).collect();
+                assert!(screen.concat().contains("ok"), "{case}: {screen:?}");
+            }
+        }
+    }
+
+    /// GHSA-w9q4-5jvv-mcv4: a clear that scrolls the screen into a scrollback too
+    /// small to keep it freed the page the cursor was on, and the cursor kept that
+    /// page's style and hyperlink. Output alone does it, so the smallest setting
+    /// and even smaller byte limits must stay sound and bounded.
+    #[test]
+    fn clearing_into_a_tiny_scrollback_with_a_styled_hyperlinked_cursor_stays_sound() {
+        let original = crate::settings::get();
+        crate::settings::set(crate::settings::Settings { scrollback_lines: crate::settings::SCROLLBACK_MIN, ..(*original).clone() });
+        let mut vts = vec![("the smallest setting".to_owned(), Vt::new(80, 24))];
+        crate::settings::set((*original).clone());
+        assert_eq!(scrollback_limits(&vts[0].1), (1_000, 1_000_000));
+        for bytes in [0usize, 1, 4096] {
+            let vt = Vt::new(80, 24);
+            unsafe { ok(ghostty_terminal_set(vt.term, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &bytes as *const _ as *const c_void), "scrollback_max_bytes") };
+            vts.push((format!("{bytes} scrollback bytes"), vt));
+        }
+        for (case, vt) in &mut vts {
+            for round in 0..300u32 {
+                for line in 0..30u32 {
+                    vt.write(format!("\x1b[3{}m{round:03} {line:02} {}\x1b[0m\r\n", line % 8, "y".repeat(60)).as_bytes());
+                }
+                // A styled cursor inside an OSC 8 link, then either clear that scrolls into scrollback.
+                vt.write(format!("\x1b[1;4;38;2;1;2;3m\x1b]8;id=r{round};https://example.com/{round}\x1b\\").as_bytes());
+                if round % 2 == 0 {
+                    vt.write(b"\x1b[22J");
+                } else {
+                    // CSI 2 J scrolls too when the last row is a marked shell prompt.
+                    vt.write(b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b[2J");
+                }
+                // Printing, then restyling and closing the link, after the clear.
+                vt.write(format!("\x1b[Hafter {round}").as_bytes());
+                vt.write(b"\x1b[0m\x1b]8;;\x1b\\ plain");
+            }
+            vt.scroll_to_bottom();
+            let f = vt.frame();
+            let first: String = f.rows[0].iter().map(|c| c.text.as_str()).collect();
+            assert!(first.starts_with("after 299 plain"), "{case}: {first:?}");
+            assert!(f.rows[0][0].bold && f.rows[0][0].underline, "{case}: the cursor's style survives the clear");
+            assert!(!f.rows[0][10].bold && !f.rows[0][10].underline, "{case}: and ends where it was reset");
+            assert_eq!(vt.link_at(0, 0, found).map(|hit| hit.target).as_deref(), Some("https://example.com/299"), "{case}");
+            assert_eq!(vt.link_at(10, 0, found), None, "{case}: the link was closed");
+            let sb = vt.scrollbar();
+            let kept = sb.total - sb.len;
+            assert!(kept < 2_000, "{case}: {kept} of ~16,000 rows kept");
+        }
+    }
+
+    /// Ghostty refuses terminals with zero rows or columns since 1.4
+    /// (GHSA-hp9c-qp4q-cpw3): a zero size from the app never reaches it.
+    #[test]
+    fn a_zero_size_never_reaches_ghostty() {
+        let shape = |vt: &mut Vt| {
+            let f = vt.frame();
+            (f.rows.len(), f.rows[0].len(), f.rows[0][0].text.clone())
+        };
+        let mut vt = Vt::new(0, 0);
+        vt.write(b"x");
+        assert_eq!(shape(&mut vt), (1, 1, "x".to_owned()));
+        vt.resize(0, 5, 8, 16);
+        vt.resize(5, 0, 8, 16);
+        assert_eq!(shape(&mut vt), (1, 1, "x".to_owned()), "a zero resize is ignored");
+        vt.resize(3, 2, 0, 0);
+        let f = vt.frame();
+        assert_eq!((f.rows.len(), f.rows[0].len()), (2, 3), "zero cell pixels still resize");
+    }
+
+    /// Kitty graphics keep the 128 MB store and take image data only from the
+    /// output itself: a program (maybe on another machine) cannot make the app
+    /// load a local file, a temporary file or shared memory.
+    #[test]
+    fn kitty_graphics_keep_their_limit_and_never_load_local_files() {
+        use base64::Engine;
+        let mut vt = Vt::new(20, 5);
+        vt.resize(20, 5, 8, 16);
+        let (mut limit, mut file, mut shared) = (0u64, true, true);
+        unsafe {
+            ok(ghostty_terminal_get(vt.term, GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT, &mut limit as *mut _ as *mut c_void), "get kitty storage limit");
+            ok(ghostty_terminal_get(vt.term, GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_MEDIUM_FILE, &mut file as *mut _ as *mut c_void), "get kitty file medium");
+            ok(ghostty_terminal_get(vt.term, GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_MEDIUM_SHARED_MEM, &mut shared as *mut _ as *mut c_void), "get kitty shared memory medium");
+        }
+        assert_eq!(limit, 128 << 20);
+        assert!(!file && !shared);
+        let icon = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/h0x-ade-icon.png");
+        let mut id = 20;
+        for medium in ["f", "t", "s"] {
+            for path in [icon, r"C:\Windows\System32\drivers\etc\hosts", r"\\server\share\image.png", "/etc/passwd", ""] {
+                id += 1;
+                let payload = base64::engine::general_purpose::STANDARD.encode(path);
+                vt.write(format!("\x1b_Ga=T,t={medium},f=100,i={id};{payload}\x1b\\").as_bytes());
+                assert!(vt.placements().is_empty(), "t={medium} {path:?}");
+                assert!(vt.image_bgra(id, [0, 0, 1, 1]).is_none(), "t={medium} {path:?}");
+                let reply = String::from_utf8_lossy(&vt.take_replies()).into_owned();
+                assert!(!reply.contains("OK"), "t={medium} {path:?}: {reply:?}");
+            }
+        }
+        // Direct data still works after the refusals.
+        vt.write(b"\x1b_Ga=T,f=100,i=7,q=2;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\");
+        assert_eq!(vt.placements().len(), 1);
+    }
+
+    /// Core reads 7501 reports and answers `7501;?` itself. Should one reach the
+    /// app's screen it shows nothing, and the app never answers a second time.
+    #[test]
+    fn osc_7501_reports_and_questions_leave_no_text_and_no_reply() {
+        let mut vt = Vt::new(20, 2);
+        vt.write(b"a\x1b]7501;state=working\x1b\\b\x1b]7501;?\x1b\\c\x1b]7501;?\x07d\x1b]7501;\x07e\x1b]7501;state=\xff\xfe\x1b\\f");
+        let first: String = vt.frame().rows[0].iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(first.trim_end(), "abcdef");
+        assert!(vt.take_replies().is_empty());
+        assert_eq!(vt.take_title(), None);
+    }
 }

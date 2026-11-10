@@ -10,7 +10,7 @@ Input-SHA256: 84a7a98c82140fb12c37fe42b93805baa16024cb3e5acc599b7ffe612c55d847 a
 Input-SHA256: 30f0c136e3c88e422d0791acd97238870f9054a9729bc34cf2ff0d4ed8cac4ad assets/fonts/OFL-JetBrainsMono.txt
 Input-SHA256: e5e56b793839774266243b8dd89c618f2962f098a2076757a5f2839c27eaaabd assets/fonts/OFL.txt
 Input-SHA256: 9ccb6b1a96db08162bbeea238747fcf1e6d08537260f92529ae2eebe74d0f1b3 crates/ghostty-sys/Cargo.toml
-Input-SHA256: fbc6bf4ca768aadc8a6fed045721777034e8d4e2679af7cac7facac54dbce432 crates/ghostty-sys/build.rs
+Input-SHA256: 7c9859c26bfa5ade67c721fd8841fe4256eac44847f8a8881de51679e14a6701 crates/ghostty-sys/build.rs
 Input-SHA256: add9d7531d1b21646317a8958e38fc727506fa39d24bdecb44154d943c82753a defaults/icons/LICENSE-LobeHub.txt
 Input-SHA256: b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57 defaults/icons/LICENSE-Lucide.txt
 Input-SHA256: 7b3925ce431fc0984bdb1a47da2663c48262191259dda8c23f2fa6ed8accb841 defaults/icons/LICENSES.md
@@ -28,7 +28,7 @@ Input-SHA256: f8ac2c75e7f629a87565c80d61ff9fe5aa15cdea0bda997d52a4dc13fdbd19cb l
 Input-SHA256: 5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177 licenses/Zig.txt
 Input-SHA256: d25e82e26acd42ca3ccc9993622631163425b869b9e16284226d534cff6470f2 licenses/highway-BSD3.txt
 Input-SHA256: 43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1 licenses/highway.txt
-Input-SHA256: 7b36d9008dd8d40527a09a8bdf11a67e75e504886532c1073654e813993454a2 licenses/inventory.json
+Input-SHA256: f746e27899214c909a4226f6bda2a2da0f9146f5bceebd5a2efc4e5c0f0f5239 licenses/inventory.json
 Input-SHA256: f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af licenses/musl.txt
 Input-SHA256: 204bbed08ddeeecb362b4da36d3479a0167b7356a9d6024a24f9833affbe228a licenses/simdutf-TH.txt
 Input-SHA256: fc8dbc04e03ad4efc08a647ffe7f995b811a95bc04c0e85a56d5277c6593fa5f licenses/simdutf.txt
@@ -38,14 +38,14 @@ Input-SHA256: 312e901e142be2477b4ca859e9311f9e3f80d33372991759b7921c1893605f33 l
 Input-SHA256: d78ac01638fd241bde2eb2952e75c40e5f5fc8dce026971b547265d3845e8333 scripts/notices.hbs
 Input-SHA256: d12cccfea95d87ead0c420f60bc718cb5797abd2271d73a1abee4d90c8aca6d9 scripts/notices.ts
 Input-SHA256: 386211873e5b7a02f663ae4d7adf96285999f91608f8f9f31fecfd0f4095e6f1 vendor/ghostty/LICENSE
-Input-SHA256: b878e4fc36f9c2b6c9ad82e5ceba58c91905fde89f0ac3d3cb7ab413ea029e39 vendor/ghostty/build.zig.zon
+Input-SHA256: 195967ceee17309c61737edb8ed0565746a02814a4d3dd1881ef0c39b9e947a4 vendor/ghostty/build.zig.zon
 Input-SHA256: 57103e0424e9ca660756bb2cd0475ca3057e61e7f2d4038aba2a90eae890b932 vendor/ghostty/pkg/highway/build.zig.zon
 Input-SHA256: 38dc5481dc4b7eef95cea8056b84d940419288100f317ecaff683bd89f163263 vendor/ghostty/pkg/simdutf/vendor/simdutf.cpp
 Input-SHA256: d3501fc2143f0edc5c84e6bb013a7fdb8ccd95514f7fd0816669248e62676301 vendor/ghostty/pkg/simdutf/vendor/simdutf.h
 Input-SHA256: e9a4a14099a87ae063a84f7d903535dc4d9977d2554775f561db4320436fce69 vendor/ghostty/pkg/wuffs/build.zig
 Input-SHA256: fc90571cbef7acefb618bfef0cf9e301d8609ecfd229f17cfce8a935be6efa28 vendor/ghostty/pkg/wuffs/build.zig.zon
-Input-SHA256: cfaa8ecc23407128fab02c87ef67d9d36ec4c0e43274b359600014a38eb8c89f vendor/ghostty/src/build/GhosttyLibVt.zig
-Input-SHA256: 447c5e414458a29d38e260621e584118e77e02e692e05ffab08107e5ab4f03da vendor/ghostty/src/build/GhosttyZig.zig
+Input-SHA256: 4aa4a31ba40a703aac13fd59f1d403dba9188904f7d2538413c7d475d719f510 vendor/ghostty/src/build/GhosttyLibVt.zig
+Input-SHA256: bbc3d70cbb8b095ec6be7a6e0bc164dfadbceb34aecc6e72cdb4070118f2f72f vendor/ghostty/src/build/GhosttyZig.zig
 Input-SHA256: fe3eebbef685f9a72781e4588df7563d96e6446f53355a8d41a122c04bd82eb5 vendor/gpui-kit/Cargo.toml
 Input-SHA256: d1b0449e5478c574ba4f686c2656df7fe77d66821a61f8b6ed3378a58ed9a811 vendor/gpui-kit/LICENSE-APACHE
 Input-SHA256: 61bcae330899900cb50eb30be894b46e85d1bcbad8ec119c99fa533f710fd18d vendor/gpui-kit/crates/base/Cargo.toml
@@ -20098,8 +20098,8 @@ POSSIBILITY OF SUCH DAMAGE.
 
 
 ----------------------------------------------------------------------
-Zig 0.16.0 standard library and compiler runtime
-https://github.com/ziglang/zig/tree/0.16.0
+Zig 0.17.0 standard library and compiler runtime
+https://github.com/ziglang/zig/tree/0.17.0
 
 --- licenses/Zig.txt ---
 The MIT License (Expat)
@@ -20127,7 +20127,7 @@ THE SOFTWARE.
 
 ----------------------------------------------------------------------
 musl (where statically included by the toolchain)
-Zig 0.16.0 lib/libc/musl/COPYRIGHT; official Linux app builds use system glibc, not musl.
+Zig 0.17.0 lib/libc/musl/COPYRIGHT; official Linux app builds use system glibc, not musl.
 
 --- licenses/musl.txt ---
 musl as a whole is licensed under the following standard MIT license:
