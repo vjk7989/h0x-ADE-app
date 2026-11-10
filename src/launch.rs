@@ -12,6 +12,12 @@ pub fn init(from_shell: bool) {
     let _ = FOLDER.set(pick(from_shell, std::env::current_dir()));
 }
 
+/// Records the folder a detached copy was started for (`--launched-in`); it is
+/// kept only if it is still an existing folder.
+pub fn init_with(folder: Option<String>) {
+    let _ = FOLDER.set(folder.and_then(|f| pick(true, Ok(PathBuf::from(f)))));
+}
+
 /// The folder this launch was started in; None for a launch from a shortcut,
 /// Dock or Explorer, or when the shell's folder is unusable.
 pub fn folder() -> Option<String> {
@@ -65,6 +71,41 @@ pub fn announce(line: &str, folder: Option<&str>) -> Option<std::thread::JoinHan
     println!("{line}");
     let _ = std::io::stdout().flush();
     crate::os_notice::show("HyperOx has been launched", folder.unwrap_or(""))
+}
+
+/// Waits for the notification of a process that is about to exit, or it is
+/// lost; never more than 2 s.
+pub fn wait(notice: Option<std::thread::JoinHandle<()>>) {
+    if let Some(notice) = notice {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !notice.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+}
+
+/// Starts the window as a copy of this program in its own session, with no
+/// terminal, so closing or reusing the shell's terminal doesn't touch it. The
+/// folder reaches it as the hidden `--launched-in <folder>` argument.
+#[cfg(unix)]
+pub fn detach(folder: Option<&str>) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(std::env::current_exe()?);
+    if let Some(folder) = folder {
+        child.arg("--launched-in").arg(folder).current_dir(folder);
+    }
+    child.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // SAFETY: setsid is async-signal-safe and touches no memory.
+    unsafe {
+        child.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    child.spawn().map(drop)
 }
 
 #[cfg(test)]
@@ -148,6 +189,62 @@ mod tests {
         // macOS refuses such names; the path then isn't a folder either way.
         let _ = std::fs::create_dir(&folder);
         assert_eq!(pick(true, Ok(folder)), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `init_with` sets a once-only global, so each case runs in its own copy of
+    /// this test binary: this test, with the folder given and wanted in these.
+    const INIT_WITH: &str = "H0X_ADE_TEST_INIT_WITH";
+    const INIT_WITH_GIVEN: &str = "H0X_ADE_TEST_INIT_WITH_GIVEN";
+    const INIT_WITH_WANT: &str = "H0X_ADE_TEST_INIT_WITH_WANT";
+
+    #[test]
+    fn a_launched_in_case_in_its_own_process() {
+        // Only as the child of `a_launched_in_folder_is_kept_only_while_it_is_an_existing_folder`.
+        if std::env::var_os(INIT_WITH).is_none() {
+            return;
+        }
+        super::init_with(std::env::var(INIT_WITH_GIVEN).ok());
+        assert_eq!(super::folder(), std::env::var(INIT_WITH_WANT).ok());
+    }
+
+    #[test]
+    fn a_launched_in_folder_is_kept_only_while_it_is_an_existing_folder() {
+        let dir = temp("launched-in");
+        let exact = dir.to_str().unwrap().to_owned();
+        let file = dir.join("file.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let file = file.to_str().unwrap().to_owned();
+        let missing = dir.join("missing").to_str().unwrap().to_owned();
+        // A trailing separator (a backslash on Windows) stays as given.
+        let trailing = format!("{exact}{}", std::path::MAIN_SEPARATOR);
+        let cases = [
+            (None, None),
+            (Some(String::new()), None),
+            (Some(missing), None),
+            (Some(file), None),
+            (Some(exact.clone()), Some(exact.clone())),
+            (Some(trailing.clone()), Some(trailing)),
+        ];
+        for (given, want) in cases {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["launch::tests::a_launched_in_case_in_its_own_process", "--exact", "--test-threads=1"])
+                .env(INIT_WITH, "1")
+                .env_remove(INIT_WITH_GIVEN)
+                .env_remove(INIT_WITH_WANT);
+            if let Some(given) = &given {
+                child.env(INIT_WITH_GIVEN, given);
+            }
+            if let Some(want) = &want {
+                child.env(INIT_WITH_WANT, want);
+            }
+            let out = child.output().unwrap();
+            let report = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success(), "{given:?} -> {want:?}: {report}");
+            // The case really ran: a filter that matches nothing passes too.
+            assert!(report.contains("1 passed"), "{given:?}: {report}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -1,7 +1,9 @@
 //! End to end: `h0x-ade` typed in a terminal opens HyperOx in that folder, a second
 //! launch from another folder shows that folder in the running window, the same
 //! folder twice makes no second space, and a launch that is not from a shell
-//! changes nothing (LF plan AC1-AC4, AC6).
+//! changes nothing (LF plan AC1-AC4, AC6). The terminal gets only the one line, and
+//! on Linux and macOS the launch exits at once while the window runs on in its own
+//! session, with no terminal (LF-QUIET, LF-DETACH).
 //!
 //! It runs the real app, so it needs a desktop and h0x-core: CI's `launch-e2e` job
 //! sets `H0X_E2E=1` and `H0X_E2E_CORE_ARCHIVE` (the h0x-core release archive, its
@@ -128,17 +130,73 @@ impl Launch {
     }
 }
 
+/// What a terminal shows of `out`: no `\r`, colour or title escapes or other
+/// control characters, no blank lines, and none of `script`'s own lines.
+fn terminal_lines(out: &str) -> Vec<String> {
+    let mut text = String::new();
+    let mut chars = out.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.next() {
+                // CSI: up to its final byte.
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: up to BEL or ST.
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\u{7}' {
+                            break;
+                        }
+                        if c == '\u{1b}' {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else if c == '\n' || !c.is_control() {
+            text.push(c);
+        }
+    }
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "^D" && !l.starts_with("Script started") && !l.starts_with("Script done"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Linux and macOS: the window this test started, a detached copy found by the
+/// test's folder in its hidden `--launched-in` argument (the app writes no pid).
+#[cfg(unix)]
+fn window_pids(env: &Isolated) -> Vec<u32> {
+    let pattern = format!("launched-in .*{}/", env.root.file_name().unwrap().to_str().unwrap());
+    let out = Command::new("pgrep").args(["-f", &pattern]).stdin(Stdio::null()).stderr(Stdio::null()).output();
+    out.map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().filter_map(|p| p.parse().ok()).collect()).unwrap_or_default()
+}
+
 /// Stops whatever is left, also when an assertion failed half way.
 struct Cleanup<'a> {
     env: &'a Isolated,
-    window: Option<Launch>,
+    /// The first launch: the window itself on Windows, on Linux and macOS only
+    /// the launcher (the window is then found by `window_pids`).
+    launch: Option<Launch>,
 }
 
 impl Drop for Cleanup<'_> {
     fn drop(&mut self) {
-        if let Some(mut window) = self.window.take() {
-            let _ = window.child.kill();
-            let _ = window.child.wait();
+        if let Some(mut launch) = self.launch.take() {
+            let _ = launch.child.kill();
+            let _ = launch.child.wait();
+        }
+        #[cfg(unix)]
+        for pid in window_pids(self.env) {
+            let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).stdin(Stdio::null()).status();
         }
         let _ = self.env.command(self.env.core()).args(["server", "stop"]).stdin(Stdio::null()).output();
         let _ = std::fs::remove_dir_all(&self.env.root);
@@ -288,23 +346,66 @@ fn a_shell_launch_opens_hyperox_in_its_folder() {
     for dir in [&env.home, &a, &b, &c] {
         std::fs::create_dir_all(dir).unwrap();
     }
-    let mut cleanup = Cleanup { env: &env, window: None };
+    let mut cleanup = Cleanup { env: &env, launch: None };
 
     // AC1: not running; from a shell in A the window opens on a focused local space in A.
-    cleanup.window = Some(Launch::start(in_shell(&env, &a)));
+    #[cfg(unix)]
+    let launched = Instant::now();
+    cleanup.launch = Some(Launch::start(in_shell(&env, &a)));
+    // LF-DETACH AC-D1, Linux and macOS: the launch lets go of the terminal at once (the
+    // window is a detached copy). Windows: the launch is the window, a window app the
+    // shell doesn't wait for, and it lets go of the console instead.
+    #[cfg(unix)]
+    {
+        let launch = cleanup.launch.as_mut().unwrap();
+        let status = launch.wait(20).unwrap_or_else(|| panic!("the first launch still holds the terminal after 20 s; output: {}", launch.output()));
+        assert!(status.success(), "{status:?}: {}", launch.output());
+        eprintln!("the first launch exited after {:?}", launched.elapsed());
+    }
     let world = wait_for(&env, 240, |w| active(w).is_some_and(|s| s["machine"].is_null() && s["folder"].as_str().is_some_and(|f| names(f, &a))));
-    let world = world.unwrap_or_else(|| panic!("no active space in {} after the first launch; output: {}", a.display(), cleanup.window.as_ref().unwrap().output()));
+    let world = world.unwrap_or_else(|| panic!("no active space in {} after the first launch; output: {}", a.display(), cleanup.launch.as_ref().unwrap().output()));
     assert!(active(&world).is_some_and(|s| names(s["folder"].as_str().unwrap(), &a)), "{world:#}");
+    // LF-QUIET AC-Q1: the window is up and logging by now; the terminal has the started line and nothing else.
     let started = format!("HyperOx started in {}.", seen(&a));
-    let window_out = cleanup.window.as_ref().unwrap().output();
-    assert!(window_out.contains(&started), "expected {started:?} in {window_out:?}");
+    let window_out = cleanup.launch.as_ref().unwrap().output();
+    assert_eq!(terminal_lines(&window_out), [started.clone()], "expected only {started:?} in {window_out:?}");
+
+    // LF-DETACH AC-D2, Linux and macOS: the terminal is gone (`script` exited and closed
+    // its pty); the window has no controlling terminal, is in a session of its own,
+    // and still answers.
+    #[cfg(unix)]
+    {
+        let pids = window_pids(&env);
+        assert!(!pids.is_empty(), "no detached window found after {:?}", launched.elapsed());
+        for pid in &pids {
+            let tty = Command::new("ps").args(["-o", "tty=", "-p", &pid.to_string()]).output().unwrap();
+            let tty = String::from_utf8_lossy(&tty.stdout).trim().to_owned();
+            assert!(tty == "?" || tty == "??", "window {pid} has the terminal {tty:?}");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // Field 6 of /proc/<pid>/stat; the 4th after `(comm)`, which may hold spaces.
+            let session = |pid: &str| {
+                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+                stat.rsplit_once(')').unwrap().1.split_whitespace().nth(3).unwrap().to_owned()
+            };
+            let own = session("self");
+            for pid in &pids {
+                assert_ne!(session(&pid.to_string()), own, "window {pid} is in the test's session");
+            }
+            assert!(pids.iter().any(|p| session(&p.to_string()) == p.to_string()), "no window leads its own session: {pids:?}");
+        }
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(env.ls().is_some(), "the window went away with the terminal");
+    }
 
     // AC2: running; from B the same window shows B, and the launch says so and exits 0.
     let mut second = Launch::start(in_shell(&env, &b));
     let status = second.wait(90).expect("the second launch did not exit");
     assert!(status.success(), "{status:?}: {}", second.output());
+    // LF-QUIET AC-Q2: that line and nothing else.
     let running = format!("HyperOx is already running. Opened {}.", seen(&b));
-    assert!(second.output().contains(&running), "expected {running:?} in {:?}", second.output());
+    assert_eq!(terminal_lines(&second.output()), [running.clone()], "expected only {running:?} in {:?}", second.output());
     let world = wait_for(&env, 30, |w| active(w).is_some_and(|s| s["folder"].as_str().is_some_and(|f| names(f, &b))));
     let world = world.expect("the window answers ls");
     assert!(active(&world).is_some_and(|s| s["machine"].is_null() && names(s["folder"].as_str().unwrap(), &b)), "{world:#}");
@@ -318,7 +419,8 @@ fn a_shell_launch_opens_hyperox_in_its_folder() {
     let mut third = Launch::start(in_shell(&env, &again));
     let status = third.wait(90).expect("the third launch did not exit");
     assert!(status.success(), "{status:?}: {}", third.output());
-    assert!(third.output().contains("HyperOx is already running. Opened "), "{}", third.output());
+    let lines = terminal_lines(&third.output());
+    assert!(lines.len() == 1 && lines[0].starts_with("HyperOx is already running. Opened "), "{}", third.output());
     let world = wait_for(&env, 30, |w| active(w).is_some_and(|s| s["folder"].as_str().is_some_and(|f| names(f, &a)))).expect("the window answers ls");
     assert!(active(&world).is_some_and(|s| names(s["folder"].as_str().unwrap(), &a)), "{world:#}");
     assert_eq!(local_spaces_in(&world, &a).len(), 1, "{world:#}");
@@ -338,9 +440,20 @@ fn a_shell_launch_opens_hyperox_in_its_folder() {
 
     // Quit; nothing of HyperOx is left running.
     let _ = env.command(EXE).args(["do", "app.quit"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
-    let mut window = cleanup.window.take().unwrap();
-    let status = window.wait(60);
-    assert!(status.is_some(), "HyperOx did not quit; output: {}", window.output());
+    #[cfg(windows)]
+    {
+        let mut window = cleanup.launch.take().unwrap();
+        let status = window.wait(60);
+        assert!(status.is_some(), "HyperOx did not quit; output: {}", window.output());
+    }
+    #[cfg(unix)]
+    {
+        let until = Instant::now() + Duration::from_secs(60);
+        while !window_pids(&env).is_empty() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert!(window_pids(&env).is_empty(), "HyperOx did not quit: {:?} still running", window_pids(&env));
+    }
     assert!(env.ls().is_none(), "a window still answers after quit");
     let stopped = env.command(env.core()).args(["server", "stop"]).stdin(Stdio::null()).output().unwrap();
     eprintln!("h0x-core server stop: {} {}{}", stopped.status, String::from_utf8_lossy(&stopped.stdout), String::from_utf8_lossy(&stopped.stderr));
