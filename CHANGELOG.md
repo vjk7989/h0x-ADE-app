@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-11-11
+
+Security release from the final QA round. Bundles h0x-core 0.1.14.
+
+### Security
+
+- Terminal engine updated to Ghostty 1.4.0, which fixes two terminal-escape security issues (GHSA-jqr7, GHSA-w9q4).
+- The mods script engine is updated to QuickJS-ng 0.16.2, which fixes known memory-safety bugs.
+- Installers only download over https from the official release pages, install the core version this app was tested with, and check the app archive's signature before unpacking it. The setup screen installs the core with its signature check on, and no longer suggests piping a script into your shell.
+
+### Changed
+
+- The Info link points to Buckleson (https://github.com/buckleson).
+- On a first run the automatic update check waits until the welcome screen is closed. "Check now" and turning the check off work as before.
+- Mods' commands find h0x-core on their own PATH; the app no longer changes its own PATH while running.
+
 ## [0.1.14] - 2026-11-10
 
 Performance release. Bundles h0x-core 0.1.13 (opt-in `keep_awake` in core's config.toml).
