@@ -254,12 +254,9 @@ fn outgoing_message<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<Message> {
     let bytes = TypedArray::<u8>::from_js(ctx, value).map_err(|_| {
         Exception::throw_type(ctx, "WebSocket.write(data) expects a string or Uint8Array")
     })?;
-    // SAFETY: the slice is copied before any JavaScript can run.
-    let bytes = unsafe { bytes.as_bytes() }
-        .ok_or_else(|| {
-            Exception::throw_type(ctx, "WebSocket.write(data) received a detached Uint8Array")
-        })?
-        .to_vec();
+    let bytes = host::with_view_bytes(ctx, &bytes, <[u8]>::to_vec).ok_or_else(|| {
+        Exception::throw_type(ctx, "WebSocket.write(data) received a detached Uint8Array")
+    })?;
     if bytes.len() > MESSAGE_LIMIT {
         return Err(Exception::throw_range(
             ctx,

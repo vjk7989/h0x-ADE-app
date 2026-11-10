@@ -96,7 +96,81 @@ pub fn install(_ctx: &Ctx<'_>, module: &Object<'_>) -> JsResult<()> {
     // `localStorage` and `sessionStorage` go on `window`, where a browser puts
     // them. The prelude assembles them from these.
     install_storage(ctx)?;
+    capture_view_byte_length(ctx)?;
     Ok(())
+}
+
+/// HyperOx (FX-A2): the native `%TypedArray%.prototype.byteLength` getter, taken before any mod
+/// code runs, so reading a view's live length never goes through a property a mod can replace.
+struct ViewByteLength<'js>(rquickjs::Function<'js>);
+
+// SAFETY: the only lifetime in the type is the one `Changed` swaps.
+unsafe impl<'js> rquickjs::JsLifetime<'js> for ViewByteLength<'js> {
+    type Changed<'to> = ViewByteLength<'to>;
+}
+
+fn capture_view_byte_length<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
+    let getter: rquickjs::Function<'js> = ctx.eval(
+        "Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'byteLength').get",
+    )?;
+    let _ = ctx.store_userdata(ViewByteLength(getter));
+    Ok(())
+}
+
+/// HyperOx (FX-A2): runs `read` on the bytes a Uint8Array covers right now, or returns `None` for a
+/// detached or out-of-bounds view.
+///
+/// quickjs-ng reports a view's length as it was at creation, so for a view tracking a resizable
+/// buffer `TypedArray::as_bytes` sends a stale prefix after a grow and refuses a valid view after
+/// a shrink. This takes the offset from the engine and the live length from the native getter, and
+/// slices the buffer's current storage. Nothing here runs script (no own-property getter, no proxy
+/// trap), and `read` must not either: the slice dies the moment script runs.
+pub(super) fn with_view_bytes<'js, R>(
+    ctx: &Ctx<'js>,
+    view: &TypedArray<'js, u8>,
+    read: impl FnOnce(&[u8]) -> R,
+) -> Option<R> {
+    let getter = ctx.userdata::<ViewByteLength>()?.0.clone();
+    let raw = view.as_value().as_raw();
+    let mut offset: rquickjs::qjs::size_t = 0;
+    // SAFETY: `raw` is a live value of this context; null out-pointers are allowed.
+    let buffer = unsafe {
+        rquickjs::qjs::JS_GetTypedArrayBuffer(
+            ctx.as_raw().as_ptr(),
+            raw,
+            &mut offset,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    // SAFETY: `buffer` is the engine's result for this context, owned by us from here.
+    let buffer = unsafe { Value::from_raw(ctx.clone(), buffer) };
+    if buffer.is_exception() {
+        // Detached or out of bounds: the engine threw, and the host refuses instead.
+        drop(ctx.catch());
+        return None;
+    }
+    let length = getter
+        .call::<_, f64>((rquickjs::function::This(view.as_value().clone()),))
+        .ok()? as usize;
+    let mut size: rquickjs::qjs::size_t = 0;
+    // SAFETY: `buffer` is an ArrayBuffer or SharedArrayBuffer of this context.
+    let data = unsafe { rquickjs::qjs::JS_GetArrayBuffer(ctx.as_raw().as_ptr(), &mut size, buffer.as_raw()) };
+    let (offset, size) = (offset as usize, size as usize);
+    if data.is_null() {
+        // An empty buffer has no storage; anything else here is a pending error to refuse on.
+        if ctx.has_exception() {
+            drop(ctx.catch());
+            return None;
+        }
+        return (length == 0).then(|| read(&[]));
+    }
+    if offset.checked_add(length).is_none_or(|end| end > size) {
+        return None;
+    }
+    // SAFETY: `offset + length` is inside the buffer's live storage, which stays put until script
+    // runs, and `read` is the only code that runs while the slice lives.
+    Some(read(unsafe { std::slice::from_raw_parts(data.add(offset), length) }))
 }
 
 /// Hands a URL to whatever the system opens URLs with.
@@ -194,15 +268,13 @@ pub(super) fn write_file<'js>(
                 "fs.writeFile(path, contents) expects a string or Uint8Array",
             )
         })?;
-        // SAFETY: the slice is copied before any JavaScript can run.
-        unsafe { bytes.as_bytes() }
+        with_view_bytes(&ctx, &bytes, <[u8]>::to_vec)
             .ok_or_else(|| {
                 Exception::throw_type(
                     &ctx,
                     "fs.writeFile(path, contents) received a detached Uint8Array",
                 )
             })?
-            .to_vec()
     };
     let grant = grant(&ctx, &path, Access::Write)?;
     let name = grant.describe();
