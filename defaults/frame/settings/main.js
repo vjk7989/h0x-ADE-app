@@ -14,6 +14,7 @@ const SECTIONS = [
   { id: "alerts", title: "Alerts", icon: "bell" },
   { id: "mods", title: "Mods", icon: "shield" },
   { id: "updates", title: "Updates", icon: "refresh" },
+  { id: "info", title: "Info", icon: "shield" },
 ];
 
 const LOOKS = { main: "HyperOx", terminals: "Terminals", win98: "HyperOx 98" };
@@ -1066,6 +1067,20 @@ export default class Settings extends View {
       .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("HyperOx looks for both every hour (unless automatic checks are off) and tells you in the corner. h0x-core runs your terminals, so they keep running through its updates."));
   }
 
+  info(t) {
+    const line = (text) => div().text_size(13).line_height("20px").text_color(t.dim).child(text);
+    return v_flex()
+      .w_full()
+      .child(this.heading(t, "HyperOx"))
+      .child(this.row(t, "HyperOx by Buckleson Group", "https://github.com/buckleson", div()))
+      .child(div().h(18))
+      .child(this.heading(t, "Source"))
+      .child(v_flex().gap(4)
+        .child(line("App: https://github.com/vjk7989/h0x-ADE-app"))
+        .child(line("Core: https://github.com/vjk7989/h0x-ADE-core"))
+        .child(line("Runtime: https://github.com/vjk7989/h0x-ADE-Runtime")));
+  }
+
   // ----------------------------------------------------------------------
 
   render(cx) {
@@ -1166,7 +1181,9 @@ export default class Settings extends View {
                         ? this.alerts(t)
                       : this.section === "mods"
                         ? this.mods(t)
-                        : this.updates(t),
+                        : this.section === "info"
+                          ? this.info(t)
+                          : this.updates(t),
                   ),
               ),
           )

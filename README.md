@@ -82,7 +82,7 @@ Open **Settings → Machines** and pick a host from your SSH config. HyperOx con
 ## Make it yours
 
 - **Command palette**: `Ctrl+Shift+P` (`Cmd+Shift+P` on macOS) lists every command with its arguments.
-- **Settings**: look, sounds, machines, updates, and the raw `settings.json` in your app home.
+- **Settings**: look, sounds, machines, updates, info, and the raw `settings.json` in your app home.
 - **Layouts**: HyperOx (the default), Terminals (just terminals), and HyperOx 98 (a whole desktop in one mod). Clone one and change anything.
 - **Mods** are small JavaScript programs that draw panels, overlays and windows. The shipped ones are examples; your agent can write new ones. `AGENTS.md` in your app home is the guide, written for agents and people alike.
 - **Keys**: `keys.json` in your app home rebinds anything; see [the keys section](defaults/AGENTS.md#keys-keysjson) of the mod guide for the format, including JSON objects for named, typed command arguments.
@@ -123,6 +123,10 @@ cargo test --locked
 ```
 
 The app needs a running `h0x-core` of the matching generation; `distribution/core-version` names the release it expects. Mods are plain files under `defaults/`: edit, save, and the running window reloads them.
+
+## Info
+
+HyperOx by Buckleson Group: https://github.com/buckleson
 
 ## Part of HyperOx
 

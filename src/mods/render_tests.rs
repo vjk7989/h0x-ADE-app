@@ -1239,12 +1239,18 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let start = Instant::now();
     let staged = Staged::new();
-    for section in ["look", "alerts", "mods", "updates"] {
+    for section in ["look", "alerts", "mods", "updates", "info"] {
         let mut p = props();
         p["section"] = json!(section);
         let tree = describe(cx, &staged, "frame/settings", true, p, updates("current", "current"), None).unwrap();
         if section == "mods" {
             assert!(tree.contains("No mod has asked yet"), "an empty mods list says so: {tree}");
+        }
+        if section == "info" {
+            assert!(
+                tree.contains("HyperOx by Buckleson Group") && tree.contains("https://github.com/buckleson"),
+                "the Info page names the maker and links to them: {tree}"
+            );
         }
     }
     for app in ["source", "current", "ready"] {
