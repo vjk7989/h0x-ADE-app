@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { core, run, theme, themes, fonts, updates, settings, layouts, shared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, props, closeOverlay, window } from "h0x";
+import { core, run, theme, themes, fonts, updates, settings, layouts, shared, appHome, coreConfig, readTextFile, writeTextFile, removeAppFile, playSound, props, closeOverlay, window } from "h0x";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -48,6 +48,7 @@ export default class Settings extends View {
     this.raw = null;
     this.unreadable = false;
     this.error = null;
+    this.keepAwake = false;
     this.previews = {}; // layout name -> its "preview" picture
     this.previewsOf = "";
     this.machineList = null;
@@ -78,6 +79,7 @@ export default class Settings extends View {
     this.handle.focus();
     cx.spawn(async (cx) => {
       await this.load();
+      await this.loadKeepAwake();
       if (this.section === "machines") await this.loadMachines();
       cx.notify();
     });
@@ -170,6 +172,64 @@ export default class Settings extends View {
           break;
         } catch {}
       }
+      cx.notify();
+    });
+  }
+
+  // Core's own config.toml (keep_awake). Edited line by line so every other byte stays as it was.
+  keepAwakeLine(text) {
+    const parts = text.split("\n");
+    for (let i = 0; i < parts.length; i++) {
+      if (/^\s*\[/.test(parts[i])) break;
+      if (/^\s*keep_awake\s*=/.test(parts[i])) return { parts, i };
+    }
+    return { parts, i: -1 };
+  }
+
+  async loadKeepAwake() {
+    try {
+      const text = (await readTextFile(coreConfig())) ?? "";
+      const { parts, i } = this.keepAwakeLine(text);
+      this.keepAwake = i >= 0 && /^\s*keep_awake\s*=\s*true\s*(#.*)?\r?$/.test(parts[i]);
+    } catch {
+      this.keepAwake = false;
+    }
+  }
+
+  setKeepAwake(on, cx) {
+    cx.spawn(async (cx) => {
+      let last = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        let raw;
+        try {
+          raw = await readTextFile(coreConfig());
+        } catch {
+          this.error = "h0x-core's config.toml can't be read, so nothing was changed. Fix the file, then try again.";
+          last = null;
+          break;
+        }
+        const text = raw ?? "";
+        const { parts, i } = this.keepAwakeLine(text);
+        let next;
+        if (i >= 0) {
+          const bom = i === 0 && parts[0].startsWith("\uFEFF") ? "\uFEFF" : "";
+          parts[i] = `${bom}keep_awake = ${on}${parts[i].endsWith("\r") ? "\r" : ""}`;
+          next = parts.join("\n");
+        } else {
+          const bom = text.startsWith("\uFEFF") ? "\uFEFF" : "";
+          next = `${bom}keep_awake = ${on}${text.includes("\r\n") ? "\r\n" : "\n"}${text.slice(bom.length)}`;
+        }
+        try {
+          await writeTextFile(coreConfig(), next, raw);
+          this.keepAwake = on;
+          this.error = null;
+          last = null;
+          break;
+        } catch (e) {
+          last = e;
+        }
+      }
+      if (last) this.error = String(last?.message ?? last);
       cx.notify();
     });
   }
@@ -580,6 +640,14 @@ export default class Settings extends View {
           "Scrollback lines per pane",
           "How far back each terminal pane keeps its output (1,000 to 100,000). Wide panes or long wrapped lines keep fewer. Applies to panes opened after the change.",
           this.stepper(t, "st-scrollback", String(lines).replace(/\B(?=(\d{3})+(?!\d))/g, ","), (_e, cx) => this.change((p) => { p.scrollback_lines = stopAt(-1); }, cx), (_e, cx) => this.change((p) => { p.scrollback_lines = stopAt(1); }, cx)),
+        ),
+      )
+      .child(
+        this.row(
+          t,
+          "Keep this PC awake while agents work",
+          "While an agent in a terminal on this PC is working, the PC doesn't go to sleep. The display can still turn off and the screen still locks. Saved as keep_awake in h0x-core's config.toml.",
+          this.toggle(t, "st-keep-awake", this.keepAwake, (_e, cx) => this.setKeepAwake(!this.keepAwake, cx)),
         ),
       );
   }
