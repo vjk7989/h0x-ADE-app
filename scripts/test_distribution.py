@@ -162,7 +162,7 @@ printf 'dev PATH added' >> "$3"''')
         installer = self.bin / "install.sh"
         installer.write_text(script)
         env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", TEST_OS="Darwin",
-                   TEST_ARCH="arm64", HOME=str(home))
+                   TEST_ARCH="arm64", HOME=str(home), H0X_ADE_RELEASES_URL="https://releases.example")
         result = subprocess.run(["sh", str(installer)], cwd=ROOT, env=env,
                                 capture_output=True, text=True, check=False)
         return result, installed.read_bytes(), log.read_text().splitlines(), plist_log.exists(), plist

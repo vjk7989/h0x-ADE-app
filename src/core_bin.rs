@@ -163,11 +163,15 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
     Some(out.into())
 }
 
-/// Installs the core's latest release with its own installer (into
-/// ~/.local/bin, or H0X_CORE_INSTALL_DIR), then finds it. Err: what went wrong.
+/// Installs the core version this app pins (distribution/core-version, never
+/// "latest") with its own installer (into ~/.local/bin, or H0X_CORE_INSTALL_DIR),
+/// then finds it. Err: what went wrong.
 /// The script is downloaded (https, GitHub only) to a file, run only if its
 /// `.minisig` is the release key's signature, and run as one argument; values
-/// reach it through the environment, never a command string.
+/// reach it through the environment, never a command string. The installer then
+/// checks the release archive's signature itself, unless a releases site was
+/// set by H0X_CORE_RELEASES_URL (inherited as it is, never set here: a value
+/// set here would switch that check off).
 pub fn install() -> Result<PathBuf, String> {
     if let Some(dir) = std::env::var_os("H0X_CORE_INSTALL_DIR").map(PathBuf::from).filter(|d| !d.is_absolute()) {
         return Err(format!("H0X_CORE_INSTALL_DIR must be an absolute folder, not {}", dir.display()));
@@ -180,9 +184,10 @@ pub fn install() -> Result<PathBuf, String> {
     std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
     let file = work.join(script);
     // Run a fresh copy of the checked bytes, not the downloaded path.
-    let result = crate::update::download(&format!("{releases}/latest/download/{script}"), &file, "120").and_then(|bytes| {
+    let pinned = crate::core_link::core_min();
+    let result = crate::update::download(&format!("{releases}/download/v{pinned}/{script}"), &file, "120").and_then(|bytes| {
         let (sealed_dir, sealed) = crate::update::seal(&home, &bytes, script)?;
-        let ran = run_installer(&sealed, &releases);
+        let ran = run_installer(&sealed, pinned);
         let _ = std::fs::remove_dir_all(&sealed_dir);
         ran
     });
@@ -200,7 +205,7 @@ pub fn install() -> Result<PathBuf, String> {
     version(&bin).map(|_| bin).ok_or_else(|| "installed, but h0x-core doesn't run".into())
 }
 
-fn run_installer(file: &Path, releases: &str) -> Result<(), String> {
+fn run_installer(file: &Path, version: &str) -> Result<(), String> {
     let mut cmd = if cfg!(windows) {
         // Absolute: a powershell.exe earlier on PATH must not run the installer.
         let root = std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?;
@@ -212,7 +217,7 @@ fn run_installer(file: &Path, releases: &str) -> Result<(), String> {
         c.arg(file);
         c
     };
-    let out = cmd.env("H0X_CORE_RELEASES_URL", releases).stdin(Stdio::null()).output().map_err(|e| format!("cannot run the installer: {e}"))?;
+    let out = cmd.env("H0X_CORE_VERSION", version).stdin(Stdio::null()).output().map_err(|e| format!("cannot run the installer: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
         return Err(if err.is_empty() { "the installer failed".into() } else { err });
