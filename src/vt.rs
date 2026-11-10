@@ -2746,7 +2746,9 @@ mod tests {
                 vt.resize(80, rows, 8, 16);
                 let f = vt.frame();
                 assert!(f.rows.iter().all(|row| row.len() == 80), "{case}");
-                assert!(f.rows.iter().any(|row| text(row).starts_with("ok")), "{case}");
+                // Widening may join "ok" to history it was wrapped from, so it need not start a row.
+                let screen: Vec<String> = f.rows.iter().map(|row| text(row)).collect();
+                assert!(screen.iter().any(|row| row.contains("ok")), "{case}: {screen:?}");
             }
         }
     }
