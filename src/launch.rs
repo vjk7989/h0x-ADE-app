@@ -192,6 +192,62 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// `init_with` sets a once-only global, so each case runs in its own copy of
+    /// this test binary: this test, with the folder given and wanted in these.
+    const INIT_WITH: &str = "H0X_ADE_TEST_INIT_WITH";
+    const INIT_WITH_GIVEN: &str = "H0X_ADE_TEST_INIT_WITH_GIVEN";
+    const INIT_WITH_WANT: &str = "H0X_ADE_TEST_INIT_WITH_WANT";
+
+    #[test]
+    fn a_launched_in_case_in_its_own_process() {
+        // Only as the child of `a_launched_in_folder_is_kept_only_while_it_is_an_existing_folder`.
+        if std::env::var_os(INIT_WITH).is_none() {
+            return;
+        }
+        super::init_with(std::env::var(INIT_WITH_GIVEN).ok());
+        assert_eq!(super::folder(), std::env::var(INIT_WITH_WANT).ok());
+    }
+
+    #[test]
+    fn a_launched_in_folder_is_kept_only_while_it_is_an_existing_folder() {
+        let dir = temp("launched-in");
+        let exact = dir.to_str().unwrap().to_owned();
+        let file = dir.join("file.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let file = file.to_str().unwrap().to_owned();
+        let missing = dir.join("missing").to_str().unwrap().to_owned();
+        // A trailing separator (a backslash on Windows) stays as given.
+        let trailing = format!("{exact}{}", std::path::MAIN_SEPARATOR);
+        let cases = [
+            (None, None),
+            (Some(String::new()), None),
+            (Some(missing), None),
+            (Some(file), None),
+            (Some(exact.clone()), Some(exact.clone())),
+            (Some(trailing.clone()), Some(trailing)),
+        ];
+        for (given, want) in cases {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["launch::tests::a_launched_in_case_in_its_own_process", "--exact", "--test-threads=1"])
+                .env(INIT_WITH, "1")
+                .env_remove(INIT_WITH_GIVEN)
+                .env_remove(INIT_WITH_WANT);
+            if let Some(given) = &given {
+                child.env(INIT_WITH_GIVEN, given);
+            }
+            if let Some(want) = &want {
+                child.env(INIT_WITH_WANT, want);
+            }
+            let out = child.output().unwrap();
+            let report = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success(), "{given:?} -> {want:?}: {report}");
+            // The case really ran: a filter that matches nothing passes too.
+            assert!(report.contains("1 passed"), "{given:?}: {report}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn the_terminal_lines_name_the_folder_or_leave_it_out() {
         assert_eq!(started_line(Some("/home/me/proj")), "HyperOx started in /home/me/proj.");
