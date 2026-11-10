@@ -982,14 +982,13 @@ fn exec_limit(options: Option<&HostValue>) -> Result<Duration, HostError> {
 
 fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
     use std::io::Read;
-    let mut child = crate::spawn::command(command)
-        .args(args)
-        .current_dir(cwd.map(PathBuf::from).unwrap_or_else(home))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot run {command}: {e}"))?;
+    let mut cmd = crate::spawn::command(command);
+    cmd.args(args).current_dir(cwd.map(PathBuf::from).unwrap_or_else(home)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // The chosen core's folder first, for mods' `core()`, without touching this process's PATH.
+    if let Some(path) = crate::core_bin::path_with_core() {
+        cmd.env("PATH", path);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("cannot run {command}: {e}"))?;
     // Bounded: a chatty command can't fill memory; the rest is drained and dropped.
     let drain = |r: Box<dyn Read + Send>| {
         std::thread::spawn(move || {

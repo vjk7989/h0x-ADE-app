@@ -33,21 +33,23 @@ pub fn path() -> PathBuf {
     BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().unwrap_or_else(|| PathBuf::from("h0x-core"))
 }
 
-/// Uses this core from now on, and puts its folder first on PATH so mods'
-/// `core()` and anything the app runs find the same one.
+/// Uses this core from now on.
 pub fn use_core(bin: PathBuf) {
-    // Only an absolute folder goes on PATH: a relative or empty one means "here".
-    if let Some(dir) = bin.parent().filter(|d| d.is_absolute()) {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
-        dirs.extend(std::env::split_paths(&path).filter(|d| d != dir));
-        if let Ok(joined) = std::env::join_paths(dirs) {
-            // SAFETY: set at start or from the setup screen, before the main window
-            // (and its mods) read the environment.
-            unsafe { std::env::set_var("PATH", joined) };
-        }
-    }
     *BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bin);
+}
+
+/// The PATH for the programs mods start: the chosen core's folder first, so
+/// their `core()` finds the same core the app runs. Given to those children,
+/// never set in this process: `set_var` while other threads run is a data race
+/// on unix. Only an absolute folder goes on it (a relative or empty one means
+/// "here"); None if there is none.
+pub fn path_with_core() -> Option<std::ffi::OsString> {
+    let bin = BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()?;
+    let dir = bin.parent().filter(|d| d.is_absolute())?;
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
+    dirs.extend(std::env::split_paths(&path).filter(|d| d != dir));
+    std::env::join_paths(dirs).ok()
 }
 
 /// Finder and Dock launches don't inherit the person's shell PATH.
@@ -335,9 +337,12 @@ echo '{hello}'
         }
         assert!(readers.into_iter().all(|r| r.join().unwrap()));
         assert_eq!(path(), a);
-        // Each replacement moves its folder to the front without piling up PATH entries.
+        // Each replacement moves its folder to the front without piling up PATH entries,
+        // and the process's own PATH is left alone.
+        let before = std::env::var_os("PATH");
         use_core(b.clone());
-        let dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH").unwrap()).collect();
+        assert_eq!(std::env::var_os("PATH"), before);
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path_with_core().unwrap()).collect();
         assert_eq!(dirs[0], b.parent().unwrap());
         assert_eq!(dirs.iter().filter(|d| d.as_path() == a.parent().unwrap()).count(), 1, "{dirs:?}");
         assert_eq!(dirs.iter().filter(|d| d.as_path() == b.parent().unwrap()).count(), 1, "{dirs:?}");
@@ -378,8 +383,7 @@ echo '{hello}'
         // SAFETY: this child process runs only this test.
         unsafe { std::env::set_var("PATH", "/usr/bin:/bin") };
         use_core(PathBuf::from("h0x-core"));
-        let path = std::env::var_os("PATH").unwrap();
-        assert!(std::env::split_paths(&path).all(|d| d.is_absolute()), "a relative core put {path:?} on PATH");
+        assert_eq!(path_with_core(), None, "a relative core put a folder on PATH");
         // A relative install folder is refused before anything is downloaded.
         // SAFETY: this child process runs only this test.
         unsafe { std::env::set_var("H0X_CORE_INSTALL_DIR", "relative/bin") };
