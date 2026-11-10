@@ -31,8 +31,8 @@ class DistributionTests(unittest.TestCase):
         path.write_text("#!/bin/sh\n" + body + "\n")
         path.chmod(0o755)
 
-    def run_script(self, script, os_name, arch, *args):
-        env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", TEST_OS=os_name, TEST_ARCH=arch)
+    def run_script(self, script, os_name, arch, *args, **extra):
+        env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", TEST_OS=os_name, TEST_ARCH=arch, **extra)
         return subprocess.run(
             [str(ROOT / script), *args], cwd=ROOT, env=env,
             capture_output=True, text=True, check=False,
@@ -72,11 +72,31 @@ class DistributionTests(unittest.TestCase):
   shift
 done
 exit 97''')
-                result = self.run_script("distribution/install.sh", "Darwin", "x86_64")
+                result = self.run_script("distribution/install.sh", "Darwin", "x86_64", H0X_ADE_RELEASES_URL="https://releases.example")
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("Installing HyperOx test for macos-aarch64", result.stdout)
                 self.assertIn("download is damaged", result.stderr)
                 self.assertNotIn("Intel Macs", result.stderr)
+
+    def test_installer_refuses_a_download_off_github_and_needs_https(self):
+        for url in ("https://evil.example/h0x-ade-linux-x86_64.tar.gz", "http://github.com/x/h0x-ade-linux-x86_64.tar.gz"):
+            with self.subTest(url=url):
+                manifest = Path(self.work.name) / "latest.json"
+                manifest.write_text('{"version":"1.0.0","core_min":"0.1.13","targets":{"linux-x86_64":{"url":"%s","sha256":"x"}}}' % url)
+                log = Path(self.work.name) / "urls"
+                log.unlink(missing_ok=True)
+                self.stub("curl", f'''url=; out=; prev=
+for a; do
+  if [ "$prev" = -o ]; then out=$a; else case $a in -*) ;; *) url=$a ;; esac; fi
+  prev=$a
+done
+echo "$url" >> "{log}"
+case $url in */latest.json) cp "{manifest}" "$out"; exit 0 ;; esac
+exit 22''')
+                result = self.run_script("distribution/install.sh", "Linux", "x86_64")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("refusing to download", result.stderr)
+                self.assertEqual(len(log.read_text().splitlines()), 1, "only the manifest was fetched")
 
     def download_url(self, url, releases="https://releases.example", installed=False):
         """The URL install.sh downloads the app from, for a manifest giving `url`."""
