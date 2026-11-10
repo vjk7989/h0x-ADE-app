@@ -1,0 +1,18 @@
+# cargo deny check advisories: CI fails on a dependency with a security
+# advisory (RustSec). Licenses are tracked by about.toml and THIRD-PARTY-NOTICES,
+# and the app takes git dependencies on purpose (gpui, the mods' JavaScript
+# runtime), so only advisories are checked here.
+
+[graph]
+all-features = true
+
+[advisories]
+# Unmaintained crates warn; known vulnerabilities fail.
+unmaintained = "workspace"
+ignore = [
+    # rsa (Marvin timing attack) comes in through the mods' WebCrypto (the
+    # quickjs-jit-stdlib crypto module); no fixed release exists. Revisit when
+    # that module is replaced.
+    { id = "RUSTSEC-2023-0071", reason = "rsa via quickjs-jit-stdlib crypto: no fix released, replacing the module is pending" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained; the text stack (gpui) depends on it, no replacement yet" },
+]
