@@ -182,23 +182,31 @@ fn parse_body<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<Vec<u8>> {
             "fetch(url, options).body expects a string or Uint8Array",
         )
     })?;
-    let bytes = bytes.as_bytes().ok_or_else(|| {
+    // The length is checked on the live bytes before anything is copied.
+    host::with_view_bytes(ctx, &bytes, |live| {
+        (live.len() as u64 <= MAX_BODY_BYTES).then(|| live.to_vec())
+    })
+    .ok_or_else(|| {
         Exception::throw_type(
             ctx,
             "fetch(url, options).body received a detached Uint8Array",
         )
-    })?;
-    limited_body(ctx, bytes.to_vec())
+    })?
+    .ok_or_else(|| body_limit_error(ctx))
 }
 
 fn limited_body<'js>(ctx: &Ctx<'js>, body: Vec<u8>) -> Result<Vec<u8>> {
     if body.len() as u64 > MAX_BODY_BYTES {
-        return Err(Exception::throw_range(
-            ctx,
-            &format!("fetch request body exceeded the {MAX_BODY_BYTES} byte limit"),
-        ));
+        return Err(body_limit_error(ctx));
     }
     Ok(body)
+}
+
+fn body_limit_error(ctx: &Ctx<'_>) -> rquickjs::Error {
+    Exception::throw_range(
+        ctx,
+        &format!("fetch request body exceeded the {MAX_BODY_BYTES} byte limit"),
+    )
 }
 
 fn authorize_request(

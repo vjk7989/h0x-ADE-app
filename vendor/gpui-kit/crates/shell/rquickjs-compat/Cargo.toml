@@ -11,7 +11,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-upstream = { package = "quickjs-jit", version = "0.12.11", git = "https://github.com/longbridge/quickjs-jit", rev = "96593cd7a54440ac060a391b8baea7e9a3cf1393", default-features = false }
+upstream = { package = "quickjs-jit", version = "0.14.1", git = "https://github.com/longbridge/quickjs-jit", rev = "de5d9bd16977b0d830a1328dfa4efd7feeed8b5e", default-features = false }
 
 [features]
 default = ["std"]

@@ -42,14 +42,14 @@ gpui-base = { workspace = true, features = ["inspector"] }
 gpui-fps.workspace = true
 
 # Keep the bindings, runtime, and LLRT compatibility facade on the same release.
-rquickjs = { package = "quickjs-jit", version = "0.12.11", git = "https://github.com/longbridge/quickjs-jit", rev = "96593cd7a54440ac060a391b8baea7e9a3cf1393", features = [
+rquickjs = { package = "quickjs-jit", version = "0.14.1", git = "https://github.com/longbridge/quickjs-jit", rev = "de5d9bd16977b0d830a1328dfa4efd7feeed8b5e", features = [
     "macro",
     "loader",
     "jit-abi",
 ], optional = true }
-rquickjs-jit = { package = "quickjs-jit-runtime", version = "0.12.11", git = "https://github.com/longbridge/quickjs-jit", rev = "96593cd7a54440ac060a391b8baea7e9a3cf1393", features = ["compiler"], optional = true }
+rquickjs-jit = { package = "quickjs-jit-runtime", version = "0.14.1", git = "https://github.com/longbridge/quickjs-jit", rev = "de5d9bd16977b0d830a1328dfa4efd7feeed8b5e", features = ["compiler"], optional = true }
 # The stdlib facade pins LLRT modules and shares our VM through rquickjs-compat.
-quickjs-jit-stdlib = { version = "0.12.7", git = "https://github.com/longbridge/quickjs-jit", rev = "605da483611a3548edb8c33fdff602e3f5f42076", optional = true }
+quickjs-jit-stdlib = { version = "0.14.1", git = "https://github.com/longbridge/quickjs-jit", rev = "de5d9bd16977b0d830a1328dfa4efd7feeed8b5e", optional = true }
 # The date type `gpui_base::Date` is built from, for the calendar binding. Same
 # version as `gpui-base`'s, because the two exchange `NaiveDate` values.
 chrono = "0.4.38"

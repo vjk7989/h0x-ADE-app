@@ -53,7 +53,7 @@
     },
     {
       "name": "QuickJS / quickjs-ng (embedded by quickjs-jit-sys)",
-      "source": "https://github.com/longbridge/quickjs-jit/tree/96593cd7a54440ac060a391b8baea7e9a3cf1393/sys/quickjs",
+      "source": "https://github.com/longbridge/quickjs-jit/tree/de5d9bd16977b0d830a1328dfa4efd7feeed8b5e/sys/quickjs",
       "files": [
         "licenses/QuickJS.txt",
         "licenses/QuickJS-source.txt"
