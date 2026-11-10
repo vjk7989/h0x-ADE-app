@@ -337,14 +337,15 @@ echo '{hello}'
         }
         assert!(readers.into_iter().all(|r| r.join().unwrap()));
         assert_eq!(path(), a);
-        // Each replacement moves its folder to the front without piling up PATH entries,
+        // Each replacement puts only its own folder in front, without piling up PATH entries,
         // and the process's own PATH is left alone.
         let before = std::env::var_os("PATH");
         use_core(b.clone());
         assert_eq!(std::env::var_os("PATH"), before);
         let dirs: Vec<PathBuf> = std::env::split_paths(&path_with_core().unwrap()).collect();
         assert_eq!(dirs[0], b.parent().unwrap());
-        assert_eq!(dirs.iter().filter(|d| d.as_path() == a.parent().unwrap()).count(), 1, "{dirs:?}");
+        // Only the core in use is added: a replaced core's folder is not left behind.
+        assert_eq!(dirs.iter().filter(|d| d.as_path() == a.parent().unwrap()).count(), 0, "{dirs:?}");
         assert_eq!(dirs.iter().filter(|d| d.as_path() == b.parent().unwrap()).count(), 1, "{dirs:?}");
     }
 
