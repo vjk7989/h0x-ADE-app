@@ -3,7 +3,7 @@ HyperOx third-party notices
 Regenerate with just notices. See licenses/README.md.
 
 Input-SHA256: b50404af835696c608d3c556ad0ed882e6468325e480ea093a5f35fdf34c2b4e Cargo.lock
-Input-SHA256: f996bbac9d2b229b5deebd11e4544738dcf0a4f7a1cd80c2615b1637bc527044 Cargo.toml
+Input-SHA256: f6f835e06ab29fb10330c1441a8cb704583aa4eb625d7d85599f3b64285fed94 Cargo.toml
 Input-SHA256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 LICENSE
 Input-SHA256: e58cb0de2dde300bcda769ca993fde2737f42c0274082f038621ab22975a49e2 about.toml
 Input-SHA256: 84a7a98c82140fb12c37fe42b93805baa16024cb3e5acc599b7ffe612c55d847 assets/fonts/LICENSE-SymbolsNerdFont.txt
