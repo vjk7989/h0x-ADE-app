@@ -25,6 +25,9 @@ proto='=https'
 [ -n "${H0X_ADE_RELEASES_URL:-}" ] && proto='=https,http'
 core_proto='=https'
 [ -n "${H0X_CORE_RELEASES_URL:-}" ] && core_proto='=https,http'
+# Said loudly: set in a profile and forgotten, either one turns a check off.
+[ -z "${H0X_ADE_RELEASES_URL:-}" ] || printf 'h0x-ade: WARNING: H0X_ADE_RELEASES_URL is set: downloads from that site are NOT signature-checked (unset it for a normal install).\n' >&2
+[ -z "${H0X_CORE_RELEASES_URL:-}" ] || printf 'h0x-ade: WARNING: H0X_CORE_RELEASES_URL is set: the core is downloaded from that site and its signature is NOT checked (unset it for a normal install).\n' >&2
 
 say() { printf '%s\n' "$*"; }
 fail() { say "h0x-ade: $*" >&2; exit 1; }
@@ -84,7 +87,17 @@ say "Installing HyperOx ${version:-} for $target..."
 asset=${url%%[?#]*}
 asset=${asset##*/}
 archive="$tmp/$asset"
-curl -fsSL --proto "$proto" --proto-redir "$proto" "$url" -o "$archive" || fail "download failed"
+# get PROTO URL OUT SITE: https only, redirects too; unless SITE (a test site)
+# is set, the URL it ended up at must be on GitHub as well.
+get() {
+  final=$(curl -fsSL --proto "$1" --proto-redir "$1" -w '%{url_effective}' -o "$3" "$2") || return 1
+  [ -n "$4" ] && return 0
+  case $final in
+    '' | https://github.com/* | https://objects.githubusercontent.com/* | https://release-assets.githubusercontent.com/*) ;;
+    *) rm -f "$3"; fail "refusing the download from $final: redirected off GitHub" ;;
+  esac
+}
+get "$proto" "$url" "$archive" "${H0X_ADE_RELEASES_URL:-}" || fail "download failed"
 [ "$(sha256 "$archive")" = "$want" ] || fail "download is damaged (checksum mismatch); try again"
 
 # The core: installed only if there's none yet, at the version this release
@@ -94,8 +107,8 @@ curl -fsSL --proto "$proto" --proto-redir "$proto" "$url" -o "$archive" || fail 
 core_present() { [ -e "$bin/h0x-core" ] || command -v h0x-core >/dev/null 2>&1; }
 ensure_core() {
   core_present && return 0
-  case $core_min in '' | *[!0-9.]*) return 1 ;; esac
-  curl -fsSL --proto "$core_proto" --proto-redir "$core_proto" "$core_releases/download/v$core_min/install.sh" -o "$tmp/core-install.sh" || return 1
+  printf '%s' "$core_min" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || return 1
+  get "$core_proto" "$core_releases/download/v$core_min/install.sh" "$tmp/core-install.sh" "${H0X_CORE_RELEASES_URL:-}" || return 1
   H0X_CORE_VERSION="$core_min" H0X_CORE_INSTALL_DIR="$bin" sh "$tmp/core-install.sh"
 }
 if [ -z "${H0X_ADE_RELEASES_URL:-}" ]; then
@@ -104,8 +117,9 @@ if [ -z "${H0X_ADE_RELEASES_URL:-}" ]; then
   # nothing from the download is unpacked before that.
   mkdir -p "$bin"
   ensure_core || fail "needs h0x-core $core_min to check the signature, and it did not install"
-  if [ -x "$bin/h0x-core" ]; then core="$bin/h0x-core"; else core=$(command -v h0x-core); fi
-  curl -fsSL --proto "$proto" --proto-redir "$proto" "${url%%[?#]*}.minisig" -o "$archive.minisig" || fail "no signature for $asset: ${url%%[?#]*}.minisig"
+  if [ -x "$bin/h0x-core" ]; then core="$bin/h0x-core"; else core=$(command -v h0x-core 2>/dev/null) || core=; fi
+  [ -n "$core" ] || fail "h0x-core is there but cannot run ($bin/h0x-core): fix or remove it, then run this again"
+  get "$proto" "${url%%[?#]*}.minisig" "$archive.minisig" "" || fail "no signature for $asset: ${url%%[?#]*}.minisig"
   "$core" update --from "$archive" --check >/dev/null || fail "$asset is not signed by the HyperOx release key, or h0x-core could not check it (see above; h0x-core 0.1.9 or newer is needed)"
 fi
 tar -xzf "$archive" -C "$tmp"

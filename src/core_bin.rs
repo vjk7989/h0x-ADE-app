@@ -48,7 +48,8 @@ pub fn path_with_core() -> Option<std::ffi::OsString> {
     let dir = bin.parent().filter(|d| d.is_absolute())?;
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
-    dirs.extend(std::env::split_paths(&path).filter(|d| d != dir));
+    // An empty or relative entry means "here": never carried over.
+    dirs.extend(std::env::split_paths(&path).filter(|d| d != dir && d.is_absolute()));
     std::env::join_paths(dirs).ok()
 }
 
@@ -204,7 +205,17 @@ pub fn install() -> Result<PathBuf, String> {
         }
     });
     let bin = core_in(&dir);
-    version(&bin).map(|_| bin).ok_or_else(|| "installed, but h0x-core doesn't run".into())
+    let installed = version(&bin).ok_or("installed, but h0x-core doesn't run")?;
+    if !is_pinned(&installed, pinned) {
+        return Err(format!("installed, but it is {installed}, not the pinned h0x-core {pinned}"));
+    }
+    Ok(bin)
+}
+
+/// The releases-site variables the core installer must not see: with one set it
+/// fetches from that site and skips the signature check. Test builds keep them (their stub sites).
+fn releases_site_vars(overrides: bool) -> &'static [&'static str] {
+    if overrides { &[] } else { &["H0X_CORE_RELEASES_URL", "H0X_ADE_RELEASES_URL"] }
 }
 
 fn run_installer(file: &Path, version: &str) -> Result<(), String> {
@@ -219,12 +230,21 @@ fn run_installer(file: &Path, version: &str) -> Result<(), String> {
         c.arg(file);
         c
     };
+    for var in releases_site_vars(crate::update::OVERRIDES) {
+        cmd.env_remove(var);
+    }
     let out = cmd.env("H0X_CORE_VERSION", version).stdin(Stdio::null()).output().map_err(|e| format!("cannot run the installer: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
         return Err(if err.is_empty() { "the installer failed".into() } else { err });
     }
     Ok(())
+}
+
+/// The installer's signature binds the file name, not the version: the core that
+/// landed must say it is exactly the pinned one.
+fn is_pinned(version_line: &str, pinned: &str) -> bool {
+    version_line.trim() == format!("h0x-core {pinned}")
 }
 
 /// Updates the core to its latest release (`h0x-core update`: same generation only,
@@ -445,6 +465,21 @@ echo '{hello}'
         unsafe { std::env::set_var("H0X_CORE_INSTALL_DIR", "relative/bin") };
         let error = install().unwrap_err();
         assert!(error.contains("absolute") && error.contains("relative/bin"), "{error}");
+    }
+
+    #[test]
+    fn the_core_installer_never_sees_a_releases_site_in_a_release_build() {
+        assert_eq!(releases_site_vars(false), ["H0X_CORE_RELEASES_URL", "H0X_ADE_RELEASES_URL"]);
+        assert!(releases_site_vars(true).is_empty());
+    }
+
+    #[test]
+    fn only_the_exact_pinned_core_counts_as_installed() {
+        assert!(is_pinned("h0x-core 0.1.13", "0.1.13"));
+        assert!(is_pinned("h0x-core 0.1.13 ", "0.1.13"));
+        for other in ["h0x-core 0.1.14", "h0x-core 0.1.130", "h0x-core 0.1.13-rc.1", "h0x-core 0.1.1", "0.1.13", ""] {
+            assert!(!is_pinned(other, "0.1.13"), "{other:?}");
+        }
     }
 
     #[test]
