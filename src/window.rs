@@ -4762,7 +4762,7 @@ fn new_space_machine(args: &Value, person: bool, model: &Model) -> Option<String
 /// and `/` against `\` don't count either.
 fn same_folder(a: &str, b: &str) -> bool {
     let key = |p: &str| {
-        let p = if cfg!(windows) { p.replace('/', "\\").to_ascii_lowercase() } else { p.to_owned() };
+        let p = if cfg!(windows) { p.replace('/', "\\").to_lowercase() } else { p.to_owned() };
         match p.trim_end_matches(['/', '\\']) {
             "" => p.chars().take(1).collect::<String>(),
             trimmed => trimmed.to_owned(),
@@ -6309,6 +6309,192 @@ export default class SystemToast extends View {
         assert!(!super::adoptable(&record("finished"), "sp1", Some("tb1"), None));
         assert!(!super::adoptable(&record("live"), "sp2", Some("tb1"), None));
         assert!(!super::adoptable(&record("live"), "sp1", Some("tb2"), None));
+    }
+
+    #[test]
+    fn a_folder_is_the_same_whatever_its_trailing_separators_but_never_a_neighbour() {
+        use super::same_folder;
+        for (a, b) in [
+            ("/home/me/proj", "/home/me/proj"),
+            ("/home/me/proj", "/home/me/proj/"),
+            ("/home/me/proj//", "/home/me/proj"),
+            ("/", "/"),
+            ("/", "//"),
+            (r"D:\proj", r"D:\proj\"),
+            (r"D:\", r"D:\"),
+            (r"D:\", "D:"),
+            (r"D:\\", "D:"),
+            (r"\\server\share", r"\\server\share"),
+            (r"\\server\share", r"\\server\share\"),
+            (r"\\server\share\x", r"\\server\share\x\"),
+            ("/tmp/caf\u{e9} & \"x\"", "/tmp/caf\u{e9} & \"x\"/"),
+        ] {
+            assert!(same_folder(a, b), "{a:?} = {b:?}");
+            assert!(same_folder(b, a), "{b:?} = {a:?}");
+        }
+        for (a, b) in [
+            // A folder whose name starts with another's is a different folder.
+            (r"D:\proj", r"D:\project"),
+            ("/a/proj", "/a/project"),
+            ("/a/proj", "/a/proj2"),
+            ("/a/b", "/a/c"),
+            ("/a/b", "/a"),
+            ("/a/b", "/a/b/c"),
+            // No path arithmetic: `..` is not resolved.
+            ("/a", "/a/b/.."),
+            ("/", "/tmp"),
+            (r"D:\", r"E:\"),
+            (r"D:\", r"D:\x"),
+            (r"\\server\share", r"\\server\other"),
+            (r"\\server\share", r"\\server"),
+            // Empty is no folder at all.
+            ("", "/"),
+            ("", r"D:\"),
+            ("", "a"),
+        ] {
+            assert!(!same_folder(a, b), "{a:?} != {b:?}");
+            assert!(!same_folder(b, a), "{b:?} != {a:?}");
+        }
+        // Only Windows ignores case and treats `/` as `\`; elsewhere they are other folders.
+        for (a, b) in [
+            (r"d:\Proj\", r"D:\proj"),
+            ("D:/proj", r"D:\proj"),
+            ("d:/PROJ/", r"D:\proj"),
+            (r"\\Server\Share", r"\\server\share\"),
+            ("//server/share", r"\\server\share"),
+            ("/Home/Me", "/home/me"),
+        ] {
+            assert_eq!(same_folder(a, b), cfg!(windows), "{a:?} vs {b:?}");
+            assert_eq!(same_folder(b, a), cfg!(windows), "{b:?} vs {a:?}");
+        }
+    }
+
+    /// NTFS folds case beyond ASCII: `C:\Café` and `C:\CAFÉ` are one folder there.
+    #[cfg(windows)]
+    #[test]
+    fn windows_folder_case_is_ignored_beyond_ascii_too() {
+        assert!(super::same_folder("C:\\Caf\u{e9}\\\u{fc}ber", "c:\\CAF\u{c9}\\\u{dc}BER\\"));
+    }
+
+    #[test]
+    fn a_launch_space_is_named_after_the_folder_and_a_root_after_itself() {
+        use super::space_name_for;
+        for (folder, name) in [
+            ("/home/me/proj", "proj"),
+            ("/home/me/proj/", "proj"),
+            ("/home/me/proj//", "proj"),
+            (r"D:\work\x", "x"),
+            (r"D:\work\x\", "x"),
+            ("D:/work/x", "x"),
+            (r"\\server\share\x", "x"),
+            (r"\\server\share\x\", "x"),
+            ("/tmp/my proj", "my proj"),
+            ("/tmp/caf\u{e9} \u{65e5}\u{672c} & \"q\" <x>", "caf\u{e9} \u{65e5}\u{672c} & \"q\" <x>"),
+            ("proj", "proj"),
+            // Roots name themselves, exactly as given.
+            ("/", "/"),
+            ("//", "//"),
+            (r"D:\", r"D:\"),
+            ("D:", "D:"),
+            ("D:/", "D:/"),
+            (r"\\server\share", r"\\server\share"),
+            (r"\\server\share\", r"\\server\share\"),
+            ("", ""),
+        ] {
+            assert_eq!(space_name_for(folder), name, "{folder:?}");
+        }
+    }
+
+    #[test]
+    fn a_launch_folder_focuses_this_machine_s_space_for_it_and_refuses_what_is_no_folder() {
+        in_own_process("launch_folder_window");
+    }
+
+    /// `open_launch_folder` and the raise request on the window, with an offline core:
+    /// a space made for a new folder needs a live core (the e2e test covers it).
+    #[gpui::test]
+    fn launch_folder_window(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("launch_folder_window") {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("h0x-launch-window-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (a, b, c) = (root.join("a proj"), root.join("b"), root.join("remote only"));
+        for dir in [&a, &b, &c] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(root.join("file.txt"), b"x").unwrap();
+        let text = |p: &std::path::Path| p.to_str().unwrap().to_owned();
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            // Another machine's spaces come first, in the same folders: never the launch's.
+            this.model.add_space("sp0", "", &text(&a), crate::model::Tab::new("tb0", "", "p0", "second/t0"));
+            this.model.space_mut("sp0").unwrap().machine = Some("second".into());
+            this.model.add_space("sp9", "", &text(&c), crate::model::Tab::new("tb9", "", "p9", "second/t9"));
+            this.model.space_mut("sp9").unwrap().machine = Some("second".into());
+            this.model.add_space("sp1", "", &text(&a), crate::model::Tab::new("tb1", "", "p1", "t1"));
+            // This space was opened elsewhere; its terminal has since gone into b.
+            this.model.add_space("sp2", "", "/elsewhere", crate::model::Tab::new("tb2", "", "p2", "t2"));
+            this.cwds.insert("t2".into(), text(&b));
+            this.documents.entry(String::new()).or_default().available = true;
+            let spaces =|this: &super::AppWindow| this.model.spaces.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+            let before = spaces(this);
+
+            // The same folder: its local space, focused, not another one (AC3, AC7).
+            for asked in [text(&a), format!("{}{}", text(&a), std::path::MAIN_SEPARATOR), format!("{}//", text(&a))] {
+                this.model.active = Some("sp0".into());
+                assert_eq!(this.open_launch_folder(&asked, window, cx).as_deref(), Some("sp1"), "{asked:?}");
+                assert_eq!(this.model.active.as_deref(), Some("sp1"));
+                assert_eq!(spaces(this), before);
+            }
+            // Windows: another case and `/` name the same folder (AC3).
+            if cfg!(windows) {
+                for asked in [text(&a).to_uppercase(), text(&a).replace('\\', "/") + "/"] {
+                    this.model.active = Some("sp0".into());
+                    assert_eq!(this.open_launch_folder(&asked, window, cx).as_deref(), Some("sp1"), "{asked:?}");
+                    assert_eq!(spaces(this), before);
+                }
+            }
+            // A space whose terminal is in the folder now counts too.
+            this.model.active = Some("sp0".into());
+            assert_eq!(this.open_launch_folder(&text(&b), window, cx).as_deref(), Some("sp2"));
+            assert_eq!(this.model.active.as_deref(), Some("sp2"));
+
+            // No folder: nothing changes (AC5).
+            for asked in [text(&root.join("missing")), text(&root.join("file.txt")), String::new()] {
+                this.model.active = Some("sp1".into());
+                assert_eq!(this.open_launch_folder(&asked, window, cx), None, "{asked:?}");
+                assert_eq!(this.model.active.as_deref(), Some("sp1"));
+                assert_eq!(spaces(this), before);
+            }
+            // Only another machine has a space there, and it is the shown one: never that
+            // space; a new one would be local (the offline core can't start its terminal).
+            this.model.active = Some("sp9".into());
+            assert_eq!(this.open_launch_folder(&text(&c), window, cx), None);
+            assert_eq!(spaces(this), before);
+            assert_eq!(this.model.active.as_deref(), Some("sp9"));
+
+            // The raise request from a second launch (AC2, AC9).
+            this.model.active = Some("sp0".into());
+            assert_eq!(this.control(json!({ "raise": true, "folder": text(&a) }), window, cx), json!({ "ok": true, "space": "sp1" }));
+            assert_eq!(this.model.active.as_deref(), Some("sp1"));
+            this.model.active = Some("sp0".into());
+            for cmd in [
+                json!({ "raise": true }),
+                json!({ "raise": true, "folder": "" }),
+                json!({ "raise": true, "folder": null }),
+                json!({ "raise": true, "folder": 7 }),
+                json!({ "raise": true, "folder": text(&root.join("missing")) }),
+            ] {
+                assert_eq!(this.control(cmd.clone(), window, cx), json!({ "ok": true }), "{cmd}");
+                assert_eq!(this.model.active.as_deref(), Some("sp0"), "{cmd}");
+                assert_eq!(spaces(this), before, "{cmd}");
+            }
+        }));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
 }

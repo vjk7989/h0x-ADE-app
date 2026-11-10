@@ -583,3 +583,86 @@ mod windows_tests {
         }
     }
 }
+
+/// A second launch from a shell names its folder to the running window; on
+/// Windows too (`uds_windows`).
+#[cfg(test)]
+mod raise_tests {
+    use super::*;
+
+    /// Asks a stand-in window at a fresh socket (`name`) to come to the front with
+    /// `folder`; it answers `reply` (None: hangs up without a word). What the launch
+    /// returned, and the exact request the window got.
+    fn ask(name: &str, folder: Option<&str>, reply: Option<&'static [u8]>) -> (bool, Value) {
+        let dir = std::env::temp_dir().join(format!("h0x-rf-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let asked = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            if let Some(reply) = reply {
+                (&stream).write_all(reply).unwrap();
+            }
+            line
+        });
+        let raised = raise_running_at(&path, folder);
+        let line = asked.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(line.ends_with('\n') && line.matches('\n').count() == 1, "one request line: {line:?}");
+        (raised, serde_json::from_str(&line).unwrap())
+    }
+
+    #[test]
+    fn a_launch_with_no_folder_sends_exactly_the_old_raise() {
+        let (raised, asked) = ask("none", None, Some(b"{\"ok\":true}\n"));
+        assert!(raised);
+        assert_eq!(asked, json!({ "raise": true }));
+        assert_eq!(asked.to_string(), r#"{"raise":true}"#);
+    }
+
+    #[test]
+    fn the_launch_folder_reaches_the_window_literally_whatever_it_contains() {
+        for folder in [
+            r"D:\work\proj",
+            r"D:\",
+            r"\\server\share\x",
+            "/home/me/my proj",
+            "/",
+            "/tmp/it's \"quoted\" & <tagged>",
+            "C:\\caf\u{e9}\\\u{65e5}\u{672c}\\a\tb",
+        ] {
+            let (raised, asked) = ask("folder", Some(folder), Some(b"{\"ok\":true,\"space\":\"sp1\"}\n"));
+            assert!(raised, "{folder}");
+            assert_eq!(asked, json!({ "raise": true, "folder": folder }));
+            assert_eq!(asked["folder"].as_str(), Some(folder));
+        }
+        // On the wire, a backslash and a quote are JSON-escaped.
+        let (_, asked) = ask("escaped", Some(r#"D:\a "b""#), Some(b"{\"ok\":true}\n"));
+        assert!(asked.to_string().contains(r#""folder":"D:\\a \"b\"""#), "{asked}");
+    }
+
+    #[test]
+    fn an_empty_folder_is_sent_as_given() {
+        let (raised, asked) = ask("empty", Some(""), Some(b"{\"ok\":true}\n"));
+        assert!(raised);
+        assert_eq!(asked, json!({ "raise": true, "folder": "" }));
+    }
+
+    #[test]
+    fn an_old_window_that_ignores_or_refuses_the_folder_still_counts_as_running() {
+        // A window from before launch folders answers as it always did, or not at all.
+        for (name, reply) in [
+            ("old-ok", Some(&b"{\"ok\":true}\n"[..])),
+            ("old-error", Some(&b"{\"error\":\"unknown request\"}\n"[..])),
+            ("old-garbage", Some(&b"not json\n"[..])),
+            ("old-silent", None),
+        ] {
+            let (raised, asked) = ask(name, Some(r"D:\proj"), reply);
+            assert!(raised, "{name}");
+            assert_eq!(asked["raise"], json!(true), "{name}");
+        }
+    }
+}

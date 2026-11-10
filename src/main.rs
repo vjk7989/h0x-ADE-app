@@ -101,9 +101,12 @@ fn main() {
             launch::init(from_shell);
             let folder = launch::folder();
             if control::raise_running(folder.as_deref()) {
-                // This process exits now: wait for the notification, or it is lost.
+                // This process exits now: wait for the notification, or it is lost; never more than 2 s.
                 if from_shell && let Some(notice) = launch::announce(&launch::running_line(folder.as_deref()), folder.as_deref()) {
-                    let _ = notice.join();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while !notice.is_finished() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
                 }
                 return;
             }

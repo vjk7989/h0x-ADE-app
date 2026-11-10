@@ -127,6 +127,49 @@ mod platform {
         }
     }
 
+    /// The toast's XML only: no toast is shown and the registry is not touched.
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn texts(xml: &XmlDocument) -> Vec<String> {
+            let list = xml.GetElementsByTagName(&HSTRING::from("text")).unwrap();
+            (0..list.Length().unwrap()).map(|i| list.Item(i).unwrap().InnerText().unwrap().to_string()).collect()
+        }
+
+        #[test]
+        fn the_toast_text_is_escaped_and_reads_back_literally() {
+            winrt(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() }).unwrap();
+            let _apartment = ComApartment;
+            let title = "HyperOx has been launched";
+            let body = r#"D:\a <b> & "c" 'd' </text><text>x</text>"#;
+            let xml = notification_xml(title, body).unwrap();
+            let out = xml.GetXml().unwrap().to_string();
+            // Markup in the folder stays text: escaped, never an element of its own.
+            assert!(out.contains("&lt;b"), "{out}");
+            assert!(out.contains("&amp;"), "{out}");
+            assert!(!out.contains("<b>"), "{out}");
+            assert!(!out.contains("<text>x</text>"), "{out}");
+            assert!(out.contains(r#"<binding template="ToastGeneric">"#), "{out}");
+            assert!(out.contains(r#"<audio silent="true"/>"#) || out.contains(r#"<audio silent="true" />"#), "{out}");
+            assert_eq!(texts(&xml), [title, body]);
+            // Parsed again, as the toast platform does, it is the same text.
+            let again = XmlDocument::new().unwrap();
+            again.LoadXml(&HSTRING::from(out.as_str())).unwrap();
+            assert_eq!(texts(&again), [title, body]);
+        }
+
+        #[test]
+        fn an_empty_body_gives_a_title_only_toast() {
+            winrt(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() }).unwrap();
+            let _apartment = ComApartment;
+            assert_eq!(texts(&notification_xml("HyperOx has been launched", "").unwrap()), ["HyperOx has been launched"]);
+            // A unicode or UNC folder is kept as it is.
+            let body = "\\\\server\\share\\caf\u{e9} \u{65e5}\u{672c}";
+            assert_eq!(texts(&notification_xml("t", body).unwrap()), ["t", body]);
+        }
+    }
+
     pub fn show(title: &str, body: &str) -> io::Result<()> {
         winrt(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() })?;
         let _apartment = ComApartment;
@@ -179,5 +222,40 @@ mod platform {
 mod platform {
     pub fn show(_title: &str, _body: &str) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{args_for_notify_send, args_for_osascript};
+
+    const ODD: &str = "/tmp/it's \"quoted\" & <x> $(rm -rf ~) `id` \u{65e5}";
+
+    #[test]
+    fn osascript_gets_the_title_and_body_as_arguments_never_in_its_script() {
+        let args = args_for_osascript("HyperOx has been launched", ODD);
+        assert_eq!(args.len(), 4);
+        assert_eq!(args[0], "-e");
+        assert_eq!(args[1], "display notification (item 2 of argv) with title (item 1 of argv)");
+        assert_eq!(args[2], "HyperOx has been launched");
+        assert_eq!(args[3], ODD);
+        assert!(!args[1].contains("HyperOx") && !args[1].contains(ODD));
+        // An empty body is still `item 2`, so the script never fails on a missing item.
+        let args = args_for_osascript("t", "");
+        assert_eq!(args.len(), 4);
+        assert_eq!(args[3], "");
+        // A title that looks like AppleScript stays a value.
+        let args = args_for_osascript("\" & (do shell script \"id\") & \"", "b");
+        assert_eq!(args[1], "display notification (item 2 of argv) with title (item 1 of argv)");
+        assert_eq!(args[2], "\" & (do shell script \"id\") & \"");
+    }
+
+    #[test]
+    fn notify_send_names_the_app_and_leaves_out_an_empty_body() {
+        assert_eq!(args_for_notify_send("HyperOx has been launched", ""), ["--app-name=HyperOx", "HyperOx has been launched"]);
+        assert_eq!(args_for_notify_send("HyperOx has been launched", ODD), ["--app-name=HyperOx", "HyperOx has been launched", ODD]);
+        // A body that looks like an option is still the body, after the title.
+        let args = args_for_notify_send("t", "--urgency=critical");
+        assert_eq!(args, ["--app-name=HyperOx", "t", "--urgency=critical"]);
     }
 }
