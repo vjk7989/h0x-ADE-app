@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.1.17] - 2026-11-11
+
+A clean start from the terminal. Bundles h0x-core 0.1.14.
+
+### Changed
+
+- Typing `h0x-ade` in a terminal shows only `HyperOx started in <folder>.` and then gives the terminal back: no log lines follow, you can keep using the terminal or close it, and HyperOx keeps running.
+- macOS and Linux: HyperOx runs on its own after a terminal launch instead of inside that terminal.
+
 ## [0.1.16] - 2026-11-11
 
 Open HyperOx where you are. Bundles h0x-core 0.1.14.
