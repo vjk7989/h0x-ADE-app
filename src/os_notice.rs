@@ -43,7 +43,7 @@ mod platform {
     use windows::{
         Data::Xml::Dom::XmlDocument,
         UI::Notifications::{ToastNotification, ToastNotificationManager},
-        Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
+        Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx},
         core::HSTRING,
     };
     use windows_sys::Win32::System::Registry::{
@@ -117,16 +117,6 @@ mod platform {
         Ok(xml)
     }
 
-    struct ComApartment;
-
-    impl Drop for ComApartment {
-        fn drop(&mut self) {
-            unsafe {
-                CoUninitialize();
-            }
-        }
-    }
-
     /// The toast's XML only: no toast is shown and the registry is not touched.
     #[cfg(test)]
     mod tests {
@@ -140,7 +130,6 @@ mod platform {
         #[test]
         fn the_toast_text_is_escaped_and_reads_back_literally() {
             winrt(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() }).unwrap();
-            let _apartment = ComApartment;
             let title = "HyperOx has been launched";
             let body = r#"D:\a <b> & "c" 'd' </text><text>x</text>"#;
             let xml = notification_xml(title, body).unwrap();
@@ -162,7 +151,6 @@ mod platform {
         #[test]
         fn an_empty_body_gives_a_title_only_toast() {
             winrt(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() }).unwrap();
-            let _apartment = ComApartment;
             assert_eq!(texts(&notification_xml("HyperOx has been launched", "").unwrap()), ["HyperOx has been launched"]);
             // A unicode or UNC folder is kept as it is.
             let body = "\\\\server\\share\\caf\u{e9} \u{65e5}\u{672c}";
@@ -171,8 +159,8 @@ mod platform {
     }
 
     pub fn show(title: &str, body: &str) -> io::Result<()> {
+        // Never uninitialized: the windows crate caches activation factories across calls.
         winrt(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() })?;
-        let _apartment = ComApartment;
         register_display_name()?;
         let xml = notification_xml(title, body)?;
         let notification = winrt(ToastNotification::CreateToastNotification(&xml))?;

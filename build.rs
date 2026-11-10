@@ -45,4 +45,8 @@ fn main() {
         println!("cargo:rerun-if-changed=assets/icons/h0x-ade.ico");
         winresource::WindowsResource::new().set_icon("assets/icons/h0x-ade.ico").compile().expect("cannot embed the icon");
     }
+    // Windows gives the main thread 1 MiB; an unoptimized build overflows it while opening the window.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg-bin=h0x-ade=/STACK:8388608");
+    }
 }
