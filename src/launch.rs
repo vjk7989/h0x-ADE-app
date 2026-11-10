@@ -12,6 +12,12 @@ pub fn init(from_shell: bool) {
     let _ = FOLDER.set(pick(from_shell, std::env::current_dir()));
 }
 
+/// Records the folder a detached copy was started for (`--launched-in`); it is
+/// kept only if it is still an existing folder.
+pub fn init_with(folder: Option<String>) {
+    let _ = FOLDER.set(folder.and_then(|f| pick(true, Ok(PathBuf::from(f)))));
+}
+
 /// The folder this launch was started in; None for a launch from a shortcut,
 /// Dock or Explorer, or when the shell's folder is unusable.
 pub fn folder() -> Option<String> {
@@ -65,6 +71,41 @@ pub fn announce(line: &str, folder: Option<&str>) -> Option<std::thread::JoinHan
     println!("{line}");
     let _ = std::io::stdout().flush();
     crate::os_notice::show("HyperOx has been launched", folder.unwrap_or(""))
+}
+
+/// Waits for the notification of a process that is about to exit, or it is
+/// lost; never more than 2 s.
+pub fn wait(notice: Option<std::thread::JoinHandle<()>>) {
+    if let Some(notice) = notice {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !notice.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+}
+
+/// Starts the window as a copy of this program in its own session, with no
+/// terminal, so closing or reusing the shell's terminal doesn't touch it. The
+/// folder reaches it as the hidden `--launched-in <folder>` argument.
+#[cfg(unix)]
+pub fn detach(folder: Option<&str>) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(std::env::current_exe()?);
+    if let Some(folder) = folder {
+        child.arg("--launched-in").arg(folder).current_dir(folder);
+    }
+    child.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // SAFETY: setsid is async-signal-safe and touches no memory.
+    unsafe {
+        child.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    child.spawn().map(drop)
 }
 
 #[cfg(test)]

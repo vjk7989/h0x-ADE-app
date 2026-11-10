@@ -97,22 +97,30 @@ fn main() {
     let mut quiet = false;
     match args.get(1).map(String::as_str) {
         // Already open on this home: that window comes to the front.
-        None => {
-            let from_shell = launch::from_shell();
-            launch::init(from_shell);
+        // `--launched-in <folder>` is the detached copy a shell launch starts on unix: a bare launch in that folder.
+        None | Some("--launched-in") => {
+            let detached = args.len() > 1;
+            let from_shell = !detached && launch::from_shell();
+            if detached {
+                launch::init_with(args.get(2).cloned());
+            } else {
+                launch::init(from_shell);
+            }
             let folder = launch::folder();
             if control::raise_running(folder.as_deref()) {
-                // This process exits now: wait for the notification, or it is lost; never more than 2 s.
-                if from_shell && let Some(notice) = launch::announce(&launch::running_line(folder.as_deref()), folder.as_deref()) {
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-                    while !notice.is_finished() && std::time::Instant::now() < deadline {
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                    }
+                if from_shell {
+                    launch::wait(launch::announce(&launch::running_line(folder.as_deref()), folder.as_deref()));
                 }
                 return;
             }
             if from_shell {
-                let _ = launch::announce(&launch::started_line(folder.as_deref()), folder.as_deref());
+                let _notice = launch::announce(&launch::started_line(folder.as_deref()), folder.as_deref());
+                // The window runs in a detached copy; this process is done once the notification is out.
+                #[cfg(unix)]
+                if launch::detach(folder.as_deref()).is_ok() {
+                    launch::wait(_notice);
+                    return;
+                }
                 // The started line is all the terminal gets: let go of it, and log nowhere unless asked.
                 #[cfg(windows)]
                 unsafe {
