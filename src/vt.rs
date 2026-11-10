@@ -2746,9 +2746,10 @@ mod tests {
                 vt.resize(80, rows, 8, 16);
                 let f = vt.frame();
                 assert!(f.rows.iter().all(|row| row.len() == 80), "{case}");
-                // Widening may join "ok" to history it was wrapped from, so it need not start a row.
-                let screen: Vec<String> = f.rows.iter().map(|row| text(row)).collect();
-                assert!(screen.iter().any(|row| row.contains("ok")), "{case}: {screen:?}");
+                // Widening may join "ok" to history it was wrapped from; the alternate
+                // screen never reflows, so one column leaves "o" and "k" on two rows.
+                let screen: Vec<String> = f.rows.iter().map(|row| text(row).trim_end().to_owned()).collect();
+                assert!(screen.concat().contains("ok"), "{case}: {screen:?}");
             }
         }
     }
