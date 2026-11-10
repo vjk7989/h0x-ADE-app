@@ -71,13 +71,11 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Wind
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
-# gpui-shell's LLRT modules must share its quickjs-jit VM; gpui-kit's own workspace does the same.
 [patch.crates-io]
 # HyperOx: production frame capture without test-support dependencies.
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
-rquickjs = { path = "vendor/gpui-kit/crates/shell/rquickjs-compat" }
 # Our copy: an idle window stops waking every vsync (patches marked HyperOx:).
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 # Our copy: snapping a maximized window to a half kept its old size (HyperOx:).

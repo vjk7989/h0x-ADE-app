@@ -442,6 +442,553 @@ fn a_mod_still_cannot_import_the_editor_helpers_after_code_sharing(cx: &mut Test
     cx.run_until_parked();
 }
 
+// HyperOx (FX-A2): the stubs that name the replacement for a timer or `require` still stand on
+// the new engine, at module scope and in init: the stdlib now carries LLRT's timers, and a real
+// setTimeout installed first would silently replace them.
+#[gpui::test]
+fn timers_and_require_still_refuse_a_mod_and_name_the_replacement(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("timers");
+    std::fs::create_dir_all(&root).unwrap();
+    let body = "import { View, div } from 'gpui-kit'; export default class Panel extends View { init() { let hint = 'none'; try { setTimeout(() => {}, 0); } catch (error) { hint = error.message; } this.hint = hint; } render() { return div().child('hint:' + this.hint); } }";
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        for (call, hint) in [
+            ("setTimeout(() => {}, 0)", "cx.timer.after"),
+            ("setInterval(() => {}, 0)", "cx.timer.every"),
+            ("clearTimeout(1)", "cx.timer.after"),
+            ("clearInterval(1)", "cx.timer.every"),
+            ("require('fs')", "this runtime uses ES modules"),
+        ] {
+            std::fs::write(root.join("main.js"), format!("{call};\n{body}")).unwrap();
+            let error = DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx)
+                .err()
+                .map(|error| format!("{error:#}"))
+                .unwrap_or_else(|| panic!("{call} at module scope must stop the mod"));
+            assert!(error.contains("is not available in the shell") && error.contains(hint), "{call}: {error}");
+        }
+        std::fs::write(root.join("main.js"), body).unwrap();
+        let mut session = DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx).unwrap();
+        let tree = session.describe(window, cx).unwrap();
+        assert!(tree.contains("hint:`setTimeout` is not available in the shell: use cx.timer.after"), "{tree}");
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+// HyperOx (FX-A2): the quickjs-jit bump moved the stdlib onto vendored LLRT crates (timers, events,
+// streams, abort, ...). A mod still imports only the runtime's own modules: none of those crates,
+// nor the engine's std/os/bjson modules, nor a node: alias, became importable. A new reserved
+// module is a new host capability and has to change this list on purpose.
+#[gpui::test]
+fn a_mod_imports_only_the_runtime_s_own_modules_after_the_engine_bump(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    assert_eq!(
+        gpui_shell::RESERVED_SPECIFIERS,
+        &[
+            "gpui-kit", "gpui", "gpui-base", "gpui-component", "gpui-shell", "gpui-fps", "buffer", "console", "crypto",
+            "fs/promises", "net", "os", "path", "process", "url", "websocket", "zlib",
+        ][..]
+    );
+    let staged = Staged::new();
+    let root = staged.0.join("imports");
+    std::fs::create_dir_all(&root).unwrap();
+    let entry = |name: &str| format!("import * as imported from '{name}'; import {{ View, div }} from 'gpui-kit'; export default class Panel extends View {{ render() {{ return div().child('exports:' + Object.keys(imported).length); }} }}");
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        for name in ["buffer", "console", "crypto", "fs/promises", "net", "os", "path", "process", "url", "websocket", "zlib"] {
+            std::fs::write(root.join("main.js"), entry(name)).unwrap();
+            let mut session = DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx)
+                .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+            assert!(session.describe(window, cx).unwrap().contains("exports:"), "{name}");
+        }
+        for name in [
+            "qjs:std", "qjs:os", "qjs:bjson", "std", "bjson", "timers", "node:timers", "events", "node:events", "stream/web",
+            "stream", "abort", "async_hooks", "exceptions", "child_process", "node:child_process", "fs", "node:fs",
+            "node:crypto", "http", "https", "dns", "tls", "dgram", "llrt:timers", "llrt:fs", "test",
+        ] {
+            std::fs::write(root.join("main.js"), entry(name)).unwrap();
+            assert!(DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx).is_err(), "{name} must not resolve");
+        }
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+// HyperOx (FX-A2): every kind of byte view a mod can hand to the host, built fresh on each call.
+// `ran` turns true if the host ever ran script while reading one (a getter or a proxy trap).
+const BYTE_VIEWS: &str = r#"
+function views() {
+  const ran = { value: false };
+  const detached = new Uint8Array([1, 2, 3]);
+  detached.buffer.transfer();
+  const shrinking = new ArrayBuffer(4, { maxByteLength: 8 });
+  const outOfBounds = new Uint8Array(shrinking, 2, 2);
+  shrinking.resize(1);
+  const growing = new ArrayBuffer(2, { maxByteLength: 8 });
+  const grown = new Uint8Array(growing);
+  grown.set([1, 2]);
+  growing.resize(5);
+  grown[4] = 5;
+  const halving = new ArrayBuffer(4, { maxByteLength: 8 });
+  const shrunk = new Uint8Array(halving);
+  shrunk.set([1, 2, 3, 4]);
+  halving.resize(2);
+  const shared = new Uint8Array(new SharedArrayBuffer(3));
+  shared.set([4, 5, 6]);
+  const trapped = new Uint8Array([7, 8, 9]);
+  const trappedBuffer = trapped.buffer;
+  for (const key of ['buffer', 'length', 'byteLength', 'byteOffset']) {
+    Object.defineProperty(trapped, key, { get() { ran.value = true; trappedBuffer.transfer(); return 0; } });
+  }
+  const proxied = new Proxy(new Uint8Array([1]), {
+    get() { ran.value = true; },
+    getPrototypeOf() { ran.value = true; return null; },
+  });
+  return { ran, list: [
+    ['detached', detached],
+    ['outOfBounds', outOfBounds],
+    ['grown', grown],
+    ['shrunk', shrunk],
+    ['offset', new Uint8Array(new Uint8Array([9, 8, 7, 6]).buffer, 1, 2)],
+    ['shared', shared],
+    ['empty', new Uint8Array(0)],
+    ['buffer', Buffer.from('hi')],
+    ['trapped', trapped],
+    ['proxied', proxied],
+    ['signed', new Int8Array([1])],
+    ['plain', new ArrayBuffer(1)],
+  ] };
+}
+"#;
+/// The views of [`BYTE_VIEWS`] the host must copy, in order, with the bytes each holds at the call.
+const COPIED_VIEWS: [(&str, &[u8]); 7] = [
+    ("grown", &[1, 2, 0, 0, 5]),
+    ("shrunk", &[1, 2]),
+    ("offset", &[8, 7]),
+    ("shared", &[4, 5, 6]),
+    ("empty", &[]),
+    ("buffer", b"hi"),
+    ("trapped", &[7, 8, 9]),
+];
+/// Views over a detached buffer, or out of bounds of a shrunk one: no bytes to borrow.
+const DETACHED_VIEWS: [&str; 2] = ["detached", "outOfBounds"];
+/// Not a Uint8Array at all, whatever a proxy claims.
+const FOREIGN_VIEWS: [&str; 3] = ["proxied", "signed", "plain"];
+
+// HyperOx (FX-A2): `TypedArray::as_bytes` is unsafe on the new engine, because the slice dies the
+// moment script runs. fs.writeFile reads a view's internal slots without running script (getters
+// and proxy traps never fire), copies exactly the bytes in bounds at the call (a resized, offset or
+// shared view), and refuses a detached or out-of-bounds view before it touches the disk.
+#[gpui::test]
+fn fs_write_file_copies_the_live_bytes_of_any_view_and_refuses_a_detached_one(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("writer");
+    let out = staged.0.join("out");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { Buffer } from 'buffer';
+import { writeFile } from 'fs/promises';
+__VIEWS__
+export default class Panel extends View {
+  init(_, cx) {
+    this.log = [];
+    cx.spawn(async cx => {
+      const { ran, list } = views();
+      for (const [name, view] of list) {
+        try { writeFile(__DIR__ + '/' + name + '.bin', view); this.log.push(name + ':queued'); }
+        catch (error) { this.log.push(name + ':' + error.message); }
+      }
+      this.log.push('ran:' + ran.value);
+      cx.notify();
+    });
+  }
+  render() { return div().child(this.log.join(' | ')); }
+}
+"#.replace("__VIEWS__", BYTE_VIEWS).replace("__DIR__", &serde_json::to_string(&out.to_string_lossy()).unwrap())).unwrap();
+    let policy = Policy::new().with_capabilities(Capabilities::new().write_roots([out.clone()]));
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window.update(cx, |_, window, cx| {
+        let mut session = DescriptionSession::load(runtime.clone(), &root, policy, window, cx).unwrap();
+        session.describe(window, cx).unwrap();
+        session
+    }).unwrap();
+    cx.run_until_parked();
+    let tree = window.update(cx, |_, window, cx| session.describe(window, cx).unwrap()).unwrap();
+    assert!(tree.contains("ran:false"), "{tree}");
+    for (name, bytes) in COPIED_VIEWS {
+        assert!(tree.contains(&format!("{name}:queued")), "{name}: {tree}");
+        assert_eq!(std::fs::read(out.join(format!("{name}.bin"))).unwrap(), bytes, "{name}");
+    }
+    for name in DETACHED_VIEWS {
+        assert!(tree.contains(&format!("{name}:fs.writeFile(path, contents) received a detached Uint8Array")), "{name}: {tree}");
+        assert!(!out.join(format!("{name}.bin")).exists(), "{name}");
+    }
+    for name in FOREIGN_VIEWS {
+        assert!(tree.contains(&format!("{name}:fs.writeFile(path, contents) expects a string or Uint8Array")), "{name}: {tree}");
+        assert!(!out.join(format!("{name}.bin")).exists(), "{name}");
+    }
+    drop(session);
+    cx.run_until_parked();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+// HyperOx (FX-A2): fetch's body goes through the same unsafe borrow. It is read last, after the
+// method and headers, so script a getter runs before it (here: a headers getter that detaches the
+// body) is seen as a detached body, never as freed bytes. No network: with no grant, a body that was
+// read whole reaches the authorization refusal, and one that was not is refused before it.
+#[gpui::test]
+fn fetch_reads_a_body_view_without_running_script_and_refuses_a_detached_one(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("fetcher");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { Buffer } from 'buffer';
+__VIEWS__
+export default class Panel extends View {
+  init() {
+    this.log = [];
+    const { ran, list } = views();
+    const send = (name, options) => {
+      try { fetch('http://127.0.0.1:9/', options); this.log.push(name + ':sent'); }
+      catch (error) { this.log.push(name + ':' + error.message); }
+    };
+    for (const [name, view] of list) send(name, { method: 'POST', body: view });
+    this.log.push('ran:' + ran.value);
+    const victim = new Uint8Array([1, 2, 3]);
+    send('reordered', { method: 'POST', get headers() { victim.buffer.transfer(); return {}; }, body: victim });
+  }
+  render() { return div().child(this.log.join(' | ')); }
+}
+"#.replace("__VIEWS__", BYTE_VIEWS)).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let mut session = DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx).unwrap();
+        let tree = session.describe(window, cx).unwrap();
+        assert!(tree.contains("ran:false"), "{tree}");
+        for (name, _) in COPIED_VIEWS {
+            assert!(tree.contains(&format!("{name}:HTTP request POST http://127.0.0.1:9/ is not granted")), "{name}: {tree}");
+        }
+        for name in DETACHED_VIEWS.into_iter().chain(["reordered"]) {
+            assert!(tree.contains(&format!("{name}:fetch(url, options).body received a detached Uint8Array")), "{name}: {tree}");
+        }
+        for name in FOREIGN_VIEWS {
+            assert!(tree.contains(&format!("{name}:fetch(url, options).body expects a string or Uint8Array")), "{name}: {tree}");
+        }
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+// HyperOx (FX-A2): WebSocket.write goes through the same unsafe borrow. Against a real loopback
+// server, each view the host may copy arrives as one binary frame holding exactly its bytes at the
+// call; a detached, out-of-bounds or foreign view is refused at the call and sends nothing.
+#[gpui::test]
+fn websocket_write_sends_the_live_bytes_of_any_view_and_refuses_a_detached_one(cx: &mut TestAppContext) {
+    use base64::Engine as _;
+    use std::io::{Read as _, Write as _};
+    // The handshake's accept key is SHA-1 (RFC 6455 section 4.2.2); the app has no SHA-1 crate.
+    fn sha1(data: &[u8]) -> [u8; 20] {
+        let mut state: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
+        let mut message = data.to_vec();
+        message.push(0x80);
+        while message.len() % 64 != 56 {
+            message.push(0);
+        }
+        message.extend_from_slice(&(data.len() as u64 * 8).to_be_bytes());
+        for block in message.chunks(64) {
+            let mut words = [0u32; 80];
+            for i in 0..16 {
+                words[i] = u32::from_be_bytes(block[4 * i..4 * i + 4].try_into().unwrap());
+            }
+            for i in 16..80 {
+                words[i] = (words[i - 3] ^ words[i - 8] ^ words[i - 14] ^ words[i - 16]).rotate_left(1);
+            }
+            let [mut a, mut b, mut c, mut d, mut e] = state;
+            for (i, word) in words.iter().enumerate() {
+                let (f, k) = match i {
+                    0..=19 => ((b & c) | (!b & d), 0x5A827999),
+                    20..=39 => (b ^ c ^ d, 0x6ED9EBA1),
+                    40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDC),
+                    _ => (b ^ c ^ d, 0xCA62C1D6),
+                };
+                let next = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(*word);
+                e = d;
+                d = c;
+                c = b.rotate_left(30);
+                b = a;
+                a = next;
+            }
+            for (word, add) in state.iter_mut().zip([a, b, c, d, e]) {
+                *word = word.wrapping_add(add);
+            }
+        }
+        let mut digest = [0u8; 20];
+        for (i, word) in state.iter().enumerate() {
+            digest[4 * i..4 * i + 4].copy_from_slice(&word.to_be_bytes());
+        }
+        digest
+    }
+    let accept = |key: &str| base64::engine::general_purpose::STANDARD.encode(sha1(format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes()));
+    assert_eq!(accept("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", "RFC 6455's own example");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (frames, received) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut byte = [0u8; 1];
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        let request = String::from_utf8(request).unwrap();
+        let key = request
+            .lines()
+            .find_map(|line| line.split_once(':').filter(|(name, _)| name.trim().eq_ignore_ascii_case("sec-websocket-key")).map(|(_, key)| key.trim().to_owned()))
+            .unwrap();
+        let reply = format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", accept(&key));
+        stream.write_all(reply.as_bytes()).unwrap();
+        loop {
+            let mut head = [0u8; 2];
+            if stream.read_exact(&mut head).is_err() {
+                break;
+            }
+            let mut length = (head[1] & 0x7f) as usize;
+            if length == 126 {
+                let mut extended = [0u8; 2];
+                stream.read_exact(&mut extended).unwrap();
+                length = u16::from_be_bytes(extended) as usize;
+            } else if length == 127 {
+                let mut extended = [0u8; 8];
+                stream.read_exact(&mut extended).unwrap();
+                length = u64::from_be_bytes(extended) as usize;
+            }
+            let mut mask = [0u8; 4];
+            if head[1] & 0x80 != 0 {
+                stream.read_exact(&mut mask).unwrap();
+            }
+            let mut payload = vec![0u8; length];
+            stream.read_exact(&mut payload).unwrap();
+            for (i, byte) in payload.iter_mut().enumerate() {
+                *byte ^= mask[i % 4];
+            }
+            // Only binary frames; a close (0x8) ends the conversation.
+            match head[0] & 0x0f {
+                0x2 => {
+                    if frames.send(payload).is_err() {
+                        break;
+                    }
+                }
+                0x8 => break,
+                _ => {}
+            }
+        }
+    });
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("socket");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { Buffer } from 'buffer';
+import { WebSocket } from 'websocket';
+__VIEWS__
+export default class Panel extends View {
+  init(_, cx) {
+    this.log = [];
+    cx.spawn(async cx => {
+      try {
+        const socket = await WebSocket.connect('__URL__');
+        const { ran, list } = views();
+        for (const [name, view] of list) {
+          try { socket.write(view); this.log.push(name + ':sent'); }
+          catch (error) { this.log.push(name + ':' + error.message); }
+        }
+        this.log.push('ran:' + ran.value);
+      } catch (error) {
+        this.log.push('failed:' + error.message);
+      }
+      cx.notify();
+    });
+  }
+  render() { return div().child(this.log.join(' | ')); }
+}
+"#.replace("__VIEWS__", BYTE_VIEWS).replace("__URL__", &format!("ws://127.0.0.1:{port}/"))).unwrap();
+    let policy = Policy::new().with_capabilities(Capabilities::new().network_hosts(["127.0.0.1".to_owned()]));
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window.update(cx, |_, window, cx| {
+        let mut session = DescriptionSession::load(runtime.clone(), &root, policy, window, cx).unwrap();
+        session.describe(window, cx).unwrap();
+        session
+    }).unwrap();
+    cx.run_until_parked();
+    let tree = window.update(cx, |_, window, cx| session.describe(window, cx).unwrap()).unwrap();
+    assert!(tree.contains("ran:false"), "{tree}");
+    for (name, _) in COPIED_VIEWS {
+        assert!(tree.contains(&format!("{name}:sent")), "{name}: {tree}");
+    }
+    for name in DETACHED_VIEWS {
+        assert!(tree.contains(&format!("{name}:WebSocket.write(data) received a detached Uint8Array")), "{name}: {tree}");
+    }
+    for name in FOREIGN_VIEWS {
+        assert!(tree.contains(&format!("{name}:WebSocket.write(data) expects a string or Uint8Array")), "{name}: {tree}");
+    }
+    for (name, bytes) in COPIED_VIEWS {
+        let frame = received.recv_timeout(std::time::Duration::from_secs(10)).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(frame, bytes, "{name}");
+    }
+    drop(session);
+    cx.run_until_parked();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+// HyperOx (FX-A2, GHSA-52gx-967m-hxp3): before quickjs-ng 0.16, ArrayBuffer.prototype.transfer
+// handed bytes the host allocated (fs.readFile's) to the engine's own realloc: a crash for an empty
+// file, a use-after-free otherwise. Now every transfer of host bytes grows, shrinks, empties or
+// freezes them safely, zero-fills what it adds, and leaves the old view detached and refused.
+#[gpui::test]
+fn transferring_the_bytes_of_a_read_file_never_crashes_and_detaches_the_old_view(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("transfer");
+    let data = staged.0.join("data");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("empty.bin"), b"").unwrap();
+    std::fs::write(data.join("abc.bin"), b"abc").unwrap();
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { readFile, writeFile } from 'fs/promises';
+const dir = __DIR__;
+const bytes = buffer => Array.from(new Uint8Array(buffer)).join(',');
+export default class Panel extends View {
+  init(_, cx) {
+    this.log = [];
+    cx.spawn(async cx => {
+      try {
+        const empty = await readFile(dir + '/empty.bin');
+        const grown = empty.buffer.transfer(64);
+        this.log.push('grown:' + grown.byteLength + ':' + new Uint8Array(grown).every(byte => byte === 0) + ':' + empty.byteLength);
+        try { writeFile(dir + '/detached.bin', empty); this.log.push('detached:queued'); }
+        catch (error) { this.log.push('detached:' + error.message); }
+        this.log.push('shrunk:' + bytes((await readFile(dir + '/abc.bin')).buffer.transfer(1)));
+        this.log.push('fixed:' + bytes((await readFile(dir + '/abc.bin')).buffer.transferToFixedLength(2)));
+        this.log.push('zero:' + (await readFile(dir + '/abc.bin')).buffer.transfer(0).byteLength);
+        await writeFile(dir + '/grown.bin', new Uint8Array((await readFile(dir + '/abc.bin')).buffer.transfer(8)));
+        const frozen = (await readFile(dir + '/abc.bin')).buffer.transferToImmutable();
+        await writeFile(dir + '/frozen.bin', new Uint8Array(frozen));
+        try { frozen.transfer(1); this.log.push('refrozen:moved'); }
+        catch (error) { this.log.push('refrozen:' + error.name); }
+        this.log.push('done');
+      } catch (error) {
+        this.log.push('failed:' + error.message);
+      }
+      cx.notify();
+    });
+  }
+  render() { return div().child(this.log.join(' | ')); }
+}
+"#.replace("__DIR__", &serde_json::to_string(&data.to_string_lossy()).unwrap())).unwrap();
+    let policy = Policy::new().with_capabilities(Capabilities::new().read_roots([data.clone()]).write_roots([data.clone()]));
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window.update(cx, |_, window, cx| {
+        let mut session = DescriptionSession::load(runtime.clone(), &root, policy, window, cx).unwrap();
+        session.describe(window, cx).unwrap();
+        session
+    }).unwrap();
+    cx.run_until_parked();
+    let tree = window.update(cx, |_, window, cx| session.describe(window, cx).unwrap()).unwrap();
+    for expected in [
+        "grown:64:true:0",
+        "detached:fs.writeFile(path, contents) received a detached Uint8Array",
+        "shrunk:97",
+        "fixed:97,98",
+        "zero:0",
+        "refrozen:TypeError",
+        "done",
+    ] {
+        assert!(tree.contains(expected), "{expected}: {tree}");
+    }
+    assert!(!data.join("detached.bin").exists());
+    assert_eq!(std::fs::read(data.join("grown.bin")).unwrap(), b"abc\0\0\0\0\0");
+    assert_eq!(std::fs::read(data.join("frozen.bin")).unwrap(), b"abc");
+    drop(session);
+    cx.run_until_parked();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+// HyperOx (FX-A2, GHSA-rxpx-wj25-jhqq): quickjs-ng 0.16 fixed a write past the RegExp bytecode
+// buffer when growing it fails. A mod that compiles alternations with its heap at the limit gets
+// an out-of-memory error, not a corrupt engine. The shell keeps such a failure out of the code
+// cache by its text (an InternalError `out of memory`), so the same unchanged code loads again
+// once memory is back; a reworded engine message would cache the failure for good.
+#[gpui::test]
+fn a_mod_that_runs_out_of_memory_compiling_regexps_fails_cleanly_and_loads_again(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("hog");
+    std::fs::create_dir_all(&root).unwrap();
+    // Indexed loops only: an iterator allocates, and each step near the limit must be in a try.
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { hog } from 'copy';
+const sizes = [1 << 24, 1 << 20, 1 << 16, 1 << 12, 1 << 8, 1 << 6];
+const patterns = Array.from({ length: 32 }, (_, n) => '(?:' + Array.from({ length: n + 2 }, (_, i) => 'a' + i).join('|') + ')+$');
+function exhaust() {
+  const held = [];
+  let failure = null;
+  for (let s = 0; s < sizes.length; s++) {
+    try { for (;;) held.push(new ArrayBuffer(sizes[s])); } catch (error) { failure = failure || error; }
+    for (let p = 0; p < patterns.length; p++) {
+      try { new RegExp(patterns[p], 'u'); } catch (error) { failure = failure || error; }
+    }
+  }
+  return failure;
+}
+if (hog()) {
+  let failure = null;
+  try { failure = exhaust(); } catch (error) { failure = failure || error; }
+  throw failure;
+}
+export default class Panel extends View { render() { return div().child('loaded'); } }
+"#).unwrap();
+    let policy = |hog: bool| Policy::new().with_host_module(HostModule::new("copy").function("hog", move |_| Ok(HostValue::Bool(hog)))).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let error = DescriptionSession::load(runtime.clone(), &root, policy(true), window, cx)
+            .err()
+            .map(|error| format!("{error:#}"))
+            .expect("a mod that exhausts its heap must not load");
+        assert!(error.contains("out of memory"), "{error}");
+        let mut loaded = DescriptionSession::load(runtime.clone(), &root, policy(false), window, cx)
+            .unwrap_or_else(|error| panic!("the out-of-memory failure was cached: {error:#}"));
+        let tree = loaded.describe(window, cx).unwrap();
+        assert!(tree.contains("loaded"), "{tree}");
+        assert_eq!(runtime.code_cache_counts().0, 1, "one version: the failure was not kept");
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
 // HyperOx: shared code is keyed by content, like the consent hash (ADR-048). With every watcher
 // event lost, an edit that keeps the size and modified time, anywhere the code imports (the entry,
 // a helper, a file deeper than the watcher's scan, a file replaced by a link), asks again and never
