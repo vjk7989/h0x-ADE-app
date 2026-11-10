@@ -94,6 +94,7 @@ fn main() {
         std::process::exit(control::client(&args[1..]));
     }
     // Anything else from a shell answers in the shell; only a bare launch opens the window.
+    let mut quiet = false;
     match args.get(1).map(String::as_str) {
         // Already open on this home: that window comes to the front.
         None => {
@@ -112,6 +113,12 @@ fn main() {
             }
             if from_shell {
                 let _ = launch::announce(&launch::started_line(folder.as_deref()), folder.as_deref());
+                // The started line is all the terminal gets: let go of it, and log nowhere unless asked.
+                #[cfg(windows)]
+                unsafe {
+                    windows_sys::Win32::System::Console::FreeConsole();
+                }
+                quiet = std::env::var_os("H0X_ADE_LOG").is_none();
             }
         }
         Some("-h" | "--help" | "help") => return print!("{HELP}"),
@@ -125,12 +132,15 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     core_bin::fill_path();
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    let log = tracing_subscriber::fmt().with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("H0X_ADE_LOG")
                 .unwrap_or_else(|_| "warn,h0x_ade=info,gpui_shell=info".into()),
-        )
-        .init();
+        );
+    if quiet {
+        log.with_writer(std::io::sink).init();
+    } else {
+        log.init();
+    }
 
     if update::apply_on_startup() {
         return;
