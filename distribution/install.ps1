@@ -6,8 +6,12 @@
 # `h0x-ade`), HyperOx in the Start menu. The core, with its own installer,
 # only if none is there yet; the app keeps it current after that. Running it
 # again updates the app (an open one keeps running until it quits). No admin
-# needed. H0X_ADE_RELEASES_URL (app) and H0X_CORE_RELEASES_URL (core) point
-# elsewhere (tests).
+# needed. The core is the version this release pins (core_min in its manifest),
+# never "latest". The app download must carry the release key's signature (its
+# .minisig); h0x-core checks it before anything downloaded is unpacked, as the
+# core's own installer does (which, on a first install, trusts TLS to GitHub
+# and the checksum, documented there).
+# H0X_ADE_RELEASES_URL (app) and H0X_CORE_RELEASES_URL (core) point elsewhere (tests).
 
 # Its own scope: under `irm | iex` it would otherwise set the caller's variables.
 & {
@@ -19,6 +23,31 @@ function Fail($why) { throw "h0x-ade: $why" }
 
 $releases = if ($env:H0X_ADE_RELEASES_URL) { $env:H0X_ADE_RELEASES_URL.TrimEnd("/") } else { "https://github.com/vjk7989/h0x-ADE-app/releases" }
 $coreReleases = if ($env:H0X_CORE_RELEASES_URL) { $env:H0X_CORE_RELEASES_URL.TrimEnd("/") } else { "https://github.com/vjk7989/h0x-ADE-core/releases" }
+# https only, and the downloads on GitHub; a site set by H0X_ADE_RELEASES_URL or
+# H0X_CORE_RELEASES_URL (tests) is trusted as it is, unsigned.
+$proto = if ($env:H0X_ADE_RELEASES_URL) { "=https,http" } else { "=https" }
+$coreProto = if ($env:H0X_CORE_RELEASES_URL) { "=https,http" } else { "=https" }
+# Said loudly: set in a profile and forgotten, either one turns a check off.
+if ($env:H0X_ADE_RELEASES_URL) { [Console]::Error.WriteLine("h0x-ade: WARNING: H0X_ADE_RELEASES_URL is set: downloads from that site are NOT signature-checked (unset it for a normal install).") }
+if ($env:H0X_CORE_RELEASES_URL) { [Console]::Error.WriteLine("h0x-ade: WARNING: H0X_CORE_RELEASES_URL is set: the core is downloaded from that site and its signature is NOT checked (unset it for a normal install).") }
+# An https link on GitHub, no port and no user name; the host compared in lower case.
+function Test-GitHub($url) {
+    try { $u = [Uri]$url } catch { return $false }
+    return $u.IsAbsoluteUri -and $u.Scheme -eq "https" -and $u.IsDefaultPort -and -not $u.UserInfo -and $u.Host.ToLowerInvariant() -in "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"
+}
+function Check($url) {
+    if (-not $env:H0X_ADE_RELEASES_URL -and -not (Test-GitHub $url)) { Fail "refusing to download ${url}: not an https link on GitHub" }
+}
+function Check-Core($url) {
+    if (-not $env:H0X_CORE_RELEASES_URL -and -not (Test-GitHub $url)) { Fail "refusing to download ${url}: not an https link on GitHub" }
+}
+# curl.exe https only (redirects too), and where it ended up must pass `check` as well.
+function Get-File($url, $out, $protocol, $check) {
+    $final = curl.exe -fsSL --proto $protocol --proto-redir $protocol -w "%{url_effective}" -o $out $url
+    if ($LASTEXITCODE) { return $false }
+    if ($final) { & $check $final }
+    return $true
+}
 $dir = Join-Path $env:LOCALAPPDATA "Programs\h0x-ade"
 $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 if ($arch -ne "AMD64") { Fail "no build for $arch Windows yet (x64 only)" }
@@ -32,20 +61,59 @@ if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue) -or -not (Test-Pat
 $tmp = Join-Path ([IO.Path]::GetTempPath()) "h0x-ade-install-$PID"
 New-Item -ItemType Directory -Force $tmp | Out-Null
 try {
-    curl.exe -fsSL "$releases/latest/download/latest.json" -o "$tmp\latest.json"
+    $manifest = "$releases/latest/download/latest.json"
+    Check $manifest
+    curl.exe -fsSL --proto $proto --proto-redir $proto $manifest -o "$tmp\latest.json"
     if ($LASTEXITCODE) { Fail "cannot reach $releases" }
     $m = Get-Content -Raw "$tmp\latest.json" | ConvertFrom-Json
     $t = $m.targets.$target
     if (-not $t.url -or -not $t.sha256) { Fail "no build for $target yet" }
+    Check $t.url
 
     Write-Host "Installing HyperOx $($m.version) for $target..."
-    curl.exe -fsSL $t.url -o "$tmp\app.tar.gz"
-    if ($LASTEXITCODE) { Fail "download failed: $($t.url)" }
+    # Fetched exactly as the list gives it, under the release's own file name:
+    # its signature is bound to that name.
+    $asset = ($t.url -replace "[?#].*", "") -replace ".*/", ""
+    $archive = Join-Path $tmp $asset
+    if (-not (Get-File $t.url $archive $proto ${function:Check})) { Fail "download failed: $($t.url)" }
     # .NET, not Get-FileHash: that one fails when PowerShell 7 starts 5.1.
-    $stream = [IO.File]::OpenRead("$tmp\app.tar.gz")
+    $stream = [IO.File]::OpenRead($archive)
     try { $got = -join ([Security.Cryptography.SHA256]::Create().ComputeHash($stream) | ForEach-Object { $_.ToString("x2") }) } finally { $stream.Close() }
     if ($got -ne $t.sha256) { Fail "the download is damaged (checksum mismatch); try again" }
-    & $tar -xzf "$tmp\app.tar.gz" -C $tmp
+
+    # The core: installed only if there's none yet, at the version this release
+    # pins (never "latest"). One that's already there is left alone; the app
+    # updates it. Its installer is downloaded to a file and run, not piped.
+    $core = Join-Path $env:LOCALAPPDATA "Programs\h0x-core\h0x-core.exe"
+    function Core-Present { (Test-Path $core) -or [bool](Get-Command h0x-core -ErrorAction SilentlyContinue) }
+    function Ensure-Core {
+        if (Core-Present) { return }
+        if ($m.core_min -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw "the release lists no core version" }
+        $script = "$tmp\core-install.ps1"
+        $url = "$coreReleases/download/v$($m.core_min)/install.ps1"
+        Check-Core $url
+        if (-not (Get-File $url $script $coreProto ${function:Check-Core})) { throw "cannot download $url" }
+        $was = $env:H0X_CORE_VERSION
+        $env:H0X_CORE_VERSION = $m.core_min
+        try {
+            $ps = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+            & $ps -NoProfile -ExecutionPolicy Bypass -File $script
+            if ($LASTEXITCODE) { throw "the core installer failed" }
+        } finally { $env:H0X_CORE_VERSION = $was }
+    }
+    if (-not $env:H0X_ADE_RELEASES_URL) {
+        # The checksum comes from the same place as the file: the signature is what
+        # proves the release key made it. h0x-core (0.1.9 or newer) checks it, so
+        # nothing from the download is unpacked before that.
+        try { Ensure-Core } catch { Fail "needs h0x-core $($m.core_min) to check the signature, and it did not install: $_" }
+        $checker = if (Test-Path $core) { $core } else { (Get-Command h0x-core).Source }
+        $sigUrl = ($t.url -replace "[?#].*", "") + ".minisig"
+        Check $sigUrl
+        if (-not (Get-File $sigUrl "$archive.minisig" $proto ${function:Check})) { Fail "no signature for ${asset}: $sigUrl" }
+        & $checker update --from $archive --check | Out-Null
+        if ($LASTEXITCODE) { Fail "$asset is not signed by the HyperOx release key, or h0x-core could not check it (see above; h0x-core 0.1.9 or newer is needed)" }
+    }
+    & $tar -xzf $archive -C $tmp
     if ($LASTEXITCODE -or -not (Test-Path "$tmp\h0x-ade\h0x-ade.exe")) { Fail "the download holds no complete app" }
 
     # A running app's folder can be renamed, not deleted: the old one goes
@@ -78,17 +146,7 @@ try {
     $key.Close()
     if (($env:Path -split ";") -notcontains $dir) { $env:Path += ";$dir" }
 
-    # The core: installed only if there's none yet. One that's already there
-    # is left alone; the app updates it.
-    $core = Join-Path $env:LOCALAPPDATA "Programs\h0x-core\h0x-core.exe"
-    if (-not (Test-Path $core) -and -not (Get-Command h0x-core -ErrorAction SilentlyContinue)) {
-        try {
-            $env:H0X_CORE_RELEASES_URL = $coreReleases
-            Invoke-RestMethod "$coreReleases/latest/download/install.ps1" | Invoke-Expression
-        } catch {
-            Write-Host "h0x-core didn't install; HyperOx will offer it when it opens."
-        }
-    }
+    try { Ensure-Core } catch { Write-Host "h0x-core didn't install; HyperOx will offer it when it opens." }
 
     Write-Host "HyperOx is installed. Open it from the Start menu, or run: h0x-ade"
 } finally {

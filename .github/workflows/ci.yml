@@ -147,9 +147,17 @@ jobs:
       - name: Check release packaging
         if: matrix.platform == 'linux-x86_64'
         run: python3 -m unittest discover -s scripts -p test_distribution.py
+      # Pinned by version and the sha256 of the release zip (from the release's SHASUMS256.txt).
       - name: Install Bun
         if: matrix.platform == 'linux-x86_64'
-        run: curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"
+        env:
+          BUN_VERSION: 1.4.4
+          BUN_SHA256: bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c
+        run: |
+          curl -fsSL --proto '=https' --proto-redir '=https' -o "$RUNNER_TEMP/bun.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/bun-linux-x64.zip"
+          echo "$BUN_SHA256  $RUNNER_TEMP/bun.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bun"
+          install -D -m 755 "$RUNNER_TEMP/bun/bun-linux-x64/bun" ~/.bun/bin/bun
       - name: Check documentation
         if: matrix.platform == 'linux-x86_64'
         run: |
@@ -159,11 +167,23 @@ jobs:
         if: matrix.platform == 'linux-x86_64'
         run: ~/.bun/bin/bun test scripts/files.test.ts scripts/machine-add.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/rest.test.ts scripts/spaces.test.ts scripts/worktree.test.ts
 
+  # Security advisories (RustSec) in the dependencies: deny.toml.
+  advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories
+
   # Keep the required check name stable while requiring every platform.
   test:
-    needs: platform-tests
+    needs: [platform-tests, advisories]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - run: '[ "${{ needs.platform-tests.result }}" = success ]'
+      - run: '[ "${{ needs.platform-tests.result }}" = success ] && [ "${{ needs.advisories.result }}" = success ]'

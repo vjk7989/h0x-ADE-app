@@ -33,21 +33,24 @@ pub fn path() -> PathBuf {
     BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().unwrap_or_else(|| PathBuf::from("h0x-core"))
 }
 
-/// Uses this core from now on, and puts its folder first on PATH so mods'
-/// `core()` and anything the app runs find the same one.
+/// Uses this core from now on.
 pub fn use_core(bin: PathBuf) {
-    // Only an absolute folder goes on PATH: a relative or empty one means "here".
-    if let Some(dir) = bin.parent().filter(|d| d.is_absolute()) {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
-        dirs.extend(std::env::split_paths(&path).filter(|d| d != dir));
-        if let Ok(joined) = std::env::join_paths(dirs) {
-            // SAFETY: set at start or from the setup screen, before the main window
-            // (and its mods) read the environment.
-            unsafe { std::env::set_var("PATH", joined) };
-        }
-    }
     *BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bin);
+}
+
+/// The PATH for the programs mods start: the chosen core's folder first, so
+/// their `core()` finds the same core the app runs. Given to those children,
+/// never set in this process: `set_var` while other threads run is a data race
+/// on unix. Only an absolute folder goes on it (a relative or empty one means
+/// "here"); None if there is none.
+pub fn path_with_core() -> Option<std::ffi::OsString> {
+    let bin = BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()?;
+    let dir = bin.parent().filter(|d| d.is_absolute())?;
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
+    // An empty or relative entry means "here": never carried over.
+    dirs.extend(std::env::split_paths(&path).filter(|d| d != dir && d.is_absolute()));
+    std::env::join_paths(dirs).ok()
 }
 
 /// Finder and Dock launches don't inherit the person's shell PATH.
@@ -163,11 +166,15 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
     Some(out.into())
 }
 
-/// Installs the core's latest release with its own installer (into
-/// ~/.local/bin, or H0X_CORE_INSTALL_DIR), then finds it. Err: what went wrong.
+/// Installs the core version this app pins (distribution/core-version, never
+/// "latest") with its own installer (into ~/.local/bin, or H0X_CORE_INSTALL_DIR),
+/// then finds it. Err: what went wrong.
 /// The script is downloaded (https, GitHub only) to a file, run only if its
 /// `.minisig` is the release key's signature, and run as one argument; values
-/// reach it through the environment, never a command string.
+/// reach it through the environment, never a command string. The installer then
+/// checks the release archive's signature itself, unless a releases site was
+/// set by H0X_CORE_RELEASES_URL (inherited as it is, never set here: a value
+/// set here would switch that check off).
 pub fn install() -> Result<PathBuf, String> {
     if let Some(dir) = std::env::var_os("H0X_CORE_INSTALL_DIR").map(PathBuf::from).filter(|d| !d.is_absolute()) {
         return Err(format!("H0X_CORE_INSTALL_DIR must be an absolute folder, not {}", dir.display()));
@@ -180,9 +187,10 @@ pub fn install() -> Result<PathBuf, String> {
     std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
     let file = work.join(script);
     // Run a fresh copy of the checked bytes, not the downloaded path.
-    let result = crate::update::download(&format!("{releases}/latest/download/{script}"), &file, "120").and_then(|bytes| {
+    let pinned = crate::core_link::core_min();
+    let result = crate::update::download(&format!("{releases}/download/v{pinned}/{script}"), &file, "120").and_then(|bytes| {
         let (sealed_dir, sealed) = crate::update::seal(&home, &bytes, script)?;
-        let ran = run_installer(&sealed, &releases);
+        let ran = run_installer(&sealed, pinned);
         let _ = std::fs::remove_dir_all(&sealed_dir);
         ran
     });
@@ -197,10 +205,20 @@ pub fn install() -> Result<PathBuf, String> {
         }
     });
     let bin = core_in(&dir);
-    version(&bin).map(|_| bin).ok_or_else(|| "installed, but h0x-core doesn't run".into())
+    let installed = version(&bin).ok_or("installed, but h0x-core doesn't run")?;
+    if !is_pinned(&installed, pinned) {
+        return Err(format!("installed, but it is {installed}, not the pinned h0x-core {pinned}"));
+    }
+    Ok(bin)
 }
 
-fn run_installer(file: &Path, releases: &str) -> Result<(), String> {
+/// The releases-site variables the core installer must not see: with one set it
+/// fetches from that site and skips the signature check. Test builds keep them (their stub sites).
+fn releases_site_vars(overrides: bool) -> &'static [&'static str] {
+    if overrides { &[] } else { &["H0X_CORE_RELEASES_URL", "H0X_ADE_RELEASES_URL"] }
+}
+
+fn run_installer(file: &Path, version: &str) -> Result<(), String> {
     let mut cmd = if cfg!(windows) {
         // Absolute: a powershell.exe earlier on PATH must not run the installer.
         let root = std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?;
@@ -212,12 +230,21 @@ fn run_installer(file: &Path, releases: &str) -> Result<(), String> {
         c.arg(file);
         c
     };
-    let out = cmd.env("H0X_CORE_RELEASES_URL", releases).stdin(Stdio::null()).output().map_err(|e| format!("cannot run the installer: {e}"))?;
+    for var in releases_site_vars(crate::update::OVERRIDES) {
+        cmd.env_remove(var);
+    }
+    let out = cmd.env("H0X_CORE_VERSION", version).stdin(Stdio::null()).output().map_err(|e| format!("cannot run the installer: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
         return Err(if err.is_empty() { "the installer failed".into() } else { err });
     }
     Ok(())
+}
+
+/// The installer's signature binds the file name, not the version: the core that
+/// landed must say it is exactly the pinned one.
+fn is_pinned(version_line: &str, pinned: &str) -> bool {
+    version_line.trim() == format!("h0x-core {pinned}")
 }
 
 /// Updates the core to its latest release (`h0x-core update`: same generation only,
@@ -330,12 +357,71 @@ echo '{hello}'
         }
         assert!(readers.into_iter().all(|r| r.join().unwrap()));
         assert_eq!(path(), a);
-        // Each replacement moves its folder to the front without piling up PATH entries.
+        // Each replacement puts only its own folder in front, without piling up PATH entries,
+        // and the process's own PATH is left alone.
+        let before = std::env::var_os("PATH");
         use_core(b.clone());
-        let dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH").unwrap()).collect();
+        assert_eq!(std::env::var_os("PATH"), before);
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path_with_core().unwrap()).collect();
         assert_eq!(dirs[0], b.parent().unwrap());
-        assert_eq!(dirs.iter().filter(|d| d.as_path() == a.parent().unwrap()).count(), 1, "{dirs:?}");
+        // Only the core in use is added: a replaced core's folder is not left behind.
+        assert_eq!(dirs.iter().filter(|d| d.as_path() == a.parent().unwrap()).count(), 0, "{dirs:?}");
         assert_eq!(dirs.iter().filter(|d| d.as_path() == b.parent().unwrap()).count(), 1, "{dirs:?}");
+    }
+
+    // BIN and PATH are process-wide: runs in a child process.
+    #[test]
+    fn the_core_folder_goes_first_once_whatever_its_name() {
+        const CHILD: &str = "H0X_TEST_PATH_WITH_CORE";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "core_bin::tests::the_core_folder_goes_first_once_whatever_its_name", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let log = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success() && log.contains("1 passed"), "{log}");
+            return;
+        }
+        let (dir, written, others) = if cfg!(windows) {
+            (r"C:\Users\Zoë\Programme mit Leerzeichen\h0x-核心", r"C:\Users\Zoë\Programme mit Leerzeichen\h0x-核心\", [r"C:\Windows\System32", r"C:\Tools"])
+        } else {
+            ("/home/zoë/my tools/h0x-核心", "/home/zoë/my tools/h0x-核心/", ["/usr/bin", "/bin"])
+        };
+        let dir = PathBuf::from(dir);
+        // SAFETY: this child process runs only this test.
+        unsafe { std::env::set_var("PATH", std::env::join_paths([others[0], written, others[1]]).unwrap()) };
+        let before = std::env::var_os("PATH");
+        use_core(dir.join(if cfg!(windows) { "h0x-core.exe" } else { "h0x-core" }));
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path_with_core().unwrap()).collect();
+        // Already on PATH (here with a trailing separator): moved to the front, not added twice.
+        assert_eq!(dirs, [dir.clone(), PathBuf::from(others[0]), PathBuf::from(others[1])], "{dirs:?}");
+        assert_eq!(std::env::var_os("PATH"), before, "the process's own PATH is left alone");
+    }
+
+    // BIN and PATH are process-wide: runs in a child process.
+    #[test]
+    fn an_empty_or_unset_path_gets_the_core_folder_and_never_the_current_one() {
+        const CHILD: &str = "H0X_TEST_PATH_WITH_CORE_EMPTY";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "core_bin::tests::an_empty_or_unset_path_gets_the_core_folder_and_never_the_current_one", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let log = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success() && log.contains("1 passed"), "{log}");
+            return;
+        }
+        let dir = PathBuf::from(if cfg!(windows) { r"C:\Users\me\AppData\Local\Programs\h0x-core" } else { "/home/me/.local/bin" });
+        use_core(dir.join("h0x-core"));
+        // An empty PATH entry means the current folder: a mod's program must not be looked up there.
+        // SAFETY: this child process runs only this test.
+        unsafe { std::env::set_var("PATH", "") };
+        assert_eq!(path_with_core(), Some(dir.clone().into_os_string()), "PATH empty");
+        // SAFETY: this child process runs only this test.
+        unsafe { std::env::remove_var("PATH") };
+        assert_eq!(path_with_core(), Some(dir.into_os_string()), "PATH unset");
     }
 
     // The committed fixture core sits in the child's current folder, with `.`
@@ -373,13 +459,27 @@ echo '{hello}'
         // SAFETY: this child process runs only this test.
         unsafe { std::env::set_var("PATH", "/usr/bin:/bin") };
         use_core(PathBuf::from("h0x-core"));
-        let path = std::env::var_os("PATH").unwrap();
-        assert!(std::env::split_paths(&path).all(|d| d.is_absolute()), "a relative core put {path:?} on PATH");
+        assert_eq!(path_with_core(), None, "a relative core put a folder on PATH");
         // A relative install folder is refused before anything is downloaded.
         // SAFETY: this child process runs only this test.
         unsafe { std::env::set_var("H0X_CORE_INSTALL_DIR", "relative/bin") };
         let error = install().unwrap_err();
         assert!(error.contains("absolute") && error.contains("relative/bin"), "{error}");
+    }
+
+    #[test]
+    fn the_core_installer_never_sees_a_releases_site_in_a_release_build() {
+        assert_eq!(releases_site_vars(false), ["H0X_CORE_RELEASES_URL", "H0X_ADE_RELEASES_URL"]);
+        assert!(releases_site_vars(true).is_empty());
+    }
+
+    #[test]
+    fn only_the_exact_pinned_core_counts_as_installed() {
+        assert!(is_pinned("h0x-core 0.1.13", "0.1.13"));
+        assert!(is_pinned("h0x-core 0.1.13 ", "0.1.13"));
+        for other in ["h0x-core 0.1.14", "h0x-core 0.1.130", "h0x-core 0.1.13-rc.1", "h0x-core 0.1.1", "0.1.13", ""] {
+            assert!(!is_pinned(other, "0.1.13"), "{other:?}");
+        }
     }
 
     #[test]

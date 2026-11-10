@@ -8,12 +8,26 @@
 # its release signature intact (ad hoc for unsigned/dev builds). The core, with its
 # own installer, into ~/.local/bin/h0x-core only if none is there yet; the app
 # keeps it current after that. Running it again updates the app.
+# The core is the version this release pins (core_min in its manifest), never
+# "latest". The app download must carry the release key's signature (its
+# .minisig); h0x-core checks it before anything downloaded is unpacked, as the
+# core's own installer does (which, on a first install, trusts TLS to GitHub
+# and the checksum, documented there).
 # H0X_ADE_RELEASES_URL (app) and H0X_CORE_RELEASES_URL (core) point elsewhere (tests).
 set -eu
 
 releases=${H0X_ADE_RELEASES_URL:-https://github.com/vjk7989/h0x-ADE-app/releases}
 core_releases=${H0X_CORE_RELEASES_URL:-https://github.com/vjk7989/h0x-ADE-core/releases}
 bin="$HOME/.local/bin"
+# https only, and the downloads on GitHub; a site set by H0X_ADE_RELEASES_URL
+# or H0X_CORE_RELEASES_URL (tests: a local http one) is trusted as it is, unsigned.
+proto='=https'
+[ -n "${H0X_ADE_RELEASES_URL:-}" ] && proto='=https,http'
+core_proto='=https'
+[ -n "${H0X_CORE_RELEASES_URL:-}" ] && core_proto='=https,http'
+# Said loudly: set in a profile and forgotten, either one turns a check off.
+[ -z "${H0X_ADE_RELEASES_URL:-}" ] || printf 'h0x-ade: WARNING: H0X_ADE_RELEASES_URL is set: downloads from that site are NOT signature-checked (unset it for a normal install).\n' >&2
+[ -z "${H0X_CORE_RELEASES_URL:-}" ] || printf 'h0x-ade: WARNING: H0X_CORE_RELEASES_URL is set: the core is downloaded from that site and its signature is NOT checked (unset it for a normal install).\n' >&2
 
 say() { printf '%s\n' "$*"; }
 fail() { say "h0x-ade: $*" >&2; exit 1; }
@@ -51,18 +65,64 @@ sha256() {
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-curl -fsSL "$releases/latest/download/latest.json" -o "$tmp/latest.json" || fail "cannot reach $releases"
+curl -fsSL --proto "$proto" --proto-redir "$proto" "$releases/latest/download/latest.json" -o "$tmp/latest.json" || fail "cannot reach $releases"
 # Read without jq: the manifest is flat enough for sed once spaces are gone.
-entry=$(tr -d '\n ' < "$tmp/latest.json" | sed -n "s/.*\"$target\":{\([^}]*\)}.*/\1/p")
+flat=$(tr -d '\n ' < "$tmp/latest.json")
+entry=$(printf '%s' "$flat" | sed -n "s/.*\"$target\":{\([^}]*\)}.*/\1/p")
 url=$(printf '%s' "$entry" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
 want=$(printf '%s' "$entry" | sed -n 's/.*"sha256":"\([^"]*\)".*/\1/p')
-version=$(tr -d '\n ' < "$tmp/latest.json" | sed -n 's/^{"version":"\([^"]*\)".*/\1/p')
+version=$(printf '%s' "$flat" | sed -n 's/^{"version":"\([^"]*\)".*/\1/p')
+core_min=$(printf '%s' "$flat" | sed -n 's/.*"core_min":"\([^"]*\)".*/\1/p')
 [ -n "$url" ] && [ -n "$want" ] || fail "no build for $target yet"
+if [ -z "${H0X_ADE_RELEASES_URL:-}" ]; then
+  case $url in
+    https://github.com/* | https://objects.githubusercontent.com/* | https://release-assets.githubusercontent.com/*) ;;
+    *) fail "refusing to download $url: not an https link on GitHub" ;;
+  esac
+fi
 
 say "Installing HyperOx ${version:-} for $target..."
-curl -fsSL "$url" -o "$tmp/app.tar.gz" || fail "download failed"
-[ "$(sha256 "$tmp/app.tar.gz")" = "$want" ] || fail "download is damaged (checksum mismatch); try again"
-tar -xzf "$tmp/app.tar.gz" -C "$tmp"
+# Fetched exactly as the list gives it, under the release's own file name:
+# its signature is bound to that name.
+asset=${url%%[?#]*}
+asset=${asset##*/}
+archive="$tmp/$asset"
+# get PROTO URL OUT SITE: https only, redirects too; unless SITE (a test site)
+# is set, the URL it ended up at must be on GitHub as well.
+get() {
+  final=$(curl -fsSL --proto "$1" --proto-redir "$1" -w '%{url_effective}' -o "$3" "$2") || return 1
+  [ -n "$4" ] && return 0
+  case $final in
+    '' | https://github.com/* | https://objects.githubusercontent.com/* | https://release-assets.githubusercontent.com/*) ;;
+    *) rm -f "$3"; fail "refusing the download from $final: redirected off GitHub" ;;
+  esac
+}
+get "$proto" "$url" "$archive" "${H0X_ADE_RELEASES_URL:-}" || fail "download failed"
+[ "$(sha256 "$archive")" = "$want" ] || fail "download is damaged (checksum mismatch); try again"
+
+# The core: installed only if there's none yet, at the version this release
+# pins (never "latest"). One that's already there (yours, or from a package
+# manager) is left alone; the app updates it. Its installer is downloaded to a
+# file and run, not piped.
+core_present() { [ -e "$bin/h0x-core" ] || command -v h0x-core >/dev/null 2>&1; }
+ensure_core() {
+  core_present && return 0
+  printf '%s' "$core_min" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || return 1
+  get "$core_proto" "$core_releases/download/v$core_min/install.sh" "$tmp/core-install.sh" "${H0X_CORE_RELEASES_URL:-}" || return 1
+  H0X_CORE_VERSION="$core_min" H0X_CORE_INSTALL_DIR="$bin" sh "$tmp/core-install.sh"
+}
+if [ -z "${H0X_ADE_RELEASES_URL:-}" ]; then
+  # The checksum comes from the same place as the file: the signature is what
+  # proves the release key made it. h0x-core (0.1.9 or newer) checks it, so
+  # nothing from the download is unpacked before that.
+  mkdir -p "$bin"
+  ensure_core || fail "needs h0x-core $core_min to check the signature, and it did not install"
+  if [ -x "$bin/h0x-core" ]; then core="$bin/h0x-core"; else core=$(command -v h0x-core 2>/dev/null) || core=; fi
+  [ -n "$core" ] || fail "h0x-core is there but cannot run ($bin/h0x-core): fix or remove it, then run this again"
+  get "$proto" "${url%%[?#]*}.minisig" "$archive.minisig" "" || fail "no signature for $asset: ${url%%[?#]*}.minisig"
+  "$core" update --from "$archive" --check >/dev/null || fail "$asset is not signed by the HyperOx release key, or h0x-core could not check it (see above; h0x-core 0.1.9 or newer is needed)"
+fi
+tar -xzf "$archive" -C "$tmp"
 mkdir -p "$bin"
 
 if [ "$os" = linux ]; then
@@ -119,11 +179,7 @@ else
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app" 2>/dev/null || true
 fi
 
-# The core: installed only if there's none yet. One that's already there
-# (yours, or from a package manager) is left alone; the app updates it.
-if [ ! -e "$bin/h0x-core" ] && ! command -v h0x-core >/dev/null 2>&1; then
-  curl -fsSL "$core_releases/latest/download/install.sh" | H0X_CORE_INSTALL_DIR="$bin" H0X_CORE_RELEASES_URL="$core_releases" sh || say "h0x-core didn't install; HyperOx will offer it when it opens."
-fi
+ensure_core || say "h0x-core didn't install; HyperOx will offer it when it opens."
 
 say "HyperOx is installed. Open it from your apps, or run: h0x-ade"
 case ":$PATH:" in

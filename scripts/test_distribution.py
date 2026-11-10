@@ -31,8 +31,8 @@ class DistributionTests(unittest.TestCase):
         path.write_text("#!/bin/sh\n" + body + "\n")
         path.chmod(0o755)
 
-    def run_script(self, script, os_name, arch, *args):
-        env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", TEST_OS=os_name, TEST_ARCH=arch)
+    def run_script(self, script, os_name, arch, *args, **extra):
+        env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", TEST_OS=os_name, TEST_ARCH=arch, **extra)
         return subprocess.run(
             [str(ROOT / script), *args], cwd=ROOT, env=env,
             capture_output=True, text=True, check=False,
@@ -72,11 +72,189 @@ class DistributionTests(unittest.TestCase):
   shift
 done
 exit 97''')
-                result = self.run_script("distribution/install.sh", "Darwin", "x86_64")
+                result = self.run_script("distribution/install.sh", "Darwin", "x86_64", H0X_ADE_RELEASES_URL="https://releases.example")
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("Installing HyperOx test for macos-aarch64", result.stdout)
                 self.assertIn("download is damaged", result.stderr)
                 self.assertNotIn("Intel Macs", result.stderr)
+
+    def test_installer_refuses_a_download_off_github_and_needs_https(self):
+        for url in ("https://evil.example/h0x-ade-linux-x86_64.tar.gz", "http://github.com/x/h0x-ade-linux-x86_64.tar.gz"):
+            with self.subTest(url=url):
+                manifest = Path(self.work.name) / "latest.json"
+                manifest.write_text('{"version":"1.0.0","core_min":"0.1.13","targets":{"linux-x86_64":{"url":"%s","sha256":"x"}}}' % url)
+                log = Path(self.work.name) / "urls"
+                log.unlink(missing_ok=True)
+                self.stub("curl", f'''url=; out=; prev=
+for a; do
+  if [ "$prev" = -o ]; then out=$a; else case $a in -*) ;; *) url=$a ;; esac; fi
+  prev=$a
+done
+echo "$url" >> "{log}"
+case $url in */latest.json) cp "{manifest}" "$out"; exit 0 ;; esac
+exit 22''')
+                result = self.run_script("distribution/install.sh", "Linux", "x86_64")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("refusing to download", result.stderr)
+                self.assertEqual(len(log.read_text().splitlines()), 1, "only the manifest was fetched")
+
+    APP_URL = "https://github.com/vjk7989/h0x-ADE-app/releases/download/v1.0.0/h0x-ade-linux-x86_64.tar.gz"
+
+    def release_install(self, url=APP_URL, core_min="0.1.13", core=None, core_status=1, **extra):
+        """Runs install.sh on Linux against the real release sites (stubbed curl).
+
+        `core`: None (no h0x-core yet; the core installer writes one), "present"
+        (an h0x-core in ~/.local/bin already) or "not-executable". The h0x-core
+        answers `update --from … --check` with `core_status`. Returns the result,
+        the fetched URLs, every curl command line, the core installer's
+        `H0X_CORE_VERSION|H0X_CORE_INSTALL_DIR|H0X_CORE_RELEASES_URL` (or None if
+        it never ran), the h0x-core calls, whether tar ran, and the home."""
+        if shutil.which("h0x-core"):
+            self.skipTest("an h0x-core on this machine's PATH")
+        work = Path(self.work.name)
+        home = work / "home"
+        shutil.rmtree(home, ignore_errors=True)
+        bin_dir = home / ".local/bin"
+        source = work / "source/h0x-ade"
+        source.mkdir(parents=True, exist_ok=True)
+        (source / "h0x-ade").write_text("app")
+        archive = work / "release.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(source, arcname="h0x-ade")
+        sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+        pin = "" if core_min is None else ',"core_min":"%s"' % core_min
+        manifest = work / "latest.json"
+        manifest.write_text('{"version":"1.0.0"%s,"targets":{"linux-x86_64":{"url":"%s","sha256":"%s"}}}' % (pin, url, sha), encoding="utf-8")
+        calls = work / "core-calls"
+        core_stub = f'#!/bin/sh\necho "$*" >> "{calls}"\nexit {core_status}\n'
+        core_env = work / "core-env"
+        core_installer = work / "core-installer.sh"
+        core_installer.write_text(f'''printf '%s|%s|%s\\n' "${{H0X_CORE_VERSION-unset}}" "${{H0X_CORE_INSTALL_DIR-unset}}" "${{H0X_CORE_RELEASES_URL-unset}}" > "{core_env}"
+mkdir -p "$H0X_CORE_INSTALL_DIR"
+printf '%s' '{core_stub}' > "$H0X_CORE_INSTALL_DIR/h0x-core"
+chmod 755 "$H0X_CORE_INSTALL_DIR/h0x-core"
+''')
+        if core is not None:
+            bin_dir.mkdir(parents=True)
+            (bin_dir / "h0x-core").write_text(core_stub)
+            (bin_dir / "h0x-core").chmod(0o644 if core == "not-executable" else 0o755)
+        for name in ("urls", "args", "tar-calls"):
+            (work / name).unlink(missing_ok=True)
+        for name in (calls, core_env):
+            name.unlink(missing_ok=True)
+        url_log, arg_log, tar_log = work / "urls", work / "args", work / "tar-calls"
+        self.stub("curl", f'''url=; out=; prev=
+for a; do
+  if [ "$prev" = -o ]; then out=$a; else case $a in -*) ;; *) url=$a ;; esac; fi
+  prev=$a
+done
+echo "$url" >> "{url_log}"
+echo "$*" >> "{arg_log}"
+case $url in
+  */latest/download/latest.json) cp "{manifest}" "$out" ;;
+  *.minisig) echo signature > "$out" ;;
+  */install.sh) cp "{core_installer}" "$out" ;;
+  *h0x-ade-linux-x86_64.tar.gz*) cp "{archive}" "$out" ;;
+  *) exit 22 ;;
+esac''')
+        self.stub("tar", f'echo "$*" >> "{tar_log}"; echo "unexpected unpack" >&2; exit 97')
+        env = {k: v for k, v in os.environ.items() if k not in ("H0X_ADE_RELEASES_URL", "H0X_CORE_RELEASES_URL", "H0X_CORE_VERSION", "H0X_CORE_INSTALL_DIR")}
+        env.update(PATH=f"{self.bin}:{os.environ['PATH']}", TEST_OS="Linux", TEST_ARCH="x86_64",
+                   HOME=str(home), XDG_DATA_HOME=str(home / ".local/share"), **extra)
+        result = subprocess.run([str(ROOT / "distribution/install.sh")], cwd=ROOT, env=env,
+                                capture_output=True, text=True, check=False)
+        read = lambda p: p.read_text().splitlines() if p.exists() else []
+        ran_core_installer = core_env.read_text().strip() if core_env.exists() else None
+        return result, read(url_log), read(arg_log), ran_core_installer, read(calls), tar_log.exists(), home
+
+    def assert_nothing_installed(self, home):
+        self.assertFalse((home / ".local/share/h0x-ade").exists(), "the app was unpacked")
+        self.assertFalse((home / ".local/bin/h0x-ade").exists(), "the app was linked")
+
+    def test_installer_refuses_look_alike_github_hosts(self):
+        for host in ("github.com.evil.com", "evil.com/github.com", "user@github.com@evil.com",
+                     "github.com@evil.com", "GITHUB.COM", "xn--github-9ya.com", "gіthub.com",
+                     "github.com:8443", "objects.githubusercontent.com.evil.com",
+                     "evil-githubusercontent.com"):
+            for scheme in ("https://", "http://"):
+                url = f"{scheme}{host}/vjk7989/h0x-ADE-app/releases/download/v1.0.0/h0x-ade-linux-x86_64.tar.gz"
+                with self.subTest(url=url):
+                    result, urls, _, core_env, _, unpacked, home = self.release_install(url=url)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn("refusing to download", result.stderr)
+                    self.assertEqual(len(urls), 1, f"only the manifest was fetched: {urls}")
+                    self.assertIsNone(core_env, "no core installer ran")
+                    self.assertFalse(unpacked)
+                    self.assertNotIn("h0x-core", os.listdir(home / ".local/bin") if (home / ".local/bin").exists() else [])
+        # Plain http to a real GitHub host is refused too.
+        for url in (self.APP_URL.replace("https://", "http://"),
+                    "http://objects.githubusercontent.com/x/h0x-ade-linux-x86_64.tar.gz",
+                    "github.com/vjk7989/h0x-ADE-app/releases/download/v1.0.0/h0x-ade-linux-x86_64.tar.gz",
+                    "//github.com/vjk7989/h0x-ADE-app/releases/download/v1.0.0/h0x-ade-linux-x86_64.tar.gz"):
+            with self.subTest(url=url):
+                result, urls, *_ = self.release_install(url=url)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("refusing to download", result.stderr)
+                self.assertEqual(len(urls), 1, urls)
+
+    def test_installer_checks_the_app_signature_with_the_pinned_core_before_unpacking(self):
+        # A query (a signed mirror URL) is not part of the file name or the signature's URL.
+        url = self.APP_URL + "?x=1"
+        result, urls, args, core_env, calls, unpacked, home = self.release_install(url=url, core_status=1)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("not signed by the HyperOx release key", result.stderr)
+        # The pinned core, never "latest", from a downloaded file (not piped).
+        self.assertIn("https://github.com/vjk7989/h0x-ADE-core/releases/download/v0.1.13/install.sh", urls)
+        self.assertFalse([u for u in urls if "/latest/" in u and not u.endswith("/latest/download/latest.json")], urls)
+        # It runs with the version and the folder, and without a releases site: one set
+        # here would switch off the core installer's own signature check.
+        bin_dir = home / ".local/bin"
+        self.assertEqual(core_env, f"0.1.13|{bin_dir}|unset")
+        self.assertIn(self.APP_URL + ".minisig", urls)
+        self.assertEqual(len(calls), 1, calls)
+        self.assertRegex(calls[0], r"^update --from .*/h0x-ade-linux-x86_64\.tar\.gz --check$")
+        # https only, on redirects too.
+        for line in args:
+            with self.subTest(curl=line):
+                self.assertIn("--proto =https ", line)
+                self.assertIn("--proto-redir =https ", line)
+        self.assertFalse(unpacked, "unpacked before the signature was checked")
+        self.assert_nothing_installed(home)
+
+    def test_installer_stops_before_unpacking_when_the_core_cannot_check(self):
+        # A core older than 0.1.9 has no `update --check` (exit 2); one that is there but
+        # won't run; either way nothing from the download is unpacked or installed.
+        for core, status in (("present", 2), ("present", 1), ("not-executable", 0)):
+            with self.subTest(core=core, status=status):
+                result, urls, _, core_env, _, unpacked, home = self.release_install(core=core, core_status=status)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("h0x-core", result.stderr, "the failure says why")
+                self.assertIsNone(core_env, "a core that is there is left alone")
+                self.assertFalse([u for u in urls if "h0x-ADE-core" in u], urls)
+                self.assertFalse(unpacked)
+                self.assert_nothing_installed(home)
+
+    def test_installer_refuses_a_missing_or_unsafe_core_pin(self):
+        for pin in (None, "", "latest", "../x", "0.1.13/../../x", "v0.1.13", "0.1.13?x=1", "0.1.13#x"):
+            with self.subTest(core_min=pin):
+                result, urls, _, core_env, calls, unpacked, home = self.release_install(core_min=pin)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("needs h0x-core", result.stderr)
+                self.assertFalse([u for u in urls if "h0x-ADE-core" in u], f"fetched a core installer: {urls}")
+                self.assertIsNone(core_env)
+                self.assertEqual(calls, [])
+                self.assertFalse(unpacked)
+                self.assert_nothing_installed(home)
+
+    def test_installer_warns_loudly_when_a_releases_site_switches_off_signature_checks(self):
+        # Set in a shell profile and forgotten, either one turns a check off: the installer must say so.
+        for var, value in (("H0X_ADE_RELEASES_URL", "https://releases.example"),
+                           ("H0X_CORE_RELEASES_URL", "http://127.0.0.1:9/core")):
+            with self.subTest(var=var):
+                url = (value + "/download/v1.0.0/h0x-ade-linux-x86_64.tar.gz") if var == "H0X_ADE_RELEASES_URL" else self.APP_URL
+                result, *_ = self.release_install(url=url, core_status=0, **{var: value})
+                self.assertIn(var, result.stderr, "the warning names the variable")
+                self.assertIn("signature", result.stderr.lower(), "the warning says what is not checked")
 
     def download_url(self, url, releases="https://releases.example", installed=False):
         """The URL install.sh downloads the app from, for a manifest giving `url`."""
@@ -162,7 +340,7 @@ printf 'dev PATH added' >> "$3"''')
         installer = self.bin / "install.sh"
         installer.write_text(script)
         env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", TEST_OS="Darwin",
-                   TEST_ARCH="arm64", HOME=str(home))
+                   TEST_ARCH="arm64", HOME=str(home), H0X_ADE_RELEASES_URL="https://releases.example")
         result = subprocess.run(["sh", str(installer)], cwd=ROOT, env=env,
                                 capture_output=True, text=True, check=False)
         return result, installed.read_bytes(), log.read_text().splitlines(), plist_log.exists(), plist
