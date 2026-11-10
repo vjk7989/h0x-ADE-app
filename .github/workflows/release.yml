@@ -57,6 +57,8 @@ env:
   RUST_TOOLCHAIN: 1.95.0
   # In the cache key: ghostty-sys can't tell when Zig changes.
   ZIG_VERSION: 0.16.0
+  # Where scripts/zig-fetch puts the packages and cargo's `zig build` finds them.
+  ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
   IS_TAG: ${{ github.ref_type == 'tag' }}
 
 jobs:
@@ -102,6 +104,24 @@ jobs:
           restore-keys: |
             release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-
             release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
+      # Zig has no download timeout: a stalled GitHub fetch hung macOS builds.
+      # Fetch the packages here, with time limits and retries, before cargo's
+      # build script runs `zig build`; it then finds them in the cache.
+      - name: Restore Zig packages
+        id: zig-packages
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache
+          key: zig-pkg-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.ZIG_VERSION }}-${{ hashFiles('vendor/ghostty/**/build.zig.zon') }}
+      - name: Fetch Zig packages
+        timeout-minutes: 20
+        run: scripts/zig-fetch vendor/ghostty
+      - name: Save Zig packages
+        if: github.ref == 'refs/heads/main' && steps.zig-packages.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache
+          key: ${{ steps.zig-packages.outputs.cache-primary-key }}
       - name: Linux build dependencies
         if: runner.os == 'Linux'
         # A stuck package mirror fails here in minutes, not at the job's limit.
@@ -126,6 +146,8 @@ jobs:
         run: scripts/ci-sources restore
       # scripts/package sets H0X_ADE_RELEASE=1 itself, so the build updates.
       - name: Build and pack
+        # A stuck build fails here, not at the job's limit.
+        timeout-minutes: 35
         env:
           APPLE_CERTIFICATE_P12: ${{ runner.os == 'macOS' && github.ref_type == 'tag' && secrets.APPLE_CERTIFICATE_P12 || '' }}
           APPLE_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && github.ref_type == 'tag' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
