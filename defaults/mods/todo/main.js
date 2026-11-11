@@ -13,7 +13,16 @@ const READ_FAIL = "This list can't be read (over 1 MB or unreadable). It is left
 const FULL = "This list is full (1 MiB). Start a new list for more tasks.";
 // The host's readTextFile refuses files over this size, so a bigger write could never be read back.
 const MAX_BYTES = 1048576;
-const fits = (text) => new TextEncoder().encode(text).length <= MAX_BYTES;
+// UTF-8 length by hand: the mod runtime has no TextEncoder.
+const utf8Length = (text) => {
+  let n = 0;
+  for (const ch of text) {
+    const c = ch.codePointAt(0);
+    n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+  }
+  return n;
+};
+const fits = (text) => text.length <= MAX_BYTES / 4 || utf8Length(text) <= MAX_BYTES;
 const same = (a, b) => a && b && a.k === b.k && a.i === b.i && a.j === b.j;
 
 // Mutations are replayed on fresh disk text after a stale write, so they find their task by
