@@ -366,7 +366,7 @@ export default class Settings extends View {
             .text_size(13)
             .cursor_pointer()
             .when(now === value, (el) => el.bg(t.raised).text_color(t.foreground).border_1().border_color(t.border))
-            .when(now !== value, (el) => el.text_color(t.muted))
+            .when(now !== value, (el) => el.text_color(t.muted).hover((s) => s.text_color(t.foreground)))
             .on_click((_e, cx) =>
               this.change((p) => {
                 if (value === null) delete p.appearance;
@@ -1112,7 +1112,7 @@ export default class Settings extends View {
         .child(partner("Security & blockchain partner", "Buckleson", "st-info-buckleson", "https://buckleson.com", "buckleson.com")))
       .child(div().h(2))
       .child(small("Currently closed source (open source soon)"))
-      .child(small(`Version ${u.app.version} \u00b7 Core ${u.core.version ?? "unknown"} \u00b7 Open-source notices`));
+      .child(small(`Version ${u.app.version} \u00b7 Core ${u.core.version || "unknown"} \u00b7 Open-source notices`));
   }
 
   // ----------------------------------------------------------------------

@@ -256,6 +256,14 @@ jobs:
           else
             "${run[@]}"
           fi
+      # A screenshot of Settings > Info for a person to look at (tests/launch_folder.rs).
+      - name: Upload the Info page screenshot
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: info-page-${{ matrix.platform }}
+          path: ${{ runner.temp }}/info-page.png
+          if-no-files-found: warn
 
   # Security advisories (RustSec) in the dependencies: deny.toml.
   advisories:
