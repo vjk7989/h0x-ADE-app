@@ -10,6 +10,7 @@
 
 const TASK_RE = /^[-*] \[( |x|X)\] (.*)$/;
 const STEP_RE = /^(?:  +|\t)[ \t]*[-*] \[( |x|X)\] (.*)$/;
+const FENCE_RE = /^---[ \t]*$/;
 const HEADING_RE = /^# (.*)$/;
 const INDEX_RE = /^- \[(.+?)\]\(([^()]*)\.md\)\s*$/;
 const SLUG_RE = /^[a-z0-9-]{1,60}$/;
@@ -29,7 +30,10 @@ export function parseList(text) {
   const list = { name: "", head: [], tasks: [] };
   let named = false;
   const pre = [];
-  for (const line of lines) {
+  // YAML front matter (`---` ... `---` at the very top) is never searched for the heading.
+  const close = FENCE_RE.test(lines[0] ?? "") ? lines.findIndex((l, k) => k > 0 && FENCE_RE.test(l)) : -1;
+  const front = close > 0 ? lines.slice(0, close + 1) : [];
+  for (const line of close > 0 ? lines.slice(close + 1) : lines) {
     const task = TASK_RE.exec(line);
     if (task) {
       list.tasks.push({ title: task[2].replace(/ +$/, ""), done: task[1] !== " ", steps: [], extra: [] });
@@ -58,7 +62,9 @@ export function parseList(text) {
     }
   }
   // Without a heading there is nothing to stay above: those lines are the head.
-  if (named) { if (pre.length) list.pre = pre; } else list.head = pre;
+  if (!named) list.head = pre;
+  const above = named ? [...front, ...pre] : front;
+  if (above.length) list.pre = above;
   if (!list.name) list.name = "Untitled";
   return list;
 }

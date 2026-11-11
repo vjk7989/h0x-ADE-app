@@ -5549,6 +5549,11 @@ export default class Scenario extends Real {
         else if (verb === 'undo') this.undo(cx);
         else if (verb === 'reload') this.reload(cx);
         else if (verb === 'focus') this.handle.focus();
+        // `stuck <ms ago> [writing]`: a save flag left set, as if a cut-off write loop never reset it.
+        else if (verb === 'stuck') {
+          const [ago, writing] = arg.split(' ');
+          this.flushing = true; this.writing = writing === 'writing'; this.flushAt = Date.now() - Number(ago);
+        }
         else if (verb === 'key') {
           const parts = arg.split('-'), k = parts.pop();
           this.listKey(k, { shift: parts.includes('shift'), alt: parts.includes('alt') }, cx);
@@ -6143,6 +6148,190 @@ fn todo_stale_write_replays_task_and_step_ticks_onto_the_agents_steps(cx: &mut T
     todo_describe(cx, window, session);
 }
 
+// The pop-up follows the list as written after a stale-write replay, not the view before it: another program
+// finishing the rest makes our tick the last one; another program adding an open task means it is not.
+#[gpui::test]
+fn todo_congratulations_follow_the_list_as_written_after_a_stale_write_replay(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] a\n- [ ] b\n")], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    // b is still open in the view, but the agent ticked it on disk.
+    host.borrow_mut().files.insert(TODO_TASKS.into(), "# Tasks\n- [ ] a\n- [x] b\n".into());
+    todo_step(cx, &host, "tick 0");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [x] a\n- [x] b\n");
+    assert_eq!(
+        todo_effects(&host, "openOverlay"),
+        [json!([{"mod":"todo", "kind":"dialog", "width":400, "props":{"celebrate":"Tasks"}}])],
+        "our tick finished the list as written"
+    );
+    todo_step(cx, &host, "reload");
+    assert_eq!(todo_celebrations(&host), 1, "once");
+    todo_describe(cx, window, session);
+
+    // The view is all done after the tick, but the agent added an open task: no pop-up until our tick finishes it.
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] a\n- [x] b\n")], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    host.borrow_mut().files.insert(TODO_TASKS.into(), "# Tasks\n- [ ] a\n- [x] b\n- [ ] from the agent\n".into());
+    todo_step(cx, &host, "tick 0");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [x] a\n- [x] b\n- [ ] from the agent\n");
+    assert_eq!(todo_celebrations(&host), 0, "the list as written still has an open task");
+    let state = todo_state(cx, &host);
+    assert_eq!(state["text"], json!("# Tasks\n- [x] a\n- [x] b\n- [ ] from the agent\n"), "{state}");
+    todo_step(cx, &host, "tick 2");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [x] a\n- [x] b\n- [x] from the agent\n");
+    assert_eq!(todo_celebrations(&host), 1, "the tick that finishes it as written");
+    todo_describe(cx, window, session);
+
+    // The agent already ticked everything, ours included: the replayed write changes nothing, so no pop-up.
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] a\n- [x] b\n")], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    host.borrow_mut().files.insert(TODO_TASKS.into(), "# Tasks\n- [x] a\n- [x] b\n".into());
+    todo_step(cx, &host, "tick 0");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [x] a\n- [x] b\n");
+    assert_eq!(host.borrow().writes.len(), 2, "one refused write, one replayed over identical text");
+    assert_eq!(todo_celebrations(&host), 0, "our write did not change the list");
+    let state = todo_state(cx, &host);
+    assert_eq!((state["error"].clone(), state["pending"].clone()), (Value::Null, json!(0)), "{state}");
+    todo_step(cx, &host, "reload");
+    assert_eq!(todo_celebrations(&host), 0);
+    todo_describe(cx, window, session);
+}
+
+// A failed save is retried by itself, without any user action: after 5 s, then 10, 20 s and so on; one timer at a
+// time however many changes fail meanwhile; a successful save starts the wait at 5 s again; and a timer that comes
+// due with nothing pending writes nothing.
+#[gpui::test]
+fn todo_a_failed_save_is_retried_by_itself_after_a_growing_wait(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] a\n- [ ] b\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    let big = "x".repeat(1024 * 1024 + 1);
+    let wait = |cx: &mut TestAppContext, ms: u64| {
+        cx.executor().advance_clock(std::time::Duration::from_millis(ms));
+        cx.run_until_parked();
+    };
+    let writes = |host: &Rc<RefCell<TodoHost>>| host.borrow().writes.len();
+    // At T the tick fails (the file changed and can't be re-read); at T+2.5 s an add fails too, starting no timer.
+    host.borrow_mut().files.insert(TODO_TASKS.into(), big.clone());
+    todo_step(cx, &host, "tick 0");
+    assert_eq!(writes(&host), 1);
+    wait(cx, 2450);
+    todo_step(cx, &host, "add c");
+    assert_eq!(writes(&host), 2);
+    wait(cx, 2450);
+    assert_eq!(writes(&host), 2, "not before 5 s");
+    wait(cx, 100);
+    assert_eq!(writes(&host), 3, "the first retry, at 5 s; it fails again");
+    wait(cx, 9900);
+    assert_eq!(writes(&host), 3, "one timer, now 10 s");
+    wait(cx, 100);
+    assert_eq!(writes(&host), 4, "the second retry, at 10 s more");
+    // The file is back as we read it: the next retry, 20 s later, saves both changes.
+    host.borrow_mut().files.insert(TODO_TASKS.into(), start.into());
+    wait(cx, 19900);
+    assert_eq!(writes(&host), 4, "not before 20 s");
+    wait(cx, 100);
+    let saved = "# Tasks\n- [ ] c\n- [x] a\n- [ ] b\n";
+    assert_eq!(writes(&host), 5);
+    assert_eq!(host.borrow().files[TODO_TASKS], saved);
+    let state = todo_state(cx, &host);
+    assert_eq!((state["error"].clone(), state["pending"].clone()), (Value::Null, json!(0)), "{state}");
+    // After a save the wait starts at 5 s again.
+    host.borrow_mut().files.insert(TODO_TASKS.into(), big);
+    todo_step(cx, &host, "tick 2");
+    assert_eq!(writes(&host), 6);
+    wait(cx, 4900);
+    assert_eq!(writes(&host), 6);
+    wait(cx, 200);
+    assert_eq!(writes(&host), 7, "5 s, not 40 s");
+    // The file is back; untick b by hand, which saves at once. The 10 s timer then finds nothing pending.
+    host.borrow_mut().files.insert(TODO_TASKS.into(), saved.into());
+    todo_step(cx, &host, "tick 2");
+    assert_eq!(writes(&host), 8);
+    assert_eq!(host.borrow().files[TODO_TASKS], saved);
+    wait(cx, 60_000);
+    assert_eq!(writes(&host), 8, "nothing pending, nothing written");
+    let state = todo_state(cx, &host);
+    assert_eq!((state["error"].clone(), state["pending"].clone()), (Value::Null, json!(0)), "{state}");
+    todo_describe(cx, window, session);
+}
+
+// A tick whose write failed (the file changed and could not be re-read) is kept and not celebrated; when it reaches
+// the disk with the next change and the list as written is done, the pop-up comes once.
+#[gpui::test]
+fn todo_a_finishing_tick_whose_write_failed_celebrates_once_when_it_is_saved(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] a\n- [x] b\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    host.borrow_mut().files.insert(TODO_TASKS.into(), "x".repeat(1024 * 1024 + 1));
+    todo_step(cx, &host, "tick 0");
+    let state = todo_state(cx, &host);
+    assert!(state["error"].as_str().is_some_and(|e| e.starts_with("Not saved yet")), "{state}");
+    assert_eq!(state["pending"], json!(1), "{state}");
+    assert_eq!(todo_celebrations(&host), 0, "nothing was saved");
+    // The file is back as we read it; deleting the done task sends both changes.
+    host.borrow_mut().files.insert(TODO_TASKS.into(), start.into());
+    todo_step(cx, &host, "delete 1");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [x] a\n");
+    assert_eq!(todo_written(&host), ["# Tasks\n- [x] a\n- [x] b\n", "# Tasks\n- [x] a\n"]);
+    let state = todo_state(cx, &host);
+    assert_eq!((state["error"].clone(), state["pending"].clone()), (Value::Null, json!(0)), "{state}");
+    assert_eq!(todo_celebrations(&host), 1);
+    todo_step(cx, &host, "reload");
+    assert_eq!(todo_celebrations(&host), 1, "at most once");
+    todo_describe(cx, window, session);
+}
+
+// Front matter above the heading stays above it on every write: an add, a tick and a stale-write replay onto an agent's
+// edit of the front matter itself.
+#[gpui::test]
+fn todo_front_matter_stays_above_the_heading_on_every_write(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "---\ntitle: x\n---\n# Tasks\n- [ ] Old\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    todo_step(cx, &host, "reload");
+    assert!(host.borrow().writes.is_empty(), "opening writes nothing");
+    todo_step(cx, &host, "add Milk");
+    todo_step(cx, &host, "tick 1");
+    let theirs = "---\ntitle: y\n---\n# Tasks\n- [ ] Milk\n- [x] Old\n- [ ] agent\n";
+    host.borrow_mut().files.insert(TODO_TASKS.into(), theirs.into());
+    todo_step(cx, &host, "tick 0");
+    assert_eq!(
+        todo_written(&host),
+        [
+            "---\ntitle: x\n---\n# Tasks\n- [ ] Milk\n- [ ] Old\n",
+            "---\ntitle: x\n---\n# Tasks\n- [ ] Milk\n- [x] Old\n",
+            "---\ntitle: x\n---\n# Tasks\n- [x] Milk\n- [x] Old\n",
+            "---\ntitle: y\n---\n# Tasks\n- [x] Milk\n- [x] Old\n- [ ] agent\n",
+        ],
+        "the stale write is refused, then replayed on the agent's front matter"
+    );
+    let state = todo_state(cx, &host);
+    assert_eq!(state["text"], json!("---\ntitle: y\n---\n# Tasks\n- [x] Milk\n- [x] Old\n- [ ] agent\n"), "{state}");
+    assert_eq!(todo_celebrations(&host), 0, "the agent's task is open");
+    todo_describe(cx, window, session);
+
+    // No heading: closed front matter stays above the `# Untitled` written under it; an unclosed fence is a plain line,
+    // as before front matter was known.
+    for (text, written) in [
+        ("---\ntitle: x\n---\n- [ ] a\n- [ ] b\n", "---\ntitle: x\n---\n# Untitled\n- [x] a\n- [ ] b\n"),
+        ("---\ntitle: x\n- [ ] a\n- [ ] b\n", "# Untitled\n---\ntitle: x\n- [x] a\n- [ ] b\n"),
+    ] {
+        let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, text)], &[]);
+        let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+        todo_step(cx, &host, "tick 0");
+        assert_eq!(todo_written(&host), [written]);
+        todo_describe(cx, window, session);
+    }
+}
+
 // AC3/AC4: done tasks and steps are struck through and dimmed; titles and the add box use the
 // handwriting only when the font is loaded.
 #[gpui::test]
@@ -6548,6 +6737,145 @@ fn todo_rename_list_from_the_name_box_renames_it_and_keeps_saving(cx: &mut TestA
     files_wait(&mut visual, 100);
     assert_eq!(host.borrow().files[TODO_TASKS], "# Chores\n- [x] a\n- [x] b\n", "a tick after the rename is saved");
     assert_eq!(todo_mounted_state(&mut visual, &host)["pending"], json!(0));
+}
+
+// Renaming a list with front matter renames the heading under it; the front matter stays on top, and the real key
+// press that finishes the list opens the pop-up once.
+#[gpui::test]
+fn todo_rename_keeps_front_matter_above_the_renamed_heading(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // The front matter holds a `# ` comment: it is never taken for the heading, so the rename leaves it alone.
+    let start = "---\n# note\ntitle: x\n---\n# Tasks\n- [ ] a\n- [x] b\n";
+    let host = todo_host(&[(TODO_LISTS, TODO_TWO_LISTS), (TODO_TASKS, start), (TODO_WORK, TODO_WORK_TEXT)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    files_keys(&mut visual, "down");
+    assert_eq!(todo_mounted_state(&mut visual, &host)["sel"], json!({"k":"head"}));
+    files_keys(&mut visual, "ctrl-l down down down enter");
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.simulate_input("Chores");
+    files_keys(&mut visual, "enter");
+    files_wait(&mut visual, 100);
+    assert_eq!(host.borrow().files[TODO_TASKS], "---\n# note\ntitle: x\n---\n# Chores\n- [ ] a\n- [x] b\n");
+    assert_eq!(host.borrow().files[TODO_LISTS], "- [Chores](tasks.md)\n- [Work](work.md)\n");
+    assert_eq!(todo_celebrations(&host), 0);
+    files_keys(&mut visual, "up space");
+    files_wait(&mut visual, 100);
+    assert_eq!(host.borrow().files[TODO_TASKS], "---\n# note\ntitle: x\n---\n# Chores\n- [x] a\n- [x] b\n");
+    assert_eq!(
+        todo_effects(&host, "openOverlay"),
+        [json!([{"mod":"todo", "kind":"dialog", "width":400, "props":{"celebrate":"Chores"}}])]
+    );
+}
+
+// A save flag left set with nothing writing for over 10 s is reset by the next tick, and that tick is saved (and,
+// finishing the list, celebrated once).
+#[gpui::test]
+fn todo_a_stuck_save_is_reset_by_the_next_tick_and_the_tick_is_saved(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] one\n- [x] two\n")], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    host.borrow_mut().commands.push_back("stuck 11000".into());
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["flushing"], json!(true), "the flag is set");
+    files_keys(&mut visual, "space");
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_written(&host), ["# Tasks\n- [x] one\n- [x] two\n"], "saved once");
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(
+        (state["error"].clone(), state["flushing"].clone(), state["pending"].clone()),
+        (Value::Null, json!(false), json!(0)),
+        "{state}"
+    );
+    assert_eq!(todo_celebrations(&host), 1);
+}
+
+// A write that never ended (the loop was cut off after it started writing) is reset after 60 s: the next tick is saved
+// once, and the panel saves normally afterwards.
+#[gpui::test]
+fn todo_a_save_stuck_writing_for_over_60_s_is_reset_by_the_next_tick(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] one\n- [ ] two\n")], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    host.borrow_mut().commands.push_back("stuck 61000 writing".into());
+    files_wait(&mut visual, 50);
+    files_keys(&mut visual, "space");
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_written(&host), ["# Tasks\n- [x] one\n- [ ] two\n"], "saved once");
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(
+        (state["error"].clone(), state["flushing"].clone(), state["pending"].clone()),
+        (Value::Null, json!(false), json!(0)),
+        "{state}"
+    );
+    files_keys(&mut visual, "space");
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_written(&host), ["# Tasks\n- [x] one\n- [ ] two\n", "# Tasks\n- [ ] one\n- [ ] two\n"], "and keeps saving");
+}
+
+// Under 10 s, or while a write has been in progress for under 60 s, the flag is never reset and the change waits; past
+// 10 s with nothing writing, the next look at the disk resets it and saves the waiting change.
+#[gpui::test]
+fn todo_a_save_flag_is_not_reset_under_10_s_or_while_writing_and_a_reload_heals_it(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] one\n- [ ] two\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    let waiting = |visual: &mut gpui::VisualTestContext, why: &str| {
+        let state = todo_mounted_state(visual, &host);
+        assert_eq!((state["flushing"].clone(), state["pending"].clone()), (json!(true), json!(1)), "{why}: {state}");
+        assert!(host.borrow().writes.is_empty() && host.borrow().files[TODO_TASKS] == start, "{why}: nothing is written");
+    };
+    host.borrow_mut().commands.push_back("stuck 9000".into());
+    files_wait(&mut visual, 50);
+    files_keys(&mut visual, "space");
+    files_wait(&mut visual, 50);
+    waiting(&mut visual, "a tick under 10 s");
+    host.borrow_mut().commands.extend(["stuck 9000", "reload"].map(String::from));
+    files_wait(&mut visual, 50);
+    waiting(&mut visual, "a reload under 10 s");
+    host.borrow_mut().commands.extend(["stuck 59000 writing", "reload"].map(String::from));
+    files_wait(&mut visual, 50);
+    waiting(&mut visual, "a write in progress for 59 s");
+    host.borrow_mut().commands.extend(["stuck 11000", "reload"].map(String::from));
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_written(&host), ["# Tasks\n- [x] one\n- [ ] two\n"], "the waiting tick is saved once");
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(
+        (state["error"].clone(), state["flushing"].clone(), state["pending"].clone()),
+        (Value::Null, json!(false), json!(0)),
+        "{state}"
+    );
+}
+
+// Switching lists while a stuck flag holds a waiting change resets it, saves the change to its own list, and opens the
+// other list editable.
+#[gpui::test]
+fn todo_switching_lists_heals_a_stuck_save_and_saves_to_the_list_it_was_made_in(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, TODO_TWO_LISTS), (TODO_TASKS, "# Tasks\n- [ ] a\n- [ ] b\n"), (TODO_WORK, TODO_WORK_TEXT)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    host.borrow_mut().commands.push_back("stuck 0".into());
+    files_wait(&mut visual, 50);
+    files_keys(&mut visual, "space");
+    files_wait(&mut visual, 50);
+    assert!(host.borrow().writes.is_empty(), "the tick waits behind the flag");
+    host.borrow_mut().commands.push_back("stuck 11000".into());
+    files_wait(&mut visual, 50);
+    files_keys(&mut visual, "ctrl-l down enter");
+    files_wait(&mut visual, 200);
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [x] a\n- [ ] b\n");
+    assert_eq!(host.borrow().files[TODO_WORK], TODO_WORK_TEXT, "nothing lands in the other list");
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(
+        (state["cur"].clone(), state["text"].clone(), state["readonly"].clone(), state["error"].clone(), state["flushing"].clone()),
+        (json!("work"), json!(TODO_WORK_TEXT), json!(false), Value::Null, json!(false)),
+        "{state}"
+    );
 }
 
 // An unreadable lists.md is left alone until "Start a new index" is clicked; then the index and an empty Tasks list are

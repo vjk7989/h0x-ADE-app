@@ -115,6 +115,84 @@ test("lines before the heading stay above it and a step before any task stays a 
   expect(roundTrip(front)).toBe(front);
 });
 
+test("front matter stays above the heading through a tick, an add and a rename; only lines above it are front matter", () => {
+  const text = "---\ntitle: x\ntags: [a, b]\n---\n\n# Tasks\n\nIntro\n- [ ] a\n  - [ ] s\n";
+  const list = parseList(text);
+  expect(list.pre).toEqual(["---", "title: x", "tags: [a, b]", "---", ""]);
+  expect(list.head).toEqual(["", "Intro"]);
+  expect(roundTrip(text)).toBe(text);
+  setTaskDone(list.tasks[0], true);
+  list.tasks.unshift({ title: "new", done: false, steps: [], extra: [] });
+  list.name = "Chores";
+  const written = "---\ntitle: x\ntags: [a, b]\n---\n\n# Chores\n\nIntro\n- [ ] new\n- [x] a\n  - [x] s\n";
+  expect(serializeList(list)).toBe(written);
+  expect(roundTrip(written)).toBe(written);
+  // CRLF front matter is written with LF; a single blank line above the heading is front matter too.
+  expect(roundTrip("---\r\ntitle: x\r\n---\r\n# T\r\n- [ ] a\r\n")).toBe("---\ntitle: x\n---\n# T\n- [ ] a\n");
+  expect(parseList("\n# T\n").pre).toEqual([""]);
+  expect(roundTrip("\n# T\n")).toBe("\n# T\n");
+  // Nothing above the heading: no `pre` at all.
+  expect(parseList("# T\n- [ ] a\n").pre).toBe(undefined);
+  expect(parseList("").pre).toBe(undefined);
+});
+
+test("without a heading, lines before the tasks (an unclosed fence too) stay the head under # Untitled as before", () => {
+  for (const [text, written] of [
+    ["---\ntitle: x\n- [ ] a\n", "# Untitled\n---\ntitle: x\n- [ ] a\n"],
+    ["intro\n- [ ] a\n# Late\n", "# Untitled\nintro\n- [ ] a\n# Late\n"],
+  ]) {
+    const list = parseList(text);
+    expect(list.name).toBe("Untitled");
+    expect(list.pre).toBe(undefined);
+    expect(serializeList(list)).toBe(written);
+    expect(roundTrip(written)).toBe(written);
+  }
+});
+
+test("a --- fence on the first line is front matter up to the next ---, never searched for the heading or tasks", () => {
+  const text = "---\n# note\n- [ ] yaml\ntitle: x\n---\n# Tasks\n- [ ] a\n";
+  const list = parseList(text);
+  expect([list.name, list.head, list.tasks.map((t: any) => t.title)]).toEqual(["Tasks", [], ["a"]]);
+  expect(list.pre).toEqual(["---", "# note", "- [ ] yaml", "title: x", "---"]);
+  expect(roundTrip(text)).toBe(text);
+  // A rename changes the heading only.
+  list.name = "Chores";
+  expect(serializeList(list)).toBe("---\n# note\n- [ ] yaml\ntitle: x\n---\n# Chores\n- [ ] a\n");
+  // Empty front matter, fences with trailing blanks, CRLF, and lines between the fence and the heading.
+  for (const [text, name, pre, written] of [
+    ["---\n---\n# T\n", "T", ["---", "---"], "---\n---\n# T\n"],
+    ["--- \t\n# c\n---\t\n# T\n", "T", ["--- \t", "# c", "---\t"], "--- \t\n# c\n---\t\n# T\n"],
+    ["---\r\n# c\r\n---\r\n# T\r\n", "T", ["---", "# c", "---"], "---\n# c\n---\n# T\n"],
+    ["---\nx\n---\nnote\n# T\n", "T", ["---", "x", "---", "note"], "---\nx\n---\nnote\n# T\n"],
+  ] as [string, string, string[], string][]) {
+    const l = parseList(text);
+    expect([l.name, l.pre]).toEqual([name, pre]);
+    expect(serializeList(l)).toBe(written);
+  }
+  // Closed front matter with no heading stays above the # Untitled that is written.
+  const bare = parseList("---\ntitle: x\n---\n- [ ] a\n");
+  expect([bare.name, bare.pre, bare.head]).toEqual(["Untitled", ["---", "title: x", "---"], []]);
+  expect(serializeList(bare)).toBe("---\ntitle: x\n---\n# Untitled\n- [ ] a\n");
+  expect(roundTrip("---\ntitle: x\n---\n# Untitled\n- [ ] a\n")).toBe("---\ntitle: x\n---\n# Untitled\n- [ ] a\n");
+});
+
+test("only a fence on the very first line opens front matter; an unclosed or indented one is a plain line", () => {
+  // Unclosed: today's behaviour, the first `# ` line is the name.
+  const open = parseList("---\n# note\ntitle: x\n");
+  expect([open.name, open.pre, open.head]).toEqual(["note", ["---"], ["title: x"]]);
+  expect(roundTrip("---\n# note\ntitle: x\n")).toBe("---\n# note\ntitle: x\n");
+  // Not on the first line, indented, or four dashes: no front matter.
+  for (const [text, name] of [
+    ["\n---\n# note\n---\n# Tasks\n", "note"],
+    [" ---\n# note\n---\n# Tasks\n", "note"],
+    ["----\n# note\n----\n# Tasks\n", "note"],
+  ]) {
+    const l = parseList(text);
+    expect(l.name).toBe(name);
+    expect(roundTrip(text)).toBe(text);
+  }
+});
+
 test("writing what was read is stable for messy files", () => {
   for (const text of ["", "\n\n", "# T\r\n* [X] a\r\n\t- [ ] b\r\n", "intro\n# T\n- [ ] a\n # not a heading\n", "- [ ] \n- [x]   \n"]) {
     const once = roundTrip(text);
@@ -287,4 +365,21 @@ test("the last step of the last open task is what makes the whole list done", ()
   expect(allDone(list)).toBe(false);
   setStepDone(list.tasks[1], 1, true);
   expect([openCount(list), allDone(list)]).toEqual([0, true]);
+});
+
+test("step and task helpers ignore a missing task or an out-of-range step without throwing or changing anything", () => {
+  const text = "# T\n- [ ] A\n  - [ ] a1\n- [ ] B\n- [x] C\n";
+  const list = parseList(text);
+  const [a, b, c] = list.tasks;
+  for (const missing of [undefined, null, list.tasks[3], list.tasks[-1]]) {
+    setTaskDone(missing, true);
+    setStepDone(missing, 0, true);
+  }
+  // Just past the last step, before the first, and not a number at all.
+  for (const j of [1, -1, NaN, 1.5]) setStepDone(a, j, true);
+  // A task without steps has no step 0: an open one is not ticked, a done one is not unticked.
+  setStepDone(b, 0, true);
+  setStepDone(c, 0, false);
+  expect([a.done, a.steps[0].done, b.done, c.done]).toEqual([false, false, false, true]);
+  expect(serializeList(list)).toBe(text);
 });
