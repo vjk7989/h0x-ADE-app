@@ -100,7 +100,7 @@ mod tests {
         let mut m = Model::default();
         assert_eq!(spaces_payload(&m), "[]");
         m.spaces = vec![space("b", "/work/b", None), space("remote", "/srv", Some("box")), space("none", "", None), space("a", "/work/a", None)];
-        assert_eq!(spaces_payload(&m), r#"[{"folder":"/work/a","name":"a"},{"folder":"/work/b","name":"b"}]"#);
+        assert_eq!(spaces_payload(&m), r#"[{"name":"a","folder":"/work/a"},{"name":"b","folder":"/work/b"}]"#);
     }
 
     #[test]
