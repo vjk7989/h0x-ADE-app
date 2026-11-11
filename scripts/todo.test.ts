@@ -104,12 +104,15 @@ test("no heading, an empty heading or a non-H1 heading reads as Untitled", () =>
   expect(roundTrip("## Sub\n- [ ] one\n")).toBe("# Untitled\n## Sub\n- [ ] one\n");
 });
 
-test("lines before the heading are kept (below it) and a step before any task stays a plain line", () => {
+test("lines before the heading stay above it and a step before any task stays a plain line", () => {
   const list = parseList("<!-- mine -->\n# Tasks\n  - [ ] orphan\n- [ ] a\n");
   expect(list.name).toBe("Tasks");
-  expect(list.head).toEqual(["<!-- mine -->", "  - [ ] orphan"]);
+  expect(list.pre).toEqual(["<!-- mine -->"]);
+  expect(list.head).toEqual(["  - [ ] orphan"]);
   expect(list.tasks[0].steps).toEqual([]);
-  expect(serializeList(list)).toBe("# Tasks\n<!-- mine -->\n  - [ ] orphan\n- [ ] a\n");
+  expect(serializeList(list)).toBe("<!-- mine -->\n# Tasks\n  - [ ] orphan\n- [ ] a\n");
+  const front = "---\ntitle: x\n---\n# Tasks\n- [ ] a\n";
+  expect(roundTrip(front)).toBe(front);
 });
 
 test("writing what was read is stable for messy files", () => {

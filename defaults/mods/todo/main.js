@@ -76,7 +76,7 @@ export default class Todo extends View {
     if (p.celebrate !== undefined) { this.handle.focus(); return; }
     this.dir = `${appHome()}/todo`;
     this.index = []; this.indexText = null; this.cur = null; this.list = parseList(""); this.text = ""; this.disk = "";
-    this.pending = []; this.open = new Set(); this.showDone = false; this.sel = { k: "head" }; this.pos = 0;
+    this.pending = []; this.finishing = new WeakSet(); this.open = new Set(); this.showDone = false; this.sel = { k: "head" }; this.pos = 0;
     this.edit = null; this.naming = null; this.menu = false; this.menuAt = 0; this.confirming = false; this.hover = null;
     this.readonly = false; this.ready = false; this.error = null; this.shown = false; this.wantFocus = false; this.badIndex = null;
     this.add = this.makeAdd();
@@ -153,7 +153,7 @@ export default class Todo extends View {
   }
 
   async openListFrom(slug, cx) {
-    while (this.flushing) await cx.sleep(50);
+    while (this.flushBusy(cx)) await cx.sleep(50);
     this.cur = slug; this.pending = []; this.edit = null; this.error = null; this.readonly = false;
     localStorage.setItem("todo.list", slug);
     let text;
@@ -175,7 +175,7 @@ export default class Todo extends View {
   // A look at the disk (watch event or 10 s): other editors' changes appear; our own writes and
   // anything while we have unsaved changes or an open edit are left alone.
   async reload(cx) {
-    if (!this.ready || this.flushing || this.pending.length || this.edit || this.naming || this.reloading) return;
+    if (!this.ready || this.flushBusy(cx) || this.pending.length || this.edit || this.naming || this.reloading) return;
     this.reloading = true;
     const slug = this.cur;
     try {
@@ -212,14 +212,29 @@ export default class Todo extends View {
 
   // Writes the latest text over what we last read or wrote. A stale write re-reads the file and
   // re-applies our unsaved changes to it; a second failure keeps them and says so.
+  // True while a write loop runs. If the runtime cut the loop off before it could reset
+  // `flushing` (nothing writing for 10 s), the flag is reset once and the unsaved changes retried.
+  flushBusy(cx) {
+    if (this.flushing && !this.writing && Date.now() - this.flushAt > 10000) {
+      this.flushing = false;
+      if (!this.healed) { this.healed = true; console.log("todo: a stuck save was reset and is retried"); }
+      if (this.pending.length) this.flush(cx);
+    }
+    return this.flushing;
+  }
+
   flush(cx) {
-    if (this.flushing) return;
+    if (this.flushBusy(cx)) return;
     const slug = this.cur, path = this.file(slug);
-    this.flushing = true;
+    this.flushing = true; this.flushAt = Date.now();
     try { cx.spawn(async (cx) => {
       try {
         while (this.pending.length && this.cur === slug) {
           const batch = this.pending.slice(), next = this.text;
+          // The finishing decision is made on the text that reached the disk, not the view.
+          const ticked = batch.some((m) => this.finishing.has(m)), was = ticked && allDone(parseList(this.disk));
+          let written = next;
+          this.writing = true;
           try {
             try { await writeTextFile(path, next, this.disk); this.disk = next; }
             catch (first) {
@@ -230,16 +245,17 @@ export default class Todo extends View {
               const merged = serializeList(list);
               if (!fits(merged)) { this.pending = []; this.disk = fresh; this.setText(fresh); this.error = FULL; return; }
               await writeTextFile(path, merged, fresh);
-              this.disk = merged;
+              this.disk = merged; written = merged;
               const rest = this.pending.slice(batch.length), after = parseList(merged);
               for (const mut of rest) mut(after);
               this.setText(serializeList(after));
             }
             this.pending.splice(0, batch.length); this.error = null;
+            if (ticked && !was && allDone(parseList(written))) this.celebrate();
           } catch (e) {
             this.error = `Not saved yet (${String(e?.message ?? e).slice(0, 100)}). Your changes are kept here and will be retried.`;
             break;
-          }
+          } finally { this.writing = false; }
         }
       } finally { this.flushing = false; cx.notify(); }
     }); } catch (e) { this.flushing = false; throw e; }
@@ -308,7 +324,7 @@ export default class Todo extends View {
     this.confirming = false; this.menu = false;
     const slug = this.cur;
     try {
-      while (this.flushing) await cx.sleep(50);
+      while (this.flushBusy(cx)) await cx.sleep(50);
       this.pending = [];
       // Already gone from lists.md: nothing to remove, just reopen what is left.
       const removed = await this.editIndex((entries) => { const k = entries.findIndex((e) => e.slug === slug); if (k < 0) return false; entries.splice(k, 1); });
@@ -370,11 +386,13 @@ export default class Todo extends View {
     this.select(row, cx);
     const item = this.item(row);
     if (!item) return;
-    const done = !item.done, finished = allDone(this.list);
-    if (this.commit(setDone(this.ref(row), done), cx) && done && !finished && allDone(this.list)) this.celebrate();
+    const done = !item.done, mut = setDone(this.ref(row), done);
+    if (done) this.finishing.add(mut);
+    this.commit(mut, cx);
   }
 
-  // The tick that finishes the list (never a load, an add or a delete) offers the pop-up.
+  // The write that finishes the list because of a tick (never a load, an add, a delete or an
+  // untick) offers the pop-up: flush() decides it on the text that reached the disk.
   celebrate() {
     openOverlay({ mod: "todo", kind: "dialog", width: 400, props: { celebrate: this.name() } });
   }
@@ -775,6 +793,6 @@ export default class Todo extends View {
   }
 
   async close(cx) {
-    while (this.flushing) await cx.sleep(50);
+    while (this.flushBusy(cx)) await cx.sleep(50);
   }
 }

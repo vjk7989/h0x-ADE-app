@@ -4,7 +4,7 @@
 /**
  * @typedef {{ title: string, done: boolean, extra: string[] }} Step
  * @typedef {{ title: string, done: boolean, steps: Step[], extra: string[] }} Task
- * @typedef {{ name: string, head: string[], tasks: Task[] }} TodoList
+ * @typedef {{ name: string, head: string[], tasks: Task[], pre?: string[] }} TodoList (`pre`: lines above the heading; only present when there are some)
  * @typedef {{ name: string, slug: string }} IndexEntry
  */
 
@@ -28,6 +28,7 @@ export function parseList(text) {
   /** @type {TodoList} */
   const list = { name: "", head: [], tasks: [] };
   let named = false;
+  const pre = [];
   for (const line of lines) {
     const task = TASK_RE.exec(line);
     if (task) {
@@ -45,8 +46,10 @@ export function parseList(text) {
       if (h) {
         named = true;
         list.name = h[1].trim();
-      } else {
+      } else if (named) {
         list.head.push(line);
+      } else {
+        pre.push(line);
       }
     } else if (cur.steps.length) {
       cur.steps[cur.steps.length - 1].extra.push(line);
@@ -54,13 +57,15 @@ export function parseList(text) {
       cur.extra.push(line);
     }
   }
+  // Without a heading there is nothing to stay above: those lines are the head.
+  if (named) { if (pre.length) list.pre = pre; } else list.head = pre;
   if (!list.name) list.name = "Untitled";
   return list;
 }
 
 /** @param {TodoList} list @returns {string} */
 export function serializeList(list) {
-  const out = ["# " + escapeTitle(list.name), ...list.head];
+  const out = [...(list.pre ?? []), "# " + escapeTitle(list.name), ...list.head];
   for (const t of list.tasks) {
     out.push(`- [${t.done ? "x" : " "}] ${escapeTitle(t.title)}`, ...t.extra);
     for (const s of t.steps) {
@@ -115,6 +120,7 @@ export function openCount(list) {
 /** Tick or untick a task: its steps follow.
  * @param {Task} task @param {boolean} done */
 export function setTaskDone(task, done) {
+  if (!task) return;
   task.done = done;
   for (const s of task.steps) s.done = done;
 }
@@ -122,7 +128,9 @@ export function setTaskDone(task, done) {
 /** Tick or untick one step: the task is done exactly when every step is.
  * @param {Task} task @param {number} j @param {boolean} done */
 export function setStepDone(task, j, done) {
-  task.steps[j].done = done;
+  const step = task?.steps[j];
+  if (!step) return;
+  step.done = done;
   task.done = task.steps.every((s) => s.done);
 }
 
