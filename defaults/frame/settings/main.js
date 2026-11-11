@@ -269,7 +269,11 @@ export default class Settings extends View {
   setTodoPanel(on) {
     const stored = shared("workspace.panels");
     const list = Array.isArray(stored) ? stored : ["files", "changes", "sessions", "todo"];
-    setShared("workspace.panels", on ? [...list.filter((x) => x !== "todo"), "todo"] : list.filter((x) => x !== "todo"));
+    const next = on ? [...list.filter((x) => x !== "todo"), "todo"] : list.filter((x) => x !== "todo");
+    setShared("workspace.panels", next);
+    // The ids the tab bar migration knows (defaults/mods/tabs/main.js enabledPanels): a list written here is the person's choice, never migrated.
+    const added = Array.isArray(shared("workspace.panels.added")) ? shared("workspace.panels.added") : [];
+    setShared("workspace.panels.added", [...added, ...["sessions", "todo"].filter((id) => !added.includes(id))]);
     const body = (function find(node) {
       if (node?.id === "panel-body") return node;
       for (const child of node?.children ?? []) {

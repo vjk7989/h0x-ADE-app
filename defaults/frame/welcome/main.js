@@ -397,7 +397,7 @@ export default class Welcome extends View {
     // The list it makes already offers Sessions: the tab bar adds it to no one's choice.
     if (shared("workspace.panels") === undefined || shared("workspace.panels") === null) {
       setShared("workspace.panels", []);
-      setShared("workspace.panels.added", ["sessions"]);
+      setShared("workspace.panels.added", ["sessions", "todo"]); // the ids the tab bar migration knows (defaults/mods/tabs/main.js enabledPanels)
     }
     return v_flex()
       .gap(14)

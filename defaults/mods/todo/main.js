@@ -34,10 +34,12 @@ const move = (ref, dir) => on(ref, (a, k) => {
   if (!a[to]) return false;
   [a[k], a[to]] = [a[to], a[k]];
 });
-const indent = (ref) => on(ref, (a, k) => {
-  if (k === 0 || a[k].steps.length) return false;
+// The task becomes the last step of `parent` ({ i, title }): the task shown above it.
+const indent = (ref, parent) => on(ref, (a, k, tasks) => {
+  const p = findTask({ tasks }, parent.i, parent.title);
+  if (p < 0 || p >= k || a[k].steps.length) return false;
   const [t] = a.splice(k, 1);
-  a[k - 1].steps.push({ title: t.title, done: t.done, extra: t.extra });
+  tasks[p].steps.push({ title: t.title, done: t.done, extra: t.extra });
 });
 const outdent = (ref) => on(ref, (steps, j, tasks, i) => {
   const [s] = steps.splice(j, 1);
@@ -58,14 +60,14 @@ export default class Todo extends View {
     this.index = []; this.indexText = null; this.cur = null; this.list = parseList(""); this.text = ""; this.disk = "";
     this.pending = []; this.open = new Set(); this.showDone = false; this.sel = { k: "head" }; this.pos = 0;
     this.edit = null; this.naming = null; this.menu = false; this.menuAt = 0; this.confirming = false; this.hover = null;
-    this.readonly = false; this.ready = false; this.error = null;
+    this.readonly = false; this.ready = false; this.error = null; this.shown = false; this.wantFocus = false; this.badIndex = null;
     this.add = this.makeAdd();
     this.load(cx);
     cx.timer.every(10000, (cx) => { if (windowVisible()) this.reload(cx); });
     cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
-        if (c === "focus") this.handle.focus();
+        if (c === "focus") { if (this.shown) this.handle.focus(); else this.wantFocus = true; }
         else if (c === "undo") this.undo(cx);
         cx.notify();
       }
@@ -83,11 +85,17 @@ export default class Todo extends View {
     try {
       const text = await readTextFile(`${this.dir}/lists.md`);
       let entries = parseIndex(text ?? "");
+      if (!entries.length && (text ?? "").trim()) {
+        // Lines we can't read: the file is never touched until the person clicks "Start a new index".
+        this.badIndex = text; this.error = "lists.md has no lists HyperOx can read.";
+        return cx.notify();
+      }
       if (!entries.length) {
         entries = [DEFAULT];
         await writeTextFile(this.file(DEFAULT.slug), serializeList({ name: DEFAULT.name, head: [], tasks: [] }), null).catch(() => {});
         await writeTextFile(`${this.dir}/lists.md`, serializeIndex(entries), text);
       }
+      this.badIndex = null; this.error = null;
       this.index = entries; this.indexText = serializeIndex(entries);
       const saved = localStorage.getItem("todo.list");
       await this.openList((entries.find((e) => e.slug === saved) ?? entries[0]).slug, cx);
@@ -96,6 +104,16 @@ export default class Todo extends View {
       this.error = `Can't open your lists: ${e?.message ?? e}`;
     }
     cx.notify();
+  }
+
+  async startNewIndex(cx) {
+    const old = this.badIndex;
+    this.badIndex = null;
+    try {
+      await writeTextFile(this.file(DEFAULT.slug), serializeList({ name: DEFAULT.name, head: [], tasks: [] }), null).catch(() => {});
+      await writeTextFile(`${this.dir}/lists.md`, serializeIndex([DEFAULT]), old);
+    } catch (e) { this.badIndex = old; this.error = `Can't start a new index: ${e?.message ?? e}`; return cx.notify(); }
+    this.load(cx);
   }
 
   watch(cx) {
@@ -361,7 +379,7 @@ export default class Todo extends View {
     const title = escapeTitle(value).trim();
     if (!title) return;
     if (this.commit((list) => { list.tasks.unshift({ title, done: false, steps: [], extra: [] }); }, cx)) this.sel = { k: "task", i: 0 };
-    this.add = this.makeAdd();
+    this.add.set_value("");
     cx.notify();
   }
 
@@ -369,7 +387,7 @@ export default class Todo extends View {
     const input = InputState.new({ placeholder: "Add a task" });
     input.on("submit", (_e, cx) => this.addTask(input.value(), cx));
     input.on("focus", (_e, cx) => { this.addFocus = true; cx.notify(); });
-    input.on("blur", (_e, cx) => { if (this.add === input) this.addFocus = false; cx.notify(); });
+    input.on("blur", (_e, cx) => { this.addFocus = false; cx.notify(); });
     return input;
   }
 
@@ -412,9 +430,16 @@ export default class Todo extends View {
   }
 
   indentRow(row, cx) {
-    if (row.k === "task" && row.i > 0 && !this.item(row).steps.length) {
-      const parent = this.list.tasks[row.i - 1];
-      if (this.commit(indent(this.ref(row)), cx)) { this.open.add(parent.title); this.sel = { k: "step", i: row.i - 1, j: parent.steps.length - 1 }; }
+    if (row.k !== "task" || this.item(row).steps.length) return;
+    // The task shown above it in the same part of the screen (never a hidden finished one).
+    const rows = this.rows();
+    let at = rows.findIndex((r) => same(r, row)) - 1;
+    while (at >= 0 && rows[at].k !== "task" && rows[at].k !== "head") at--;
+    if (at < 0 || rows[at].k !== "task") return;
+    const parent = this.list.tasks[rows[at].i], pi = rows[at].i;
+    if (this.commit(indent(this.ref(row), { i: pi, title: parent.title }), cx)) {
+      this.open.add(parent.title);
+      this.sel = { k: "step", i: pi, j: this.list.tasks[pi].steps.length - 1 };
     }
   }
 
@@ -489,6 +514,10 @@ export default class Todo extends View {
 
   render(cx) {
     const p = props() ?? {}, t = theme();
+    if (!p.confetti && p.celebrate === undefined && !this.shown) {
+      this.shown = true;
+      if (this.wantFocus) { this.wantFocus = false; cx.timer.after(0, () => this.handle.focus()); }
+    }
     if (p.confetti) return this.confetti(t);
     if (p.celebrate !== undefined) return this.dialog(p, t);
     const rows = this.ready ? this.current() : [], busy = this.edit || this.naming;
@@ -499,10 +528,11 @@ export default class Todo extends View {
       .when(this.confirming, (el) => el.child(this.confirmBar(t)))
       .when(Boolean(this.naming), (el) => el.child(this.nameBar(t)))
       .when(Boolean(this.error), (el) => el.child(div().flex_none().px(14).py(6).text_size(12).text_color(t.ansi1).child(this.error)))
+      .when(Boolean(this.badIndex), (el) => el.child(this.newIndexBar(t)))
       .when(!this.readonly && this.ready, (el) => el.child(this.addBar(t)))
       .child(v_flex().id("todo-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
         .children(rows.map((r) => this.row(r, t)))
-        .when(this.ready && !this.list.tasks.length, (el) => el.child(div().p(10).text_color(t.dim).child("No tasks yet. Add one above.")))
+        .when(this.ready && !this.readonly && !this.list.tasks.length, (el) => el.child(div().p(10).text_color(t.dim).child("No tasks yet. Add one above.")))
         .when(this.ready && this.list.tasks.length > 0 && openCount(this.list) === 0, (el) => el.child(div().px(10).py(8).text_color(t.dim).child("All done for today"))))
       .child(div().flex_none().px(14).py(8).border_t(1).border_color(t.border).text_size(11).text_color(t.dim).truncate()
         .child(busy ? "Enter save · Esc cancel" : "↑↓ move · Space done · Enter edit · N new · Del remove"));
@@ -540,6 +570,13 @@ export default class Todo extends View {
       .child(div().flex_1().min_w(0).truncate().child(`Delete “${this.name()}” and its tasks?`))
       .child(button("todo-del-no", "Cancel", false, (_e, cx) => { this.confirming = false; this.handle.focus(); cx.notify(); }))
       .child(button("todo-del-yes", "Delete", true, (_e, cx) => this.deleteList(cx)));
+  }
+
+  newIndexBar(t) {
+    return h_flex().flex_none().px(14).py(8).gap(8).items_center().bg(t.raised).border_b(1).border_color(t.border).text_size(12)
+      .child(div().flex_1().min_w(0).truncate().child("Your lists.md is kept as it is."))
+      .child(div().id("todo-new-index").px(10).py(3).rounded(6).cursor_pointer().border_1().border_color(t.border).hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => this.startNewIndex(cx)).child("Start a new index"));
   }
 
   nameBar(t) {
