@@ -97,6 +97,12 @@ fn preset(name: &str) -> Option<&'static Palette> {
 const THEMES: &[(&str, &str)] = &[
     ("atom-one-dark", include_str!("../defaults/themes/atom-one-dark.json")),
     ("win98", include_str!("../defaults/themes/win98.json")),
+    ("amber-minimal", include_str!("../defaults/themes/amber-minimal.json")),
+    ("candyland", include_str!("../defaults/themes/candyland.json")),
+    ("claymorphism", include_str!("../defaults/themes/claymorphism.json")),
+    ("darkmatter", include_str!("../defaults/themes/darkmatter.json")),
+    ("soft-pop", include_str!("../defaults/themes/soft-pop.json")),
+    ("neo-brutalism", include_str!("../defaults/themes/neo-brutalism.json")),
 ];
 
 /// `themes/<name>.json`: a palette, plus `colors` overrides like settings.json's.

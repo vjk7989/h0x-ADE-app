@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, notify, props, closeOverlay, window } from "h0x";
+import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, window } from "h0x";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -25,6 +25,7 @@ const APPEARANCES = [
 ];
 
 // What the app uses when settings.json names no font (settings.rs).
+const TOKEN_SHAPE = /^\d+:[A-Za-z0-9_-]{20,}$/; // the core's rule for a bot token
 const DEFAULT_FONT = "JetBrains Mono";
 const DEFAULT_UI_FONT = "Geist";
 
@@ -59,6 +60,10 @@ export default class Settings extends View {
     this.machineNotice = null;
     this.tokenInput = InputState.new({ placeholder: "Paste the bot token" });
     this.tokenInput.set_masked(true);
+    this.tokenAt = 0; // when the token field last changed; 0 = nothing waiting to be saved
+    this.tokenInput.on("change", (_e, cx) => { this.tokenAt = Date.now(); cx.notify(); });
+    this.changingToken = false;
+    this.showHelp = false;
     this.remote = null; // bridge ls
     this.remoteLog = [];
     this.remoteTerms = [];
@@ -90,6 +95,11 @@ export default class Settings extends View {
           cx.notify();
         });
       } else cx.notify(); // the pairing countdown
+    });
+    cx.timer.every(200, (cx) => {
+      if (this.section !== "remote" || !this.tokenAt || Date.now() - this.tokenAt < 400) return;
+      this.tokenAt = 0;
+      if (TOKEN_SHAPE.test(this.tokenInput.value().trim())) this.saveToken(cx);
     });
     cx.timer.every(3000, (cx) => {
       if (this.section !== "machines") return;
@@ -838,15 +848,20 @@ export default class Settings extends View {
   // deleted afterwards, whatever the result; a leftover from a crash is deleted first.
   saveToken(cx) {
     const token = this.tokenInput.value().trim();
-    if (!token) return;
+    if (!TOKEN_SHAPE.test(token)) return;
     const path = `${appHome()}/telegram-token.tmp`;
     this.remoteAction("token", async () => {
       try {
         await removeAppFile(path);
         await writeTextFile(path, token, null);
         await this.coreJson(["bridge", "telegram", "token", "--file", path]);
-        this.remoteNotice = "Bot token saved.";
         this.tokenInput.set_value("");
+        this.tokenAt = 0; // clearing the field is not a new token
+        this.changingToken = false;
+        notify({ title: "Bot token saved", level: "success" });
+      } catch (e) {
+        notify({ title: "Couldn't save the bot token", body: e.message ?? String(e), level: "error" });
+        throw e;
       } finally {
         await removeAppFile(path).catch(() => {});
       }
@@ -900,22 +915,56 @@ export default class Settings extends View {
     const on = this.termRunning("h0x-bridge-telegram");
     const left = this.pairing ? Math.max(0, Math.ceil((this.pairing.expires_ms - Date.now()) / 1000)) : 0;
     const field = Input.new(this.tokenInput).flex_1().min_w(0).h(32).px(10).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(13).text_color(t.foreground);
+    const paired = r.identities.filter((i) => i.transport === "telegram").length;
+    const saved = r.telegram_token === "set";
+    const status = paired > 0 ? `Paired with ${paired} account${paired === 1 ? "" : "s"}` : saved ? "Token saved. Now pair your Telegram." : "Not set up";
+    const editing = !saved || this.changingToken;
+    const pairButton = this.remoteButton(t, "st-r-pair", "Pair my Telegram", async () => {
+      const p = await this.coreJson(["bridge", "pair", "--transport", "telegram", "--json"]);
+      this.pairing = { code: p.code, expires_ms: p.expires_ms };
+    });
+    const live = Boolean(this.pairing) && left > 0;
+    const command = this.pairing ? `/pair ${this.pairing.code}` : "";
+    const commands = [
+      ["/menu", "Show buttons for sessions, projects and help."],
+      ["/sessions", "List your terminals and pick one."],
+      ["/projects", "List your project folders."],
+      ["/help", "Show this list in Telegram."],
+      ["/agents", "List the coding agents that are running."],
+      ["/read", "Read what a terminal shows."],
+      ["/send", "Type text into a terminal."],
+      ["/lock", "Stop paired devices from running commands."],
+    ];
     return v_flex().w_full()
       .child(this.heading(t, "Telegram"))
-      .child(this.row(t, "Bot token", `${r.telegram_token === "set" ? "Set" : "Not set"}. Get a token from @BotFather on Telegram.`, div()))
-      .child(h_flex().w_full().py(10).gap(6).items_center().border_b(1).border_color(t.border)
-        .child(field)
-        .child(this.button(t, "st-r-token", this.remoteBusy.token ? "…" : "Save", (_e, cx) => this.saveToken(cx))))
-      .child(this.row(t, "Pair my Telegram",
-        this.pairing && left > 0 ? `Send /pair ${this.pairing.code} to your bot. The code works for ${left} s.` : "Get a one-time code, then send it to your bot.",
-        this.remoteButton(t, "st-r-pair", "Pair my Telegram", async () => {
-          const p = await this.coreJson(["bridge", "pair", "--transport", "telegram", "--json"]);
-          this.pairing = { code: p.code, expires_ms: p.expires_ms };
-        })))
-      .when(Boolean(this.pairing) && left > 0, (el) => el.child(div().py(8).text_size(22).font_semibold().text_color(t.accent).child(this.pairing.code)))
+      .child(div().py(6).text_size(13).font_semibold().text_color(paired > 0 ? t.ansi2 : t.muted).child(status))
+      .child(editing
+        ? h_flex().w_full().py(10).gap(6).items_center().border_b(1).border_color(t.border)
+          .child(field)
+          .child(div().flex_none().child(pairButton))
+        : h_flex().w_full().py(10).gap(10).items_center().border_b(1).border_color(t.border)
+          .child(div().flex_1().text_size(13.5).text_color(t.foreground).child("Bot token ✓ saved"))
+          .child(this.button(t, "st-r-token-change", "Change", (_e, cx) => { this.changingToken = true; cx.notify(); }))
+          .child(div().flex_none().child(pairButton)))
+      .when(editing, (el) => el.child(div().py(6).text_size(12.5).text_color(t.dim).child("Get a token from @BotFather on Telegram. It saves by itself once you paste it.")))
+      .when(live, (el) => el.child(v_flex().w_full().py(10).gap(6)
+        .child(div().text_size(13).text_color(t.muted).child("Send this to your bot in Telegram:"))
+        .child(h_flex().gap(12).items_center()
+          .child(div().text_size(24).font_semibold().text_color(t.accent).child(command))
+          .child(this.button(t, "st-r-pair-copy", "Copy", () => {
+            const why = copyText(command);
+            notify(why ? { title: "Couldn't copy", body: why, level: "error" } : { title: "Copied", level: "success" });
+          })))
+        .child(div().text_size(12.5).text_color(t.dim).child(`The code works for ${left} s.`))))
+      .when(!live, (el) => el.child(div().py(6).text_size(12.5).text_color(t.dim).child("Press Pair my Telegram for a one-time code, then send it to your bot.")))
       .child(this.row(t, "Bot", on ? "Running" : "Stopped", on
         ? this.remoteButton(t, "st-r-bot-stop", "Stop bot", () => this.coreJson(["kill", "h0x-bridge-telegram"]))
-        : this.remoteButton(t, "st-r-bot-start", "Start bot", () => this.coreJson(this.startArgs("h0x-bridge-telegram", "h0x-bridge=telegram", ["bridge", "run"])))));
+        : this.remoteButton(t, "st-r-bot-start", "Start bot", () => this.coreJson(this.startArgs("h0x-bridge-telegram", "h0x-bridge=telegram", ["bridge", "run"])))))
+      .child(this.button(t, "st-r-help", this.showHelp ? "Hide how to use" : "How to use", (_e, cx) => { this.showHelp = !this.showHelp; cx.notify(); }))
+      .when(this.showHelp, (el) => el.child(v_flex().w_full().py(8).gap(4)
+        .children(commands.map(([name, what]) => h_flex().gap(10)
+          .child(div().w(90).flex_none().text_size(12.5).font_semibold().text_color(t.foreground).child(name))
+          .child(div().flex_1().min_w(0).text_size(12.5).text_color(t.muted).child(what))))));
   }
 
   remoteWeb(t) {

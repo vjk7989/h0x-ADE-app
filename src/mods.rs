@@ -1259,6 +1259,14 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             crate::links::open(&crate::links::Target::Url(url.to_owned()));
             Ok(HostValue::Null)
         })
+        .function("copyText", move |a| {
+            if !settings_frame { return Err(HostError::new("copying is frame-only")); }
+            let text = a.string(0)?;
+            if text.len() > 4096 { return Ok(HostValue::Str("that is too long to copy".into())); }
+            let text = text.to_owned();
+            let done = gpui_shell::with_current_app(|cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)));
+            Ok(if done.is_some() { HostValue::Null } else { HostValue::Str("no window to copy from".into()) })
+        })
         .function("themes", |_| {
             let list: Vec<Value> = crate::settings::themes().into_iter().map(|(name, colors)| json!({ "light": crate::settings::theme_is_light(&name), "name": name, "colors": colors })).collect();
             Ok(to_host(&Value::Array(list)))
