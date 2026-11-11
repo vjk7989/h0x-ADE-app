@@ -1259,6 +1259,14 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             crate::links::open(&crate::links::Target::Url(url.to_owned()));
             Ok(HostValue::Null)
         })
+        .function("copyText", move |a| {
+            if !settings_frame { return Err(HostError::new("copying is frame-only")); }
+            let text = a.string(0)?;
+            if text.len() > 4096 { return Ok(HostValue::Str("that is too long to copy".into())); }
+            let text = text.to_owned();
+            let done = gpui_shell::with_current_app(|cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)));
+            Ok(if done.is_some() { HostValue::Null } else { HostValue::Str("no window to copy from".into()) })
+        })
         .function("themes", |_| {
             let list: Vec<Value> = crate::settings::themes().into_iter().map(|(name, colors)| json!({ "light": crate::settings::theme_is_light(&name), "name": name, "colors": colors })).collect();
             Ok(to_host(&Value::Array(list)))
@@ -1839,6 +1847,78 @@ mod tests {
         assert!(!info.to_ascii_lowercase().contains("github"), "{info}");
         assert!(info.contains("openLink("), "links open through openLink");
         assert!(!info.contains("sendFeedback"), "Send feedback is not wired to sendFeedback yet");
+    }
+
+    #[test]
+    fn copy_text_is_settings_frame_only_and_refuses_more_than_4096_bytes() {
+        std::thread::spawn(|| {
+            use gpui_shell::HostArguments;
+            let text = |s: &str| HostArguments::new([HostValue::Str(s.into())]);
+            for name in ["", "test", "settings", "frame-feedback", "frame-settings-x", "Frame-Settings", "frame-settings ", "my-mod/frame-settings"] {
+                let host = module(Instance { name: name.into(), props: Value::Null }, 1);
+                let err = host.call("copyText", &text("/pair 123456")).expect_err(name);
+                assert_eq!(err.message(), "copying is frame-only", "{name:?}");
+                assert!(host.call("copyText", &HostArguments::default()).is_err(), "{name:?}");
+            }
+            let host = module(Instance { name: "frame-settings".into(), props: Value::Null }, 2);
+            let too_long = Ok(HostValue::Str("that is too long to copy".into()));
+            // No app runs here: text that passes the checks reaches the clipboard step, which has no window.
+            // So an empty string is allowed (it is not refused as too long or as no text).
+            let reached = Ok(HostValue::Str("no window to copy from".into()));
+            for (label, s, want) in [
+                ("empty", String::new(), &reached),
+                ("4096 bytes", "x".repeat(4096), &reached),
+                ("4097 bytes", "x".repeat(4097), &too_long),
+                ("2048 two-byte characters, 4096 bytes", "\u{e9}".repeat(2048), &reached),
+                ("2049 two-byte characters, 4098 bytes", "\u{e9}".repeat(2049), &too_long),
+                ("1366 three-byte characters, 4098 bytes", "\u{20ac}".repeat(1366), &too_long),
+                ("a windows path", r"C:\Users\Ana López\AppData\Roaming\h0x-ade\telegram-token.tmp".to_owned(), &reached),
+                ("the pair command", "/pair 123456".to_owned(), &reached),
+                ("a NUL and newlines", "a\0b\r\nc".to_owned(), &reached),
+            ] {
+                assert_eq!(&host.call("copyText", &text(&s)), want, "{label}");
+            }
+            let objects = HostValue::Object(vec![("text".into(), HostValue::Str("x".into()))]);
+            let arrays = HostValue::Array(vec![HostValue::Str("x".into())]);
+            for arg in [HostValue::Null, HostValue::Bool(true), HostValue::Number(1.0), arrays, objects] {
+                assert!(host.call("copyText", &HostArguments::new([arg.clone()])).is_err(), "{arg:?} is not a string");
+            }
+            assert!(host.call("copyText", &HostArguments::default()).is_err(), "no argument");
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn the_light_theme_logo_is_an_embedded_64_px_png_beside_the_original() {
+        let file = |files: &'static [(&'static str, &'static [u8])], path: &str| -> &'static [u8] {
+            files.iter().find(|(p, _)| *p == path).map(|(_, b)| *b).unwrap_or_else(|| panic!("{path} is not embedded"))
+        };
+        let size = |png: &[u8]| (u32::from_be_bytes(png[16..20].try_into().unwrap()), u32::from_be_bytes(png[20..24].try_into().unwrap()));
+        for png in [file(DEFAULT_MODS, "workspace-chrome/hyperox-white.png"), file(FRAME_MODS, "welcome/hyperox.png")] {
+            assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "a PNG");
+            assert_eq!(&png[12..16], b"IHDR");
+        }
+        let white = file(DEFAULT_MODS, "workspace-chrome/hyperox-white.png");
+        assert_eq!(size(white), (64, 64), "crisp at 200% for a 14 px mark");
+        assert_eq!(white[25], 6, "RGBA: a white mark needs transparency around it, or it is a white square");
+        // The chrome mod names exactly the paths the app installs them under (mods/…, frame/…).
+        let chrome = std::str::from_utf8(file(DEFAULT_MODS, "workspace-chrome/main.js")).unwrap();
+        assert!(chrome.contains("image(\"mods/workspace-chrome/hyperox-white.png\")"), "{chrome}");
+        assert!(chrome.contains("image(\"frame/welcome/hyperox.png\")"), "{chrome}");
+    }
+
+    #[test]
+    fn the_telegram_token_box_saves_on_enter_and_waits_for_the_token_shape_on_a_pause() {
+        // The render tests act out these handlers; this keeps them wired as acted out.
+        let page = include_str!("../defaults/frame/settings/main.js");
+        assert!(page.contains(r#"const TOKEN_SHAPE = /^\d+:[A-Za-z0-9_-]{20,}$/;"#), "the core's token rule");
+        assert!(page.contains(r#"this.tokenInput.on("submit", (_e, cx) => { this.tokenAt = 0; this.saveToken(cx, true); });"#));
+        assert!(page.contains(r#"this.tokenInput.on("change", (_e, cx) => { this.tokenAt = Date.now();"#));
+        assert!(page.contains("this.tokenInput.set_masked(true);"), "the token is masked");
+        assert!(page.contains("if (TOKEN_SHAPE.test(this.tokenInput.value().trim())) this.saveToken(cx);"), "the pause saves only the shape");
+        assert!(!page.contains("\"st-r-token\""), "no Save button");
+        assert!(page.contains("copyText(command)") && page.contains("const command = this.pairing ? `/pair ${this.pairing.code}` : \"\";"));
     }
 
     #[test]

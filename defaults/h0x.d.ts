@@ -341,6 +341,8 @@ export function feedbackClearImages(): null;
 export function sendFeedback(body: import("gpui-kit").HostValue, images?: string[]): Promise<string | null>;
 /** Opens one of the Info page's links (pavii.tech, its docs, buckleson.com) in the browser; any other URL is refused. Resolves to an error message, or null. Settings frame only. */
 export function openLink(url: string): string | null;
+/** Copies plain text (at most 4096 bytes) to the system clipboard. Returns an error message, or null. Settings frame only. */
+export function copyText(text: string): string | null;
 
 /** What the app runs with: the shown layout's look (theme name, fonts, sizes, terminal
  *  padding and opacity) with the person's zoom and sounds. */
