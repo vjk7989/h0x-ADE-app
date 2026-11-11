@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.1.19] - 2026-11-11
+
+A to-do list. Bundles h0x-core 0.1.14.
+
+### Added
+
+- **To-do** next to Files and Changes, or `Ctrl+Shift+J` (`Cmd+Shift+J` on macOS): several lists, tasks with steps, a folded "Completed" section, and undo for deletes.
+- Keyboard first: arrows move, `Space` ticks, `Enter` edits, `N` adds, `Tab`/`Shift+Tab` make a step or a task, `Alt+↑/↓` reorder.
+- Finishing the last open task shows a small Congratulations pop-up with an optional Celebrate.
+- Lists are Markdown files in the app's folder (`todo/`), the same in every space; agents can update them and the panel follows along. A list holds up to 64 KB (about 2,900 tasks).
+- Settings → Look can hide the to-do list; your lists are kept.
+
 ## [0.1.18] - 2026-11-11
 
 A new Info page. Bundles h0x-core 0.1.14.
