@@ -158,3 +158,39 @@ fn third_party_notices_are_current_and_complete() {
     assert!(notices.contains("quickjs-jit-sys"));
     assert!(notices.contains("gpui-pre"));
 }
+
+#[test]
+fn every_font_a_shipped_mod_brings_has_its_licence_in_the_notices() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let inventory: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join("licenses/inventory.json")).unwrap())
+            .unwrap();
+    let listed: Vec<&str> = inventory["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|c| c["files"].as_array().unwrap())
+        .map(|f| f.as_str().unwrap())
+        .collect();
+    let mut fonts = 0;
+    for entry in fs::read_dir(root.join("defaults/mods")).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        let Ok(files) = fs::read_dir(root.join("defaults/mods").join(&name).join("fonts")) else {
+            continue;
+        };
+        for file in files {
+            let file = file.unwrap().file_name().into_string().unwrap();
+            if !(file.ends_with(".ttf") || file.ends_with(".otf")) {
+                continue;
+            }
+            fonts += 1;
+            let folder = format!("defaults/mods/{name}/fonts/");
+            assert!(
+                listed.iter().any(|path| path.starts_with(&folder)),
+                "{folder}{file} has no licence in licenses/inventory.json"
+            );
+        }
+    }
+    assert!(fonts >= 4, "HyperOx 98's three fonts and the to-do list's");
+    assert!(listed.contains(&"defaults/mods/todo/fonts/OFL-PatrickHand.txt"));
+}

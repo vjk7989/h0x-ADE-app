@@ -165,7 +165,7 @@ jobs:
           ~/.bun/bin/bun scripts/docs.ts check
       - name: Check mod scripts
         if: matrix.platform == 'linux-x86_64'
-        run: ~/.bun/bin/bun test scripts/files.test.ts scripts/machine-add.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/rest.test.ts scripts/spaces.test.ts scripts/worktree.test.ts scripts/todo.test.ts
+        run: ~/.bun/bin/bun test scripts/files.test.ts scripts/machine-add.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/rest.test.ts scripts/spaces.test.ts scripts/worktree.test.ts scripts/todo.test.ts scripts/cx-guard.test.ts
 
   # The real app, typed into a terminal: it opens in that folder (tests/launch_folder.rs).
   # Needs a desktop (Xvfb on Linux) and the pinned h0x-core release, whose

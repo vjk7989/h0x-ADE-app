@@ -186,6 +186,13 @@
       ]
     },
     {
+      "name": "Patrick Hand font (to-do list)",
+      "source": "https://fonts.google.com/specimen/Patrick+Hand",
+      "files": [
+        "defaults/mods/todo/fonts/OFL-PatrickHand.txt"
+      ]
+    },
+    {
       "name": "HyperOx logo artwork",
       "source": "Pixel redraw of the HyperOx mark, HyperOx's own artwork. HyperOx 98 artwork is drawn by defaults/mods/win98/art/generate.ts, under the app's Apache-2.0 license.",
       "files": [
