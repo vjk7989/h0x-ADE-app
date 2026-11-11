@@ -5557,6 +5557,7 @@ export default class Scenario extends Real {
           note(JSON.stringify({ ready: this.ready, textLen: this.text.length, text: this.text.length > 16384 ? null : this.text, error: this.error, readonly: this.readonly, sel: this.sel,
             edit: this.edit ? this.edit.input.value() : null, pending: this.pending.length, cur: this.cur, badIndex: Boolean(this.badIndex),
             confirming: this.confirming, naming: Boolean(this.naming), flushing: Boolean(this.flushing),
+            menu: this.menu, menuAt: this.menuAt, nameValue: this.naming ? this.naming.input.value() : null,
             firstDone: this.list?.tasks[0]?.done ?? null, cut: this.cut, slowMs: this.slowMs }));
         }
         this.running = null;
@@ -6489,9 +6490,16 @@ fn todo_new_list_from_the_name_box_creates_and_opens_it(cx: &mut TestAppContext)
     assert_eq!((state["naming"].clone(), state["error"].clone(), state["cur"].clone()), (json!(false), Value::Null, json!("tasks")), "{state}");
     assert!(host.borrow().writes.is_empty(), "an empty name creates nothing: {:?}", host.borrow().writes);
 
+    // key() drops an Enter within 150 ms (wall clock, Date.now) of a name-box submit: the submit's own Enter also
+    // reaches the panel. A person pauses longer than that before the next menu pick; the fake test clock doesn't.
+    std::thread::sleep(std::time::Duration::from_millis(200));
     files_keys(&mut visual, "ctrl-l down down enter");
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["naming"].clone(), state["menu"].clone()), (json!(true), json!(false)), "New list opens the name box again: {state}");
     visual.update(|window, cx| window.draw(cx).clear(cx));
     visual.simulate_input("Work");
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(state["nameValue"], json!("Work"), "typing reaches the name box: {state}");
     files_keys(&mut visual, "enter");
     files_wait(&mut visual, 100);
     let new = "/fixture/app/todo/work-2.md";

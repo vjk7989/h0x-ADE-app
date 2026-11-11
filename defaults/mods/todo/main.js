@@ -444,7 +444,12 @@ export default class Todo extends View {
     const input = InputState.new({ value, placeholder });
     if (value) input.set_selected_range({ start: 0, end: value.length });
     // The input propagates its Enter, so the panel's key() sees the same Enter right after.
-    input.on("submit", (_e, cx) => { this.submitAt = Date.now(); submit(input.value(), cx); });
+    input.on("submit", (_e, cx) => {
+      // The same Enter reaches the panel's key() next; ignore it until the next tick.
+      this.justSubmitted = true;
+      cx.timer.after(0, () => { this.justSubmitted = false; });
+      submit(input.value(), cx);
+    });
     input.on("blur", (_e, cx) => blur(input.value(), cx));
     input.focus();
     return input;
@@ -502,7 +507,7 @@ export default class Todo extends View {
   key(e, cx) {
     const k = e.key, m = e.modifiers ?? {}, mod = m.control || m.platform;
     const typing = this.edit || this.naming || this.addFocus;
-    if (k === "enter" && Date.now() - (this.submitAt ?? 0) < 150) return;
+    if (k === "enter" && this.justSubmitted) return;
     if (k === "escape") {
       if (this.edit) { this.edit = null; this.handle.focus(); }
       else if (this.naming) { this.naming = null; this.handle.focus(); }
