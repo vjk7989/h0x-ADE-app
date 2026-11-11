@@ -2795,7 +2795,7 @@ fn shipped_layouts_and_keys() {
         layouts.insert(path.file_stem().unwrap().to_str().unwrap().to_owned());
     }
     assert_eq!(layouts, crate::window::shipped_layouts().into_iter().map(str::to_owned).collect());
-    let mod_commands = ["ribbon.next"];
+    let mod_commands = ["ribbon.next", "tabs.todo"];
     for text in [
         include_str!("../../defaults/keys.json"),
         include_str!("../../defaults/keys.macos.json"),

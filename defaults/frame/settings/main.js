@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { core, run, theme, themes, fonts, updates, settings, layouts, shared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, notify, props, closeOverlay, window } from "h0x";
+import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, notify, props, closeOverlay, window } from "h0x";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -264,6 +264,23 @@ export default class Settings extends View {
       .child(div().w(16).h(16).rounded(8).bg(on ? t.accent_foreground : t.muted));
   }
 
+  // The To-do button and panel: "todo" in the shared panel list (the tab bar's own default
+  // includes it). The lists' files stay on disk either way.
+  setTodoPanel(on) {
+    const stored = shared("workspace.panels");
+    const list = Array.isArray(stored) ? stored : ["files", "changes", "sessions", "todo"];
+    setShared("workspace.panels", on ? [...list.filter((x) => x !== "todo"), "todo"] : list.filter((x) => x !== "todo"));
+    const body = (function find(node) {
+      if (node?.id === "panel-body") return node;
+      for (const child of node?.children ?? []) {
+        const found = find(child);
+        if (found) return found;
+      }
+      return null;
+    })(layout());
+    if (!on && body?.active === "todo") run("layout.hide", { id: "panel" });
+  }
+
   // Look -----------------------------------------------------------------
 
   // A small drawing of each layout, in the theme's colors (as the welcome draws them).
@@ -513,6 +530,8 @@ export default class Settings extends View {
     const s = settings();
     const p = this.person;
     const clipboardOn = p.clipboard_write === true;
+    const panels = shared("workspace.panels");
+    const todoOn = Array.isArray(panels) ? panels.includes("todo") : true;
     // The settings file holds any number; the app uses it only inside this range, else 10,000.
     const stops = [1000, 2000, 5000, 10000, 20000, 50000, 100000];
     const lines = Number.isInteger(p.scrollback_lines) && p.scrollback_lines >= 1000 && p.scrollback_lines <= 100000 ? p.scrollback_lines : 10000;
@@ -564,6 +583,9 @@ export default class Settings extends View {
       )
       .child(fontRow("font", "font_size", "Terminal font", s.font_family, DEFAULT_FONT, s.font_size))
       .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT))
+      .child(div().h(18))
+      .child(this.heading(t, "Panels"))
+      .child(this.row(t, "To-do list", "Show the To-do button and panel.", this.toggle(t, "st-todo", todoOn, () => this.setTodoPanel(!todoOn))))
       .child(div().h(18))
       .child(this.heading(t, "Terminal"))
       .child(

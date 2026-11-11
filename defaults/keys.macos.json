@@ -14,6 +14,7 @@
     "cmd-]": "agent.next",
     "cmd-[": "agent.prev",
     "cmd-shift-l": "layout.switch",
+    "cmd-shift-j": "tabs.todo",
     "cmd-n": "space.new",
     "cmd-p": "mod.open:picker",
     "cmd-shift-p": "app.palette",
