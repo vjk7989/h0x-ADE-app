@@ -1,10 +1,13 @@
 // To-do lists: Markdown files in the app folder (todo/<list>.md, todo/lists.md) shown as a
-// simple task list. Tasks have steps; ticking the last open task offers a small celebration.
+// simple task list. Tasks have steps (a task and its steps are ticked together); the tick that finishes the list offers a small celebration.
 // The same mod draws the pop-up (props().celebrate) and the confetti (props().confetti).
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { appHome, readTextFile, writeTextFile, removeAppFile, watchFolder, nextCommand, notify, openOverlay, closeOverlay, props, run, theme, windowVisible } from "h0x";
-import { parseList, serializeList, parseIndex, serializeIndex, slugify, openCount, allDone, escapeTitle } from "./model.js";
+import { appHome, readTextFile, writeTextFile, removeAppFile, watchFolder, nextCommand, notify, openOverlay, closeOverlay, props, run, theme, windowVisible, fonts } from "h0x";
+import { parseList, serializeList, parseIndex, serializeIndex, slugify, openCount, allDone, escapeTitle, setTaskDone, setStepDone } from "./model.js";
+
+// Handwriting for task and step titles (SIL OFL, fonts/PatrickHand-Regular.ttf); the app font stands in when it is not loaded.
+const HAND = "Patrick Hand";
 
 const ACTIONS = ["new", "rename", "delete"];
 const DEFAULT = { name: "Tasks", slug: "tasks" };
@@ -38,7 +41,8 @@ const on = (ref, fn) => (list) => {
   const j = findStep(list.tasks[i], ref.j, ref.stepTitle);
   return j < 0 ? false : fn(list.tasks[i].steps, j, list.tasks, i);
 };
-const setDone = (ref, done) => on(ref, (a, k) => { a[k].done = done; });
+// A task carries its steps; the last step done makes the task done, any step undone makes it open.
+const setDone = (ref, done) => on(ref, (a, k, tasks, i) => { if (ref.j == null) setTaskDone(a[k], done); else setStepDone(tasks[i], k, done); });
 const setTitle = (ref, title) => on(ref, (a, k) => { a[k].title = title; });
 const remove = (ref) => on(ref, (a, k) => { a.splice(k, 1); });
 // Moves among its own kind: a task past open tasks only, a step past steps.
@@ -196,8 +200,11 @@ export default class Todo extends View {
     if (mut(list) === false) return false;
     const next = serializeList(list);
     if (!fits(next)) { this.error = FULL; cx.notify(); return false; }
-    this.setText(next);
-    this.pending.push(mut);
+    // The sandbox cuts off a script call that runs too long (500 ms), uncatchably: all the slow
+    // work (parsing a big list) is done before anything changes, and the change is queued before
+    // it is shown, so a cut-off change is never shown without being queued for writing.
+    const shown = parseList(next);
+    this.pending.push(mut); this.text = next; this.list = shown;
     this.flush(cx);
     cx.notify();
     return true;
@@ -207,9 +214,9 @@ export default class Todo extends View {
   // re-applies our unsaved changes to it; a second failure keeps them and says so.
   flush(cx) {
     if (this.flushing) return;
-    this.flushing = true;
     const slug = this.cur, path = this.file(slug);
-    cx.spawn(async (cx) => {
+    this.flushing = true;
+    try { cx.spawn(async (cx) => {
       try {
         while (this.pending.length && this.cur === slug) {
           const batch = this.pending.slice(), next = this.text;
@@ -235,7 +242,7 @@ export default class Todo extends View {
           }
         }
       } finally { this.flushing = false; cx.notify(); }
-    });
+    }); } catch (e) { this.flushing = false; throw e; }
   }
 
   // The lists file with one change, re-read and retried once if someone else wrote meanwhile.
@@ -256,21 +263,25 @@ export default class Todo extends View {
 
   switchTo(slug, cx) {
     this.menu = false; this.confirming = false;
-    if (slug !== this.cur) this.openList(slug, cx);
+    if (slug !== this.cur) cx.spawn(async (cx) => this.openList(slug, cx));
     this.handle.focus(); cx.notify();
   }
 
   askName(mode, cx) {
     this.menu = false;
     const value = mode === "rename" ? this.name() : "";
-    const input = this.field(value, "List name", (v, cx) => this.finishName(v, cx), (v, cx) => { if (this.naming?.input === input) this.naming = null; cx.notify(); });
+    // The box keeps its own mode: the input's blur can clear `naming` before its submit runs.
+    const input = this.field(value, "List name", (v, cx) => {
+      if (this.naming?.input === input) this.naming = null;
+      this.handle.focus(); cx.notify();
+      cx.spawn(async (cx) => this.finishName(v, mode, cx));
+    }, (v, cx) => { if (this.naming?.input === input) this.naming = null; cx.notify(); });
     this.naming = { mode, input };
     cx.notify();
   }
 
-  async finishName(value, cx) {
-    const { mode } = this.naming ?? {};
-    this.naming = null; this.handle.focus();
+  async finishName(value, mode, cx) {
+    const slug0 = this.cur;
     const name = escapeTitle(value).trim();
     if (!mode || !name) return cx.notify();
     try {
@@ -284,24 +295,31 @@ export default class Todo extends View {
         await writeTextFile(this.file(slug), serializeList({ name, head: [], tasks: [] }), null);
         await this.openList(slug, cx);
       } else {
-        await this.editIndex((entries) => { const e = entries.find((x) => x.slug === this.cur); if (!e) return false; e.name = name; });
-        this.commit((list) => { list.name = name; }, cx);
+        await this.editIndex((entries) => { const e = entries.find((x) => x.slug === slug0); if (!e) return false; e.name = name; });
+        if (this.cur === slug0) this.commit((list) => { list.name = name; }, cx);
       }
     } catch (e) { this.error = `Couldn't ${mode} the list: ${e?.message ?? e}`; }
     cx.notify();
   }
 
   async deleteList(cx) {
+    if (this.deleting) return;
+    this.deleting = true;
     this.confirming = false; this.menu = false;
     const slug = this.cur;
     try {
       while (this.flushing) await cx.sleep(50);
       this.pending = [];
-      await this.editIndex((entries) => { const k = entries.findIndex((e) => e.slug === slug); if (k < 0) return false; entries.splice(k, 1); });
-      await removeAppFile(this.file(slug));
-      if (this.index.length) await this.openList(this.index[0].slug, cx);
-      else await this.load(cx);
+      // Already gone from lists.md: nothing to remove, just reopen what is left.
+      const removed = await this.editIndex((entries) => { const k = entries.findIndex((e) => e.slug === slug); if (k < 0) return false; entries.splice(k, 1); });
+      if (removed === false) await this.load(cx);
+      else {
+        await removeAppFile(this.file(slug));
+        if (this.index.length) await this.openList(this.index[0].slug, cx);
+        else await this.load(cx);
+      }
     } catch (e) { this.error = `Couldn't delete the list: ${e?.message ?? e}`; }
+    finally { this.deleting = false; }
     cx.notify();
   }
 
@@ -352,8 +370,8 @@ export default class Todo extends View {
     this.select(row, cx);
     const item = this.item(row);
     if (!item) return;
-    const done = !item.done;
-    if (this.commit(setDone(this.ref(row), done), cx) && done && row.j == null && allDone(this.list)) this.celebrate();
+    const done = !item.done, finished = allDone(this.list);
+    if (this.commit(setDone(this.ref(row), done), cx) && done && !finished && allDone(this.list)) this.celebrate();
   }
 
   // The tick that finishes the list (never a load, an add or a delete) offers the pop-up.
@@ -425,7 +443,13 @@ export default class Todo extends View {
   field(value, placeholder, submit, blur) {
     const input = InputState.new({ value, placeholder });
     if (value) input.set_selected_range({ start: 0, end: value.length });
-    input.on("submit", (_e, cx) => submit(input.value(), cx));
+    // The input propagates its Enter, so the panel's key() sees the same Enter right after.
+    input.on("submit", (_e, cx) => {
+      // The same Enter reaches the panel's key() next; ignore it until the next tick.
+      this.justSubmitted = true;
+      cx.timer.after(0, () => { this.justSubmitted = false; });
+      submit(input.value(), cx);
+    });
     input.on("blur", (_e, cx) => blur(input.value(), cx));
     input.focus();
     return input;
@@ -483,6 +507,7 @@ export default class Todo extends View {
   key(e, cx) {
     const k = e.key, m = e.modifiers ?? {}, mod = m.control || m.platform;
     const typing = this.edit || this.naming || this.addFocus;
+    if (k === "enter" && this.justSubmitted) return;
     if (k === "escape") {
       if (this.edit) { this.edit = null; this.handle.focus(); }
       else if (this.naming) { this.naming = null; this.handle.focus(); }
@@ -493,7 +518,7 @@ export default class Todo extends View {
     } else if (typing) {
       return;
     } else if (this.confirming) {
-      if (k === "enter") this.deleteList(cx); else return;
+      if (k === "enter") { this.confirming = false; this.menu = false; cx.spawn(async (cx) => this.deleteList(cx)); } else return;
     } else if (this.menu) {
       this.menuKey(k, cx);
     } else if (mod && k === "l") {
@@ -551,6 +576,7 @@ export default class Todo extends View {
     }
     if (p.confetti) return this.confetti(t);
     if (p.celebrate !== undefined) return this.dialog(p, t);
+    this.hand = fonts().includes(HAND);
     const rows = this.ready ? this.current() : [], busy = this.edit || this.naming;
     return v_flex().id("todo").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
@@ -561,22 +587,28 @@ export default class Todo extends View {
       .when(Boolean(this.error), (el) => el.child(div().flex_none().px(14).py(6).text_size(12).text_color(t.ansi1).child(this.error)))
       .when(Boolean(this.badIndex), (el) => el.child(this.newIndexBar(t)))
       .when(!this.readonly && this.ready, (el) => el.child(this.addBar(t)))
-      .child(v_flex().id("todo-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
+      .child(v_flex().id("todo-list").flex_1().min_h(0).overflow_y_scrollbar().px(10).py(6).gap(4)
         .children(rows.map((r) => this.row(r, t)))
-        .when(this.ready && !this.readonly && !this.list.tasks.length, (el) => el.child(div().p(10).text_color(t.dim).child("No tasks yet. Add one above.")))
-        .when(this.ready && this.list.tasks.length > 0 && openCount(this.list) === 0, (el) => el.child(div().px(10).py(8).text_color(t.dim).child("All done for today"))))
+        .when(this.ready && !this.readonly && !this.list.tasks.length, (el) => el.child(this.emptyNote("square-pen", "No tasks yet. Add one above.", t)))
+        .when(this.ready && this.list.tasks.length > 0 && openCount(this.list) === 0, (el) => el.child(this.emptyNote("circle-check", "All done for today", t))))
       .child(div().flex_none().px(14).py(8).border_t(1).border_color(t.border).text_size(11).text_color(t.dim).truncate()
         .child(busy ? "Enter save · Esc cancel" : "↑↓ move · Space done · Enter edit · N new · Del remove"));
   }
 
   header(t) {
-    return h_flex().h(42).flex_none().px(10).gap(8).items_center().border_b(1).border_color(t.border)
-      .child(h_flex().id("todo-switch").h(28).px(8).gap(6).items_center().rounded(7).cursor_pointer().hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => { if (this.menu) { this.menu = false; this.handle.focus(); cx.notify(); } else this.openMenu(cx); })
-        .child(div().font_semibold().max_w(220).truncate().child(this.ready ? this.name() : "To-do"))
-        .child(svg("mods/workspace-chrome/chevron-down.svg").size(12).flex_none().text_color(t.dim)))
-      .child(div().flex_1())
-      .when(this.ready, (el) => el.child(div().text_size(11).text_color(t.dim).child(`${openCount(this.list)} open`)));
+    const total = this.list.tasks.length, done = total - openCount(this.list), ready = this.ready;
+    return v_flex().flex_none().border_b(1).border_color(t.border)
+      .child(h_flex().h(46).flex_none().px(10).gap(8).items_center()
+        .child(h_flex().id("todo-switch").h(30).px(8).gap(6).items_center().rounded(8).cursor_pointer().hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => { if (this.menu) { this.menu = false; this.handle.focus(); cx.notify(); } else this.openMenu(cx); })
+          .child(div().text_size(14.5).font_semibold().max_w(220).truncate().child(ready ? this.name() : "To-do"))
+          .child(svg("mods/workspace-chrome/chevron-down.svg").size(12).flex_none().text_color(t.dim)))
+        .child(div().flex_1())
+        .when(ready, (el) => el.child(div().text_size(11).text_color(t.dim).child(`${openCount(this.list)} open`))))
+      .when(ready && total > 0, (el) => el.child(h_flex().flex_none().px(14).pb(10).gap(10).items_center()
+        .child(div().flex_1().min_w(0).h(5).rounded(3).bg(t.hover).overflow_hidden()
+          .child(div().h_full().rounded(3).bg(t.accent).w(`${Math.round((done / total) * 100)}%`)))
+        .child(div().flex_none().text_size(11).text_color(t.dim).child(`${done} of ${total} done`))));
   }
 
   switcher(t) {
@@ -600,14 +632,14 @@ export default class Todo extends View {
     return h_flex().flex_none().px(14).py(8).gap(8).items_center().bg(t.raised).border_b(1).border_color(t.border).text_size(12)
       .child(div().flex_1().min_w(0).truncate().child(`Delete “${this.name()}” and its tasks?`))
       .child(button("todo-del-no", "Cancel", false, (_e, cx) => { this.confirming = false; this.handle.focus(); cx.notify(); }))
-      .child(button("todo-del-yes", "Delete", true, (_e, cx) => this.deleteList(cx)));
+      .child(button("todo-del-yes", "Delete", true, (_e, cx) => { this.confirming = false; this.menu = false; cx.notify(); cx.spawn(async (cx) => this.deleteList(cx)); }));
   }
 
   newIndexBar(t) {
     return h_flex().flex_none().px(14).py(8).gap(8).items_center().bg(t.raised).border_b(1).border_color(t.border).text_size(12)
       .child(div().flex_1().min_w(0).truncate().child("Your lists.md is kept as it is."))
       .child(div().id("todo-new-index").px(10).py(3).rounded(6).cursor_pointer().border_1().border_color(t.border).hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => this.startNewIndex(cx)).child("Start a new index"));
+        .on_click((_e, cx) => { cx.spawn(async (cx) => this.startNewIndex(cx)); }).child("Start a new index"));
   }
 
   nameBar(t) {
@@ -616,10 +648,15 @@ export default class Todo extends View {
       .child(Input.new(this.naming.input).flex_1().min_w(0).h(28).px(8).rounded(7).border_1().border_color(t.accent).bg(t.background).text_size(12.5));
   }
 
+  // Handwriting for task titles and the add box when the font is loaded; the app font otherwise.
+  face(el) { return this.hand ? el.font_family(HAND) : el; }
+
   addBar(t) {
-    return h_flex().id("todo-add").flex_none().mx(10).mt(10).mb(4).h(36).px(10).gap(8).items_center().rounded(9).border_1().border_color(this.addFocus ? t.accent : t.border).bg(t.surface)
-      .child(svg("mods/workspace-chrome/plus.svg").size(14).flex_none().text_color(t.accent))
-      .child(Input.new(this.add).flex_1().min_w(0).h_full().text_size(12.8).text_color(t.foreground));
+    return h_flex().id("todo-add").flex_none().mx(12).mt(12).mb(6).h(40).px(12).gap(8).items_center().rounded(12).border_1()
+      .border_color(this.addFocus ? t.accent : t.border).bg(t.surface)
+      .when(!this.addFocus, (el) => el.hover((s) => s.bg(t.hover)))
+      .child(svg("mods/workspace-chrome/plus.svg").size(16).flex_none().text_color(t.accent))
+      .child(this.face(Input.new(this.add).flex_1().min_w(0).h_full().text_size(this.hand ? 15.5 : 13).text_color(t.foreground)));
   }
 
   row(r, t) {
@@ -630,21 +667,35 @@ export default class Todo extends View {
 
   headRow(r, t) {
     const count = this.list.tasks.filter((x) => x.done).length, sel = same(r, this.sel);
-    return h_flex().id("todo-done").h(30).flex_none().px(8).gap(8).items_center().rounded(7).cursor_pointer().text_color(t.muted)
+    return h_flex().id("todo-done").h(32).flex_none().mt(6).px(8).gap(8).items_center().rounded(8).cursor_pointer().text_color(t.muted)
       .when(sel, (el) => el.bg(t.selected)).hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { this.sel = r; this.showDone = !this.showDone; this.handle.focus(); cx.notify(); })
       .child(svg(`mods/workspace-chrome/chevron-${this.showDone ? "down" : "right"}.svg`).size(12).flex_none())
-      .child(div().text_size(12).child(`Completed (${count})`));
+      .child(div().text_size(12).font_medium().child("Completed"))
+      .child(div().flex_none().min_w(20).h(18).px(6).rounded(9).bg(t.hover).flex().items_center().justify_center().text_size(10.5).text_color(t.dim).child(String(count)));
+  }
+
+  // The guide line that ties a step to its task.
+  stepWrap(row, t) {
+    return h_flex().flex_none().ml(20).pl(8).border_l(1).border_color(t.border).child(row);
   }
 
   addStepRow(r, t) {
     const editing = this.edit && same(this.edit.row, r), sel = same(r, this.sel);
-    return h_flex().id(`todo-addstep-${r.i}`).min_h(30).flex_none().pl(42).pr(8).gap(8).items_center().rounded(7).cursor_pointer().text_color(t.dim)
+    return this.stepWrap(h_flex().id(`todo-addstep-${r.i}`).flex_1().min_w(0).min_h(30).px(8).gap(8).items_center().rounded(8).cursor_pointer().text_color(t.dim)
       .when(sel && !editing, (el) => el.bg(t.selected)).hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => this.startStep(r.i, cx))
       .child(svg("mods/workspace-chrome/plus.svg").size(12).flex_none())
-      .child(editing ? Input.new(this.edit.input).flex_1().min_w(0).h(26).px(6).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(12.5).text_color(t.foreground)
-        : div().text_size(12).child("Add step"));
+      .child(editing ? this.face(Input.new(this.edit.input).flex_1().min_w(0).h(28).px(6).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(this.hand ? 14 : 12.5).text_color(t.foreground))
+        : div().text_size(12).child("Add step")), t);
+  }
+
+  // Done text is struck through by a line over it (the style kit has no text decoration) and dimmer.
+  titleEl(item, step, t) {
+    const text = this.face(div().min_w(0).truncate().text_size(this.hand ? (step ? 14.5 : 16) : (step ? 12.5 : 13.5))
+      .text_color(item.done ? t.muted : t.foreground).child(item.title));
+    return div().relative().min_w(0).flex().child(text)
+      .when(item.done, (el) => el.child(div().absolute().inset(0).flex().items_center().child(div().w_full().h(1).bg(t.muted))));
   }
 
   taskRow(r, t) {
@@ -653,26 +704,39 @@ export default class Todo extends View {
     const step = r.k === "step", key = `${r.i}.${r.j ?? ""}`, sel = same(r, this.sel);
     const editing = this.edit && same(this.edit.row, r), shown = this.hover === key || sel;
     const stop = (_e, cx) => cx.stop_propagation();
-    const circle = div().id(`todo-tick-${key}`).size(18).flex_none().rounded(9).flex().items_center().justify_center().cursor_pointer()
+    const circle = div().id(`todo-tick-${key}`).size(step ? 17 : 21).flex_none().rounded(step ? 9 : 11).flex().items_center().justify_center().cursor_pointer()
       .border_1().border_color(item.done ? t.accent : t.muted).when(item.done, (el) => el.bg(t.accent))
+      .hover((s) => s.border_color(t.accent))
       .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.tick(r, cx); })
-      .when(item.done, (el) => el.child(svg("mods/workspace-chrome/check.svg").size(11).text_color(t.accent_foreground)));
+      .when(item.done, (el) => el.child(svg("mods/workspace-chrome/check.svg").size(step ? 10 : 13).text_color(t.accent_foreground)));
     const open = this.open.has(item.title), steps = step ? [] : item.steps;
-    return h_flex().id(`todo-row-${key}`).min_h(34).flex_none().pl(step ? 30 : 8).pr(8).gap(8).items_center().rounded(7).cursor_pointer()
+    const row = h_flex().id(`todo-row-${key}`).min_h(step ? 32 : 44).px(10).gap(10).items_center().cursor_pointer()
+      .when(step, (el) => el.flex_1().min_w(0).rounded(8))
+      .when(!step, (el) => el.flex_none().rounded(12).border_1().border_color(t.border).bg(t.surface))
       .when(sel, (el) => el.bg(t.selected)).hover((s) => s.bg(t.hover))
       .on_hover((h, cx) => { this.hover = h ? key : (this.hover === key ? null : this.hover); cx.notify(); })
       .on_mouse_down("left", (e, cx) => { this.select(r, cx); if (e.click_count === 2) this.startEdit(r, cx); })
       .child(circle)
       .child(editing
-        ? Input.new(this.edit.input).flex_1().min_w(0).h(26).px(6).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(12.5).text_color(t.foreground)
-        : div().flex_1().min_w(0).truncate().text_color(item.done ? t.muted : t.foreground).child(item.title))
-      .when(steps.length > 0 && !editing, (el) => el.child(div().text_size(11).text_color(t.dim).child(`${steps.filter((s) => s.done).length}/${steps.length}`)))
+        ? this.face(Input.new(this.edit.input).flex_1().min_w(0).h(28).px(6).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(this.hand ? 15 : 12.5).text_color(t.foreground))
+        : this.titleEl(item, step, t))
+      .when(!editing, (el) => el.child(div().flex_1()))
+      .when(steps.length > 0 && !editing, (el) => el.child(div().flex_none().h(18).px(7).rounded(9).bg(t.hover).flex().items_center().text_size(10.5).text_color(t.dim)
+        .child(`${steps.filter((s) => s.done).length}/${steps.length}`)))
       .when(!step && !editing, (el) => el.child(div().id(`todo-fold-${key}`).w(16).flex_none().cursor_pointer()
         .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.select(r, cx); this.fold(r, !open, cx); })
         .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(12).text_color(t.dim))))
       .when(shown && !editing && !this.readonly, (el) => el.child(div().id(`todo-del-${key}`).w(16).flex_none().cursor_pointer().text_color(t.dim).hover((s) => s.text_color(t.ansi1))
         .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.delete(r, cx); })
         .child(svg("mods/pane/close.svg").size(12))));
+    return step ? this.stepWrap(row, t) : row;
+  }
+
+  // A friendly line with a quiet icon when there is nothing to show.
+  emptyNote(icon, text, t) {
+    return v_flex().flex_none().items_center().gap(8).py(28).text_color(t.dim)
+      .child(svg(`mods/workspace-chrome/${icon}.svg`).size(28).text_color(t.dim))
+      .child(div().text_size(12.5).child(text));
   }
 
   // The pop-up when the last open task is ticked.

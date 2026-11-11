@@ -1190,6 +1190,30 @@ mod tests {
     }
 
     #[test]
+    fn the_todo_mod_ships_the_handwriting_font_its_panel_asks_for() {
+        let file = |path: &str| crate::mods::DEFAULT_MODS.iter().find(|(p, _)| *p == path).map(|(_, b)| *b).unwrap_or_else(|| panic!("{path} is not shipped"));
+        let font = file("todo/fonts/PatrickHand-Regular.ttf");
+        assert!(font.len() > 1024 && font[..4] == [0, 1, 0, 0], "a TrueType file, not {:?}", &font[..font.len().min(4)]);
+        // The family the panel names is the one in the font's (UTF-16BE) name table.
+        let family: Vec<u8> = "Patrick Hand".encode_utf16().flat_map(u16::to_be_bytes).collect();
+        assert!(font.windows(family.len()).any(|w| w == family.as_slice()), "the font's family is Patrick Hand");
+        assert!(String::from_utf8_lossy(file("todo/main.js")).contains("\"Patrick Hand\""));
+        assert!(String::from_utf8_lossy(file("todo/fonts/OFL-PatrickHand.txt")).contains("SIL OPEN FONT LICENSE Version 1.1"));
+        // As shipped, the todo mod's fonts load without a question.
+        let root = std::env::temp_dir().join(format!("h0x-ade-fonts-todo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("mods").join("todo");
+        for (path, bytes) in crate::mods::DEFAULT_MODS {
+            let Some(rel) = path.strip_prefix("todo/") else { continue };
+            std::fs::create_dir_all(dir.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(rel), bytes).unwrap();
+        }
+        let found = crate::mods::Found { id: "todo".into(), dir: dir.clone(), hint: Default::default(), stamp: std::time::SystemTime::UNIX_EPOCH };
+        assert_eq!(font_dirs(&root, std::slice::from_ref(&found), &BTreeMap::new()), vec![root.join("fonts"), dir.join("fonts")]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn missing_or_malformed_settings_allow_no_mod_fonts() {
         let root = std::env::temp_dir().join(format!("h0x-ade-fonts-bad-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
