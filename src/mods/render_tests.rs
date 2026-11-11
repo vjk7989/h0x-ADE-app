@@ -5581,11 +5581,19 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let head = "# Tasks\n- [ ] edge\n";
-    let full = "This list is full (1 MiB). Start a new list for more tasks.";
+    let full = "This list is full (512 KB). Start a new list for more tasks.";
 
-    // Exactly 1 MiB: editable; an add would cross the limit and is refused with the reason, a tick is written.
-    let size = 1024 * 1024;
-    let big = format!("{head}{}\n", "x".repeat(size - head.len() - 1));
+    // Exactly at the panel's 512 KB write limit, as people fill a list (many short tasks): editable;
+    // an add would cross the limit and is refused with the reason, a tick is written.
+    let size = 512 * 1024;
+    let mut big = head.to_string();
+    let mut n = 0;
+    while big.len() + 40 < size {
+        n += 1;
+        big.push_str(&format!("- [ ] task number {n}\n"));
+    }
+    let pad = size - big.len() - "- [ ] \n".len();
+    big.push_str(&format!("- [ ] {}\n", "y".repeat(pad)));
     assert_eq!(big.len(), size);
     let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &big)], &[]);
     let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);

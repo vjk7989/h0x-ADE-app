@@ -10,9 +10,10 @@ const ACTIONS = ["new", "rename", "delete"];
 const DEFAULT = { name: "Tasks", slug: "tasks" };
 const UNDO_MS = 8000, CONFETTI_MS = 1500, CONFETTI_PIECES = 36;
 const READ_FAIL = "This list can't be read (over 1 MB or unreadable). It is left untouched and read-only.";
-const FULL = "This list is full (1 MiB). Start a new list for more tasks.";
-// The host's readTextFile refuses files over this size, so a bigger write could never be read back.
-const MAX_BYTES = 1048576;
+const FULL = "This list is full (512 KB). Start a new list for more tasks.";
+// The panel never writes a list past 512 KB (about 10,000 tasks): the host's readTextFile refuses
+// files over 1 MiB, and this keeps every list we write well clear of it.
+const MAX_BYTES = 512 * 1024;
 // UTF-8 length by hand: the mod runtime has no TextEncoder.
 const utf8Length = (text) => {
   let n = 0;
