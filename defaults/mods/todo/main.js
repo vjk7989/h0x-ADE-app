@@ -10,6 +10,10 @@ const ACTIONS = ["new", "rename", "delete"];
 const DEFAULT = { name: "Tasks", slug: "tasks" };
 const UNDO_MS = 8000, CONFETTI_MS = 1500, CONFETTI_PIECES = 36;
 const READ_FAIL = "This list can't be read (over 1 MB or unreadable). It is left untouched and read-only.";
+const FULL = "This list is full (1 MiB). Start a new list for more tasks.";
+// The host's readTextFile refuses files over this size, so a bigger write could never be read back.
+const MAX_BYTES = 1048576;
+const fits = (text) => new TextEncoder().encode(text).length <= MAX_BYTES;
 const same = (a, b) => a && b && a.k === b.k && a.i === b.i && a.j === b.j;
 
 // Mutations are replayed on fresh disk text after a stale write, so they find their task by
@@ -170,7 +174,9 @@ export default class Todo extends View {
     if (this.readonly || !this.ready) return false;
     const list = parseList(this.text);
     if (mut(list) === false) return false;
-    this.setText(serializeList(list));
+    const next = serializeList(list);
+    if (!fits(next)) { this.error = FULL; cx.notify(); return false; }
+    this.setText(next);
     this.pending.push(mut);
     this.flush(cx);
     cx.notify();
@@ -195,6 +201,7 @@ export default class Todo extends View {
               const list = parseList(fresh ?? serializeList({ name: this.name(), head: [], tasks: [] }));
               for (const mut of batch) mut(list);
               const merged = serializeList(list);
+              if (!fits(merged)) { this.pending = []; this.disk = fresh; this.setText(fresh); this.error = FULL; return; }
               await writeTextFile(path, merged, fresh);
               this.disk = merged;
               const rest = this.pending.slice(batch.length), after = parseList(merged);
@@ -219,6 +226,7 @@ export default class Todo extends View {
       const entries = parseIndex(text ?? "");
       if (mut(entries) === false) return false;
       const next = serializeIndex(entries);
+      if (!fits(next)) { this.error = FULL; return false; }
       try { await writeTextFile(path, next, text); this.index = entries; this.indexText = next; return true; }
       catch (e) { if (n) throw e; }
     }
@@ -248,10 +256,11 @@ export default class Todo extends View {
     try {
       if (mode === "new") {
         let slug;
-        await this.editIndex((entries) => {
+        const added = await this.editIndex((entries) => {
           slug = slugify(name, entries.map((e) => e.slug));
           entries.push({ name, slug });
         });
+        if (added === false) return cx.notify();
         await writeTextFile(this.file(slug), serializeList({ name, head: [], tasks: [] }), null);
         await this.openList(slug, cx);
       } else {

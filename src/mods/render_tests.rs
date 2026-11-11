@@ -5574,13 +5574,49 @@ fn todo_stale_write_rereads_and_reapplies_without_losing_the_other_edit(cx: &mut
     assert!(tree.contains("From the agent") && tree.contains("C"), "{tree}");
 }
 
-// AC8: a list over the 1 MiB read limit is shown read-only and never written; at the limit it is a list.
+// AC8: a list over the 1 MiB read limit is shown read-only and never written; at the limit it is
+// an editable list that refuses to grow past the limit but still takes same-size changes.
 #[gpui::test]
 fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let head = "# Tasks\n- [ ] edge\n";
-    for (size, refused) in [(1024 * 1024, false), (1024 * 1024 + 1, true)] {
+    let full = "This list is full (1 MiB). Start a new list for more tasks.";
+
+    // Exactly 1 MiB: editable; an add would cross the limit and is refused with the reason, a tick is written.
+    let size = 1024 * 1024;
+    let big = format!("{head}{}\n", "x".repeat(size - head.len() - 1));
+    assert_eq!(big.len(), size);
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &big)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    let state = todo_state(cx, &host);
+    assert_eq!((state["readonly"].clone(), state["error"].clone()), (json!(false), Value::Null), "loads editable");
+    todo_step(cx, &host, "add New");
+    assert!(host.borrow().writes.is_empty(), "an add past the limit writes nothing: {}", host.borrow().writes.len());
+    assert_eq!(host.borrow().files[TODO_TASKS], big, "the file is unchanged");
+    let state = todo_state(cx, &host);
+    assert_eq!(state["readonly"], json!(false), "still editable");
+    assert!(!state["text"].as_str().unwrap().contains("- [ ] New"), "the refused task is not shown either");
+    let tree = todo_describe(cx, window, session);
+    assert!(tree.contains(full), "the reason is shown");
+    assert!(tree.contains("todo-add") && !tree.contains(TODO_READ_FAIL), "the add box stays; not read-only");
+
+    // A same-size change (a tick) at the limit is written over what was read.
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &big)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    todo_step(cx, &host, "tick 0");
+    let ticked = big.replacen("- [ ] edge", "- [x] edge", 1);
+    assert_eq!(ticked.len(), size);
+    assert_eq!(todo_written(&host), [ticked.clone()], "a same-size change is written");
+    assert_eq!(host.borrow().writes[0].2, json!(big), "over what was read");
+    assert_eq!(host.borrow().files[TODO_TASKS], ticked);
+    let state = todo_state(cx, &host);
+    assert_eq!((state["readonly"].clone(), state["error"].clone()), (json!(false), Value::Null), "{}", state["error"]);
+    let tree = todo_describe(cx, window, session);
+    assert!(tree.contains("todo-add") && !tree.contains(full) && !tree.contains(TODO_READ_FAIL), "{tree}");
+
+    // Over the limit: read-only, the reason shown, never written.
+    for (size, refused) in [(1024 * 1024 + 1, true)] {
         let big = format!("{head}{}\n", "x".repeat(size - head.len() - 1));
         assert_eq!(big.len(), size);
         let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &big)], &[]);
@@ -5592,12 +5628,8 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
         let tree = todo_describe(cx, window, session);
         assert_eq!(tree.contains(TODO_READ_FAIL), refused, "{size}: the reason is shown");
         assert_eq!(tree.contains("todo-add"), !refused, "{size}: no add box on a read-only list");
-        if refused {
-            assert!(host.borrow().writes.is_empty(), "{size}: {:?}", host.borrow().writes.len());
-            assert_eq!(host.borrow().files[TODO_TASKS], big, "left untouched");
-        } else {
-            assert_eq!(todo_written(&host).len(), 2, "{size}: an add and a tick");
-        }
+        assert!(host.borrow().writes.is_empty(), "{size}: {:?}", host.borrow().writes.len());
+        assert_eq!(host.borrow().files[TODO_TASKS], big, "left untouched");
     }
 }
 
