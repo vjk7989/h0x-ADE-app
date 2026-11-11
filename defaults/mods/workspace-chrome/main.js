@@ -13,6 +13,7 @@ function find(node, id) {
 
 // The sidebar's rail goes by its width, not a flag: dragging its edge narrows it too.
 const narrow = () => (find(layout(), "sidebar")?.size?.px ?? Infinity) < 160;
+const luma = (hex) => { const n = parseInt(String(hex).slice(1, 7), 16); return (0.2126 * (n >> 16) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255)) / 255; };
 
 // To the rail (on macOS wide enough for the traffic lights), or back to the width it had.
 function toggleSidebar() {
@@ -32,6 +33,8 @@ export default class WorkspaceChrome extends View {
   render() {
     const t = theme();
     const collapsed = narrow();
+    // Light theme: the white mark on a near-black tile; a hex chrome color's luma decides.
+    const light = luma(t.chrome) > 0.6;
     if (props()?.footer) {
       const row = (id, icon, label, dim, action) => h_flex().id(id).h(28).px(8).gap(9).items_center().rounded(8)
         .when(collapsed, el => el.relative().w(32).px(0).justify_center().tooltip(label))
@@ -47,7 +50,7 @@ export default class WorkspaceChrome extends View {
     }
     return h_flex().size_full().bg(t.chrome).pl(collapsed ? 6 : 14).pr(10).gap(4).items_center().text_size(13.5)
       .when(window()?.platform === "macos" && !window()?.fullscreen && !collapsed, el => el.pl(76))
-      .when(!collapsed, el => el.child(h_flex().flex_1().gap(8).items_center().child(image("frame/welcome/hyperox.png").size(20).rounded(5)).child(div().font_semibold().text_color(t.foreground).child("HyperOx"))
+      .when(!collapsed, el => el.child(h_flex().flex_1().gap(8).items_center().child(light ? div().size(20).flex_none().rounded(5).bg("#111111").items_center().justify_center().child(image("mods/workspace-chrome/hyperox-white.png").size(14)) : image("frame/welcome/hyperox.png").size(20).rounded(5)).child(div().font_semibold().text_color(t.foreground).child("HyperOx"))
         .child(div().id("brand-beta").flex_none().px(5).rounded(4).border(1).border_color(t.border).text_size(10).font_medium().text_color(t.muted).child("Beta"))))
       .when(!collapsed, el => el.child(this.button("search", svg("mods/workspace-chrome/search.svg").size(15), () => run("mod.open", { name: "picker" }))))
       // On the macOS rail the traffic lights fill the row; the agents list's » unfolds it.

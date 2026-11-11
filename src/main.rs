@@ -28,6 +28,7 @@ mod remote_shell;
 mod settings;
 mod setup;
 mod sound;
+mod spaces_share;
 mod spawn;
 mod sprites;
 mod feedback;
