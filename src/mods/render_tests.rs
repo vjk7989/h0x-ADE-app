@@ -5659,6 +5659,14 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
         cx.run_until_parked();
     }
     todo_step(cx, &host, "tick 0");
+    // The write of a 64 KB list lands a moment later on a slow runner: wait for it (real time).
+    for _ in 0..200 {
+        if !host.borrow().writes.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        cx.run_until_parked();
+    }
     let ticked = big.replacen("- [ ] edge", "- [x] edge", 1);
     assert_eq!(ticked.len(), size);
     assert_eq!(todo_written(&host), [ticked.clone()], "a same-size change is written");
