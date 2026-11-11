@@ -5580,7 +5580,7 @@ fn todo_big_lists_of_many_tasks_open(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let mut seen = Vec::new();
-    for size in [8 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024] {
+    for size in [8 * 1024, 32 * 1024, 64 * 1024] {
         let mut text = String::from("# Tasks\n");
         let mut n = 0;
         while text.len() + 40 < size {
@@ -5611,11 +5611,11 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let head = "# Tasks\n- [ ] edge\n";
-    let full = "This list is full (256 KB). Start a new list for more tasks.";
+    let full = "This list is full (64 KB, about 2,900 tasks). Start a new list for more tasks.";
 
-    // Exactly at the panel's 256 KB write limit, as people fill a list (many short tasks): editable;
+    // Exactly at the panel's 64 KB write limit, as people fill a list (many short tasks): editable;
     // an add would cross the limit and is refused with the reason, a tick is written.
-    let size = 256 * 1024;
+    let size = 64 * 1024;
     let mut big = head.to_string();
     let mut n = 0;
     while big.len() + 40 < size {

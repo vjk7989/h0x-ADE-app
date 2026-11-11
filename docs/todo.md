@@ -35,7 +35,7 @@ When you tick the last open task of a list, a **Congratulations** pop-up appears
 In `~/.config/h0x-ade/todo/` (or `$H0X_ADE_HOME/todo/`):
 
 - `lists.md` lists the lists, one `- [Name](slug.md)` line each, in display order.
-- `<slug>.md` is one list: `# Name` on the first line, then tasks.
+- `<slug>.md` is one list: `# Name` on the first line, then tasks. A list holds up to 64 KB (about 2,900 tasks); past that the panel asks you to start a new list.
 
 ```md
 # Groceries
