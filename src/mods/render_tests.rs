@@ -5305,7 +5305,7 @@ export default class Scenario extends Real {
           this.listKey(k, { shift: parts.includes('shift'), alt: parts.includes('alt') }, cx);
         } else if (verb === 'state') {
           if (this.ready) this.current();
-          note(JSON.stringify({ text: this.text, error: this.error, readonly: this.readonly, sel: this.sel,
+          note(JSON.stringify({ ready: this.ready, text: this.text, error: this.error, readonly: this.readonly, sel: this.sel,
             edit: this.edit ? this.edit.input.value() : null, pending: this.pending.length }));
         }
         cx.notify();
@@ -5589,7 +5589,15 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
     assert_eq!(big.len(), size);
     let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &big)], &[]);
     let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
-    let state = todo_state(cx, &host);
+    // A 1 MiB list takes a moment to read and parse; changes before that are ignored by design.
+    let mut state = todo_state(cx, &host);
+    for _ in 0..200 {
+        if state["ready"] == json!(true) {
+            break;
+        }
+        state = todo_state(cx, &host);
+    }
+    assert_eq!(state["ready"], json!(true), "the list finished loading");
     assert_eq!((state["readonly"].clone(), state["error"].clone()), (json!(false), Value::Null), "loads editable");
     todo_step(cx, &host, "add New");
     assert!(host.borrow().writes.is_empty(), "an add past the limit writes nothing: {}", host.borrow().writes.len());
@@ -5605,6 +5613,11 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
     // A same-size change (a tick) at the limit is written over what was read.
     let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &big)], &[]);
     let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    for _ in 0..200 {
+        if todo_state(cx, &host)["ready"] == json!(true) {
+            break;
+        }
+    }
     todo_step(cx, &host, "tick 0");
     let ticked = big.replacen("- [ ] edge", "- [x] edge", 1);
     assert_eq!(ticked.len(), size);
