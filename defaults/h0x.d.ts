@@ -339,6 +339,8 @@ export function feedbackClearImages(): null;
 /** Opens a new issue on the app's GitHub repository in the browser, prefilled with the draft
  *  (nothing is posted by the app). Resolves to an error message, or null. Frame-only. */
 export function sendFeedback(body: import("gpui-kit").HostValue, images?: string[]): Promise<string | null>;
+/** Opens one of the Info page's links (pavii.tech, its docs, buckleson.com) in the browser; any other URL is refused. Resolves to an error message, or null. Settings frame only. */
+export function openLink(url: string): string | null;
 
 /** What the app runs with: the shown layout's look (theme name, fonts, sizes, terminal
  *  padding and opacity) with the person's zoom and sounds. */

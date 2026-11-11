@@ -1795,8 +1795,8 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
         }
         if section == "info" {
             assert!(
-                tree.contains("HyperOx by Buckleson Group") && tree.contains("https://github.com/buckleson"),
-                "the Info page names the maker and links to them: {tree}"
+                ["HyperOx", "Agentic development environment", "Built by", "Team Pavii", "Security & blockchain partner", "Buckleson", "Currently closed source"].iter().all(|t| tree.contains(t)),
+                "the Info page names the product, its makers and partner: {tree}"
             );
         }
     }

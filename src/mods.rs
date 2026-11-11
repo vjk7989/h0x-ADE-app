@@ -963,6 +963,11 @@ fn strings(v: Option<&HostValue>) -> Vec<String> {
     v.and_then(HostValue::as_array).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_owned)).collect()).unwrap_or_default()
 }
 
+/// The only web pages a mod may open: the ones the Info page links to.
+fn allowed_link(url: &str) -> bool {
+    matches!(url, "https://pavii.tech" | "https://www.pavii.tech/products/dev-tools/docs/" | "https://buckleson.com")
+}
+
 fn opt_str(v: Option<&HostValue>, key: &str) -> Option<String> {
     v.and_then(|o| o.get(key)).and_then(HostValue::as_str).map(str::to_owned)
 }
@@ -1138,6 +1143,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     });
     let props = inst.props.clone();
     let feedback_frame = inst.name == "frame-feedback";
+    let settings_frame = inst.name == "frame-settings";
     let feedback_from = inst.props.get("from").and_then(Value::as_str).unwrap_or("person").to_owned();
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
     let (cmd_tx, commands) = async_channel::unbounded::<String>();
@@ -1244,6 +1250,13 @@ fn module(inst: Instance, copy: u64) -> HostModule {
                     Err(why) => HostValue::Str(why),
                 })
             })
+        })
+        .function("openLink", move |a| {
+            if !settings_frame { return Err(HostError::new("opening links is frame-only")); }
+            let url = a.string(0)?;
+            if !allowed_link(url) { return Ok(HostValue::Str("that link is not allowed".into())); }
+            crate::links::open(&crate::links::Target::Url(url.to_owned()));
+            Ok(HostValue::Null)
         })
         .function("themes", |_| {
             let list: Vec<Value> = crate::settings::themes().into_iter().map(|(name, colors)| json!({ "light": crate::settings::theme_is_light(&name), "name": name, "colors": colors })).collect();
