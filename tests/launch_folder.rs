@@ -346,10 +346,15 @@ fn a_shell_launch_opens_hyperox_in_its_folder() {
     for dir in [&env.home, &a, &b, &c] {
         std::fs::create_dir_all(dir).unwrap();
     }
-    // Two tasks for the To-do panel screenshot below (the app home's todo/ folder).
+    // Open and done tasks and steps for the To-do panel screenshot below (the app home's todo/
+    // folder): the progress bar, step counts and the Completed count all have something to show.
     std::fs::create_dir_all(env.home.join("todo")).unwrap();
     std::fs::write(env.home.join("todo/lists.md"), "- [Tasks](tasks.md)\n").unwrap();
-    std::fs::write(env.home.join("todo/tasks.md"), "# Tasks\n- [ ] Write the release notes\n  - [x] Collect the changes\n  - [ ] Ask for a review\n- [ ] Ship HyperOx\n").unwrap();
+    std::fs::write(
+        env.home.join("todo/tasks.md"),
+        "# Tasks\n- [ ] Write the release notes\n  - [x] Collect the changes\n  - [x] Draft the summary\n  - [ ] Ask for a review\n- [ ] Ship HyperOx\n- [ ] Plan the next stage\n  - [ ] Ask the user\n- [x] Polish the to-do panel\n  - [x] Tick tasks and steps together\n  - [x] Strike done items\n- [x] Pick a handwritten font\n",
+    )
+    .unwrap();
     let mut cleanup = Cleanup { env: &env, launch: None };
 
     // AC1: not running; from a shell in A the window opens on a focused local space in A.

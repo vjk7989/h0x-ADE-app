@@ -3,8 +3,8 @@ import { readFile } from "node:fs/promises";
 
 // The to-do mod's pure model (defaults/mods/todo/model.js), evaluated without its exports.
 const source = (await readFile(new URL("../defaults/mods/todo/model.js", import.meta.url), "utf8")).replace(/^export /gm, "");
-const { parseList, serializeList, parseIndex, serializeIndex, slugify, openCount, allDone } = new Function(
-  `${source}; return { parseList, serializeList, parseIndex, serializeIndex, slugify, openCount, allDone };`,
+const { parseList, serializeList, parseIndex, serializeIndex, slugify, openCount, allDone, setTaskDone, setStepDone } = new Function(
+  `${source}; return { parseList, serializeList, parseIndex, serializeIndex, slugify, openCount, allDone, setTaskDone, setStepDone };`,
 )();
 
 const roundTrip = (text: string) => serializeList(parseList(text));
@@ -200,4 +200,88 @@ test("open count and all done look at tasks only, and an empty list is not done"
   expect([openCount(doneWithOpenSteps), allDone(doneWithOpenSteps)]).toEqual([0, true]);
   const openWithDoneSteps = parseList("# T\n- [ ] a\n  - [x] step\n- [x] b\n");
   expect([openCount(openWithDoneSteps), allDone(openWithDoneSteps)]).toEqual([1, false]);
+});
+
+test("ticking a task ticks every step and unticking unticks them; notes and blank lines stay", () => {
+  const text = "# T\n- [ ] Milk\n  > a note\n  - [ ] one\n  - [x] two\n\n  - [ ] three\n- [ ] Bread\n";
+  const list = parseList(text);
+  setTaskDone(list.tasks[0], true);
+  expect(serializeList(list)).toBe("# T\n- [x] Milk\n  > a note\n  - [x] one\n  - [x] two\n\n  - [x] three\n- [ ] Bread\n");
+  expect([openCount(list), allDone(list)]).toEqual([1, false]);
+  setTaskDone(list.tasks[0], false);
+  expect(serializeList(list)).toBe("# T\n- [ ] Milk\n  > a note\n  - [ ] one\n  - [ ] two\n\n  - [ ] three\n- [ ] Bread\n");
+  // Ticking an already done task again changes nothing.
+  setTaskDone(list.tasks[1], true);
+  setTaskDone(list.tasks[1], true);
+  expect(serializeList(list).endsWith("- [x] Bread\n")).toBe(true);
+});
+
+test("a task with no steps ticks and unticks on its own", () => {
+  const list = parseList("# T\n- [ ] alone\n");
+  setTaskDone(list.tasks[0], true);
+  expect(list.tasks[0]).toEqual({ title: "alone", done: true, steps: [], extra: [] });
+  expect(allDone(list)).toBe(true);
+  setTaskDone(list.tasks[0], false);
+  expect(serializeList(list)).toBe("# T\n- [ ] alone\n");
+  expect(allDone(list)).toBe(false);
+});
+
+test("the last open step ticks the task; any step unticked opens it again", () => {
+  const list = parseList("# T\n- [ ] A\n  - [ ] s1\n  - [x] s2\n  - [ ] s3\n");
+  const task = list.tasks[0];
+  setStepDone(task, 0, true);
+  expect(task.done).toBe(false);
+  expect(serializeList(list)).toBe("# T\n- [ ] A\n  - [x] s1\n  - [x] s2\n  - [ ] s3\n");
+  setStepDone(task, 2, true);
+  expect(serializeList(list)).toBe("# T\n- [x] A\n  - [x] s1\n  - [x] s2\n  - [x] s3\n");
+  expect(allDone(list)).toBe(true);
+  // Unticking one step of a done task opens the task and leaves the other steps done.
+  setStepDone(task, 1, false);
+  expect(serializeList(list)).toBe("# T\n- [ ] A\n  - [x] s1\n  - [ ] s2\n  - [x] s3\n");
+  expect(allDone(list)).toBe(false);
+});
+
+test("a single step decides its task both ways, and toggling twice is back where it started", () => {
+  const text = "# T\n- [ ] A\n  - [ ] only\n";
+  const list = parseList(text);
+  setStepDone(list.tasks[0], 0, true);
+  expect(serializeList(list)).toBe("# T\n- [x] A\n  - [x] only\n");
+  setStepDone(list.tasks[0], 0, false);
+  expect(serializeList(list)).toBe(text);
+  setTaskDone(list.tasks[0], true);
+  setTaskDone(list.tasks[0], false);
+  expect(serializeList(list)).toBe(text);
+});
+
+test("many steps: the task is done only after the very last one, whatever the order", () => {
+  const n = 200;
+  const text = "# T\n- [ ] big\n" + Array.from({ length: n }, (_, k) => `  - [ ] step ${k}\n`).join("");
+  const list = parseList(text);
+  const task = list.tasks[0];
+  // Tick from the end backwards: only the final tick (step 0) finishes the task.
+  for (let k = n - 1; k > 0; k--) {
+    setStepDone(task, k, true);
+    expect(task.done).toBe(false);
+  }
+  setStepDone(task, 0, true);
+  expect(task.done).toBe(true);
+  expect(task.steps.every((s: any) => s.done)).toBe(true);
+  setTaskDone(task, false);
+  expect(serializeList(list)).toBe(text);
+});
+
+test("unicode and emoji titles are kept when a task and its steps tick together", () => {
+  const text = "# Café ☕\n- [ ] 🥛 Milch für Oma — 牛奶\n  - [ ] Ask 👵\n  - [ ] [x] looks ticked\n";
+  const list = parseList(text);
+  setTaskDone(list.tasks[0], true);
+  expect(serializeList(list)).toBe("# Café ☕\n- [x] 🥛 Milch für Oma — 牛奶\n  - [x] Ask 👵\n  - [x] [x] looks ticked\n");
+  setStepDone(list.tasks[0], 1, false);
+  expect(serializeList(list)).toBe("# Café ☕\n- [ ] 🥛 Milch für Oma — 牛奶\n  - [x] Ask 👵\n  - [ ] [x] looks ticked\n");
+});
+
+test("the last step of the last open task is what makes the whole list done", () => {
+  const list = parseList("# T\n- [x] a\n- [ ] b\n  - [x] b1\n  - [ ] b2\n- [x] c\n");
+  expect(allDone(list)).toBe(false);
+  setStepDone(list.tasks[1], 1, true);
+  expect([openCount(list), allDone(list)]).toEqual([0, true]);
 });

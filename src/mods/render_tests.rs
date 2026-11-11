@@ -5474,6 +5474,16 @@ fn todo_celebrations(host: &Rc<RefCell<TodoHost>>) -> usize {
     todo_effects(host, "openOverlay").iter().filter(|a| a[0]["props"].get("celebrate").is_some()).count()
 }
 
+// The described lines of the element with this id and of everything inside it.
+fn todo_element(tree: &str, id: &str) -> Vec<String> {
+    let lines: Vec<&str> = tree.lines().collect();
+    let tag = format!(":id[Str({id:?})]");
+    let at = lines.iter().position(|l| l.contains(&tag)).unwrap_or_else(|| panic!("no {id}: {tree}"));
+    let depth = |l: &str| l.len() - l.trim_start().len();
+    let inside = lines[at + 1..].iter().take_while(|l| depth(l) > depth(lines[at]));
+    std::iter::once(&lines[at]).chain(inside).map(|l| l.to_string()).collect()
+}
+
 #[gpui::test]
 fn todo_first_open_creates_the_index_and_an_empty_tasks_list(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
@@ -5541,6 +5551,9 @@ fn todo_adding_and_ticking_tasks_writes_the_markdown_over_what_was_read(cx: &mut
     assert_eq!((state["error"].clone(), state["pending"].clone()), (Value::Null, json!(0)), "{state}");
     let tree = todo_describe(cx, window, session);
     assert!(tree.contains("Completed") && tree.contains("todo-done") && tree.contains("3 open") && tree.contains("1 of 4 done") && tree.contains("Ship [ ] it"), "{tree}");
+    // The Completed header carries its count (formerly "Completed (1)") in its pill.
+    let head = todo_element(&tree, "todo-done");
+    assert!(head.iter().any(|l| l.trim() == "text \"Completed\"") && head.iter().any(|l| l.trim() == "text \"1\""), "{head:#?}");
     assert_eq!(todo_celebrations(&host), 0, "open tasks remain");
 }
 
@@ -5743,6 +5756,200 @@ fn todo_congratulations_open_once_on_the_last_tick_and_never_on_load(cx: &mut Te
         assert!(tree.contains(expected), "missing {expected}: {tree}");
     }
     assert!(host.borrow().writes.is_empty() && host.borrow().effects.is_empty());
+}
+
+// A task and its steps tick together both ways; a task without steps ticks alone.
+#[gpui::test]
+fn todo_a_task_and_its_steps_tick_together_and_write_the_markdown(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] A\n  > a note\n  - [ ] a1\n  - [x] a2\n  - [ ] a3\n- [ ] B\n- [ ] C\n  - [ ] c1\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    for command in ["tick 0", "tick 0", "tick 0.0", "tick 0.1", "tick 0.2", "tick 0.1", "tick 1", "tick 1"] {
+        todo_step(cx, &host, command);
+    }
+    let rest = "- [ ] C\n  - [ ] c1\n";
+    assert_eq!(
+        todo_written(&host),
+        [
+            format!("# Tasks\n- [x] A\n  > a note\n  - [x] a1\n  - [x] a2\n  - [x] a3\n- [ ] B\n{rest}"),
+            format!("# Tasks\n- [ ] A\n  > a note\n  - [ ] a1\n  - [ ] a2\n  - [ ] a3\n- [ ] B\n{rest}"),
+            format!("# Tasks\n- [ ] A\n  > a note\n  - [x] a1\n  - [ ] a2\n  - [ ] a3\n- [ ] B\n{rest}"),
+            format!("# Tasks\n- [ ] A\n  > a note\n  - [x] a1\n  - [x] a2\n  - [ ] a3\n- [ ] B\n{rest}"),
+            format!("# Tasks\n- [x] A\n  > a note\n  - [x] a1\n  - [x] a2\n  - [x] a3\n- [ ] B\n{rest}"),
+            format!("# Tasks\n- [ ] A\n  > a note\n  - [x] a1\n  - [ ] a2\n  - [x] a3\n- [ ] B\n{rest}"),
+            format!("# Tasks\n- [ ] A\n  > a note\n  - [x] a1\n  - [ ] a2\n  - [x] a3\n- [x] B\n{rest}"),
+            format!("# Tasks\n- [ ] A\n  > a note\n  - [x] a1\n  - [ ] a2\n  - [x] a3\n- [ ] B\n{rest}"),
+        ],
+        "the task carries its steps; the last step closes it and any unticked step opens it; B has no steps"
+    );
+    let state = todo_state(cx, &host);
+    assert_eq!((state["error"].clone(), state["pending"].clone()), (Value::Null, json!(0)), "{state}");
+    assert_eq!(todo_celebrations(&host), 0, "C is open the whole time");
+    todo_describe(cx, window, session);
+}
+
+// AC7 with steps: the step that finishes the last open task finishes the list, once; unticks never do.
+#[gpui::test]
+fn todo_congratulations_open_once_when_the_last_step_finishes_the_list(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [x] a\n  - [x] a1\n- [ ] b\n  - [x] b1\n  - [ ] b2\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    todo_step(cx, &host, "tick 1.0");
+    todo_step(cx, &host, "tick 1.0");
+    assert_eq!(host.borrow().files[TODO_TASKS], start, "b2 is still open");
+    assert_eq!(todo_celebrations(&host), 0);
+    todo_step(cx, &host, "tick 1.1");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [x] a\n  - [x] a1\n- [x] b\n  - [x] b1\n  - [x] b2\n");
+    assert_eq!(
+        todo_effects(&host, "openOverlay"),
+        [json!([{"mod":"todo", "kind":"dialog", "width":400, "props":{"celebrate":"Tasks"}}])],
+        "the last step of the last open task finishes the list"
+    );
+    // Unticking a step of a done task, a whole task, and a reload: no second pop-up.
+    for command in ["tick 1.1", "tick 0", "reload"] {
+        todo_step(cx, &host, command);
+    }
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] a\n  - [ ] a1\n- [ ] b\n  - [x] b1\n  - [ ] b2\n");
+    assert_eq!(todo_celebrations(&host), 1);
+    todo_describe(cx, window, session);
+
+    // Ticking the only open task, steps and all, finishes the list on that one tick.
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] a\n  - [ ] a1\n  - [ ] a2\n")], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    todo_step(cx, &host, "tick 0");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [x] a\n  - [x] a1\n  - [x] a2\n");
+    assert_eq!(todo_celebrations(&host), 1);
+    todo_step(cx, &host, "tick 0");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] a\n  - [ ] a1\n  - [ ] a2\n", "toggled twice is back to the start");
+    assert_eq!(todo_celebrations(&host), 1, "an untick is never celebrated");
+    todo_describe(cx, window, session);
+}
+
+// AC4 with steps: a stale write is replayed by title on the agent's text, steps following their task.
+#[gpui::test]
+fn todo_stale_write_replays_task_and_step_ticks_onto_the_agents_steps(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] A\n  - [ ] a1\n")], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    // The agent adds a done task above and a step to A; ticking A ticks the agent's step too.
+    let theirs = "# Tasks\n- [x] Agent done\n- [ ] A\n  - [ ] a1\n  - [ ] from the agent\n";
+    host.borrow_mut().files.insert(TODO_TASKS.into(), theirs.into());
+    todo_step(cx, &host, "tick 0");
+    let merged = "# Tasks\n- [x] Agent done\n- [x] A\n  - [x] a1\n  - [x] from the agent\n";
+    assert_eq!(host.borrow().files[TODO_TASKS], merged);
+    assert_eq!(host.borrow().writes.len(), 2, "one refused write, one replayed");
+    assert_eq!(todo_celebrations(&host), 1, "one tick, one pop-up");
+
+    // The agent unticks its step; our untick of a1 lands on that text and A stays open.
+    let theirs = "# Tasks\n- [x] Agent done\n- [ ] A\n  - [x] a1\n  - [ ] from the agent\n";
+    host.borrow_mut().files.insert(TODO_TASKS.into(), theirs.into());
+    todo_step(cx, &host, "tick 1.0");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [x] Agent done\n- [ ] A\n  - [ ] a1\n  - [ ] from the agent\n");
+
+    // The agent ticks its step; our tick of a1 is then the last step, so A is done on disk.
+    let theirs = "# Tasks\n- [x] Agent done\n- [ ] A\n  - [ ] a1\n  - [x] from the agent\n";
+    host.borrow_mut().files.insert(TODO_TASKS.into(), theirs.into());
+    todo_step(cx, &host, "tick 1.0");
+    assert_eq!(host.borrow().files[TODO_TASKS], merged);
+    let writes = host.borrow().writes.clone();
+    assert_eq!(writes.len(), 6, "{writes:?}");
+    assert_eq!(writes[5], (TODO_TASKS.to_string(), merged.to_string(), json!(theirs)));
+    let state = todo_state(cx, &host);
+    assert_eq!(state["text"], json!(merged), "{state}");
+    assert_eq!((state["error"].clone(), state["pending"].clone()), (Value::Null, json!(0)), "{state}");
+    todo_describe(cx, window, session);
+}
+
+// AC3/AC4: done tasks and steps are struck through and dimmed; titles and the add box use the
+// handwriting only when the font is loaded.
+#[gpui::test]
+fn todo_done_items_are_struck_through_and_titles_are_handwritten_when_the_font_is_there(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] Open task\n  - [x] Done step\n  - [ ] Open step\n- [x] Done task\n- [ ] Plain\n";
+    let hand = ".font_family[Str(\"Patrick Hand\")]";
+    for loaded in [true, false] {
+        let mut values = todo_values();
+        if loaded {
+            values.insert("fonts".into(), json!(["Monospace", "Sans", "Patrick Hand"]));
+        }
+        let (muted, fg) = (values["theme"]["muted"].clone(), values["theme"]["foreground"].clone());
+        assert_ne!(muted, fg);
+        let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+        let (window, session) = load_todo(cx, &staged, todo_root(&staged), values, &host);
+        assert_eq!(todo_state(cx, &host)["sel"], json!({"k":"head"}));
+        // Show the completed task, unfold Open task's steps, then select Done task.
+        for command in ["key enter", "key up", "key up", "key right", "key down", "key down", "key down", "key down", "key down", "key down"] {
+            todo_step(cx, &host, command);
+        }
+        assert_eq!(todo_state(cx, &host)["sel"], json!({"k":"task", "i":1}));
+        assert!(host.borrow().writes.is_empty(), "looking writes nothing");
+        let tree = todo_describe(cx, window, session);
+        let lines: Vec<&str> = tree.lines().collect();
+        for (title, done) in [("Open task", false), ("Done step", true), ("Open step", false), ("Done task", true), ("Plain", false)] {
+            let at = lines.iter().position(|l| l.trim() == format!("text {title:?}")).unwrap_or_else(|| panic!("no {title}: {tree}"));
+            let color = format!(".text_color[Str({})]", if done { &muted } else { &fg });
+            assert!(lines[at - 1].contains(&color), "{title} is {}: {}", if done { "dimmed" } else { "not dimmed" }, lines[at - 1]);
+            let struck = lines.get(at + 1).is_some_and(|l| l.contains(".absolute") && l.contains(".inset[Number(0.0)]"));
+            assert_eq!(struck, done, "{title} struck through: {:?}", lines.get(at + 1));
+            assert_eq!(lines[at - 1].contains(hand), loaded, "{title}: {}", lines[at - 1]);
+        }
+        assert_eq!(todo_element(&tree, "todo-add").iter().any(|l| l.contains(hand)), loaded, "the add box");
+        if !loaded {
+            assert!(!tree.contains("Patrick Hand"), "no font asked for that is not there: {tree}");
+        }
+        for id in ["todo-switch", "todo-add", "todo-row-0.", "todo-tick-0.", "todo-fold-0.", "todo-row-0.0", "todo-tick-0.1", "todo-addstep-0", "todo-row-2.", "todo-done", "todo-row-1.", "todo-tick-1.", "todo-del-1."] {
+            assert!(tree.contains(&format!(":id[Str({id:?})]")), "missing {id}: {tree}");
+        }
+        assert!(tree.contains("text \"Add step\"") && tree.contains("text \"1/2\"") && tree.contains("2 open") && tree.contains("1 of 3 done"), "{tree}");
+        assert!(tree.contains(".w[Str(\"33%\")]"), "a third of the bar: {tree}");
+        assert_eq!(todo_celebrations(&host), 0);
+    }
+}
+
+// AC5: the progress header from no tasks to all done, with the Completed count and empty states.
+#[gpui::test]
+fn todo_progress_header_and_completed_count_from_no_tasks_to_all_done(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // (file, open, progress, bar, completed count, the note under the list)
+    let cases = [
+        ("# Tasks\n", "0 open", None, None, None, Some(("square-pen", "No tasks yet. Add one above."))),
+        ("# Tasks\n- [ ] a\n  - [x] a1\n- [ ] b\n", "2 open", Some("0 of 2 done"), Some("0%"), None, None),
+        ("# Tasks\n- [x] a\n- [ ] b\n- [ ] c\n", "2 open", Some("1 of 3 done"), Some("33%"), Some("1"), None),
+        ("# Tasks\n- [x] a\n  - [x] a1\n- [x] b\n", "0 open", Some("2 of 2 done"), Some("100%"), Some("2"), Some(("circle-check", "All done for today"))),
+    ];
+    for (file, open, progress, bar, count, note) in cases {
+        let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, file)], &[]);
+        let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+        let tree = todo_describe(cx, window, session);
+        assert!(tree.contains(&format!("text {open:?}")), "{file:?}: {tree}");
+        match progress {
+            Some(progress) => assert!(tree.contains(&format!("text {progress:?}")), "{file:?}: {tree}"),
+            None => assert!(!tree.contains(" done\"") && !tree.contains(".w[Str("), "no progress for an empty list: {tree}"),
+        }
+        if let Some(bar) = bar {
+            assert!(tree.contains(&format!(".w[Str({bar:?})]")), "{file:?}: {tree}");
+        }
+        match count {
+            Some(count) => {
+                let head = todo_element(&tree, "todo-done");
+                assert!(head.iter().any(|l| l.trim() == format!("text {count:?}")), "{file:?}: {head:#?}");
+            }
+            None => assert!(!tree.contains("todo-done"), "no Completed header without done tasks: {tree}"),
+        }
+        for (icon, text) in [("square-pen", "No tasks yet. Add one above."), ("circle-check", "All done for today")] {
+            let shown = note == Some((icon, text));
+            assert_eq!(tree.contains(text), shown, "{file:?}: {tree}");
+            assert_eq!(tree.contains(&format!("mods/workspace-chrome/{icon}.svg")), shown, "{file:?}: {tree}");
+        }
+        assert!(host.borrow().writes.is_empty() && todo_celebrations(&host) == 0, "opening writes and celebrates nothing");
+    }
 }
 
 // AC2: a delete posts an Undo notice; undo puts the task (with its steps) or the step back once.
