@@ -516,7 +516,8 @@ fn scan_dir(root: &Path, prefix: &str) -> Vec<Found> {
         .filter(|e| e.path().join("main.js").is_file())
         .filter_map(|e| {
             let id = format!("{prefix}{}", e.file_name().to_str()?);
-            if id.starts_with('.') {
+            // `frame-` ids are the app's own pages, trusted with frame-only functions: never a person's mod.
+            if id.starts_with('.') || (prefix.is_empty() && id.starts_with("frame-")) {
                 return None;
             }
             let dir = e.path();
@@ -963,6 +964,11 @@ fn strings(v: Option<&HostValue>) -> Vec<String> {
     v.and_then(HostValue::as_array).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_owned)).collect()).unwrap_or_default()
 }
 
+/// The only web pages a mod may open: the ones the Info page links to.
+fn allowed_link(url: &str) -> bool {
+    matches!(url, "https://pavii.tech" | "https://www.pavii.tech/products/dev-tools/docs/" | "https://buckleson.com")
+}
+
 fn opt_str(v: Option<&HostValue>, key: &str) -> Option<String> {
     v.and_then(|o| o.get(key)).and_then(HostValue::as_str).map(str::to_owned)
 }
@@ -1138,6 +1144,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     });
     let props = inst.props.clone();
     let feedback_frame = inst.name == "frame-feedback";
+    let settings_frame = inst.name == "frame-settings";
     let feedback_from = inst.props.get("from").and_then(Value::as_str).unwrap_or("person").to_owned();
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
     let (cmd_tx, commands) = async_channel::unbounded::<String>();
@@ -1244,6 +1251,13 @@ fn module(inst: Instance, copy: u64) -> HostModule {
                     Err(why) => HostValue::Str(why),
                 })
             })
+        })
+        .function("openLink", move |a| {
+            if !settings_frame { return Err(HostError::new("opening links is frame-only")); }
+            let url = a.string(0)?;
+            if !allowed_link(url) { return Ok(HostValue::Str("that link is not allowed".into())); }
+            crate::links::open(&crate::links::Target::Url(url.to_owned()));
+            Ok(HostValue::Null)
         })
         .function("themes", |_| {
             let list: Vec<Value> = crate::settings::themes().into_iter().map(|(name, colors)| json!({ "light": crate::settings::theme_is_light(&name), "name": name, "colors": colors })).collect();
@@ -1728,6 +1742,103 @@ mod tests {
             COMMANDS.with_borrow(|commands| assert_eq!(commands.len(), 1));
             drop(last);
         }).join().unwrap();
+    }
+
+    #[test]
+    fn allowed_link_accepts_only_the_three_info_page_addresses() {
+        for url in ["https://pavii.tech", "https://www.pavii.tech/products/dev-tools/docs/", "https://buckleson.com"] {
+            assert!(allowed_link(url), "{url}");
+        }
+        for url in [
+            "",
+            " ",
+            "http://pavii.tech",
+            "http://buckleson.com",
+            "http://www.pavii.tech/products/dev-tools/docs/",
+            "https://pavii.tech/",
+            "https://buckleson.com/",
+            "https://www.pavii.tech/products/dev-tools/docs",
+            "https://www.pavii.tech/products/dev-tools/docs//",
+            "https://www.pavii.tech/products/dev-tools/",
+            "https://www.pavii.tech",
+            "https://www.buckleson.com",
+            "https://pavii.tech:443",
+            "HTTPS://pavii.tech",
+            "https://PAVII.tech",
+            "https://Buckleson.com",
+            "https://www.pavii.tech/products/Dev-Tools/docs/",
+            " https://pavii.tech",
+            "https://pavii.tech ",
+            "https://pavii.tech\n",
+            "https://pavii.tech\0",
+            "\thttps://buckleson.com",
+            "https://pavii.tech@evil.com",
+            "https://evil.com@pavii.tech",
+            "https://user:pass@buckleson.com",
+            "https://pavii.tech.evil.com",
+            "https://buckleson.com.evil",
+            "https://evilpavii.tech",
+            "https://pav\u{456}i.tech",
+            "https://pavii.tech?x=1",
+            "https://pavii.tech#top",
+            "https://buckleson.com/?",
+            "https://www.pavii.tech/products/dev-tools/docs/#install",
+            "https://www.pavii.tech/products/dev-tools/docs/../../../../evil",
+            "//pavii.tech",
+            "pavii.tech",
+            "buckleson.com",
+            "file:///etc/passwd",
+            "file:///C:/Windows/System32/calc.exe",
+            r"C:\Windows\System32\calc.exe",
+            r"\\server\share\evil.html",
+            "javascript:alert(1)",
+            "mailto:team@pavii.tech",
+            "https://github.com/vjk7989/h0x-ADE-app",
+        ] {
+            assert!(!allowed_link(url), "{url:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn open_link_is_settings_frame_only_and_refuses_everything_else_without_opening() {
+        std::thread::spawn(|| {
+            use gpui_shell::HostArguments;
+            // Only refused links are ever passed here, so even a broken check opens no browser.
+            let refused = || HostArguments::new([HostValue::Str("https://pavii.tech/".into())]);
+            for name in ["", "test", "settings", "frame-feedback", "frame-settings-x", "Frame-Settings", "frame-settings ", "my-mod/frame-settings"] {
+                let host = module(Instance { name: name.into(), props: Value::Null }, 1);
+                let err = host.call("openLink", &refused()).expect_err(name);
+                assert_eq!(err.message(), "opening links is frame-only", "{name:?}");
+                assert!(host.call("openLink", &HostArguments::default()).is_err(), "{name:?}");
+            }
+            let host = module(Instance { name: "frame-settings".into(), props: Value::Null }, 2);
+            for url in ["", "http://pavii.tech", "https://pavii.tech/", "https://pavii.tech@evil.com", "https://buckleson.com.evil", "javascript:alert(1)", r"C:\Users\me\evil.html"] {
+                let answer = host.call("openLink", &HostArguments::new([HostValue::Str(url.into())]));
+                assert_eq!(answer, Ok(HostValue::Str("that link is not allowed".into())), "{url:?}");
+            }
+            let objects = HostValue::Object(vec![("url".into(), HostValue::Str("https://pavii.tech".into()))]);
+            let arrays = HostValue::Array(vec![HostValue::Str("https://pavii.tech".into())]);
+            for arg in [HostValue::Null, HostValue::Bool(true), HostValue::Number(1.0), arrays, objects] {
+                assert!(host.call("openLink", &HostArguments::new([arg.clone()])).is_err(), "{arg:?} is not a string");
+            }
+            assert!(host.call("openLink", &HostArguments::default()).is_err(), "no argument");
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn every_link_on_the_info_page_is_allowed_and_none_points_to_source_repos() {
+        let page = include_str!("../defaults/frame/settings/main.js");
+        let start = page.find("  info(t) {").expect("the settings frame has an Info page");
+        let info = &page[start..start + page[start..].find("\n  }").unwrap()];
+        let links: std::collections::BTreeSet<&str> = info.split('"').filter(|s| s.contains("://")).collect();
+        let expected = std::collections::BTreeSet::from(["https://pavii.tech", "https://www.pavii.tech/products/dev-tools/docs/", "https://buckleson.com"]);
+        assert_eq!(links, expected, "every allowed page is linked, and nothing else");
+        assert!(links.iter().all(|l| allowed_link(l)));
+        assert!(!info.to_ascii_lowercase().contains("github"), "{info}");
+        assert!(info.contains("openLink("), "links open through openLink");
+        assert!(!info.contains("sendFeedback"), "Send feedback is not wired to sendFeedback yet");
     }
 
     #[test]
@@ -2569,6 +2680,26 @@ mod tests {
         assert_eq!(read("b-edited/main.js"), "mine", "clones stay untouched");
         assert_eq!(read("d/notes.md"), "my notes", "a dropped default with an added file stays");
 
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reserved_ids {
+    #[test]
+    fn a_persons_mod_can_never_take_a_frame_id() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-reserved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for name in ["frame-settings", "frame-consent", "frame-", "framed", "ok"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("main.js"), "").unwrap();
+        }
+        let mut people: Vec<String> = super::scan_dir(&root, "").into_iter().map(|f| f.id).collect();
+        people.sort();
+        assert_eq!(people, ["framed", "ok"]);
+        // The app's own pages keep their prefix.
+        let frames: Vec<String> = super::scan_dir(&root, "frame-").into_iter().map(|f| f.id).collect();
+        assert!(frames.contains(&"frame-ok".to_string()), "{frames:?}");
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
