@@ -5574,6 +5574,36 @@ fn todo_stale_write_rereads_and_reapplies_without_losing_the_other_edit(cx: &mut
     assert!(tree.contains("From the agent") && tree.contains("C"), "{tree}");
 }
 
+// Big lists of ordinary tasks open: every size up to the panel's write limit finishes loading.
+#[gpui::test]
+fn todo_big_lists_of_many_tasks_open(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut seen = Vec::new();
+    for size in [8 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024, 384 * 1024, 512 * 1024] {
+        let mut text = String::from("# Tasks\n");
+        let mut n = 0;
+        while text.len() + 40 < size {
+            n += 1;
+            text.push_str(&format!("- [ ] task number {n}\n"));
+        }
+        let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &text)], &[]);
+        let (window, _session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+        let mut ready = false;
+        for _ in 0..200 {
+            if todo_state(cx, &host)["ready"] == json!(true) {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            cx.run_until_parked();
+        }
+        let _ = window.update(cx, |_, window, _| window.remove_window());
+        seen.push((size, n, ready));
+    }
+    assert!(seen.iter().all(|s| s.2), "size, tasks, opened: {seen:?}");
+}
+
 // AC8: a list over the 1 MiB read limit is shown read-only and never written; at the limit it is
 // an editable list that refuses to grow past the limit but still takes same-size changes.
 #[gpui::test]
