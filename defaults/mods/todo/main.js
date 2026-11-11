@@ -211,9 +211,9 @@ export default class Todo extends View {
   // re-applies our unsaved changes to it; a second failure keeps them and says so.
   flush(cx) {
     if (this.flushing) return;
-    this.flushing = true;
     const slug = this.cur, path = this.file(slug);
-    cx.spawn(async (cx) => {
+    this.flushing = true;
+    try { cx.spawn(async (cx) => {
       try {
         while (this.pending.length && this.cur === slug) {
           const batch = this.pending.slice(), next = this.text;
@@ -239,7 +239,7 @@ export default class Todo extends View {
           }
         }
       } finally { this.flushing = false; cx.notify(); }
-    });
+    }); } catch (e) { this.flushing = false; throw e; }
   }
 
   // The lists file with one change, re-read and retried once if someone else wrote meanwhile.
@@ -260,20 +260,21 @@ export default class Todo extends View {
 
   switchTo(slug, cx) {
     this.menu = false; this.confirming = false;
-    if (slug !== this.cur) this.openList(slug, cx);
+    if (slug !== this.cur) cx.spawn(async (cx) => this.openList(slug, cx));
     this.handle.focus(); cx.notify();
   }
 
   askName(mode, cx) {
     this.menu = false;
     const value = mode === "rename" ? this.name() : "";
-    const input = this.field(value, "List name", (v, cx) => this.finishName(v, cx), (v, cx) => { if (this.naming?.input === input) this.naming = null; cx.notify(); });
+    const input = this.field(value, "List name", (v, cx) => { cx.spawn(async (cx) => this.finishName(v, cx)); }, (v, cx) => { if (this.naming?.input === input) this.naming = null; cx.notify(); });
     this.naming = { mode, input };
     cx.notify();
   }
 
   async finishName(value, cx) {
     const { mode } = this.naming ?? {};
+    const slug0 = this.cur;
     this.naming = null; this.handle.focus();
     const name = escapeTitle(value).trim();
     if (!mode || !name) return cx.notify();
@@ -288,24 +289,31 @@ export default class Todo extends View {
         await writeTextFile(this.file(slug), serializeList({ name, head: [], tasks: [] }), null);
         await this.openList(slug, cx);
       } else {
-        await this.editIndex((entries) => { const e = entries.find((x) => x.slug === this.cur); if (!e) return false; e.name = name; });
-        this.commit((list) => { list.name = name; }, cx);
+        await this.editIndex((entries) => { const e = entries.find((x) => x.slug === slug0); if (!e) return false; e.name = name; });
+        if (this.cur === slug0) this.commit((list) => { list.name = name; }, cx);
       }
     } catch (e) { this.error = `Couldn't ${mode} the list: ${e?.message ?? e}`; }
     cx.notify();
   }
 
   async deleteList(cx) {
+    if (this.deleting) return;
+    this.deleting = true;
     this.confirming = false; this.menu = false;
     const slug = this.cur;
     try {
       while (this.flushing) await cx.sleep(50);
       this.pending = [];
-      await this.editIndex((entries) => { const k = entries.findIndex((e) => e.slug === slug); if (k < 0) return false; entries.splice(k, 1); });
-      await removeAppFile(this.file(slug));
-      if (this.index.length) await this.openList(this.index[0].slug, cx);
-      else await this.load(cx);
+      // Already gone from lists.md: nothing to remove, just reopen what is left.
+      const removed = await this.editIndex((entries) => { const k = entries.findIndex((e) => e.slug === slug); if (k < 0) return false; entries.splice(k, 1); });
+      if (removed === false) await this.load(cx);
+      else {
+        await removeAppFile(this.file(slug));
+        if (this.index.length) await this.openList(this.index[0].slug, cx);
+        else await this.load(cx);
+      }
     } catch (e) { this.error = `Couldn't delete the list: ${e?.message ?? e}`; }
+    finally { this.deleting = false; }
     cx.notify();
   }
 
@@ -429,7 +437,8 @@ export default class Todo extends View {
   field(value, placeholder, submit, blur) {
     const input = InputState.new({ value, placeholder });
     if (value) input.set_selected_range({ start: 0, end: value.length });
-    input.on("submit", (_e, cx) => submit(input.value(), cx));
+    // The input propagates its Enter, so the panel's key() sees the same Enter right after.
+    input.on("submit", (_e, cx) => { this.submitAt = Date.now(); submit(input.value(), cx); });
     input.on("blur", (_e, cx) => blur(input.value(), cx));
     input.focus();
     return input;
@@ -487,6 +496,7 @@ export default class Todo extends View {
   key(e, cx) {
     const k = e.key, m = e.modifiers ?? {}, mod = m.control || m.platform;
     const typing = this.edit || this.naming || this.addFocus;
+    if (k === "enter" && Date.now() - (this.submitAt ?? 0) < 150) return;
     if (k === "escape") {
       if (this.edit) { this.edit = null; this.handle.focus(); }
       else if (this.naming) { this.naming = null; this.handle.focus(); }
@@ -497,7 +507,7 @@ export default class Todo extends View {
     } else if (typing) {
       return;
     } else if (this.confirming) {
-      if (k === "enter") this.deleteList(cx); else return;
+      if (k === "enter") { this.confirming = false; this.menu = false; cx.spawn(async (cx) => this.deleteList(cx)); } else return;
     } else if (this.menu) {
       this.menuKey(k, cx);
     } else if (mod && k === "l") {
@@ -611,14 +621,14 @@ export default class Todo extends View {
     return h_flex().flex_none().px(14).py(8).gap(8).items_center().bg(t.raised).border_b(1).border_color(t.border).text_size(12)
       .child(div().flex_1().min_w(0).truncate().child(`Delete “${this.name()}” and its tasks?`))
       .child(button("todo-del-no", "Cancel", false, (_e, cx) => { this.confirming = false; this.handle.focus(); cx.notify(); }))
-      .child(button("todo-del-yes", "Delete", true, (_e, cx) => this.deleteList(cx)));
+      .child(button("todo-del-yes", "Delete", true, (_e, cx) => { this.confirming = false; this.menu = false; cx.notify(); cx.spawn(async (cx) => this.deleteList(cx)); }));
   }
 
   newIndexBar(t) {
     return h_flex().flex_none().px(14).py(8).gap(8).items_center().bg(t.raised).border_b(1).border_color(t.border).text_size(12)
       .child(div().flex_1().min_w(0).truncate().child("Your lists.md is kept as it is."))
       .child(div().id("todo-new-index").px(10).py(3).rounded(6).cursor_pointer().border_1().border_color(t.border).hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => this.startNewIndex(cx)).child("Start a new index"));
+        .on_click((_e, cx) => { cx.spawn(async (cx) => this.startNewIndex(cx)); }).child("Start a new index"));
   }
 
   nameBar(t) {

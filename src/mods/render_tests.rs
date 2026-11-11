@@ -5306,7 +5306,8 @@ export default class Scenario extends Real {
         } else if (verb === 'state') {
           if (this.ready) this.current();
           note(JSON.stringify({ ready: this.ready, textLen: this.text.length, text: this.text.length > 16384 ? null : this.text, error: this.error, readonly: this.readonly, sel: this.sel,
-            edit: this.edit ? this.edit.input.value() : null, pending: this.pending.length }));
+            edit: this.edit ? this.edit.input.value() : null, pending: this.pending.length, cur: this.cur, badIndex: Boolean(this.badIndex),
+            confirming: this.confirming, naming: Boolean(this.naming), flushing: Boolean(this.flushing) }));
         }
         cx.notify();
       }
@@ -5882,6 +5883,10 @@ fn todo_done_items_are_struck_through_and_titles_are_handwritten_when_the_font_i
         assert_ne!(muted, fg);
         let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
         let (window, session) = load_todo(cx, &staged, todo_root(&staged), values, &host);
+        // The panel opens on the first open task; two down reach the Completed header.
+        assert_eq!(todo_state(cx, &host)["sel"], json!({"k":"task", "i":0}));
+        todo_step(cx, &host, "key down");
+        todo_step(cx, &host, "key down");
         assert_eq!(todo_state(cx, &host)["sel"], json!({"k":"head"}));
         // Show the completed task, unfold Open task's steps, then select Done task.
         for command in ["key enter", "key up", "key up", "key right", "key down", "key down", "key down", "key down", "key down", "key down"] {
@@ -6065,6 +6070,231 @@ fn todo_key_presses_tick_and_add_tasks_in_a_mounted_panel(cx: &mut TestAppContex
     files_keys(&mut visual, "enter");
     files_wait(&mut visual, 50);
     assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] Bread\n- [ ] Milk\n- [ ] one\n- [x] two\n");
+}
+
+const TODO_WORK: &str = "/fixture/app/todo/work.md";
+const TODO_TWO_LISTS: &str = "- [Tasks](tasks.md)\n- [Work](work.md)\n";
+const TODO_WORK_TEXT: &str = "# Work\n- [ ] ship\n- [ ] test\n- [x] plan\n";
+
+// The to-do panel (TODO_SCENARIO) mounted with real input and holding the keyboard, its first load done. Keys,
+// typing and clicks reach the panel's own handlers, whose cx the runtime retires when the call ends.
+fn mount_todo(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    host: &Rc<RefCell<TodoHost>>,
+) -> (gpui::VisualTestContext, Rc<ShellRuntime>, gpui::Entity<gpui_shell::ShellRoot>) {
+    let root = todo_root(staged);
+    gpui_shell::policy::set_default(todo_policy(staged, todo_values(), host));
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| FilesMounted(runtime.try_load(&root, window, cx).unwrap()));
+    let shell = window.update(cx, |mounted, _, _| mounted.0.clone()).unwrap();
+    let mut visual = gpui::VisualTestContext::from_window(*window, cx);
+    visual.run_until_parked();
+    host.borrow_mut().commands.push_back("focus".into());
+    files_wait(&mut visual, 50);
+    visual.update(|window, cx| {
+        window.activate_window();
+        window.draw(cx).clear(cx)
+    });
+    (visual, runtime, shell)
+}
+
+fn todo_mounted_state(visual: &mut gpui::VisualTestContext, host: &Rc<RefCell<TodoHost>>) -> Value {
+    host.borrow_mut().commands.push_back("state".into());
+    files_wait(visual, 50);
+    serde_json::from_str(host.borrow().notes.last().expect("the scenario reports its state")).unwrap()
+}
+
+// The panel's elements carry no test selectors, so this clicks down a column 20 px in from its right edge (where the
+// confirm and new-index bars keep their right-hand button), from just under the 46 px header, until `landed` says a
+// click did something. Nothing else in that column takes a click above those bars. Each click meets a fresh frame.
+fn todo_click_right_column(visual: &mut gpui::VisualTestContext, landed: impl Fn() -> bool) -> gpui::Point<gpui::Pixels> {
+    let x = visual.update(|window, _| window.viewport_size().width) - gpui::px(20.);
+    for y in (48..400).step_by(2) {
+        let at = gpui::point(x, gpui::px(y as f32));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.simulate_click(at, gpui::Modifiers::none());
+        if landed() {
+            return at;
+        }
+    }
+    panic!("no click in the panel's right-hand column landed");
+}
+
+// After deleting the open list (index entry and file, once), the next list is open, editable and without an error.
+fn assert_tasks_list_deleted_once(visual: &mut gpui::VisualTestContext, host: &Rc<RefCell<TodoHost>>) {
+    files_wait(visual, 100);
+    {
+        let h = host.borrow();
+        assert_eq!(h.removes, [TODO_TASKS], "the list file is removed once");
+        assert!(!h.files.contains_key(TODO_TASKS), "{:?}", h.files);
+        assert_eq!(h.files[TODO_LISTS], "- [Work](work.md)\n");
+        assert_eq!(h.writes.iter().filter(|(p, _, _)| p == TODO_LISTS).count(), 1, "one edit of lists.md: {:?}", h.writes);
+        assert_eq!(h.files[TODO_WORK], TODO_WORK_TEXT, "the next list is untouched");
+    }
+    let state = todo_mounted_state(visual, host);
+    assert_eq!(state["error"], Value::Null, "{state}");
+    assert_eq!(
+        (state["cur"].clone(), state["text"].clone(), state["readonly"].clone(), state["ready"].clone(), state["confirming"].clone()),
+        (json!("work"), json!(TODO_WORK_TEXT), json!(false), json!(true), json!(false)),
+        "{state}"
+    );
+}
+
+// Delete list from the list menu with real keys: Enter confirms. A second Enter, pressed before the delete has
+// finished, deletes nothing more.
+#[gpui::test]
+fn todo_delete_list_confirmed_with_enter_opens_the_next_list_editable(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, TODO_TWO_LISTS), (TODO_TASKS, "# Tasks\n- [ ] a\n- [ ] b\n"), (TODO_WORK, TODO_WORK_TEXT)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    // Tasks, Work, New list, Rename list, Delete list.
+    files_keys(&mut visual, "ctrl-l down down down down enter");
+    assert_eq!(todo_mounted_state(&mut visual, &host)["confirming"], json!(true), "Delete list asks first");
+    assert!(host.borrow().removes.is_empty() && host.borrow().files.contains_key(TODO_TASKS), "nothing is deleted before the answer");
+    files_keys(&mut visual, "enter enter");
+    assert_tasks_list_deleted_once(&mut visual, &host);
+}
+
+// The same through the confirm bar's Delete button; a second click on the same spot deletes nothing more.
+#[gpui::test]
+fn todo_delete_list_confirmed_with_the_delete_button_opens_the_next_list_editable(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, TODO_TWO_LISTS), (TODO_TASKS, "# Tasks\n- [ ] a\n- [ ] b\n"), (TODO_WORK, TODO_WORK_TEXT)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    files_keys(&mut visual, "ctrl-l down down down down enter");
+    assert_eq!(todo_mounted_state(&mut visual, &host)["confirming"], json!(true));
+    let at = todo_click_right_column(&mut visual, || !host.borrow().removes.is_empty());
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.simulate_click(at, gpui::Modifiers::none());
+    assert_tasks_list_deleted_once(&mut visual, &host);
+}
+
+// Switching lists from the menu with real keys opens the other list editable, with no error, and writes nothing.
+#[gpui::test]
+fn todo_switching_lists_with_keys_opens_the_other_list_editable(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, TODO_TWO_LISTS), (TODO_TASKS, "# Tasks\n- [ ] a\n- [ ] b\n"), (TODO_WORK, TODO_WORK_TEXT)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    files_keys(&mut visual, "ctrl-l down enter");
+    files_wait(&mut visual, 100);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(state["error"], Value::Null, "{state}");
+    assert_eq!(
+        (state["cur"].clone(), state["text"].clone(), state["readonly"].clone(), state["ready"].clone()),
+        (json!("work"), json!(TODO_WORK_TEXT), json!(false), json!(true)),
+        "{state}"
+    );
+    assert!(host.borrow().writes.is_empty() && host.borrow().removes.is_empty(), "switching writes nothing");
+    // Still live: Space ticks Work's first task and saves it.
+    files_keys(&mut visual, "space");
+    files_wait(&mut visual, 50);
+    assert_eq!(host.borrow().files[TODO_WORK], "# Work\n- [x] ship\n- [ ] test\n- [x] plan\n");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] a\n- [ ] b\n");
+}
+
+// New list through the name box: an empty name does nothing; a name already taken gets the next free file, which is
+// created (never over an existing one), added to lists.md and opened.
+#[gpui::test]
+fn todo_new_list_from_the_name_box_creates_and_opens_it(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // An empty open list: the panel's selection is the (absent) Completed row, so nothing else answers Enter.
+    let host = todo_host(&[(TODO_LISTS, TODO_TWO_LISTS), (TODO_TASKS, "# Tasks\n"), (TODO_WORK, TODO_WORK_TEXT)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    files_keys(&mut visual, "ctrl-l down down enter");
+    assert_eq!(todo_mounted_state(&mut visual, &host)["naming"], json!(true));
+    files_keys(&mut visual, "enter");
+    files_wait(&mut visual, 50);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["naming"].clone(), state["error"].clone(), state["cur"].clone()), (json!(false), Value::Null, json!("tasks")), "{state}");
+    assert!(host.borrow().writes.is_empty(), "an empty name creates nothing: {:?}", host.borrow().writes);
+
+    files_keys(&mut visual, "ctrl-l down down enter");
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.simulate_input("Work");
+    files_keys(&mut visual, "enter");
+    files_wait(&mut visual, 100);
+    let new = "/fixture/app/todo/work-2.md";
+    {
+        let h = host.borrow();
+        assert_eq!(h.files[TODO_LISTS], "- [Tasks](tasks.md)\n- [Work](work.md)\n- [Work](work-2.md)\n");
+        assert_eq!(h.files[new], "# Work\n");
+        assert!(h.writes.iter().any(|w| w == &(new.to_string(), "# Work\n".to_string(), Value::Null)), "created, never over a file: {:?}", h.writes);
+        assert_eq!(h.files[TODO_WORK], TODO_WORK_TEXT, "the list with the same name is kept");
+    }
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(state["error"], Value::Null, "{state}");
+    assert_eq!(
+        (state["cur"].clone(), state["text"].clone(), state["readonly"].clone(), state["ready"].clone()),
+        (json!("work-2"), json!("# Work\n"), json!(false), json!(true)),
+        "{state}"
+    );
+}
+
+// Rename through the name box renames lists.md's entry and the list's heading, and leaves the panel saving: the next
+// tick is written too.
+#[gpui::test]
+fn todo_rename_list_from_the_name_box_renames_it_and_keeps_saving(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, TODO_TWO_LISTS), (TODO_TASKS, "# Tasks\n- [ ] a\n- [x] b\n"), (TODO_WORK, TODO_WORK_TEXT)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    // Select the Completed row first, so the Enter that ends the name box opens no task.
+    files_keys(&mut visual, "down");
+    assert_eq!(todo_mounted_state(&mut visual, &host)["sel"], json!({"k":"head"}));
+    files_keys(&mut visual, "ctrl-l down down down enter");
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    // The old name is selected, so typing replaces it.
+    visual.simulate_input("Chores");
+    files_keys(&mut visual, "enter");
+    files_wait(&mut visual, 100);
+    assert_eq!(host.borrow().files[TODO_LISTS], "- [Chores](tasks.md)\n- [Work](work.md)\n");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Chores\n- [ ] a\n- [x] b\n");
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(
+        (state["error"].clone(), state["flushing"].clone(), state["pending"].clone(), state["readonly"].clone()),
+        (Value::Null, json!(false), json!(0), json!(false)),
+        "{state}"
+    );
+    files_keys(&mut visual, "up space");
+    files_wait(&mut visual, 100);
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Chores\n- [x] a\n- [x] b\n", "a tick after the rename is saved");
+    assert_eq!(todo_mounted_state(&mut visual, &host)["pending"], json!(0));
+}
+
+// An unreadable lists.md is left alone until "Start a new index" is clicked; then the index and an empty Tasks list are
+// written (the index over exactly the text that was read) and opened, editable and without an error.
+#[gpui::test]
+fn todo_start_a_new_index_button_writes_and_opens_a_fresh_index(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let unreadable = "My lists:\nTasks, Work\n";
+    let host = todo_host(&[(TODO_LISTS, unreadable)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["badIndex"].clone(), state["ready"].clone()), (json!(true), json!(false)), "{state}");
+    assert!(host.borrow().writes.is_empty(), "nothing is written before the click");
+    todo_click_right_column(&mut visual, || host.borrow().writes.iter().any(|(p, _, _)| p == TODO_LISTS));
+    files_wait(&mut visual, 100);
+    {
+        let h = host.borrow();
+        assert_eq!(h.files[TODO_LISTS], "- [Tasks](tasks.md)\n");
+        assert_eq!(h.files[TODO_TASKS], "# Tasks\n");
+        let index: Vec<_> = h.writes.iter().filter(|(p, _, _)| p == TODO_LISTS).collect();
+        assert_eq!(index.len(), 1, "{:?}", h.writes);
+        assert_eq!(index[0].2, json!(unreadable), "the new index replaces exactly what was read");
+    }
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(state["error"], Value::Null, "{state}");
+    assert_eq!(
+        (state["badIndex"].clone(), state["cur"].clone(), state["readonly"].clone(), state["ready"].clone()),
+        (json!(false), json!("tasks"), json!(false), json!(true)),
+        "{state}"
+    );
 }
 
 // AC1: tabs.todo opens the panel on To-do and hands it the keyboard; pressed on it, it closes.
