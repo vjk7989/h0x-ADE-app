@@ -445,6 +445,8 @@ fn a_shell_launch_opens_hyperox_in_its_folder() {
     // For a person to look at, not an assertion: the To-do panel opened by its key's command
     // (Ctrl/Cmd+Shift+J), saved where CI uploads it with the Info page below.
     let todo_shot = std::env::var_os("RUNNER_TEMP").map(PathBuf::from).unwrap_or_else(|| root.clone()).join("todo-panel.png");
+    // A fresh home shows the welcome over everything: close it so the panel is visible.
+    let _ = env.command(EXE).args(["do", "overlay.close"]).stdin(Stdio::null()).output();
     let opened = env.command(EXE).args(["do", "tabs.todo"]).stdin(Stdio::null()).output();
     std::thread::sleep(Duration::from_secs(3));
     let saved = env.command(EXE).arg("shot").arg(&todo_shot).stdin(Stdio::null()).output();
