@@ -9,6 +9,7 @@ on:
     branches: [main, rebrand]
   # No paths-ignore here: CI is required to merge, so every PR needs it.
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -42,7 +43,7 @@ jobs:
           - { platform: linux-x86_64, runner: ubuntu-22.04 }
           - { platform: macos-aarch64, runner: macos-15 }
           - { platform: windows-x86_64, runner: windows-2022 }
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.platform == 'linux-x86_64' && vars.CI_RUNNER == 'gcp' && github.event_name != 'pull_request' && fromJSON('["self-hosted","gcp"]') || matrix.runner }}
     timeout-minutes: 45
     defaults:
       run:
@@ -178,7 +179,7 @@ jobs:
           - { platform: linux-x86_64, runner: ubuntu-22.04, core: h0x-core-linux-x86_64.tar.gz }
           - { platform: macos-aarch64, runner: macos-15, core: h0x-core-macos-aarch64.tar.gz }
           - { platform: windows-x86_64, runner: windows-2022, core: h0x-core-windows-x86_64.zip }
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.platform == 'linux-x86_64' && vars.CI_RUNNER == 'gcp' && github.event_name != 'pull_request' && fromJSON('["self-hosted","gcp"]') || matrix.runner }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -267,7 +268,7 @@ jobs:
 
   # Security advisories (RustSec) in the dependencies: deny.toml.
   advisories:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER == 'gcp' && github.event_name != 'pull_request' && fromJSON('["self-hosted","gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -281,7 +282,7 @@ jobs:
   test:
     needs: [platform-tests, launch-e2e, advisories]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER == 'gcp' && github.event_name != 'pull_request' && fromJSON('["self-hosted","gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - run: '[ "${{ needs.platform-tests.result }}" = success ] && [ "${{ needs.launch-e2e.result }}" = success ] && [ "${{ needs.advisories.result }}" = success ]'
