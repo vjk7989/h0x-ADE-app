@@ -112,7 +112,21 @@ export function openCount(list) {
   return list.tasks.filter((t) => !t.done).length;
 }
 
-/** At least one task and all done (steps do not count).
+/** Tick or untick a task: its steps follow.
+ * @param {Task} task @param {boolean} done */
+export function setTaskDone(task, done) {
+  task.done = done;
+  for (const s of task.steps) s.done = done;
+}
+
+/** Tick or untick one step: the task is done exactly when every step is.
+ * @param {Task} task @param {number} j @param {boolean} done */
+export function setStepDone(task, j, done) {
+  task.steps[j].done = done;
+  task.done = task.steps.every((s) => s.done);
+}
+
+/** At least one task and all done.
  * @param {TodoList} list @returns {boolean} */
 export function allDone(list) {
   return list.tasks.length > 0 && list.tasks.every((t) => t.done);

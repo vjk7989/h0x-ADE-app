@@ -5540,7 +5540,7 @@ fn todo_adding_and_ticking_tasks_writes_the_markdown_over_what_was_read(cx: &mut
     let state = todo_state(cx, &host);
     assert_eq!((state["error"].clone(), state["pending"].clone()), (Value::Null, json!(0)), "{state}");
     let tree = todo_describe(cx, window, session);
-    assert!(tree.contains("Completed (1)") && tree.contains("3 open") && tree.contains("Ship [ ] it"), "{tree}");
+    assert!(tree.contains("Completed") && tree.contains("todo-done") && tree.contains("3 open") && tree.contains("1 of 4 done") && tree.contains("Ship [ ] it"), "{tree}");
     assert_eq!(todo_celebrations(&host), 0, "open tasks remain");
 }
 
@@ -5714,8 +5714,9 @@ fn todo_congratulations_open_once_on_the_last_tick_and_never_on_load(cx: &mut Te
 
     let host = todo_host(&[(TODO_LISTS, "- [Groceries](tasks.md)\n"), (TODO_TASKS, "# Groceries\n- [ ] a\n  - [ ] step\n- [x] b\n- [ ] c\n")], &[]);
     let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    // Ticking a task's only step finishes the task (a and b done); c is still open.
     todo_step(cx, &host, "tick 0.0");
-    todo_step(cx, &host, "tick 0");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Groceries\n- [x] a\n  - [x] step\n- [x] b\n- [ ] c\n");
     assert_eq!(todo_celebrations(&host), 0, "c is still open");
     todo_step(cx, &host, "tick 2");
     assert_eq!(
