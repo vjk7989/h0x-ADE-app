@@ -438,6 +438,14 @@ fn a_shell_launch_opens_hyperox_in_its_folder() {
     assert_eq!(spaces(&world).len(), count, "{world:#}");
     assert!(active(&world).is_some_and(|s| names(s["folder"].as_str().unwrap(), &a)), "{world:#}");
 
+    // For a person to look at, not an assertion: Settings on the Info page, saved where CI
+    // uploads it (artifact `info-page-<platform>`).
+    let shot = std::env::var_os("RUNNER_TEMP").map(PathBuf::from).unwrap_or_else(|| root.clone()).join("info-page.png");
+    let opened = env.command(EXE).args(["do", "app.settings", "--section", "info"]).stdin(Stdio::null()).output();
+    std::thread::sleep(Duration::from_secs(3));
+    let saved = env.command(EXE).arg("shot").arg(&shot).stdin(Stdio::null()).output();
+    eprintln!("info page: settings {:?}, screenshot {} {:?}", opened.map(|o| o.status), shot.display(), saved.map(|o| (o.status, String::from_utf8_lossy(&o.stderr).into_owned())));
+
     // Quit; nothing of HyperOx is left running.
     let _ = env.command(EXE).args(["do", "app.quit"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
     #[cfg(windows)]

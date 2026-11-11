@@ -137,7 +137,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         shared.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "playSound", "setAgentOrder", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes"] {
+    for name in ["run", "playSound", "setAgentOrder", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes", "openLink"] {
         let calls = calls.clone();
         module = module.function(name, move |a| {
             if name == "run" {
@@ -150,7 +150,10 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                 .borrow_mut()
                 .effects
                 .push((name.into(), (0..2).filter_map(|i| a.get(i).map(from_host)).collect()));
-            Ok(if name == "openOverlay" || name == "notify" {
+            // Never opens anything: answers as the real one would.
+            Ok(if name == "openLink" && !a.string(0).is_ok_and(allowed_link) {
+                "that link is not allowed".into()
+            } else if name == "openOverlay" || name == "notify" {
                 "fixture-overlay".into()
             } else {
                 HostValue::Null
@@ -1795,8 +1798,8 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
         }
         if section == "info" {
             assert!(
-                tree.contains("HyperOx by Buckleson Group") && tree.contains("https://github.com/buckleson"),
-                "the Info page names the maker and links to them: {tree}"
+                ["HyperOx", "Agentic development environment", "Built by", "Team Pavii", "Security & blockchain partner", "Buckleson", "Currently closed source"].iter().all(|t| tree.contains(t)),
+                "the Info page names the product, its makers and partner: {tree}"
             );
         }
     }
@@ -1835,6 +1838,84 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
         assert!(tree.contains(if checking { "Checking" } else if succeeded { "Up to date" } else { "Check your connection" }), "check status missing: {tree}");
     }
     eprintln!("27 settings cases, each twice: {:?}", start.elapsed());
+}
+
+#[gpui::test]
+fn settings_info_shows_the_product_makers_and_versions_with_no_source_links(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // A known core version, then none (null, a missing key): the page still renders and says "unknown".
+    for (core, shown) in [(Some(json!("0.1.5")), "Core 0.1.5"), (Some(Value::Null), "Core unknown"), (None, "Core unknown")] {
+        let mut p = props();
+        p["section"] = json!("info");
+        let mut u = updates("current", "current");
+        let versions = u["core"].as_object_mut().unwrap();
+        match &core {
+            Some(v) => versions.insert("version".into(), v.clone()),
+            None => versions.remove("version"),
+        };
+        let core = format!("{core:?}");
+        let tree = describe(cx, &staged, "frame/settings", true, p, u, None).unwrap_or_else(|e| panic!("{core}: {e:#}"));
+        for text in [
+            "HyperOx",
+            "Agentic development environment",
+            "The desktop workspace for AI coding agents.",
+            "A secure space to build with AI coding agents.",
+            "conversations stay on your own machine.",
+            "Learn more",
+            "Installation guide",
+            "Documentation",
+            "Send feedback",
+            "Built by",
+            "Team Pavii",
+            "pavii.tech",
+            "Security & blockchain partner",
+            "Buckleson",
+            "buckleson.com",
+            "Currently closed source (open source soon)",
+            "Version 0.1.0",
+            shown,
+            "Open-source notices",
+        ] {
+            assert!(tree.contains(text), "{core}: the Info page shows {text:?}: {tree}");
+        }
+        for id in ["st-info-learn", "st-info-install", "st-info-docs", "st-info-feedback", "st-info-pavii", "st-info-buckleson"] {
+            assert!(tree.contains(id), "{core}: {id} is on the page: {tree}");
+        }
+        assert!(!tree.to_ascii_lowercase().contains("github"), "{core}: no source-repo links remain: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_info_buttons_open_only_allowed_links_and_feedback_is_coming_soon(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    let mut p = props();
+    p["section"] = json!("info");
+    let policy = Policy::new()
+        .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+        .with_host_module(module(fixture(true, p, updates("current", "current")), calls.clone()))
+        .unwrap();
+    // Presses each Info button once, as a click would.
+    let setup = "const real = this.button.bind(this); const pressed = new Set(); \
+        this.button = (t, id, label, onClick) => { if (id.startsWith('st-info-') && !pressed.has(id)) { pressed.add(id); onClick(); } return real(t, id, label, onClick); };";
+    let root = staged.wrapper("frame/settings", setup);
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root, policy, window, cx))
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
+    window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    let c = calls.borrow();
+    assert!(c.unexpected.is_empty(), "no sendFeedback or other unscripted call: {:?}", c.unexpected);
+    let links: Vec<&Value> = c.effects.iter().filter(|(n, _)| n == "openLink").map(|(_, a)| &a[0]).collect();
+    assert_eq!(links, [&json!("https://www.pavii.tech/products/dev-tools/docs/"); 2], "installation guide and documentation: {:?}", c.effects);
+    assert!(links.iter().all(|l| l.as_str().is_some_and(allowed_link)), "{links:?}");
+    let notes: Vec<&Value> = c.effects.iter().filter(|(n, _)| n == "notify").map(|(_, a)| &a[0]).collect();
+    assert_eq!(notes, [&json!({"title":"The feedback forum is coming soon.","level":"info"})], "feedback shows only the notice, never an error: {:?}", c.effects);
 }
 
 // The scripted answer to a `core` or `writeTextFile` call, recording it; None when nothing is scripted.

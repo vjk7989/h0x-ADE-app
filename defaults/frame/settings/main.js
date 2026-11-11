@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { core, run, theme, themes, fonts, updates, settings, layouts, shared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, props, closeOverlay, window } from "h0x";
+import { core, run, theme, themes, fonts, updates, settings, layouts, shared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, notify, props, closeOverlay, window } from "h0x";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -1068,17 +1068,51 @@ export default class Settings extends View {
   }
 
   info(t) {
-    const line = (text) => div().text_size(13).line_height("20px").text_color(t.dim).child(text);
+    const u = updates();
+    const open = (url) => () => {
+      const why = openLink(url);
+      if (why) notify({ title: "Can't open the link", body: why, level: "error" });
+    };
+    const link = (id, url, label) => div().id(id).cursor_pointer().text_color(t.accent).on_click(open(url)).child(`${label} \u2197`);
+    const center = (size, color) => (text) => h_flex().justify_center().text_size(size).line_height(`${Math.round(size * 1.5)}px`).text_color(color).child(text);
+    const small = center(12, t.dim);
+    const partner = (name, who, id, url, site) => h_flex()
+      .w_full()
+      .gap(12)
+      .px(14)
+      .py(8)
+      .items_center()
+      .child(div().flex_1().text_size(13).text_color(t.dim).child(name))
+      .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child(who))
+      .child(div().w(110).flex_none().text_size(13).child(link(id, url, site)));
     return v_flex()
       .w_full()
-      .child(this.heading(t, "HyperOx"))
-      .child(this.row(t, "HyperOx by Buckleson Group", "https://github.com/buckleson", div()))
-      .child(div().h(18))
-      .child(this.heading(t, "Source"))
-      .child(v_flex().gap(4)
-        .child(line("App: https://github.com/vjk7989/h0x-ADE-app"))
-        .child(line("Core: https://github.com/vjk7989/h0x-ADE-core"))
-        .child(line("Runtime: https://github.com/vjk7989/h0x-ADE-Runtime")));
+      .items_center()
+      .gap(10)
+      .child(h_flex().gap(12).items_center()
+        .child(image("frame/welcome/hyperox.png").w(40).h(40).rounded(8).flex_none())
+        .child(div().text_size(26).font_semibold().text_color(t.foreground).child("HyperOx")))
+      .child(center(14, t.muted)("Agentic development environment"))
+      .child(center(12.5, t.dim)("The desktop workspace for AI coding agents."))
+      .child(div().h(2))
+      .child(v_flex().items_center().gap(2)
+        .child(center(13, t.muted)("A secure space to build with AI coding agents. Your code and your"))
+        .child(h_flex().justify_center().gap(6).text_size(13).line_height("20px").text_color(t.muted)
+          .child("conversations stay on your own machine.")
+          .child(link("st-info-learn", "https://pavii.tech", "Learn more"))))
+      .child(div().h(2))
+      .child(h_flex().gap(8)
+        .child(this.button(t, "st-info-install", "Installation guide", open("https://www.pavii.tech/products/dev-tools/docs/")))
+        .child(this.button(t, "st-info-docs", "Documentation", open("https://www.pavii.tech/products/dev-tools/docs/")))
+        .child(this.button(t, "st-info-feedback", "Send feedback", () => notify({ title: "The feedback forum is coming soon.", level: "info" }))))
+      .child(div().h(2))
+      .child(v_flex().w(460).rounded(9).border_1().border_color(t.border).bg(t.raised)
+        .child(partner("Built by", "Team Pavii", "st-info-pavii", "https://pavii.tech", "pavii.tech"))
+        .child(div().h(1).bg(t.border))
+        .child(partner("Security & blockchain partner", "Buckleson", "st-info-buckleson", "https://buckleson.com", "buckleson.com")))
+      .child(div().h(2))
+      .child(small("Currently closed source (open source soon)"))
+      .child(small(`Version ${u.app.version} \u00b7 Core ${u.core.version || "unknown"} \u00b7 Open-source notices`));
   }
 
   // ----------------------------------------------------------------------
