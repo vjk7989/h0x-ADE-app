@@ -167,6 +167,13 @@
                       "content": {
                         "mod": "sessions"
                       }
+                    },
+                    {
+                      "id": "todo",
+                      "type": "block",
+                      "content": {
+                        "mod": "todo"
+                      }
                     }
                   ]
                 }

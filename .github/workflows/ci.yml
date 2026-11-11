@@ -165,7 +165,7 @@ jobs:
           ~/.bun/bin/bun scripts/docs.ts check
       - name: Check mod scripts
         if: matrix.platform == 'linux-x86_64'
-        run: ~/.bun/bin/bun test scripts/files.test.ts scripts/machine-add.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/rest.test.ts scripts/spaces.test.ts scripts/worktree.test.ts
+        run: ~/.bun/bin/bun test scripts/files.test.ts scripts/machine-add.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/rest.test.ts scripts/spaces.test.ts scripts/worktree.test.ts scripts/todo.test.ts
 
   # The real app, typed into a terminal: it opens in that folder (tests/launch_folder.rs).
   # Needs a desktop (Xvfb on Linux) and the pinned h0x-core release, whose
@@ -256,13 +256,15 @@ jobs:
           else
             "${run[@]}"
           fi
-      # A screenshot of Settings > Info for a person to look at (tests/launch_folder.rs).
-      - name: Upload the Info page screenshot
+      # Screenshots of Settings > Info and the To-do panel for a person to look at (tests/launch_folder.rs).
+      - name: Upload the Info page and To-do panel screenshots
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: info-page-${{ matrix.platform }}
-          path: ${{ runner.temp }}/info-page.png
+          path: |
+            ${{ runner.temp }}/info-page.png
+            ${{ runner.temp }}/todo-panel.png
           if-no-files-found: warn
 
   # Security advisories (RustSec) in the dependencies: deny.toml.

@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, shared, setShared, layout, settings } from "h0x";
+import { spaces, panes, run, openOverlay, theme, window, shared, setShared, layout, settings, nextCommand } from "h0x";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -12,23 +12,40 @@ function find(node, id) {
 }
 
 // The panels with a tab bar button. A list the welcome stored before Sessions
-// existed gains it once (shared "workspace.panels.added" remembers), so a
-// person who turns it off afterwards keeps it off.
+// or To-do existed gains each once (shared "workspace.panels.added" remembers),
+// so a person who turns one off afterwards keeps it off.
 function enabledPanels() {
   const stored = shared("workspace.panels");
-  if (!Array.isArray(stored)) return ["files", "changes", "sessions"];
+  if (!Array.isArray(stored)) return ["files", "changes", "sessions", "todo"];
   const added = Array.isArray(shared("workspace.panels.added")) ? shared("workspace.panels.added") : [];
-  if (added.includes("sessions")) return stored;
-  const next = stored.includes("sessions") ? stored : [...stored, "sessions"];
-  if (next !== stored) setShared("workspace.panels", next);
-  setShared("workspace.panels.added", [...added, "sessions"]);
+  const fresh = ["sessions", "todo"].filter((id) => !added.includes(id));
+  if (fresh.length === 0) return stored;
+  const next = [...stored, ...fresh.filter((id) => !stored.includes(id))];
+  if (next.length !== stored.length) setShared("workspace.panels", next);
+  setShared("workspace.panels.added", [...added, ...fresh]);
   return next;
 }
 
 export default class Tabs extends View {
-  init() {
+  init(_props, cx) {
     this.pressed = null;
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
+    cx.spawn(async (cx) => {
+      for (;;) {
+        if ((await nextCommand()) === "todo") this.toggleTodo();
+        cx.notify();
+      }
+    });
+  }
+
+  // tabs.todo: open the To-do panel and hand it the keyboard, or close it.
+  toggleTodo() {
+    if (!enabledPanels().includes("todo")) return;
+    const root = layout(), panel = find(root, "panel"), body = find(root, "panel-body");
+    if (panel && !panel.hidden && body?.active === "todo") { run("layout.hide", { id: "panel" }); return; }
+    run("layout.select", { stack: "panel-body", child: "todo" });
+    run("layout.show", { id: "panel" });
+    run("todo.focus");
   }
 
   // The side panel is remembered per space: switching shows that space's choice
@@ -110,6 +127,7 @@ export default class Tabs extends View {
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
+      .when(enabled.includes("todo"), el => el.child(panelButton("todo", "To-do", "mods/workspace-chrome/circle-check.svg")))
       .when(enabled.includes("sessions"), el => el.child(panelButton("sessions", "Sessions", "mods/workspace-chrome/clock.svg")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))

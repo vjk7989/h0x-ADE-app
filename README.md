@@ -75,6 +75,10 @@ If an agent changes the file while you have unsaved edits, HyperOx stops saving 
 
 After you save, idle agents in the same space get a one-line note naming the files you edited, so they re-read them before changing anything. Busy agents get it once they are idle. Files on another machine open read-only for now.
 
+## To-do lists
+
+Open **To-do** next to Files and Changes, or press `Ctrl+Shift+J` (`Cmd+Shift+J` on macOS): several lists, tasks with steps, `Space` to tick. They are Markdown files in the app's folder, the same in every space. See [docs/todo.md](docs/todo.md).
+
 ## Work on another machine
 
 Open **Settings → Machines** and pick a host from your SSH config. HyperOx connects over SSH, installs `h0x-core` there if it is missing, and lists that machine in the sidebar with its own spaces. Agents on a server keep running while your laptop sleeps.
