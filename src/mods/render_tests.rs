@@ -5305,7 +5305,7 @@ export default class Scenario extends Real {
           this.listKey(k, { shift: parts.includes('shift'), alt: parts.includes('alt') }, cx);
         } else if (verb === 'state') {
           if (this.ready) this.current();
-          note(JSON.stringify({ ready: this.ready, text: this.text, error: this.error, readonly: this.readonly, sel: this.sel,
+          note(JSON.stringify({ ready: this.ready, textLen: this.text.length, text: this.text.length > 65536 ? null : this.text, error: this.error, readonly: this.readonly, sel: this.sel,
             edit: this.edit ? this.edit.input.value() : null, pending: this.pending.length }));
         }
         cx.notify();
@@ -5612,7 +5612,8 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
     assert_eq!(host.borrow().files[TODO_TASKS], big, "the file is unchanged");
     let state = todo_state(cx, &host);
     assert_eq!(state["readonly"], json!(false), "still editable");
-    assert!(!state["text"].as_str().unwrap().contains("- [ ] New"), "the refused task is not shown either");
+    // The panel's text stays exactly what was read: the refused task is not shown either.
+    assert_eq!(state["textLen"], json!(big.chars().count()), "the refused task is not shown either");
     // The reason is the panel's error line (`this.error`); a description renders the panel afresh.
     assert_eq!(state["error"], json!(full), "the reason is shown");
     let tree = todo_describe(cx, window, session);
