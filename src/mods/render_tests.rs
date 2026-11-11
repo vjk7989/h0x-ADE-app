@@ -5597,8 +5597,9 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
     let state = todo_state(cx, &host);
     assert_eq!(state["readonly"], json!(false), "still editable");
     assert!(!state["text"].as_str().unwrap().contains("- [ ] New"), "the refused task is not shown either");
+    // The reason is the panel's error line (`this.error`); a description renders the panel afresh.
+    assert_eq!(state["error"], json!(full), "the reason is shown");
     let tree = todo_describe(cx, window, session);
-    assert!(tree.contains(full), "the reason is shown");
     assert!(tree.contains("todo-add") && !tree.contains(TODO_READ_FAIL), "the add box stays; not read-only");
 
     // A same-size change (a tick) at the limit is written over what was read.

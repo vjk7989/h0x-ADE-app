@@ -396,7 +396,9 @@ export default class Todo extends View {
   addTask(value, cx) {
     const title = escapeTitle(value).trim();
     if (!title) return;
-    if (this.commit((list) => { list.tasks.unshift({ title, done: false, steps: [], extra: [] }); }, cx)) this.sel = { k: "task", i: 0 };
+    // A refused add (a full list) keeps what was typed.
+    if (!this.commit((list) => { list.tasks.unshift({ title, done: false, steps: [], extra: [] }); }, cx)) return cx.notify();
+    this.sel = { k: "task", i: 0 };
     this.add.set_value("");
     cx.notify();
   }
