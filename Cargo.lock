@@ -3599,7 +3599,7 @@ dependencies = [
 
 [[package]]
 name = "h0x-ade"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "anyhow",
  "async-channel",
