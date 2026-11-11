@@ -19,6 +19,7 @@ const PANELS = [
   { id: "files", icon: "files", title: "Files", about: "The folder you're in as a tree. Open a file to read it, highlighted." },
   { id: "changes", icon: "git-compare", title: "Changes", about: "What your agents changed: every file with its diff, and a commit box." },
   { id: "sessions", icon: "clock", title: "Sessions", about: "Your agents' past sessions in this folder. Resume, pin, rename or delete one." },
+  { id: "todo", icon: "circle-check", title: "To-do", about: "Your to-do lists, kept as Markdown files. Tick tasks off with Space." },
 ];
 
 // The key bound to a command, as people press it: "Ctrl+Shift+P".
@@ -396,7 +397,7 @@ export default class Welcome extends View {
     // The list it makes already offers Sessions: the tab bar adds it to no one's choice.
     if (shared("workspace.panels") === undefined || shared("workspace.panels") === null) {
       setShared("workspace.panels", []);
-      setShared("workspace.panels.added", ["sessions"]);
+      setShared("workspace.panels.added", ["sessions", "todo"]); // the ids the tab bar migration knows (defaults/mods/tabs/main.js enabledPanels)
     }
     return v_flex()
       .gap(14)

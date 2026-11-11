@@ -142,6 +142,14 @@ floats included, even when the window is covered or minimized. No screen
 capture or permissions. It needs a running window that has drawn a frame;
 `H0X_ADE_HOME` selects the window, as for `status`.
 
+## The person's to-do lists
+
+They are global Markdown files in `~/.config/h0x-ade/todo/` (or
+`$H0X_ADE_HOME/todo/`). You may read and update them: `todo/<slug>.md` starts
+with `# Name`, tasks are `- [ ]` / `- [x]`, steps are indented two spaces. Add
+a new list as a file plus a `- [Name](slug.md)` line in `todo/lists.md`. The
+open panel reloads live. Never delete a list unless asked.
+
 ## Problems and safety
 
 If HyperOx misbehaves, `h0x-ade feedback "<what happened>"` drafts a report.

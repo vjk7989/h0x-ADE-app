@@ -177,6 +177,9 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
             let reply = match name {
                 _ if scripted.is_some() => scripted,
                 "readTextFile" if first == "/fixture/app/settings.json" || first == "/fixture/.ssh/config" => Some(Value::Null),
+                // The to-do panel's first run: no lists yet, so it creates the index and its first list.
+                "readTextFile" if first == "/fixture/app/todo/lists.md" || first == "/fixture/app/todo/tasks.md" => Some(Value::Null),
+                "writeTextFile" if first == "/fixture/app/todo/lists.md" || first == "/fixture/app/todo/tasks.md" => Some(Value::Null),
                 "readTextFile" => first
                     .as_str()
                     .and_then(|p| p.strip_prefix("/fixture/app/layouts/"))
@@ -2795,7 +2798,7 @@ fn shipped_layouts_and_keys() {
         layouts.insert(path.file_stem().unwrap().to_str().unwrap().to_owned());
     }
     assert_eq!(layouts, crate::window::shipped_layouts().into_iter().map(str::to_owned).collect());
-    let mod_commands = ["ribbon.next"];
+    let mod_commands = ["ribbon.next", "tabs.todo"];
     for text in [
         include_str!("../../defaults/keys.json"),
         include_str!("../../defaults/keys.macos.json"),
@@ -5202,17 +5205,20 @@ fn tab_bar_adds_sessions_to_a_stored_panel_list_once(cx: &mut TestAppContext) {
         let shared = host.borrow().shared.clone();
         (tree, shared)
     }
-    let added = json!(["sessions"]);
+    // Sessions and To-do are each added once to a list stored before they existed.
+    let added = json!(["sessions", "todo"]);
     for (before, after) in [
-        (json!(["files", "changes"]), json!(["files", "changes", "sessions"])),
+        (json!(["files", "changes"]), json!(["files", "changes", "sessions", "todo"])),
         // The welcome's "nothing picked yet".
-        (json!([]), json!(["sessions"])),
-        (json!(["sessions", "files"]), json!(["sessions", "files"])),
+        (json!([]), json!(["sessions", "todo"])),
+        (json!(["sessions", "files"]), json!(["sessions", "files", "todo"])),
+        (json!(["todo", "files"]), json!(["todo", "files", "sessions"])),
     ] {
         let (tree, shared) = tabs(cx, &staged, &[("workspace.panels", before.clone())]);
         assert_eq!(shared["workspace.panels"], after, "{before}");
         assert_eq!(shared["workspace.panels.added"], added, "{before}");
         assert!(tree.contains("panel-sessions"), "{before}: {tree}");
+        assert!(tree.contains("panel-todo"), "{before}: {tree}");
         // Shown again with what it stored: nothing changes.
         let (_, again) = tabs(cx, &staged, &[("workspace.panels", after.clone()), ("workspace.panels.added", added.clone())]);
         assert_eq!(again, shared, "{before}");
@@ -5224,22 +5230,707 @@ fn tab_bar_adds_sessions_to_a_stored_panel_list_once(cx: &mut TestAppContext) {
         assert_eq!(shared["workspace.panels"], off);
         assert_eq!(shared["workspace.panels.added"], added);
         assert!(!tree.contains("panel-sessions"), "{off}: {tree}");
+        assert!(!tree.contains("panel-todo"), "{off}: {tree}");
     }
 
-    // A fresh install stores nothing and shows all three.
+    // A list the Sessions migration already touched (an older app) gains To-do once; turned
+    // off after that, it stays off.
+    let older = json!(["sessions"]);
+    let (tree, shared) = tabs(cx, &staged, &[("workspace.panels", json!(["files"])), ("workspace.panels.added", older.clone())]);
+    assert_eq!(shared["workspace.panels"], json!(["files", "todo"]));
+    assert_eq!(shared["workspace.panels.added"], added);
+    assert!(tree.contains("panel-todo") && !tree.contains("panel-sessions"), "{tree}");
+    let (tree, shared) = tabs(cx, &staged, &[("workspace.panels", json!(["files"])), ("workspace.panels.added", added.clone())]);
+    assert_eq!(shared["workspace.panels"], json!(["files"]));
+    assert!(!tree.contains("panel-todo"), "{tree}");
+
+    // A fresh install stores nothing and shows all four.
     let (tree, shared) = tabs(cx, &staged, &[]);
     assert!(shared.is_empty(), "{shared:?}");
-    assert!(tree.contains("panel-files") && tree.contains("panel-changes") && tree.contains("panel-sessions"), "{tree}");
+    assert!(tree.contains("panel-files") && tree.contains("panel-changes") && tree.contains("panel-sessions") && tree.contains("panel-todo"), "{tree}");
 
-    // The welcome's own list already offers Sessions: the tab bar adds nothing to it.
+    // The welcome's own list already offers Sessions and To-do: the tab bar adds nothing to it.
     let host = sessions_host(&[], &[]);
     let tree = describe_sessions(cx, &staged, "frame/welcome", fixture(true, props(), updates("current", "current")), &host, "this.page = 3;");
-    assert!(tree.contains("Choose your panels") && tree.contains("Sessions"), "{tree}");
+    assert!(tree.contains("Choose your panels") && tree.contains("Sessions") && tree.contains("To-do"), "{tree}");
     let welcome = host.borrow().shared.clone();
     assert_eq!(welcome.get("workspace.panels"), Some(&json!([])));
     assert_eq!(welcome.get("workspace.panels.added"), Some(&added));
-    let picked: Vec<(&str, Value)> = vec![("workspace.panels", json!(["files"])), ("workspace.panels.added", added.clone())];
+    // What the welcome stored, with only Files picked: the tab bar shows just Files.
+    let stored = welcome.get("workspace.panels.added").cloned().unwrap_or(Value::Null);
+    let picked: Vec<(&str, Value)> = vec![("workspace.panels", json!(["files"])), ("workspace.panels.added", stored)];
     let (tree, shared) = tabs(cx, &staged, &picked);
     assert_eq!(shared["workspace.panels"], json!(["files"]));
-    assert!(!tree.contains("panel-sessions"), "{tree}");
+    assert!(!tree.contains("panel-sessions") && !tree.contains("panel-todo"), "{tree}");
+}
+
+// ---- To-do panel --------------------------------------------------------------------------
+
+/// The disk, shared values and host effects the to-do panel (and the tab bar and settings
+/// around it) meet: writes reject a stale `expected` like the app's, reads refuse over 1 MiB.
+#[derive(Default)]
+struct TodoHost {
+    files: BTreeMap<String, String>,
+    writes: Vec<(String, String, Value)>,
+    removes: Vec<String>,
+    effects: Vec<(String, Vec<Value>)>,
+    shared: BTreeMap<String, Value>,
+    commands: std::collections::VecDeque<String>,
+    notes: Vec<String>,
+}
+
+const TODO_LISTS: &str = "/fixture/app/todo/lists.md";
+const TODO_TASKS: &str = "/fixture/app/todo/tasks.md";
+const TODO_READ_FAIL: &str = "This list can't be read (over 1 MB or unreadable). It is left untouched and read-only.";
+
+const TODO_SCENARIO: &str = r#"
+import Real from './mods/todo/main.js';
+import { command, note } from 'fixture';
+export default class Scenario extends Real {
+  init(props, cx) {
+    super.init(props, cx);
+    cx.timer.every(50, cx => {
+      for (let c = command(); c !== null; c = command()) {
+        const at = c.indexOf(' '), verb = at < 0 ? c : c.slice(0, at), arg = c.slice(at + 1);
+        const [i, j] = arg.split('.').map(Number);
+        const row = arg.includes('.') ? { k: 'step', i, j } : { k: 'task', i };
+        if (verb === 'add') this.addTask(arg, cx);
+        else if (verb === 'tick') this.tick(row, cx);
+        else if (verb === 'delete') this.delete(row, cx);
+        else if (verb === 'undo') this.undo(cx);
+        else if (verb === 'reload') this.reload(cx);
+        else if (verb === 'focus') this.handle.focus();
+        else if (verb === 'key') {
+          const parts = arg.split('-'), k = parts.pop();
+          this.listKey(k, { shift: parts.includes('shift'), alt: parts.includes('alt') }, cx);
+        } else if (verb === 'state') {
+          if (this.ready) this.current();
+          note(JSON.stringify({ ready: this.ready, textLen: this.text.length, text: this.text.length > 16384 ? null : this.text, error: this.error, readonly: this.readonly, sel: this.sel,
+            edit: this.edit ? this.edit.input.value() : null, pending: this.pending.length }));
+        }
+        cx.notify();
+      }
+    });
+  }
+}
+"#;
+
+fn todo_host(files: &[(&str, &str)], shared: &[(&str, Value)]) -> Rc<RefCell<TodoHost>> {
+    Rc::new(RefCell::new(TodoHost {
+        files: files.iter().map(|(p, t)| (p.to_string(), t.to_string())).collect(),
+        shared: shared.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+        ..Default::default()
+    }))
+}
+
+fn todo_module(values: BTreeMap<String, Value>, host: Rc<RefCell<TodoHost>>) -> HostModule {
+    let mut module = HostModule::new("h0x");
+    for (name, value) in values {
+        module = module.function(name, move |_| Ok(to_host(&value)));
+    }
+    let h = host.clone();
+    module = module.function("shared", move |a| Ok(h.borrow().shared.get(a.string(0)?).map(to_host).unwrap_or(HostValue::Null)));
+    let h = host.clone();
+    module = module.function("setShared", move |a| {
+        h.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
+        Ok(HostValue::Null)
+    });
+    for name in ["run", "openOverlay", "closeOverlay", "notify", "playSound", "openLink"] {
+        let h = host.clone();
+        module = module.function(name, move |a| {
+            let args: Vec<Value> = (0..2).filter_map(|i| a.get(i).map(from_host)).collect();
+            if name == "run" {
+                let command = a.string(0)?;
+                if let Some(c) = crate::commands::find(command) {
+                    crate::commands::validate_args(c, args.get(1).unwrap_or(&Value::Null)).unwrap();
+                } else {
+                    // `<mod>.<command>` goes to a shipped mod's nextCommand().
+                    let shipped = command.split_once('.').is_some_and(|(m, _)| {
+                        Path::new(env!("CARGO_MANIFEST_DIR")).join("defaults/mods").join(m).join("main.js").is_file()
+                    });
+                    assert!(shipped, "unknown command {command}");
+                }
+            }
+            h.borrow_mut().effects.push((name.into(), args));
+            Ok(if name == "openOverlay" || name == "notify" { "fixture-overlay".into() } else { HostValue::Null })
+        });
+    }
+    for name in ["nextCommand", "watchFolder"] {
+        module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
+    }
+    for name in ["core", "exec"] {
+        module = module.async_function(name, |_| Ok(std::future::ready(Ok(to_host(&json!({"code":1,"stdout":"","stderr":"fixture"}))))));
+    }
+    let h = host.clone();
+    module = module.async_function("readTextFile", move |a| {
+        let text = h.borrow().files.get(a.string(0)?).cloned();
+        Ok(std::future::ready(match text {
+            Some(t) if t.len() > 1024 * 1024 => Err(HostError::new("the file is larger than 1 MiB")),
+            t => Ok(to_host(&json!(t))),
+        }))
+    });
+    let h = host.clone();
+    module = module.async_function("writeTextFile", move |a| {
+        let (path, text) = (a.string(0)?.to_owned(), a.string(1)?.to_owned());
+        let expected = a.get(2).map(from_host).unwrap_or(Value::Null);
+        let mut h = h.borrow_mut();
+        h.writes.push((path.clone(), text.clone(), expected.clone()));
+        let current = h.files.get(&path).map_or(Value::Null, |t| json!(t));
+        let result = if current != expected {
+            Err(HostError::new("stale snapshot: the file changed on disk"))
+        } else {
+            h.files.insert(path, text);
+            Ok(HostValue::Null)
+        };
+        Ok(std::future::ready(result))
+    });
+    module.async_function("removeAppFile", move |a| {
+        let path = a.string(0)?.to_owned();
+        let mut h = host.borrow_mut();
+        h.files.remove(&path);
+        h.removes.push(path);
+        Ok(std::future::ready(Ok(HostValue::Null)))
+    })
+}
+
+fn todo_policy(staged: &Staged, values: BTreeMap<String, Value>, host: &Rc<RefCell<TodoHost>>) -> Policy {
+    static NEXT_STORE: AtomicU64 = AtomicU64::new(0);
+    let (commands, notes) = (host.clone(), host.clone());
+    Policy::new()
+        .with_storage_path(staged.0.join(format!("todo-store-{}.json", NEXT_STORE.fetch_add(1, Ordering::Relaxed))))
+        .with_capabilities(Capabilities::new().storage(true).read_roots([staged.0.clone()]))
+        .with_host_module(todo_module(values, host.clone()))
+        .unwrap()
+        .with_host_module(
+            HostModule::new("fixture")
+                .function("command", move |_| {
+                    Ok(commands.borrow_mut().commands.pop_front().map_or(HostValue::Null, |c| to_host(&json!(c))))
+                })
+                .function("note", move |a| {
+                    notes.borrow_mut().notes.push(a.string(0)?.to_owned());
+                    Ok(HostValue::Null)
+                }),
+        )
+        .unwrap()
+}
+
+// The to-do panel driven by TODO_SCENARIO's commands.
+fn todo_root(staged: &Staged) -> PathBuf {
+    std::fs::write(staged.0.join("main.js"), TODO_SCENARIO).unwrap();
+    staged.0.clone()
+}
+
+// Loads the mod at `root` on `host` and lets its first tasks (the first load) finish.
+fn load_todo(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    root: PathBuf,
+    values: BTreeMap<String, Value>,
+    host: &Rc<RefCell<TodoHost>>,
+) -> (gpui::WindowHandle<Empty>, DescriptionSession) {
+    let policy = todo_policy(staged, values, host);
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(runtime, root, policy, window, cx))
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
+    (window, session)
+}
+
+// Hands the scenario one command; its 50 ms poll runs it and every write it starts finishes.
+fn todo_step(cx: &mut TestAppContext, host: &Rc<RefCell<TodoHost>>, command: &str) {
+    host.borrow_mut().commands.push_back(command.into());
+    cx.executor().advance_clock(std::time::Duration::from_millis(50));
+    cx.run_until_parked();
+}
+
+fn todo_state(cx: &mut TestAppContext, host: &Rc<RefCell<TodoHost>>) -> Value {
+    todo_step(cx, host, "state");
+    serde_json::from_str(host.borrow().notes.last().expect("the scenario reports its state")).unwrap()
+}
+
+fn todo_describe(cx: &mut TestAppContext, window: gpui::WindowHandle<Empty>, mut session: DescriptionSession) -> String {
+    let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    tree
+}
+
+fn todo_values() -> BTreeMap<String, Value> {
+    fixture(true, props(), updates("current", "current"))
+}
+
+// What was written to the tasks list, in order.
+fn todo_written(host: &Rc<RefCell<TodoHost>>) -> Vec<String> {
+    host.borrow().writes.iter().filter(|(p, _, _)| p == TODO_TASKS).map(|(_, t, _)| t.clone()).collect()
+}
+
+fn todo_effects(host: &Rc<RefCell<TodoHost>>, name: &str) -> Vec<Value> {
+    host.borrow().effects.iter().filter(|(n, _)| n == name).map(|(_, a)| json!(a)).collect()
+}
+
+fn todo_celebrations(host: &Rc<RefCell<TodoHost>>) -> usize {
+    todo_effects(host, "openOverlay").iter().filter(|a| a[0]["props"].get("celebrate").is_some()).count()
+}
+
+#[gpui::test]
+fn todo_first_open_creates_the_index_and_an_empty_tasks_list(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    let tree = todo_describe(cx, window, session);
+    assert_eq!(
+        host.borrow().writes,
+        vec![
+            (TODO_TASKS.to_string(), "# Tasks\n".to_string(), Value::Null),
+            (TODO_LISTS.to_string(), "- [Tasks](tasks.md)\n".to_string(), Value::Null),
+        ],
+        "both files are created, never over an existing one"
+    );
+    for expected in ["Tasks", "todo-add", "No tasks yet. Add one above.", "0 open"] {
+        assert!(tree.contains(expected), "missing {expected}: {tree}");
+    }
+    assert!(!tree.contains("All done for today") && !tree.contains(TODO_READ_FAIL), "{tree}");
+    assert_eq!(todo_celebrations(&host), 0, "nothing to celebrate in an empty list");
+}
+
+// A lost index (0 lists) is rebuilt; the tasks file already there is kept as it is.
+#[gpui::test]
+fn todo_lost_index_is_rebuilt_without_touching_an_existing_tasks_file(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tasks = "# Tasks\r\n- [ ] keep me\r\n";
+    let host = todo_host(&[(TODO_TASKS, tasks)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    let tree = todo_describe(cx, window, session);
+    assert_eq!(host.borrow().files[TODO_TASKS], tasks, "the existing list is not overwritten");
+    assert_eq!(host.borrow().files[TODO_LISTS], "- [Tasks](tasks.md)\n");
+    assert!(tree.contains("keep me") && tree.contains("1 open"), "{tree}");
+}
+
+#[gpui::test]
+fn todo_adding_and_ticking_tasks_writes_the_markdown_over_what_was_read(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] Old\n")], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    assert!(host.borrow().writes.is_empty(), "opening an existing list writes nothing");
+    for command in ["add Milk 🥛", "add Ship [ ] it", "add    ", "add two\nlines", "tick 2"] {
+        todo_step(cx, &host, command);
+    }
+    let written = todo_written(&host);
+    assert_eq!(
+        written,
+        [
+            "# Tasks\n- [ ] Milk 🥛\n- [ ] Old\n",
+            "# Tasks\n- [ ] Ship [ ] it\n- [ ] Milk 🥛\n- [ ] Old\n",
+            "# Tasks\n- [ ] two lines\n- [ ] Ship [ ] it\n- [ ] Milk 🥛\n- [ ] Old\n",
+            "# Tasks\n- [ ] two lines\n- [ ] Ship [ ] it\n- [x] Milk 🥛\n- [ ] Old\n",
+        ],
+        "a blank title adds nothing; a newline becomes a space"
+    );
+    // Each write expects the text the one before it left.
+    let writes = host.borrow().writes.clone();
+    assert_eq!(writes[0].2, json!("# Tasks\n- [ ] Old\n"));
+    for pair in writes.windows(2) {
+        assert_eq!(pair[1].2, json!(pair[0].1), "{writes:?}");
+    }
+    let state = todo_state(cx, &host);
+    assert_eq!((state["error"].clone(), state["pending"].clone()), (Value::Null, json!(0)), "{state}");
+    let tree = todo_describe(cx, window, session);
+    assert!(tree.contains("Completed (1)") && tree.contains("3 open") && tree.contains("Ship [ ] it"), "{tree}");
+    assert_eq!(todo_celebrations(&host), 0, "open tasks remain");
+}
+
+// AC4: an agent or editor changed the file after we read it; our tick lands on its text.
+#[gpui::test]
+fn todo_stale_write_rereads_and_reapplies_without_losing_the_other_edit(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] A\n- [ ] B\n")], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    let theirs = "# Tasks\n- [ ] From the agent\n- [ ] A\n  > a note the agent added\n- [ ] B\n";
+    host.borrow_mut().files.insert(TODO_TASKS.into(), theirs.into());
+    todo_step(cx, &host, "tick 0");
+    let merged = "# Tasks\n- [ ] From the agent\n- [x] A\n  > a note the agent added\n- [ ] B\n";
+    assert_eq!(host.borrow().files[TODO_TASKS], merged, "both changes are kept");
+    let writes = host.borrow().writes.clone();
+    assert_eq!(writes.len(), 2, "{writes:?}");
+    assert_eq!(writes[0].2, json!("# Tasks\n- [ ] A\n- [ ] B\n"), "the first write is refused as stale");
+    assert_eq!(writes[1], (TODO_TASKS.to_string(), merged.to_string(), json!(theirs)));
+    let state = todo_state(cx, &host);
+    assert_eq!(state["text"], json!(merged), "{state}");
+    assert_eq!((state["error"].clone(), state["pending"].clone()), (Value::Null, json!(0)), "{state}");
+
+    // A change made outside appears on the next look, and nothing is written for it.
+    let outside = "# Tasks\n- [ ] From the agent\n- [x] A\n  > a note the agent added\n- [ ] B\n- [ ] C\n";
+    host.borrow_mut().files.insert(TODO_TASKS.into(), outside.into());
+    todo_step(cx, &host, "reload");
+    assert_eq!(todo_state(cx, &host)["text"], json!(outside));
+    assert_eq!(host.borrow().writes.len(), 2);
+    let tree = todo_describe(cx, window, session);
+    assert!(tree.contains("From the agent") && tree.contains("C"), "{tree}");
+}
+
+// Big lists of ordinary tasks open: every size up to the panel's write limit finishes loading.
+#[gpui::test]
+fn todo_big_lists_of_many_tasks_open(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut seen = Vec::new();
+    for size in [8 * 1024, 32 * 1024, 64 * 1024] {
+        let mut text = String::from("# Tasks\n");
+        let mut n = 0;
+        while text.len() + 40 < size {
+            n += 1;
+            text.push_str(&format!("- [ ] task number {n}\n"));
+        }
+        let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &text)], &[]);
+        let (window, _session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+        let mut ready = false;
+        for _ in 0..200 {
+            if todo_state(cx, &host)["ready"] == json!(true) {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            cx.run_until_parked();
+        }
+        let _ = window.update(cx, |_, window, _| window.remove_window());
+        seen.push((size, n, ready));
+    }
+    assert!(seen.iter().all(|s| s.2), "size, tasks, opened: {seen:?}");
+}
+
+// AC8: a list over the 1 MiB read limit is shown read-only and never written; at the limit it is
+// an editable list that refuses to grow past the limit but still takes same-size changes.
+#[gpui::test]
+fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let head = "# Tasks\n- [ ] edge\n";
+    let full = "This list is full (64 KB, about 2,900 tasks). Start a new list for more tasks.";
+
+    // Exactly at the panel's 64 KB write limit (a few tasks and a long note, so the panel stays
+    // small enough to describe; `todo_big_lists_of_many_tasks_open` covers many short tasks):
+    // editable; an add would cross the limit and is refused with the reason, a tick is written.
+    let size = 64 * 1024;
+    let mut big = format!("{head}- [ ] second\n  - [ ] a step\n");
+    let pad = size - big.len() - "  > \n".len();
+    big.push_str(&format!("  > {}\n", "y".repeat(pad)));
+    assert_eq!(big.len(), size);
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &big)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    // A big list takes a moment of real time to arrive and parse; changes before that are ignored
+    // by design, so wait (in real time, not only on the test clock) until it is open.
+    let mut state = todo_state(cx, &host);
+    for _ in 0..200 {
+        if state["ready"] == json!(true) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        cx.run_until_parked();
+        state = todo_state(cx, &host);
+    }
+    assert_eq!(state["ready"], json!(true), "the list finished loading");
+    assert_eq!((state["readonly"].clone(), state["error"].clone()), (json!(false), Value::Null), "loads editable");
+    todo_step(cx, &host, "add New");
+    assert!(host.borrow().writes.is_empty(), "an add past the limit writes nothing: {}", host.borrow().writes.len());
+    assert_eq!(host.borrow().files[TODO_TASKS], big, "the file is unchanged");
+    let state = todo_state(cx, &host);
+    assert_eq!(state["readonly"], json!(false), "still editable");
+    // The panel's text stays exactly what was read: the refused task is not shown either.
+    assert_eq!(state["textLen"], json!(big.chars().count()), "the refused task is not shown either");
+    // The reason is the panel's error line (`this.error`); a description renders the panel afresh.
+    assert_eq!(state["error"], json!(full), "the reason is shown");
+    let tree = todo_describe(cx, window, session);
+    assert!(tree.contains("todo-add") && !tree.contains(TODO_READ_FAIL), "the add box stays; not read-only");
+
+    // A same-size change (a tick) at the limit is written over what was read.
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &big)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    for _ in 0..200 {
+        if todo_state(cx, &host)["ready"] == json!(true) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        cx.run_until_parked();
+    }
+    todo_step(cx, &host, "tick 0");
+    let ticked = big.replacen("- [ ] edge", "- [x] edge", 1);
+    assert_eq!(ticked.len(), size);
+    assert_eq!(todo_written(&host), [ticked.clone()], "a same-size change is written");
+    assert_eq!(host.borrow().writes[0].2, json!(big), "over what was read");
+    assert_eq!(host.borrow().files[TODO_TASKS], ticked);
+    let state = todo_state(cx, &host);
+    assert_eq!((state["readonly"].clone(), state["error"].clone()), (json!(false), Value::Null), "{}", state["error"]);
+    let tree = todo_describe(cx, window, session);
+    assert!(tree.contains("todo-add") && !tree.contains(full) && !tree.contains(TODO_READ_FAIL), "{tree}");
+
+    // Over the limit: read-only, the reason shown, never written.
+    for (size, refused) in [(1024 * 1024 + 1, true)] {
+        let big = format!("{head}{}\n", "x".repeat(size - head.len() - 1));
+        assert_eq!(big.len(), size);
+        let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &big)], &[]);
+        let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+        todo_step(cx, &host, "add New");
+        todo_step(cx, &host, "tick 0");
+        let state = todo_state(cx, &host);
+        assert_eq!(state["readonly"], json!(refused), "{size}: {state}");
+        let tree = todo_describe(cx, window, session);
+        assert_eq!(tree.contains(TODO_READ_FAIL), refused, "{size}: the reason is shown");
+        assert_eq!(tree.contains("todo-add"), !refused, "{size}: no add box on a read-only list");
+        assert!(host.borrow().writes.is_empty(), "{size}: {:?}", host.borrow().writes.len());
+        assert_eq!(host.borrow().files[TODO_TASKS], big, "left untouched");
+    }
+}
+
+// AC7: the pop-up comes once, on the tick that finishes the list; never on load, a step or a delete.
+#[gpui::test]
+fn todo_congratulations_open_once_on_the_last_tick_and_never_on_load(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let done = "# Tasks\n- [x] a\n- [x] b\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, done)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    todo_step(cx, &host, "reload");
+    let tree = todo_describe(cx, window, session);
+    assert!(tree.contains("All done for today"), "{tree}");
+    assert_eq!(todo_celebrations(&host), 0, "a finished list on load is not celebrated");
+
+    let host = todo_host(&[(TODO_LISTS, "- [Groceries](tasks.md)\n"), (TODO_TASKS, "# Groceries\n- [ ] a\n  - [ ] step\n- [x] b\n- [ ] c\n")], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    todo_step(cx, &host, "tick 0.0");
+    todo_step(cx, &host, "tick 0");
+    assert_eq!(todo_celebrations(&host), 0, "c is still open");
+    todo_step(cx, &host, "tick 2");
+    assert_eq!(
+        todo_effects(&host, "openOverlay"),
+        [json!([{"mod":"todo", "kind":"dialog", "width":400, "props":{"celebrate":"Groceries"}}])],
+        "the last open task is ticked"
+    );
+    // Unticking, then deleting the open one, finishes the list without a tick: no second pop-up.
+    todo_step(cx, &host, "tick 2");
+    todo_step(cx, &host, "delete 2");
+    todo_step(cx, &host, "reload");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Groceries\n- [x] a\n  - [x] step\n- [x] b\n");
+    assert_eq!(todo_celebrations(&host), 1);
+    todo_describe(cx, window, session);
+
+    // The pop-up itself: it reads and writes nothing.
+    let host = todo_host(&[], &[]);
+    let mut p = props();
+    p["celebrate"] = json!("Groceries");
+    let values = fixture(true, p, updates("current", "current"));
+    let (window, session) = load_todo(cx, &staged, staged.wrapper("mods/todo", ""), values, &host);
+    let tree = todo_describe(cx, window, session);
+    for expected in ["Congratulations!", "You finished every task in Groceries.", "todo-celebrate", "todo-close"] {
+        assert!(tree.contains(expected), "missing {expected}: {tree}");
+    }
+    assert!(host.borrow().writes.is_empty() && host.borrow().effects.is_empty());
+}
+
+// AC2: a delete posts an Undo notice; undo puts the task (with its steps) or the step back once.
+#[gpui::test]
+fn todo_delete_posts_an_undo_notice_and_undo_restores_it_once(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] a\n- [ ] b\n  - [ ] b1\n  > b's note\n- [ ] c\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    todo_step(cx, &host, "delete 1");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] a\n- [ ] c\n");
+    assert_eq!(
+        todo_effects(&host, "notify"),
+        [json!([{"title":"Task deleted", "body":"b", "timeout":8000, "action":{"name":"todo.undo"}}])]
+    );
+    todo_step(cx, &host, "undo");
+    assert_eq!(host.borrow().files[TODO_TASKS], start, "the task comes back where it was, steps and note included");
+    let count = host.borrow().writes.len();
+    todo_step(cx, &host, "undo");
+    assert_eq!(host.borrow().writes.len(), count, "a second undo does nothing");
+
+    todo_step(cx, &host, "delete 1.0");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] a\n- [ ] b\n- [ ] c\n");
+    assert_eq!(todo_effects(&host, "notify")[1][0]["title"], json!("Step deleted"));
+    todo_step(cx, &host, "undo");
+    assert_eq!(host.borrow().files[TODO_TASKS], start);
+    todo_describe(cx, window, session);
+}
+
+// AC2 keys, through the panel's key handler: arrows, Tab/Shift+Tab, Alt+Up, Space, Delete, Enter.
+#[gpui::test]
+fn todo_keys_move_indent_reorder_tick_delete_and_edit(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] one\n- [ ] two\n- [ ] three\n")], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    assert_eq!(todo_state(cx, &host)["sel"], json!({"k":"task", "i":0}));
+    todo_step(cx, &host, "key down");
+    todo_step(cx, &host, "key tab");
+    assert_eq!(todo_state(cx, &host)["sel"], json!({"k":"step", "i":0, "j":0}), "the new step stays selected");
+    todo_step(cx, &host, "key shift-tab");
+    assert_eq!(todo_state(cx, &host)["sel"], json!({"k":"task", "i":1}));
+    todo_step(cx, &host, "key alt-up");
+    assert_eq!(todo_state(cx, &host)["sel"], json!({"k":"task", "i":0}), "the moved task stays selected");
+    todo_step(cx, &host, "key space");
+    // The ticked task leaves the open ones; down twice passes one's empty "Add step" row.
+    for command in ["key down", "key down", "key delete"] {
+        todo_step(cx, &host, command);
+    }
+    assert_eq!(
+        todo_written(&host),
+        [
+            "# Tasks\n- [ ] one\n  - [ ] two\n- [ ] three\n",
+            "# Tasks\n- [ ] one\n- [ ] two\n- [ ] three\n",
+            "# Tasks\n- [ ] two\n- [ ] one\n- [ ] three\n",
+            "# Tasks\n- [x] two\n- [ ] one\n- [ ] three\n",
+            "# Tasks\n- [x] two\n- [ ] one\n",
+        ]
+    );
+    assert_eq!(todo_effects(&host, "notify")[0][0]["body"], json!("three"));
+    todo_step(cx, &host, "key up");
+    todo_step(cx, &host, "key up");
+    todo_step(cx, &host, "key enter");
+    let state = todo_state(cx, &host);
+    assert_eq!((state["sel"].clone(), state["edit"].clone()), (json!({"k":"task", "i":1}), json!("one")), "{state}");
+    todo_describe(cx, window, session);
+}
+
+// Tab under a task that already has steps: the moved task is the one selected, so Space ticks it.
+#[gpui::test]
+fn todo_tab_under_a_task_with_steps_keeps_the_moved_task_selected(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] one\n  - [ ] a\n- [ ] two\n")], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    for command in ["key down", "key tab", "key space"] {
+        todo_step(cx, &host, command);
+    }
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] one\n  - [ ] a\n  - [x] two\n");
+    todo_describe(cx, window, session);
+}
+
+// Real key presses reach the panel once it has the keyboard (todo.focus), and N types a new task.
+#[gpui::test]
+fn todo_key_presses_tick_and_add_tasks_in_a_mounted_panel(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] one\n- [ ] two\n")], &[]);
+    let root = todo_root(&staged);
+    gpui_shell::policy::set_default(todo_policy(&staged, todo_values(), &host));
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| FilesMounted(runtime.try_load(&root, window, cx).unwrap()));
+    let _root = window.update(cx, |mounted, _, _| mounted.0.clone()).unwrap();
+    let mut visual = gpui::VisualTestContext::from_window(*window, cx);
+    visual.run_until_parked();
+    host.borrow_mut().commands.push_back("focus".into());
+    files_wait(&mut visual, 50);
+    visual.update(|window, cx| {
+        window.activate_window();
+        window.draw(cx).clear(cx)
+    });
+    files_keys(&mut visual, "down space");
+    files_wait(&mut visual, 50);
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] one\n- [x] two\n");
+    files_keys(&mut visual, "n");
+    visual.simulate_input("Milk");
+    files_keys(&mut visual, "enter");
+    files_wait(&mut visual, 50);
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] Milk\n- [ ] one\n- [x] two\n");
+    // The box stays ready for the next one.
+    visual.simulate_input("Bread");
+    files_keys(&mut visual, "enter");
+    files_wait(&mut visual, 50);
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] Bread\n- [ ] Milk\n- [ ] one\n- [x] two\n");
+}
+
+// AC1: tabs.todo opens the panel on To-do and hands it the keyboard; pressed on it, it closes.
+#[gpui::test]
+fn tab_bar_todo_command_opens_focuses_and_closes_the_panel(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let open = [json!(["layout.select", {"stack":"panel-body", "child":"todo"}]), json!(["layout.show", {"id":"panel"}]), json!(["todo.focus"])];
+    for (hidden, active, shared, expected) in [
+        (true, "files", vec![], open.to_vec()),
+        (false, "files", vec![], open.to_vec()),
+        (false, "todo", vec![], vec![json!(["layout.hide", {"id":"panel"}])]),
+        // Hidden in Settings: the key does nothing.
+        (true, "files", vec![("workspace.panels", json!(["files"])), ("workspace.panels.added", json!(["sessions", "todo"]))], vec![]),
+    ] {
+        let host = todo_host(&[], &shared);
+        let mut values = todo_values();
+        values.insert("layout".into(), panel_layout(hidden, active));
+        let (window, session) = load_todo(cx, &staged, staged.wrapper("mods/tabs", "this.toggleTodo();"), values, &host);
+        let tree = todo_describe(cx, window, session);
+        assert_eq!(todo_effects(&host, "run"), expected, "hidden {hidden}, on {active}, {shared:?}");
+        assert_eq!(tree.contains("panel-todo"), shared.is_empty(), "{tree}");
+    }
+}
+
+// AC6: Settings → Look turns the To-do button on and off in workspace.panels; the files stay.
+#[gpui::test]
+fn settings_todo_toggle_edits_the_panel_list_and_keeps_the_files(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let files = [(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] keep\n")];
+    let all = json!(["files", "changes", "sessions", "todo"]);
+    for (stored, on, active, after, hides) in [
+        (Value::Null, false, "todo", json!(["files", "changes", "sessions"]), true),
+        (all.clone(), false, "files", json!(["files", "changes", "sessions"]), false),
+        (json!(["files"]), true, "files", json!(["files", "todo"]), false),
+        (json!(["todo", "files"]), true, "todo", json!(["files", "todo"]), false),
+    ] {
+        let shared: Vec<(&str, Value)> = if stored.is_null() { vec![] } else { vec![("workspace.panels", stored.clone())] };
+        let host = todo_host(&files, &shared);
+        let mut p = props();
+        p["section"] = json!("look");
+        let mut values = fixture(true, p, updates("current", "current"));
+        values.insert("layout".into(), panel_layout(false, active));
+        let setup = format!("this.setTodoPanel({on});");
+        let (window, session) = load_todo(cx, &staged, staged.wrapper("frame/settings", &setup), values, &host);
+        let tree = todo_describe(cx, window, session);
+        assert!(tree.contains("st-todo") && tree.contains("To-do list"), "{tree}");
+        let h = host.borrow();
+        assert_eq!(h.shared["workspace.panels"], after, "{stored} → {on}");
+        let hid = h.effects.iter().any(|(n, a)| n == "run" && a == &vec![json!("layout.hide"), json!({"id":"panel"})]);
+        assert_eq!(hid, hides, "{stored} → {on}: {:?}", h.effects);
+        assert!(h.removes.is_empty() && h.writes.iter().all(|(p, _, _)| !p.contains("/todo/")), "files are kept");
+        assert_eq!(h.files[TODO_TASKS], "# Tasks\n- [ ] keep\n");
+    }
+}
+
+// AC6: turned off in Settings on a fresh install, To-do stays off in the tab bar; on again, it is back.
+#[gpui::test]
+fn todo_turned_off_in_settings_stays_off_in_the_tab_bar(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[], &[]);
+    let mut p = props();
+    p["section"] = json!("look");
+    let (window, session) = load_todo(cx, &staged, staged.wrapper("frame/settings", "this.setTodoPanel(false);"), fixture(true, p.clone(), updates("current", "current")), &host);
+    todo_describe(cx, window, session);
+    let (window, session) = load_todo(cx, &staged, staged.wrapper("mods/tabs", ""), todo_values(), &host);
+    let tree = todo_describe(cx, window, session);
+    assert!(!tree.contains("panel-todo") && tree.contains("panel-sessions"), "{:?}: {tree}", host.borrow().shared);
+    let (window, session) = load_todo(cx, &staged, staged.wrapper("frame/settings", "this.setTodoPanel(true);"), fixture(true, p, updates("current", "current")), &host);
+    todo_describe(cx, window, session);
+    let (window, session) = load_todo(cx, &staged, staged.wrapper("mods/tabs", ""), todo_values(), &host);
+    let tree = todo_describe(cx, window, session);
+    assert!(tree.contains("panel-todo"), "{:?}: {tree}", host.borrow().shared);
+}
+
+#[test]
+fn todo_key_is_a_shipped_mod_command_on_every_platform() {
+    for (text, key) in [(include_str!("../../defaults/keys.json"), "ctrl-shift-j"), (include_str!("../../defaults/keys.macos.json"), "cmd-shift-j")] {
+        crate::keys::parse(text).unwrap();
+        assert_eq!(text.matches(&format!("\"{key}\"")).count(), 1, "{key} is bound once");
+        let sections: BTreeMap<String, BTreeMap<String, String>> = serde_json::from_str(text).unwrap();
+        assert_eq!(sections["global"].get(key).map(String::as_str), Some("tabs.todo"), "{key}");
+    }
+    // Not an app command: it goes to the tab bar mod, which acts on "todo".
+    assert!(crate::commands::find("tabs.todo").is_none());
+    assert!(include_str!("../../defaults/mods/tabs/main.js").contains("=== \"todo\") this.toggleTodo()"));
 }

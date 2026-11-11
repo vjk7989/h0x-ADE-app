@@ -82,6 +82,7 @@ first frame or during GPU recovery it reports an error instead of a PNG.
 | `programs.json` | how programs show (name, icon, tile), on top of the built-in table | live |
 | `icons/` | the shipped program icons | written by HyperOx (put your own elsewhere) |
 | `frame/` | the app's own screens (welcome, ...) | rewritten by HyperOx on every start: don't edit, it won't stick |
+| `todo/` | the person's to-do lists: `lists.md` (index) and one `<slug>.md` per list; see below | live (the open panel reloads) |
 | `view.json` | this screen's selected space/tab/pane, zoom, settled tabs, recent spaces and seen attention | written by HyperOx |
 | `shared.json`, `data/`, `seen.json`, `installed.json`, `window.json`, `windows.json` | mod state, bookkeeping, where the window was (size, maximized), mods' windows (spots, kept ones) | written by HyperOx |
 
@@ -89,6 +90,18 @@ Shared state is saved atomically in the background, with the latest change winni
 If `shared.json` is invalid, HyperOx logs a warning and keeps it as
 `shared.json.corrupt-<time>` before starting empty.
 `h0x-ade check` uses empty shared state in memory and leaves this file untouched.
+
+### To-do lists: `todo/`
+
+The person keeps global to-do lists (the same in every space) in `todo/`.
+You may read and update them by editing the files; the open panel picks
+changes up live. A list is `todo/<slug>.md`: the first line is `# Name`,
+tasks are `- [ ] text` / `- [x] text`, steps are tasks indented two spaces.
+Keep lines you don't understand. A new list is a new `<slug>.md`
+(lowercase letters, digits, `-`) plus a `- [Name](slug.md)` line in
+`todo/lists.md`, which sets the order; a file not named there isn't shown.
+Never delete a list or its file unless asked. Settings → Look can hide the
+panel; the files stay.
 
 ## The model: spaces, tabs, terminals
 
