@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-11-11
+
+A new Info page. Bundles h0x-core 0.1.14.
+
+### Changed
+
+- Settings → Info is redone: HyperOx, what it is, an installation guide and documentation, feedback (coming soon), built by Team Pavii, with Buckleson as security and blockchain partner, and the versions in use.
+
+### Security
+
+- Mods installed by a person can no longer use the names reserved for the app's own pages.
+
 ## [0.1.17] - 2026-11-11
 
 A clean start from the terminal. Bundles h0x-core 0.1.14.
