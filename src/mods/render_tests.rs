@@ -5590,7 +5590,7 @@ fn todo_big_lists_of_many_tasks_open(cx: &mut TestAppContext) {
         let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &text)], &[]);
         let (window, _session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
         let mut ready = false;
-        for _ in 0..200 {
+        for _ in 0..2400 {
             if todo_state(cx, &host)["ready"] == json!(true) {
                 ready = true;
                 break;
@@ -5626,7 +5626,7 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
     // A big list takes a moment of real time to arrive and parse; changes before that are ignored
     // by design, so wait (in real time, not only on the test clock) until it is open.
     let mut state = todo_state(cx, &host);
-    for _ in 0..200 {
+    for _ in 0..2400 {
         if state["ready"] == json!(true) {
             break;
         }
@@ -5651,13 +5651,17 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
     // A same-size change (a tick) at the limit is written over what was read.
     let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &big)], &[]);
     let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
-    for _ in 0..200 {
+    // Up to a minute: Windows' debug runner can be slow to open a 64 KB list; a tick before that is ignored.
+    let mut ready = false;
+    for _ in 0..2400 {
         if todo_state(cx, &host)["ready"] == json!(true) {
+            ready = true;
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
         cx.run_until_parked();
     }
+    assert!(ready, "the list finished loading before the tick");
     todo_step(cx, &host, "tick 0");
     // The write of a 64 KB list lands a moment later on a slow runner: wait for it (real time).
     for _ in 0..200 {
