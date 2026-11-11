@@ -2,9 +2,9 @@
 
 ## [Unreleased]
 
-## [0.1.19] - 2026-11-11
+## [0.1.20] - 2026-11-11
 
-A to-do list. Bundles h0x-core 0.1.14.
+A to-do list. Bundles h0x-core 0.1.14. (0.1.19 was tagged but never published: a flaky test stopped its release.)
 
 ### Added
 
