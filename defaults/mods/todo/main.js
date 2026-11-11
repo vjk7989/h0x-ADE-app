@@ -267,15 +267,18 @@ export default class Todo extends View {
   askName(mode, cx) {
     this.menu = false;
     const value = mode === "rename" ? this.name() : "";
-    const input = this.field(value, "List name", (v, cx) => { cx.spawn(async (cx) => this.finishName(v, cx)); }, (v, cx) => { if (this.naming?.input === input) this.naming = null; cx.notify(); });
+    // The mode is read now: the blur that follows Enter clears `naming` before the task runs.
+    const input = this.field(value, "List name", (v, cx) => {
+      const mode = this.naming?.input === input ? this.naming.mode : null;
+      this.naming = null; this.handle.focus(); cx.notify();
+      cx.spawn(async (cx) => this.finishName(v, mode, cx));
+    }, (v, cx) => { if (this.naming?.input === input) this.naming = null; cx.notify(); });
     this.naming = { mode, input };
     cx.notify();
   }
 
-  async finishName(value, cx) {
-    const { mode } = this.naming ?? {};
+  async finishName(value, mode, cx) {
     const slug0 = this.cur;
-    this.naming = null; this.handle.focus();
     const name = escapeTitle(value).trim();
     if (!mode || !name) return cx.notify();
     try {
