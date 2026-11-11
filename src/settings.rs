@@ -97,6 +97,12 @@ fn preset(name: &str) -> Option<&'static Palette> {
 const THEMES: &[(&str, &str)] = &[
     ("atom-one-dark", include_str!("../defaults/themes/atom-one-dark.json")),
     ("win98", include_str!("../defaults/themes/win98.json")),
+    ("amber-minimal", include_str!("../defaults/themes/amber-minimal.json")),
+    ("candyland", include_str!("../defaults/themes/candyland.json")),
+    ("claymorphism", include_str!("../defaults/themes/claymorphism.json")),
+    ("darkmatter", include_str!("../defaults/themes/darkmatter.json")),
+    ("soft-pop", include_str!("../defaults/themes/soft-pop.json")),
+    ("neo-brutalism", include_str!("../defaults/themes/neo-brutalism.json")),
 ];
 
 /// `themes/<name>.json`: a palette, plus `colors` overrides like settings.json's.
@@ -1298,5 +1304,133 @@ mod tests {
         assert!(entry("check_updates").contains("(default `true`)"), "{:?}", entry("check_updates"));
         let off = serde_json::to_value(serde_json::from_str::<Person>(r#"{"check_updates":false}"#).unwrap()).unwrap();
         assert_eq!(off.get("check_updates"), Some(&serde_json::json!(false)), "settings.json drops the documented check_updates key: {off}");
+    }
+
+    // The six colour themes (TH-1): (id, light, primary, background), the hex values converted
+    // here from .cache/reports/THEMES-SOURCE.md's oklch (primary and background tokens).
+    const NEW_THEMES: [(&str, bool, u32, u32); 6] = [
+        ("amber-minimal", false, 0xf59e0b, 0x171717),
+        ("candyland", false, 0xff99cc, 0x1a1d23),
+        ("claymorphism", false, 0x818cf8, 0x1e1b18),
+        ("darkmatter", false, 0xe78a53, 0x121113),
+        ("soft-pop", true, 0x4f46e5, 0xf7f9f3),
+        ("neo-brutalism", true, 0xff3333, 0xffffff),
+    ];
+
+    // A shipped theme as the app shows it: parsed, then resolved with its `colors`.
+    fn shipped(name: &str) -> (Palette, Theme) {
+        let text = THEMES.iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("{name} is not shipped")).1;
+        let (p, o) = parse_theme_file(name, text).unwrap_or_else(|e| panic!("{e}"));
+        let t = resolve(&p, &o);
+        (p, t)
+    }
+
+    #[test]
+    fn the_six_colour_themes_ship_beside_the_existing_presets_and_themes() {
+        for (name, text) in THEMES {
+            parse_theme_file(name, text).unwrap_or_else(|e| panic!("{e}"));
+        }
+        let names: Vec<&str> = THEMES.iter().map(|(n, _)| *n).collect();
+        for want in ["atom-one-dark", "win98", "amber-minimal", "candyland", "claymorphism", "darkmatter", "soft-pop", "neo-brutalism"] {
+            assert!(names.contains(&want), "{want} is not shipped: {names:?}");
+        }
+        assert_eq!(names.len(), 8, "{names:?}");
+        assert_eq!(PRESETS, ["graphite", "ink", "moss", "paper"]);
+        for name in PRESETS {
+            assert!(preset(name).is_some(), "{name}");
+            assert!(!names.contains(name), "a theme file never shadows the preset {name}");
+        }
+        // Ids are lowercase-dashed: the Look picker shows "amber minimal" for amber-minimal.
+        for (name, ..) in NEW_THEMES {
+            assert!(name.chars().all(|c| c.is_ascii_lowercase() || c == '-') && !name.starts_with('-') && !name.ends_with('-'), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_new_themes_are_dark_or_light_as_designed_and_presets_keep_their_side() {
+        // theme_is_light and the Look picker's Light/Dark sections go by is_light(background).
+        for (name, light, ..) in NEW_THEMES {
+            let (p, _) = shipped(name);
+            assert_eq!(is_light(p.background), light, "{name}: background {}", hex(p.background));
+        }
+        for (name, light) in [("graphite", false), ("ink", false), ("moss", false), ("paper", true)] {
+            assert_eq!(is_light(preset(name).unwrap().background), light, "{name}");
+        }
+        assert!(!theme_is_light("graphite"));
+        assert!(theme_is_light("paper"));
+        // An unknown name is never light (and never panics).
+        assert!(!theme_is_light("no-such-theme-th-t") && !theme_exists("no-such-theme-th-t"));
+        assert!(!theme_is_light(""));
+    }
+
+    #[test]
+    fn the_new_themes_keep_terminal_and_panel_text_readable() {
+        fn channel(c: u32, shift: u32) -> f64 {
+            let v = ((c >> shift) & 255) as f64 / 255.0;
+            if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        }
+        fn luminance(c: u32) -> f64 {
+            0.2126 * channel(c, 16) + 0.7152 * channel(c, 8) + 0.0722 * channel(c, 0)
+        }
+        fn contrast(a: u32, b: u32) -> f64 {
+            let (x, y) = (luminance(a), luminance(b));
+            (x.max(y) + 0.05) / (x.min(y) + 0.05)
+        }
+        let rgb = |t: &Theme, k: &str| {
+            let v = t.get(k).unwrap_or_else(|| panic!("no {k}"));
+            assert!(v.len() == 7 && v.starts_with('#'), "{k} {v} is not #rrggbb");
+            u32::from_str_radix(&v[1..], 16).unwrap()
+        };
+        // The formula itself: black on white is 21:1, a color on itself 1:1.
+        assert!((contrast(0x000000, 0xffffff) - 21.0).abs() < 1e-9);
+        assert!((contrast(0x777777, 0x777777) - 1.0).abs() < 1e-9);
+        for (name, ..) in NEW_THEMES {
+            let (_, t) = shipped(name);
+            let bg = rgb(&t, "background");
+            for key in ["foreground", "terminal_foreground"] {
+                let ratio = contrast(rgb(&t, key), bg);
+                assert!(ratio >= 7.0, "{name}: {key} on background is {ratio:.2}:1, under 7:1");
+            }
+            for i in (1..=7).chain(9..=15) {
+                let ratio = contrast(rgb(&t, &format!("ansi{i}")), bg);
+                assert!(ratio >= 3.0, "{name}: ansi{i} {} on {} is {ratio:.2}:1, under 3:1", t[&format!("ansi{i}")], t["background"]);
+            }
+        }
+    }
+
+    #[test]
+    fn the_new_themes_keep_their_source_primary_and_background() {
+        let near = |got: &str, want: u32| {
+            let got = u32::from_str_radix(got.trim_start_matches('#').get(..6).unwrap_or(""), 16).unwrap_or_else(|_| panic!("{got} is not hex"));
+            [16, 8, 0].iter().all(|s| (((got >> s) & 255) as i32 - ((want >> s) & 255) as i32).abs() <= 2)
+        };
+        for (name, _, primary, background) in NEW_THEMES {
+            let (p, t) = shipped(name);
+            for key in ["accent", "cursor"] {
+                assert!(near(&t[key], primary), "{name}: {key} {} is not the source primary #{primary:06x} (±2)", t[key]);
+            }
+            assert!(near(&t["background"], background), "{name}: background {} is not #{background:06x}", t["background"]);
+            assert!(near(&hex(p.background), background), "{name}: the terminal background {} is not #{background:06x}", hex(p.background));
+        }
+        // ±2 is a real bound: 3 off in one channel is not the source.
+        assert!(!near("#f5a10b", 0xf59e0b) && near("#f7a00d", 0xf59e0b));
+    }
+
+    #[test]
+    fn a_broken_copy_of_a_new_theme_is_refused_with_the_bad_key_named() {
+        let text = THEMES.iter().find(|(n, _)| *n == "neo-brutalism").unwrap().1;
+        let file: serde_json::Value = serde_json::from_str(text).unwrap();
+        let broken = |change: &dyn Fn(&mut serde_json::Value)| {
+            let mut f = file.clone();
+            change(&mut f);
+            parse_theme_file("neo-brutalism", &f.to_string()).err().unwrap_or_else(|| panic!("accepted {f}"))
+        };
+        assert!(broken(&|f| f["cursor"] = "#ff333".into()).contains("cursor"));
+        assert!(broken(&|f| f["background"] = "".into()).contains("background"));
+        assert!(broken(&|f| { f["ansi"].as_array_mut().unwrap().pop(); }).contains("neo-brutalism"));
+        assert!(broken(&|f| f["colors"]["accent"] = "red".into()).contains("colors.accent"));
+        assert!(broken(&|f| f["radius"] = 0.into()).contains("radius"), "unknown keys are refused, not ignored");
+        assert!(parse_theme_file("neo-brutalism", "").is_err());
+        assert!(parse_theme_file("neo-brutalism", "null").is_err());
     }
 }

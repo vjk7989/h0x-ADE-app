@@ -415,6 +415,7 @@ pub struct AppWindow {
     core_generation: u64,
     checking_closed: bool,
     documents_watching: bool,
+    spaces_share: crate::spaces_share::State,
     draining: bool,
     changing_terminals: HashSet<String>,
     /// Closed terminals stay excluded until kill completes and a listing drops them.
@@ -520,6 +521,7 @@ impl AppWindow {
             core_generation: 0,
             checking_closed: false,
             documents_watching: false,
+            spaces_share: Default::default(),
             draining: false,
             changing_terminals: HashSet::new(),
             closing_terminals: HashMap::new(),
@@ -1823,8 +1825,21 @@ impl AppWindow {
         }
     }
 
+    /// Tell the core our local spaces (debounced, only when they changed): /projects lists them.
+    fn share_spaces(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(epoch) = self.spaces_share.changed(crate::spaces_share::spaces_payload(&self.model)) else { return };
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(crate::spaces_share::DEBOUNCE).await;
+            let Some(payload) = this.update(cx, |this, _| this.spaces_share.due(epoch)).ok().flatten() else { return };
+            let sent = payload.clone();
+            let outcome = cx.background_executor().spawn(async move { crate::spaces_share::send(&sent) }).await;
+            let _ = this.update(cx, |this, _| this.spaces_share.finished(payload, outcome));
+        }).detach();
+    }
+
     fn flush_documents(&mut self, refresh: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.draining || !self.documents_watching { return; }
+        self.share_spaces(window, cx);
         let generation = self.core_generation;
         for (machine, slot) in &mut self.documents {
             slot.dirty |= refresh;

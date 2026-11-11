@@ -465,6 +465,29 @@ fn a_shell_launch_opens_hyperox_in_its_folder() {
     let saved = env.command(EXE).arg("shot").arg(&shot).stdin(Stdio::null()).output();
     eprintln!("info page: settings {:?}, screenshot {} {:?}", opened.map(|o| o.status), shot.display(), saved.map(|o| (o.status, String::from_utf8_lossy(&o.stderr).into_owned())));
 
+    // For a person to look at, not an assertion: Settings > Look with the shipped themes, then the
+    // window in a light and a dark new theme (artifact `info-page-<platform>`). A light theme is
+    // the layout's light half, so the appearance is set to match through settings.json.
+    let shots = std::env::var_os("RUNNER_TEMP").map(PathBuf::from).unwrap_or_else(|| root.clone());
+    let _ = env.command(EXE).args(["do", "overlay.close"]).stdin(Stdio::null()).output();
+    let opened = env.command(EXE).args(["do", "app.settings", "--section", "look"]).stdin(Stdio::null()).output();
+    std::thread::sleep(Duration::from_secs(3));
+    let saved = env.command(EXE).arg("shot").arg(shots.join("look-themes.png")).stdin(Stdio::null()).output();
+    eprintln!("look page: settings {:?}, screenshot {:?}", opened.map(|o| o.status), saved.map(|o| (o.status, String::from_utf8_lossy(&o.stderr).into_owned())));
+    let _ = env.command(EXE).args(["do", "overlay.close"]).stdin(Stdio::null()).output();
+    for (theme, appearance) in [("neo-brutalism", "light"), ("amber-minimal", "dark")] {
+        let settings = env.home.join("settings.json");
+        let mut person: Value = std::fs::read_to_string(&settings).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(|| serde_json::json!({}));
+        if let Some(object) = person.as_object_mut() {
+            object.insert("appearance".into(), appearance.into());
+            let _ = std::fs::write(&settings, serde_json::to_string_pretty(&person).unwrap());
+        }
+        let applied = env.command(EXE).args(["do", "app.theme", "--name", theme]).stdin(Stdio::null()).output();
+        std::thread::sleep(Duration::from_secs(3));
+        let saved = env.command(EXE).arg("shot").arg(shots.join(format!("theme-{theme}.png"))).stdin(Stdio::null()).output();
+        eprintln!("theme {theme}: {:?}, screenshot {:?}", applied.map(|o| (o.status, String::from_utf8_lossy(&o.stdout).into_owned())), saved.map(|o| (o.status, String::from_utf8_lossy(&o.stderr).into_owned())));
+    }
+
     // Quit; nothing of HyperOx is left running.
     let _ = env.command(EXE).args(["do", "app.quit"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
     #[cfg(windows)]
