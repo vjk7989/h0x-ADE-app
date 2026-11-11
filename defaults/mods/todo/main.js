@@ -137,7 +137,17 @@ export default class Todo extends View {
     });
   }
 
+  // Never a silent hang: anything unexpected while opening a list is shown, read-only.
   async openList(slug, cx) {
+    try { await this.openListFrom(slug, cx); }
+    catch (e) {
+      if (this.cur !== slug) return;
+      this.readonly = true; this.ready = true; this.error = `Couldn't open this list: ${e?.message ?? e}`;
+      cx.notify();
+    }
+  }
+
+  async openListFrom(slug, cx) {
     while (this.flushing) await cx.sleep(50);
     this.cur = slug; this.pending = []; this.edit = null; this.error = null; this.readonly = false;
     localStorage.setItem("todo.list", slug);
