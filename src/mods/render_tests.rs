@@ -5289,8 +5289,15 @@ import { command, note } from 'fixture';
 export default class Scenario extends Real {
   init(props, cx) {
     super.init(props, cx);
+    // `cut`: commands the sandbox cut off before they finished (a script call over its 500 ms
+    // real-time budget is stopped uncatchably), in order, as each next command starts; `slowMs`: the
+    // slowest finished command.
+    this.cut = []; this.running = null; this.slowMs = 0;
     cx.timer.every(50, cx => {
       for (let c = command(); c !== null; c = command()) {
+        if (this.running !== null) this.cut.push(this.running);
+        this.running = c;
+        const started = Date.now();
         const at = c.indexOf(' '), verb = at < 0 ? c : c.slice(0, at), arg = c.slice(at + 1);
         const [i, j] = arg.split('.').map(Number);
         const row = arg.includes('.') ? { k: 'step', i, j } : { k: 'task', i };
@@ -5307,8 +5314,11 @@ export default class Scenario extends Real {
           if (this.ready) this.current();
           note(JSON.stringify({ ready: this.ready, textLen: this.text.length, text: this.text.length > 16384 ? null : this.text, error: this.error, readonly: this.readonly, sel: this.sel,
             edit: this.edit ? this.edit.input.value() : null, pending: this.pending.length, cur: this.cur, badIndex: Boolean(this.badIndex),
-            confirming: this.confirming, naming: Boolean(this.naming), flushing: Boolean(this.flushing) }));
+            confirming: this.confirming, naming: Boolean(this.naming), flushing: Boolean(this.flushing),
+            firstDone: this.list?.tasks[0]?.done ?? null, cut: this.cut, slowMs: this.slowMs }));
         }
+        this.running = null;
+        this.slowMs = Math.max(this.slowMs, Date.now() - started);
         cx.notify();
       }
     });
@@ -5447,9 +5457,19 @@ fn todo_step(cx: &mut TestAppContext, host: &Rc<RefCell<TodoHost>>, command: &st
     cx.run_until_parked();
 }
 
+// A fresh report, never the one before: a "state" the sandbox cut off (see TODO_SCENARIO's `cut`)
+// notes nothing, so it is asked again.
 fn todo_state(cx: &mut TestAppContext, host: &Rc<RefCell<TodoHost>>) -> Value {
-    todo_step(cx, host, "state");
-    serde_json::from_str(host.borrow().notes.last().expect("the scenario reports its state")).unwrap()
+    let before = host.borrow().notes.len();
+    for _ in 0..20 {
+        todo_step(cx, host, "state");
+        if host.borrow().notes.len() > before {
+            break;
+        }
+    }
+    let host = host.borrow();
+    assert!(host.notes.len() > before, "the scenario reports its state");
+    serde_json::from_str(host.notes.last().unwrap()).unwrap()
 }
 
 fn todo_describe(cx: &mut TestAppContext, window: gpui::WindowHandle<Empty>, mut session: DescriptionSession) -> String {
@@ -5650,15 +5670,27 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
     }
     assert_eq!(state["ready"], json!(true), "the list finished loading");
     assert_eq!((state["readonly"].clone(), state["error"].clone()), (json!(false), Value::Null), "loads editable");
-    todo_step(cx, &host, "add New");
-    assert!(host.borrow().writes.is_empty(), "an add past the limit writes nothing: {}", host.borrow().writes.len());
+    // The sandbox stops a script call after 500 ms of real time, uncatchably (gpui-shell's task
+    // budget). Parsing, serializing and sizing a 64 KB list can take that long on a loaded Windows
+    // debug runner: CI saw the tick below never reach its write. A command the scenario reports as
+    // cut off did not run to its end (the panel makes the change only after the slow part), so it
+    // is sent again; a command that finished is checked as it is.
+    let cuts = |state: &Value, command: &str| state["cut"].as_array().map_or(0, |c| c.iter().filter(|c| *c == command).count());
+    for _ in 0..20 {
+        let before = cuts(&state, "add New");
+        todo_step(cx, &host, "add New");
+        state = todo_state(cx, &host);
+        if cuts(&state, "add New") == before {
+            break;
+        }
+    }
+    assert!(host.borrow().writes.is_empty(), "an add past the limit writes nothing: {} ({state})", host.borrow().writes.len());
     assert_eq!(host.borrow().files[TODO_TASKS], big, "the file is unchanged");
-    let state = todo_state(cx, &host);
-    assert_eq!(state["readonly"], json!(false), "still editable");
+    assert_eq!(state["readonly"], json!(false), "still editable: {state}");
     // The panel's text stays exactly what was read: the refused task is not shown either.
-    assert_eq!(state["textLen"], json!(big.chars().count()), "the refused task is not shown either");
+    assert_eq!(state["textLen"], json!(big.chars().count()), "the refused task is not shown either: {state}");
     // The reason is the panel's error line (`this.error`); a description renders the panel afresh.
-    assert_eq!(state["error"], json!(full), "the reason is shown");
+    assert_eq!(state["error"], json!(full), "the reason is shown: {state}");
     let tree = todo_describe(cx, window, session);
     assert!(tree.contains("todo-add") && !tree.contains(TODO_READ_FAIL), "the add box stays; not read-only");
 
@@ -5666,28 +5698,30 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
     let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &big)], &[]);
     let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
     // Up to a minute: Windows' debug runner can be slow to open a 64 KB list; a tick before that is ignored.
-    let mut ready = false;
+    let mut state = todo_state(cx, &host);
     for _ in 0..2400 {
-        if todo_state(cx, &host)["ready"] == json!(true) {
-            ready = true;
+        if state["ready"] == json!(true) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
         cx.run_until_parked();
+        state = todo_state(cx, &host);
     }
-    assert!(ready, "the list finished loading before the tick");
-    todo_step(cx, &host, "tick 0");
-    // The write of a 64 KB list lands a moment later on a slow runner: wait for it (real time).
-    for _ in 0..200 {
-        if !host.borrow().writes.is_empty() {
+    assert_eq!(state["ready"], json!(true), "the list finished loading before the tick: {state}");
+    // The panel's write starts in the same script call as the tick, so it is there once the tick
+    // ran; a tick cut off before it changed anything (still not done, nothing written) is sent again.
+    for _ in 0..20 {
+        let before = cuts(&state, "tick 0");
+        todo_step(cx, &host, "tick 0");
+        state = todo_state(cx, &host);
+        let untouched = state["firstDone"] == json!(false) && host.borrow().writes.is_empty();
+        if cuts(&state, "tick 0") == before || !untouched {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-        cx.run_until_parked();
     }
     let ticked = big.replacen("- [ ] edge", "- [x] edge", 1);
     assert_eq!(ticked.len(), size);
-    assert_eq!(todo_written(&host), [ticked.clone()], "a same-size change is written");
+    assert_eq!(todo_written(&host), [ticked.clone()], "a same-size change is written; the panel: {state}");
     assert_eq!(host.borrow().writes[0].2, json!(big), "over what was read");
     assert_eq!(host.borrow().files[TODO_TASKS], ticked);
     let state = todo_state(cx, &host);

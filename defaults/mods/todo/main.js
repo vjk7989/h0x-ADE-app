@@ -200,8 +200,11 @@ export default class Todo extends View {
     if (mut(list) === false) return false;
     const next = serializeList(list);
     if (!fits(next)) { this.error = FULL; cx.notify(); return false; }
-    this.setText(next);
-    this.pending.push(mut);
+    // The sandbox cuts off a script call that runs too long (500 ms), uncatchably: all the slow
+    // work (parsing a big list) is done before anything changes, and the change is queued before
+    // it is shown, so a cut-off change is never shown without being queued for writing.
+    const shown = parseList(next);
+    this.pending.push(mut); this.text = next; this.list = shown;
     this.flush(cx);
     cx.notify();
     return true;
