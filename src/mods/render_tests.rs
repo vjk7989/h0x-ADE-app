@@ -5597,12 +5597,15 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
     assert_eq!(big.len(), size);
     let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &big)], &[]);
     let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
-    // A 1 MiB list takes a moment to read and parse; changes before that are ignored by design.
+    // A big list takes a moment of real time to arrive and parse; changes before that are ignored
+    // by design, so wait (in real time, not only on the test clock) until it is open.
     let mut state = todo_state(cx, &host);
     for _ in 0..200 {
         if state["ready"] == json!(true) {
             break;
         }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        cx.run_until_parked();
         state = todo_state(cx, &host);
     }
     assert_eq!(state["ready"], json!(true), "the list finished loading");
@@ -5626,6 +5629,8 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
         if todo_state(cx, &host)["ready"] == json!(true) {
             break;
         }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        cx.run_until_parked();
     }
     todo_step(cx, &host, "tick 0");
     let ticked = big.replacen("- [ ] edge", "- [x] edge", 1);
