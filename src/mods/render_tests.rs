@@ -5305,7 +5305,7 @@ export default class Scenario extends Real {
           this.listKey(k, { shift: parts.includes('shift'), alt: parts.includes('alt') }, cx);
         } else if (verb === 'state') {
           if (this.ready) this.current();
-          note(JSON.stringify({ ready: this.ready, textLen: this.text.length, text: this.text.length > 65536 ? null : this.text, error: this.error, readonly: this.readonly, sel: this.sel,
+          note(JSON.stringify({ ready: this.ready, textLen: this.text.length, text: this.text.length > 16384 ? null : this.text, error: this.error, readonly: this.readonly, sel: this.sel,
             edit: this.edit ? this.edit.input.value() : null, pending: this.pending.length }));
         }
         cx.notify();
@@ -5613,17 +5613,13 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
     let head = "# Tasks\n- [ ] edge\n";
     let full = "This list is full (64 KB, about 2,900 tasks). Start a new list for more tasks.";
 
-    // Exactly at the panel's 64 KB write limit, as people fill a list (many short tasks): editable;
-    // an add would cross the limit and is refused with the reason, a tick is written.
+    // Exactly at the panel's 64 KB write limit (a few tasks and a long note, so the panel stays
+    // small enough to describe; `todo_big_lists_of_many_tasks_open` covers many short tasks):
+    // editable; an add would cross the limit and is refused with the reason, a tick is written.
     let size = 64 * 1024;
-    let mut big = head.to_string();
-    let mut n = 0;
-    while big.len() + 40 < size {
-        n += 1;
-        big.push_str(&format!("- [ ] task number {n}\n"));
-    }
-    let pad = size - big.len() - "- [ ] \n".len();
-    big.push_str(&format!("- [ ] {}\n", "y".repeat(pad)));
+    let mut big = format!("{head}- [ ] second\n  - [ ] a step\n");
+    let pad = size - big.len() - "  > \n".len();
+    big.push_str(&format!("  > {}\n", "y".repeat(pad)));
     assert_eq!(big.len(), size);
     let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &big)], &[]);
     let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
