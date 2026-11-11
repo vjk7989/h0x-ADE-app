@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.1.21] - 2026-11-12
+
+New themes, a nicer to-do list and Telegram you can navigate. Bundles h0x-core 0.1.15.
+
+### Added
+
+- Six new themes in Settings → Look: Amber Minimal, Candyland, Claymorphism and Darkmatter (dark), Soft Pop and Neo Brutalism (light). The existing themes stay.
+- Telegram: the bot's menu button lists its commands; `/menu`, `/sessions` and `/projects` (your saved spaces) let you pick a session and type into it, with the same safety checks as `/send`.
+
+### Changed
+
+- The to-do list: ticking a task ticks its steps and ticking the last step ticks the task; done items are struck through; tasks are written in a handwritten font (Patrick Hand); a progress bar, card rows and friendlier empty and all-done states.
+- Telegram pairing: the bot token saves itself when you paste it (or press Enter), pairing sits right beside it, the `/pair` code is large with a Copy button, and a How to use list explains the commands.
+- In light themes the top-left logo is a dark tile with the white mark.
+
+### Fixed
+
+- To-do lists: deleting, switching, creating and renaming a list, and starting a new index, no longer fail with "cx is no longer valid"; a rename no longer stops saving; the Enter that closes a box no longer reopens it.
+
 ## [0.1.20] - 2026-11-11
 
 A to-do list. Bundles h0x-core 0.1.14. (0.1.19 was tagged but never published: a flaky test stopped its release.)
