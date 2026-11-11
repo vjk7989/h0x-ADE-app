@@ -2143,7 +2143,7 @@ fn settings_remote_page_shows_unpaired_paired_and_locked(cx: &mut TestAppContext
         assert!(tree.contains(want), "unpaired page lacks {want:?}: {tree}");
     }
     let (tree, _) = describe_remote(cx, &staged, &remote_replies(bridge_ls(paired.clone(), false, "set"), json!([])), "");
-    assert!(tree.contains("My phone") && tree.contains("st-r-unpair-i1") && tree.contains("Set."), "{tree}");
+    assert!(tree.contains("My phone") && tree.contains("st-r-unpair-i1") && tree.contains("Bot token ✓ saved"), "{tree}");
     assert!(tree.contains("st-r-lock") && !tree.contains("No paired devices yet."), "{tree}");
     let (tree, _) = describe_remote(cx, &staged, &remote_replies(bridge_ls(paired, true, "set"), json!([])), "");
     assert!(tree.contains("Remote control: Locked") && tree.contains("Unlock"), "{tree}");
@@ -2176,7 +2176,7 @@ fn settings_remote_page_shows_the_pair_code_and_the_web_qr(cx: &mut TestAppConte
     let far = now_ms() + 600_000;
     let setup = format!("this.pairing = {{ code: 'AB12CD', expires_ms: {far} }}; this.reach = 'tunnel';");
     let (tree, calls) = describe_remote(cx, &staged, &replies, &setup);
-    assert!(tree.contains("AB12CD") && tree.contains("Send /pair AB12CD to your bot"), "{tree}");
+    assert!(tree.contains("/pair AB12CD") && tree.contains("Send this to your bot in Telegram:"), "{tree}");
     assert!(tree.contains("Scan with your phone") && tree.contains("st-r-web-stop"), "{tree}");
     assert!(tree.contains("http://192.168.1.5:7000/#t=abc"), "the link is shown: {tree}");
     assert!(tree.contains("Traffic passes through Cloudflare"), "{tree}");
@@ -2220,7 +2220,7 @@ fn settings_remote_token_goes_through_a_file_that_is_deleted_and_is_never_shown(
     let staged = Staged::new();
     let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
     replies.push(("bridge telegram token --file", core_ok(json!({"telegram_token":"set"}))));
-    let setup = "this.tokenInput.set_value('123456:SECRET-TOKEN'); this.saveToken(cx);";
+    let setup = "this.tokenInput.set_value('123456:SECRET-TOKEN'); this.tokenAt = 0; this.saveToken(cx, true);";
     let (tree, calls) = describe_remote(cx, &staged, &replies, setup);
     let c = calls.borrow();
     let path = "/fixture/app/telegram-token.tmp";
@@ -2229,8 +2229,11 @@ fn settings_remote_token_goes_through_a_file_that_is_deleted_and_is_never_shown(
     assert!(c.files.is_empty(), "no file holds the token: {:?}", c.files);
     assert!(c.cores.iter().any(|a| a.join(" ") == format!("bridge telegram token --file {path}")), "--file is called: {:?}", c.cores);
     assert!(c.cores.iter().all(|a| !a.join(" ").contains("SECRET")), "the token is never an argument: {:?}", c.cores);
-    assert!(tree.contains("Bot token saved."), "{tree}");
+    let saved: Vec<&Value> = c.effects.iter().filter(|(n, _)| n == "notify").map(|(_, a)| &a[0]).collect();
+    assert_eq!(saved, [&json!({"title":"Bot token saved","level":"success"})], "one success toast: {:?}", c.effects);
+    assert!(tree.contains("Bot token ✓ saved"), "{tree}");
     assert!(!tree.contains("SECRET"), "the token is never shown: {tree}");
+    assert!(c.effects.iter().all(|(_, a)| !a.iter().any(|v| v.to_string().contains("SECRET"))), "the token is never in a toast: {:?}", c.effects);
 }
 
 #[gpui::test]
@@ -2239,12 +2242,14 @@ fn settings_remote_token_file_is_deleted_when_core_refuses(cx: &mut TestAppConte
     let staged = Staged::new();
     let mut replies = remote_replies(bridge_ls(json!([]), false, "unset"), json!([]));
     replies.push(("bridge telegram token --file", core_error("invalid")));
-    let (tree, calls) = describe_remote(cx, &staged, &replies, "this.tokenInput.set_value('9:BAD-TOKEN'); this.saveToken(cx);");
+    let (tree, calls) = describe_remote(cx, &staged, &replies, "this.tokenInput.set_value('9:BAD-TOKEN'); this.tokenAt = 0; this.saveToken(cx, true);");
     let c = calls.borrow();
     assert_eq!(c.writes.len(), 1, "{:?}", c.writes);
     assert_eq!(c.removes.last().map(String::as_str), Some("/fixture/app/telegram-token.tmp"), "deleted even on failure: {:?}", c.removes);
     assert!(c.files.is_empty(), "no file holds the token: {:?}", c.files);
     assert!(tree.contains("fixture invalid") && !tree.contains("BAD-TOKEN"), "{tree}");
+    let toasts: Vec<&Value> = c.effects.iter().filter(|(n, _)| n == "notify").map(|(_, a)| &a[0]).collect();
+    assert_eq!(toasts, [&json!({"title":"Couldn't save the bot token","body":"fixture invalid","level":"error"})], "the core's refusal is toasted: {:?}", c.effects);
 }
 
 #[gpui::test]
@@ -2252,7 +2257,7 @@ fn settings_remote_token_leftover_file_is_removed_before_and_after(cx: &mut Test
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let path = "/fixture/app/telegram-token.tmp";
-    let setup = "this.tokenInput.set_value('8:NEW-TOKEN'); this.saveToken(cx);";
+    let setup = "this.tokenInput.set_value('8:NEW-TOKEN'); this.tokenAt = 0; this.saveToken(cx, true);";
     for (label, reply) in [("saved", core_ok(json!({"telegram_token":"set"}))), ("refused", core_error("invalid"))] {
         let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
         replies.push(("bridge telegram token --file", reply));
@@ -2269,7 +2274,7 @@ fn settings_remote_token_file_is_deleted_when_the_core_call_throws(cx: &mut Test
     let staged = Staged::new();
     // No reply for the token command: the core call itself rejects.
     let replies = remote_replies(bridge_ls(json!([]), false, "unset"), json!([]));
-    let setup = "this.tokenInput.set_value('5:THROW-TOKEN'); this.saveToken(cx);";
+    let setup = "this.tokenInput.set_value('5:THROW-TOKEN'); this.tokenAt = 0; this.saveToken(cx, true);";
     let (tree, calls) = describe_remote(cx, &staged, &replies, setup);
     let c = calls.borrow();
     let path = "/fixture/app/telegram-token.tmp".to_string();
@@ -2278,7 +2283,10 @@ fn settings_remote_token_file_is_deleted_when_the_core_call_throws(cx: &mut Test
     assert_eq!(c.removes, vec![path.clone(), path], "removed before and after the throw");
     assert!(c.files.is_empty(), "no file holds the token: {:?}", c.files);
     assert!(c.unexpected.iter().all(|m| !m.contains("THROW-TOKEN")), "{:?}", c.unexpected);
-    assert!(tree.contains("unexpected core") && !tree.contains("Bot token saved.") && !tree.contains("THROW-TOKEN"), "{tree}");
+    assert!(tree.contains("unexpected core") && !tree.contains("Bot token ✓ saved") && !tree.contains("THROW-TOKEN"), "{tree}");
+    let toasts: Vec<&Value> = c.effects.iter().filter(|(n, _)| n == "notify").map(|(_, a)| &a[0]).collect();
+    assert!(toasts.len() == 1 && toasts[0]["level"] == "error" && toasts[0]["title"] == "Couldn't save the bot token", "only the failure is toasted: {:?}", c.effects);
+    assert!(!toasts[0].to_string().contains("THROW-TOKEN"), "{:?}", toasts);
 }
 
 #[gpui::test]
@@ -2289,14 +2297,17 @@ fn settings_remote_token_is_never_written_when_the_leftover_cannot_be_removed(cx
     let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
     replies.push(("bridge telegram token --file", core_ok(json!({"telegram_token":"set"}))));
     replies.push(("removeAppFile refuses", Value::Null));
-    let setup = "this.tokenInput.set_value('6:NEW-TOKEN'); this.saveToken(cx);";
+    let setup = "this.tokenInput.set_value('6:NEW-TOKEN'); this.tokenAt = 0; this.saveToken(cx, true);";
     let (tree, calls) = describe_remote_with(cx, &staged, &replies, setup, "/fixture/app", &[(path, "1:OLD-TOKEN")]);
     let c = calls.borrow();
     assert!(c.writes.is_empty(), "nothing is written over a leftover: {:?}", c.writes);
     assert!(c.cores.iter().all(|a| a.get(..3) != Some(&["bridge".to_string(), "telegram".to_string(), "token".to_string()][..])), "core is never asked: {:?}", c.cores);
     assert_eq!(c.removes, vec![path.to_string(), path.to_string()], "tried first, and again in the finally");
     assert_eq!(c.files.get(path).map(String::as_str), Some("1:OLD-TOKEN"), "the leftover is untouched, not overwritten");
-    assert!(tree.contains("unexpected removeAppFile") && !tree.contains("Bot token saved."), "{tree}");
+    assert!(tree.contains("unexpected removeAppFile") && !tree.contains("Bot token ✓ saved"), "{tree}");
+    let toasts: Vec<&Value> = c.effects.iter().filter(|(n, _)| n == "notify").map(|(_, a)| &a[0]).collect();
+    assert!(toasts.len() == 1 && toasts[0]["level"] == "error", "a failure toast, never a saved one: {:?}", c.effects);
+    assert!(!toasts[0].to_string().contains("NEW-TOKEN") && !toasts[0].to_string().contains("OLD-TOKEN"), "{:?}", toasts);
     assert!(!tree.contains("NEW-TOKEN") && !tree.contains("OLD-TOKEN"), "{tree}");
 }
 
@@ -2321,14 +2332,15 @@ fn settings_remote_pair_code_shows_only_until_it_expires(cx: &mut TestAppContext
         let setup = format!("this.pairing = {{ code: 'GONE42', expires_ms: {expires} }};");
         let (tree, _) = describe_remote(cx, &staged, &replies, &setup);
         assert!(!tree.contains("GONE42"), "a code expiring {label} is hidden: {tree}");
-        assert!(tree.contains("Get a one-time code, then send it to your bot."), "{label}: {tree}");
+        assert!(tree.contains("Press Pair my Telegram for a one-time code, then send it to your bot."), "{label}: {tree}");
+        assert!(!tree.contains("st-r-pair-copy") && !tree.contains("Send this to your bot"), "no Copy without a live code ({label}): {tree}");
     }
     let (tree, _) = describe_remote(cx, &staged, &replies, "this.pairing = { code: 'DAY123', expires_ms: Date.now() + 86400000 };");
-    assert!(tree.contains("Send /pair DAY123 to your bot."), "{tree}");
+    assert!(tree.contains("/pair DAY123") && tree.contains("Send this to your bot in Telegram:"), "{tree}");
     assert!(tree.contains("works for 86400 s.") || tree.contains("works for 86399 s."), "a day ahead counts whole seconds: {tree}");
     let far = "this.pairing = { code: 'FAR999', expires_ms: Date.now() + 10 * 365 * 86400000 };";
     let (tree, _) = describe_remote(cx, &staged, &replies, far);
-    assert!(tree.contains("Send /pair FAR999") && !tree.contains("NaN") && !tree.contains("Infinity"), "{tree}");
+    assert!(tree.contains("/pair FAR999") && !tree.contains("NaN") && !tree.contains("Infinity"), "{tree}");
 }
 
 #[gpui::test]
@@ -2336,14 +2348,18 @@ fn settings_remote_blank_token_makes_no_call(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let replies = remote_replies(bridge_ls(json!([]), false, "unset"), json!([]));
-    for value in ["", "   ", "\\t \\t"] {
-        let setup = format!("this.tokenInput.set_value('{value}'); this.saveToken(cx);");
-        let (tree, calls) = describe_remote(cx, &staged, &replies, &setup);
-        let c = calls.borrow();
-        assert!(c.writes.is_empty(), "nothing is written for {value:?}: {:?}", c.writes);
-        assert!(c.removes.is_empty(), "nothing is removed for {value:?}: {:?}", c.removes);
-        assert!(c.cores.iter().all(|a| !a.join(" ").starts_with("bridge telegram")), "no call for {value:?}: {:?}", c.cores);
-        assert!(!tree.contains("Bot token saved.") && tree.contains("Not set"), "{value:?}: {tree}");
+    // Enter (the submit handler: saves any text) and the pause (shape only) alike.
+    for save in ["this.tokenAt = 0; this.saveToken(cx, true);", "this.saveToken(cx);"] {
+        for value in ["", "   ", "\\t \\t"] {
+            let setup = format!("this.tokenInput.set_value('{value}'); {save}");
+            let (tree, calls) = describe_remote(cx, &staged, &replies, &setup);
+            let c = calls.borrow();
+            assert!(c.writes.is_empty(), "nothing is written for {value:?} ({save}): {:?}", c.writes);
+            assert!(c.removes.is_empty(), "nothing is removed for {value:?} ({save}): {:?}", c.removes);
+            assert!(c.cores.iter().all(|a| !a.join(" ").starts_with("bridge telegram")), "no call for {value:?} ({save}): {:?}", c.cores);
+            assert!(c.effects.iter().all(|(n, _)| n != "notify"), "no toast for {value:?} ({save}): {:?}", c.effects);
+            assert!(tree.contains("Not set up") && !tree.contains("Bot token ✓ saved"), "{value:?}: {tree}");
+        }
     }
 }
 
@@ -2353,7 +2369,7 @@ fn settings_remote_long_padded_token_is_trimmed_and_never_an_argument(cx: &mut T
     let staged = Staged::new();
     let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
     replies.push(("bridge telegram token --file", core_ok(json!({"telegram_token":"set"}))));
-    let setup = "this.tokenInput.set_value('  ' + 'Z'.repeat(4096) + '  \\n'); this.saveToken(cx);";
+    let setup = "this.tokenInput.set_value('  ' + 'Z'.repeat(4096) + '  \\n'); this.tokenAt = 0; this.saveToken(cx, true);";
     let (tree, calls) = describe_remote(cx, &staged, &replies, setup);
     let c = calls.borrow();
     let path = "/fixture/app/telegram-token.tmp".to_string();
@@ -2361,7 +2377,8 @@ fn settings_remote_long_padded_token_is_trimmed_and_never_an_argument(cx: &mut T
     assert_eq!(c.removes.last(), Some(&path), "then deleted");
     assert!(c.files.is_empty(), "no file holds the token: {:?}", c.files);
     assert!(c.cores.iter().all(|a| !a.join(" ").contains("ZZZZ")), "the token is never an argument: {:?}", c.cores);
-    assert!(tree.contains("Bot token saved.") && !tree.contains("ZZZZ"), "{tree}");
+    assert!(c.effects.iter().any(|(n, a)| n == "notify" && a[0] == json!({"title":"Bot token saved","level":"success"})), "{:?}", c.effects);
+    assert!(tree.contains("Bot token ✓ saved") && !tree.contains("ZZZZ"), "{tree}");
 }
 
 #[gpui::test]
@@ -2371,7 +2388,7 @@ fn settings_remote_token_file_sits_in_a_windows_app_home(cx: &mut TestAppContext
     let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
     replies.push(("bridge telegram token --file", core_ok(json!({"telegram_token":"set"}))));
     let home = r"C:\Users\Ana López\AppData\Roaming\h0x-ade";
-    let setup = "this.tokenInput.set_value('7:WIN-TOKEN'); this.saveToken(cx);";
+    let setup = "this.tokenInput.set_value('7:WIN-TOKEN'); this.tokenAt = 0; this.saveToken(cx, true);";
     let (tree, calls) = describe_remote_in(cx, &staged, &replies, setup, home);
     let c = calls.borrow();
     let path = format!("{home}/telegram-token.tmp");
@@ -2383,7 +2400,231 @@ fn settings_remote_token_file_sits_in_a_windows_app_home(cx: &mut TestAppContext
         "the path with a space is one argument: {:?}",
         c.cores
     );
-    assert!(tree.contains("Bot token saved.") && !tree.contains("WIN-TOKEN"), "{tree}");
+    assert!(c.effects.iter().any(|(n, a)| n == "notify" && a[0] == json!({"title":"Bot token saved","level":"success"})), "{:?}", c.effects);
+    assert!(tree.contains("Bot token ✓ saved") && !tree.contains("WIN-TOKEN"), "{tree}");
+}
+
+// The Remote page after `ms` more of the clock (its timers run), as describe_remote.
+fn describe_remote_after(cx: &mut TestAppContext, staged: &Staged, replies: &[(&str, Value)], setup: &str, ms: u64) -> (String, Rc<RefCell<Calls>>) {
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    calls.borrow_mut().replies = replies.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+    let mut p = props();
+    p["section"] = json!("remote");
+    let policy = Policy::new()
+        .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+        .with_host_module(module(fixture(true, p, updates("current", "current")), calls.clone()))
+        .unwrap();
+    let root = staged.wrapper("frame/settings", setup);
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root, policy, window, cx))
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
+    advance(cx, ms);
+    let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    (tree, calls)
+}
+
+// What the token box's "change" handler records (main.js), a second ago: the pause is over.
+const TOKEN_PASTED: &str = "this.tokenAt = Date.now() - 1000;";
+
+#[gpui::test]
+fn settings_remote_token_saves_itself_after_the_pause_only_when_it_has_the_token_shape(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let path = "/fixture/app/telegram-token.tmp".to_string();
+    let mut replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+    replies.push(("bridge telegram token --file", core_ok(json!({"telegram_token":"set"}))));
+    let tail = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+    // (typed, saved as): 20 characters after the colon is the shortest token; padding is trimmed.
+    for (typed, saved) in [
+        (format!("123456789:{tail}"), format!("123456789:{tail}")),
+        ("1:abcdefghij_-CDEFGHIJ".to_string(), "1:abcdefghij_-CDEFGHIJ".to_string()),
+        (format!("  123456789:{tail} \\t\\n"), format!("123456789:{tail}")),
+    ] {
+        // A second run of the clock afterwards: the field was cleared, so nothing is saved twice.
+        let (tree, calls) = describe_remote_after(cx, &staged, &replies, &format!("this.tokenInput.set_value('{typed}'); {TOKEN_PASTED}"), 1000);
+        let c = calls.borrow();
+        assert_eq!(c.writes, vec![(path.clone(), saved.clone())], "{typed:?} is saved once, trimmed");
+        assert_eq!(c.removes, vec![path.clone(), path.clone()], "{typed:?}: the leftover first, the file last");
+        assert!(c.files.is_empty(), "no file holds the token: {:?}", c.files);
+        assert!(c.cores.iter().any(|a| *a == ["bridge", "telegram", "token", "--file", path.as_str()]), "{:?}", c.cores);
+        assert!(c.cores.iter().all(|a| !a.join(" ").contains("abcdefghij") && !a.join(" ").contains(tail)), "the token is never an argument: {:?}", c.cores);
+        let toasts: Vec<&Value> = c.effects.iter().filter(|(n, _)| n == "notify").map(|(_, a)| &a[0]).collect();
+        assert_eq!(toasts, [&json!({"title":"Bot token saved","level":"success"})], "{typed:?}: {:?}", c.effects);
+        assert!(tree.contains("Bot token ✓ saved") && !tree.contains(tail) && !tree.contains("abcdefghij"), "{tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_remote_partial_or_malformed_token_is_never_saved_on_a_pause(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut replies = remote_replies(bridge_ls(json!([]), false, "unset"), json!([]));
+    replies.push(("bridge telegram token --file", core_ok(json!({"telegram_token":"set"}))));
+    let tail = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+    let mut cases: Vec<(String, &str)> = [
+        "123", "123:", "123:short", "1:abcdefghij_-CDEFGHI", ":AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
+        "abc:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw", "12 3:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
+        "123:AAHdqTcvCH1vGWJxf SeofSAs0K5PALDsaw", "123:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDs$w",
+        "1:2:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
+        "\u{663}\u{664}:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw", "123:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsa\u{e9}",
+        "C:\\\\Users\\\\Ana\\\\token.txt",
+    ]
+    .iter()
+    .map(|v| (format!("this.tokenInput.set_value('{v}'); {TOKEN_PASTED}"), *v))
+    .collect();
+    // A valid token that is not waiting: never changed, still inside the pause, or off the Remote page.
+    let valid = format!("this.tokenInput.set_value('123456789:{tail}');");
+    cases.push((valid.clone(), "never changed"));
+    cases.push((format!("{valid} this.tokenAt = Date.now() + 600000;"), "changed just now"));
+    cases.push((format!("{valid} {TOKEN_PASTED} this.section = 'look';"), "on another page"));
+    for (setup, label) in &cases {
+        let (tree, calls) = describe_remote_after(cx, &staged, &replies, setup, 1000);
+        let c = calls.borrow();
+        assert!(c.writes.is_empty() && c.removes.is_empty(), "{label:?} is not saved: {:?} {:?}", c.writes, c.removes);
+        assert!(c.cores.iter().all(|a| a.get(..2) != Some(&["bridge".to_string(), "telegram".to_string()][..])), "{label:?}: {:?}", c.cores);
+        assert!(c.effects.iter().all(|(n, _)| n != "notify"), "{label:?}: no toast: {:?}", c.effects);
+    }
+}
+
+#[gpui::test]
+fn settings_remote_status_line_follows_the_token_and_telegram_pairings(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let id = |n: u32, transport: &str| json!({"id":format!("i{n}"), "transport":transport, "user_id":format!("{n}"), "label":format!("Device {n}"), "paired_at_ms":1700000000000i64});
+    for (label, ids, token, setup, status, editing) in [
+        ("fresh", json!([]), "unset", "", "Not set up", true),
+        ("token only", json!([]), "set", "", "Token saved. Now pair your Telegram.", false),
+        ("a web pairing is not Telegram", json!([id(1, "web")]), "set", "", "Token saved. Now pair your Telegram.", false),
+        ("one", json!([id(1, "telegram")]), "set", "", "Paired with 1 account", false),
+        ("two and a web one", json!([id(1, "telegram"), id(2, "web"), id(3, "telegram")]), "set", "", "Paired with 2 accounts", false),
+        ("paired but the token was removed", json!([id(1, "telegram")]), "unset", "", "Paired with 1 account", true),
+        ("Change pressed", json!([]), "set", "this.changingToken = true;", "Token saved. Now pair your Telegram.", true),
+    ] {
+        let (tree, _) = describe_remote(cx, &staged, &remote_replies(bridge_ls(ids, false, token), json!([])), setup);
+        assert!(tree.contains(status), "{label}: lacks {status:?}: {tree}");
+        assert!(!tree.contains("1 accounts") && !tree.contains("0 account"), "{label}: {tree}");
+        assert_eq!(tree.contains("@BotFather") && tree.contains("It saves by itself once you paste it."), editing, "{label}: the input and its hint: {tree}");
+        assert_eq!(tree.contains("Bot token ✓ saved"), !editing, "{label}: {tree}");
+        assert_eq!(tree.contains("st-r-token-change"), !editing, "{label}: Change only on the saved row: {tree}");
+        assert!(!tree.contains("st-r-token\""), "{label}: no Save button: {tree}");
+        // Pairing sits beside the token, above the bot's row.
+        let pair = tree.find("st-r-pair").unwrap_or_else(|| panic!("{label}: no Pair button: {tree}"));
+        assert!(pair < tree.find("st-r-bot-").unwrap(), "{label}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_remote_pair_code_is_large_with_a_copy_button_that_copies_the_command(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+    // Presses Copy once, as a click would.
+    let press = "const real = this.button.bind(this); let pressed = false; \
+        this.button = (t, id, label, onClick) => { if (id === 'st-r-pair-copy' && !pressed) { pressed = true; onClick(); } return real(t, id, label, onClick); };";
+    let setup = format!("this.pairing = {{ code: '482913', expires_ms: Date.now() + 600000 }}; {press}");
+    let (tree, calls) = describe_remote(cx, &staged, &replies, &setup);
+    let c = calls.borrow();
+    let copies: Vec<&Vec<Value>> = c.effects.iter().filter(|(n, _)| n == "copyText").map(|(_, a)| a).collect();
+    assert_eq!(copies, [&vec![json!("/pair 482913")]], "Copy copies the whole command, once: {:?}", c.effects);
+    let toasts: Vec<&Value> = c.effects.iter().filter(|(n, _)| n == "notify").map(|(_, a)| &a[0]).collect();
+    assert_eq!(toasts, [&json!({"title":"Copied","level":"success"})], "{:?}", c.effects);
+    assert!(tree.contains("st-r-pair-copy") && tree.contains("Send this to your bot in Telegram:") && tree.contains("The code works for "), "{tree}");
+    let lines: Vec<&str> = tree.lines().collect();
+    let code = lines.iter().position(|l| l.contains("/pair 482913")).unwrap_or_else(|| panic!("{tree}"));
+    assert!(lines[code.saturating_sub(1)..=code].iter().any(|l| l.contains(".text_size[Number(24.0)]")), "the command is large: {tree}");
+    // An expired code has no Copy, and nothing is copied.
+    let setup = format!("this.pairing = {{ code: '482913', expires_ms: Date.now() - 1 }}; {press}");
+    let (tree, calls) = describe_remote(cx, &staged, &replies, &setup);
+    assert!(!tree.contains("st-r-pair-copy") && !tree.contains("482913"), "{tree}");
+    assert!(calls.borrow().effects.iter().all(|(n, _)| n != "copyText"), "{:?}", calls.borrow().effects);
+}
+
+#[gpui::test]
+fn settings_remote_how_to_use_lists_the_bot_commands_only_when_open(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+    let commands = ["/menu", "/sessions", "/projects", "/help", "/agents", "/read", "/send", "/lock"];
+    let (tree, _) = describe_remote(cx, &staged, &replies, "");
+    assert!(tree.contains("st-r-help") && tree.contains("How to use") && !tree.contains("Hide how to use"), "{tree}");
+    assert!(!tree.contains("List your terminals and pick one.") && !tree.contains("/sessions"), "closed by default: {tree}");
+    let (tree, _) = describe_remote(cx, &staged, &replies, "this.showHelp = true;");
+    assert!(tree.contains("Hide how to use"), "{tree}");
+    let mut at = 0;
+    for command in commands {
+        let found = tree[at..].find(command).unwrap_or_else(|| panic!("{command} is not listed in order: {tree}"));
+        at += found + 1;
+    }
+}
+
+#[gpui::test]
+fn settings_look_lists_the_new_themes_under_dark_and_light(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["section"] = json!("look");
+    let mut values = fixture(true, p, updates("current", "current"));
+    let colors = values["theme"].clone();
+    let dark = ["graphite", "amber-minimal", "candyland", "claymorphism", "darkmatter"];
+    let light = ["paper", "soft-pop", "neo-brutalism"];
+    let list: Vec<Value> = dark.iter().map(|n| (n, false)).chain(light.iter().map(|n| (n, true))).map(|(n, l)| json!({"name":n, "light":l, "colors":colors})).collect();
+    values.insert("themes".into(), json!(list));
+    let tree = describe_with_values(cx, &staged, "frame/settings", values, None).unwrap();
+    let at = |name: &str| tree.find(&format!("st-t-{name}")).unwrap_or_else(|| panic!("{name} is not offered: {tree}"));
+    let last_dark = dark.iter().map(|n| at(n)).max().unwrap();
+    let first_light = light.iter().map(|n| at(n)).min().unwrap();
+    assert!(last_dark < first_light, "Dark comes first, then Light: {tree}");
+    for label in ["amber minimal", "soft pop", "neo brutalism"] {
+        assert!(tree.contains(label), "{label} is shown with spaces: {tree}");
+    }
+}
+
+#[gpui::test]
+fn brand_logo_is_the_white_mark_on_a_dark_tile_only_on_a_light_chrome(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let file_chrome = |text: &str| serde_json::from_str::<Value>(text).unwrap()["colors"]["chrome"].as_str().unwrap().to_owned();
+    let paper = crate::settings::themes().into_iter().find(|(n, _)| n == "paper").unwrap().1["chrome"].clone();
+    let graphite = crate::settings::themes().into_iter().find(|(n, _)| n == "graphite").unwrap().1["chrome"].clone();
+    let cases = [
+        ("graphite", graphite, false),
+        ("amber-minimal", file_chrome(include_str!("../../defaults/themes/amber-minimal.json")), false),
+        ("candyland", file_chrome(include_str!("../../defaults/themes/candyland.json")), false),
+        ("claymorphism", file_chrome(include_str!("../../defaults/themes/claymorphism.json")), false),
+        ("darkmatter", file_chrome(include_str!("../../defaults/themes/darkmatter.json")), false),
+        ("black", "#000000".to_owned(), false),
+        ("translucent dark", "#0f0f0f80".to_owned(), false),
+        ("paper", paper, true),
+        ("soft-pop", file_chrome(include_str!("../../defaults/themes/soft-pop.json")), true),
+        ("neo-brutalism", file_chrome(include_str!("../../defaults/themes/neo-brutalism.json")), true),
+        ("white", "#ffffff".to_owned(), true),
+        ("translucent light", "#f0f0f0ff".to_owned(), true),
+    ];
+    for (label, chrome, light) in cases {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.get_mut("theme").unwrap()["chrome"] = json!(chrome);
+        values.get_mut("layout").unwrap()["children"][0]["size"]["px"] = json!(268);
+        let tree = describe_with_values(cx, &staged, "mods/workspace-chrome", values.clone(), None).unwrap();
+        let lines: Vec<&str> = tree.lines().collect();
+        let (shown, hidden) = if light { ("mods/workspace-chrome/hyperox-white.png", "frame/welcome/hyperox.png") } else { ("frame/welcome/hyperox.png", "mods/workspace-chrome/hyperox-white.png") };
+        let image = lines.iter().position(|l| l.contains(shown)).unwrap_or_else(|| panic!("{label} ({chrome}): no {shown}: {tree}"));
+        assert!(!tree.contains(hidden), "{label} ({chrome}): one logo only: {tree}");
+        if light {
+            assert!(lines[image].contains(".size[Number(14.0)]"), "{label}: the mark is centred small: {}", lines[image]);
+            let tile = lines[image - 1];
+            assert!(tile.contains("#111111") && tile.contains(".size[Number(20.0)]") && tile.contains(".rounded[Number(5.0)]"), "{label}: a 20 px near-black tile: {tile}");
+        } else {
+            assert!(lines[image].contains(".size[Number(20.0)]") && !tree.contains("#111111"), "{label}: today's logo: {}", lines[image]);
+        }
+        // The rail hides the brand, either logo.
+        values.get_mut("layout").unwrap()["children"][0]["size"]["px"] = json!(44);
+        let tree = describe_with_values(cx, &staged, "mods/workspace-chrome", values, None).unwrap();
+        assert!(!tree.contains("hyperox.png") && !tree.contains("hyperox-white.png"), "{label}: rail: {tree}");
+    }
 }
 
 #[gpui::test]

@@ -265,6 +265,9 @@ jobs:
           path: |
             ${{ runner.temp }}/info-page.png
             ${{ runner.temp }}/todo-panel.png
+            ${{ runner.temp }}/look-themes.png
+            ${{ runner.temp }}/theme-neo-brutalism.png
+            ${{ runner.temp }}/theme-amber-minimal.png
           if-no-files-found: warn
 
   # Security advisories (RustSec) in the dependencies: deny.toml.

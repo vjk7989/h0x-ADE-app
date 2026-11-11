@@ -62,6 +62,7 @@ export default class Settings extends View {
     this.tokenInput.set_masked(true);
     this.tokenAt = 0; // when the token field last changed; 0 = nothing waiting to be saved
     this.tokenInput.on("change", (_e, cx) => { this.tokenAt = Date.now(); cx.notify(); });
+    this.tokenInput.on("submit", (_e, cx) => { this.tokenAt = 0; this.saveToken(cx, true); }); // Enter saves any text; the core judges it
     this.changingToken = false;
     this.showHelp = false;
     this.remote = null; // bridge ls
@@ -846,9 +847,9 @@ export default class Settings extends View {
 
   // The token goes through a file under the app folder (never an argument) and the file is
   // deleted afterwards, whatever the result; a leftover from a crash is deleted first.
-  saveToken(cx) {
+  saveToken(cx, force = false) {
     const token = this.tokenInput.value().trim();
-    if (!TOKEN_SHAPE.test(token)) return;
+    if (!token || (!force && !TOKEN_SHAPE.test(token))) return;
     const path = `${appHome()}/telegram-token.tmp`;
     this.remoteAction("token", async () => {
       try {
