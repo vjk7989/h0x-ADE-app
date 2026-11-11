@@ -346,6 +346,10 @@ fn a_shell_launch_opens_hyperox_in_its_folder() {
     for dir in [&env.home, &a, &b, &c] {
         std::fs::create_dir_all(dir).unwrap();
     }
+    // Two tasks for the To-do panel screenshot below (the app home's todo/ folder).
+    std::fs::create_dir_all(env.home.join("todo")).unwrap();
+    std::fs::write(env.home.join("todo/lists.md"), "- [Tasks](tasks.md)\n").unwrap();
+    std::fs::write(env.home.join("todo/tasks.md"), "# Tasks\n- [ ] Write the release notes\n  - [x] Collect the changes\n  - [ ] Ask for a review\n- [ ] Ship HyperOx\n").unwrap();
     let mut cleanup = Cleanup { env: &env, launch: None };
 
     // AC1: not running; from a shell in A the window opens on a focused local space in A.
@@ -437,6 +441,14 @@ fn a_shell_launch_opens_hyperox_in_its_folder() {
     assert!(local_spaces_in(&world, &c).is_empty(), "{world:#}");
     assert_eq!(spaces(&world).len(), count, "{world:#}");
     assert!(active(&world).is_some_and(|s| names(s["folder"].as_str().unwrap(), &a)), "{world:#}");
+
+    // For a person to look at, not an assertion: the To-do panel opened by its key's command
+    // (Ctrl/Cmd+Shift+J), saved where CI uploads it with the Info page below.
+    let todo_shot = std::env::var_os("RUNNER_TEMP").map(PathBuf::from).unwrap_or_else(|| root.clone()).join("todo-panel.png");
+    let opened = env.command(EXE).args(["do", "tabs.todo"]).stdin(Stdio::null()).output();
+    std::thread::sleep(Duration::from_secs(3));
+    let saved = env.command(EXE).arg("shot").arg(&todo_shot).stdin(Stdio::null()).output();
+    eprintln!("to-do panel: open {:?}, screenshot {} {:?}", opened.map(|o| (o.status, String::from_utf8_lossy(&o.stdout).into_owned())), todo_shot.display(), saved.map(|o| (o.status, String::from_utf8_lossy(&o.stderr).into_owned())));
 
     // For a person to look at, not an assertion: Settings on the Info page, saved where CI
     // uploads it (artifact `info-page-<platform>`).
