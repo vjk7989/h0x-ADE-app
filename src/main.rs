@@ -161,7 +161,7 @@ fn main() {
         log.init();
     }
 
-    if update::apply_on_startup() {
+    if update::apply_on_startup() || update::begin_start() {
         return;
     }
 
@@ -197,6 +197,7 @@ fn main() {
     update::start();
     // On by default: a first run shares until the welcome's switch says otherwise.
     analytics::start(person.as_ref().map_or(true, |p| p.share_analytics));
+    update::after_start();
     if !welcomed {
         analytics::event("first_run", serde_json::json!({}));
     }
@@ -232,6 +233,7 @@ fn main() {
                 mods::finish_shared();
                 analytics::event("app_closed", serde_json::json!({ "session_seconds": analytics::session_seconds() }));
                 analytics::flush();
+                update::clean_exit();
                 update::apply();
                 async {}
             })

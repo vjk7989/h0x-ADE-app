@@ -826,6 +826,10 @@ fn check_from(root: &Path, releases: &str) -> Result<Option<String>, String> {
     if !newer(version, env!("CARGO_PKG_VERSION")) {
         return Ok(None);
     }
+    if State::load().skips(version) {
+        tracing::info!("update: {version} failed to start twice here; waiting for a newer release");
+        return Ok(None);
+    }
     // Notes are optional: a missing feed must never hold up the update.
     if !crate::update_notes::has(version)
         && let Ok(text) = curl_text(&format!("{releases}/download/v{version}/changelog.md"))
@@ -1029,28 +1033,96 @@ pub fn apply_on_startup() -> bool {
     let Some(root) = checks_app() else { return false };
     let staged = staged_version(&root);
     let Some(version) = startup_target(env!("CARGO_PKG_VERSION"), staged.as_deref(), expected.as_deref()) else { return false };
-    if !swap(&root) {
+    if !swap(&root, version) {
         return false;
     }
     relaunch_expected(Some(version))
 }
 
+/// First thing in a start. Notes that this version is launching; a version that was
+/// launched before, never started OK and did not quit cleanly (a crash, a kill) is put
+/// back to `<install>.previous` here, for installs updated without the relaunch helper
+/// (applied on quit). True if it did: the old version is opening, this one must exit.
+pub fn begin_start() -> bool {
+    let Some(root) = root() else { return false };
+    let version = env!("CARGO_PKG_VERSION");
+    let mut state = State::load();
+    let crashed = state.launch(version);
+    state.save();
+    if !crashed {
+        return false;
+    }
+    tracing::warn!("update: {version} never started OK and its last start did not end cleanly; going back");
+    let to = last_good().unwrap_or_else(|| "unknown".to_owned());
+    if roll_back(&root).is_err() {
+        return false;
+    }
+    write_pending(&pending_path(), version, &to, "the new version crashed before it started OK");
+    state.trying = None;
+    state.launching = None;
+    state.save();
+    relaunch_expected(None)
+}
+
+/// Window shown and core connected: this version started OK. Writes the marker the
+/// relaunch helper waits for and `last-good.json`, counts the start, and drops
+/// `<install>.previous` after the 3rd.
+pub fn started_ok() {
+    static DONE: AtomicBool = AtomicBool::new(false);
+    let Some(root) = root() else { return };
+    if DONE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    let mut state = State::load();
+    let drop_previous = state.started(version);
+    state.save();
+    let _ = std::fs::write(started_marker(version), "");
+    let _ = std::fs::write(crate::mods::app_dir().join("last-good.json"), serde_json::json!({ "version": version }).to_string());
+    if drop_previous {
+        let _ = std::fs::remove_dir_all(beside(&root, ".previous"));
+    }
+}
+
+/// The app is quitting on purpose: a start that ends like this was not a crash.
+pub fn clean_exit() {
+    let mut state = State::load();
+    state.launching = None;
+    state.save();
+}
+
+/// After analytics has started: a rollback the relaunch helper (or `begin_start`) left
+/// is reported, counted, and shown once.
+pub fn after_start() {
+    let Some(pending) = take_pending(&pending_path()) else { return };
+    let mut state = State::load();
+    let failures = state.rolled_back(&pending.from);
+    state.save();
+    tracing::warn!("update: {} failed ({}), went back to {}; failure {failures}", pending.from, pending.reason, pending.to);
+    crate::analytics::report("app_update_failed", "rollback", &format!("{} to {}: {}", pending.to, pending.from, pending.reason));
+    crate::events::update_rolled_back("app", known(Some(&pending.to)), known(Some(&pending.from)));
+    notify("error", rolled_back_text("App", &pending.from, &pending.to));
+}
+
 /// Puts the downloaded version in place of this one. The running app keeps
 /// its files open, so it can go on until it quits. True if it swapped.
 /// Windows lets a running program's folder be renamed, not deleted: the old
-/// one goes on the next start (`after_update`).
+/// one is kept as `<install>.previous` (see `swap`).
 pub fn apply() -> bool {
     let Some(root) = root() else { return false };
     let staged = staged_version(&root);
-    if ready().as_deref() != staged.as_deref() || !staged.as_deref().is_some_and(|version| newer(version, env!("CARGO_PKG_VERSION"))) {
+    let Some(version) = staged.as_deref().filter(|version| newer(version, env!("CARGO_PKG_VERSION"))) else { return false };
+    if ready().as_deref() != Some(version) {
         return false;
     }
-    swap(&root)
+    swap(&root, version)
 }
 
-fn swap(root: &Path) -> bool {
+/// Swaps `version` in. The working version stays as `<install>.previous` until the
+/// new one has started OK 3 times (`started_ok`), so a rollback has it to go back to.
+fn swap(root: &Path, version: &str) -> bool {
     let staged = beside(root, ".new");
-    let old = beside(root, ".old");
+    let old = beside(root, ".previous");
     let _ = std::fs::remove_dir_all(&old);
     if let Err(e) = std::fs::rename(root, &old) {
         tracing::warn!("update: cannot move {} aside: {e}", root.display());
@@ -1069,6 +1141,11 @@ fn swap(root: &Path) -> bool {
     let _ = std::fs::remove_file(beside(root, ".new.json"));
     *READY.lock().unwrap() = None;
     let _ = std::fs::write(marker(), "");
+    let mut state = State::load();
+    state.swapped(version);
+    state.save();
+    // A marker an earlier try of this version left must not count for this one.
+    let _ = std::fs::remove_file(started_marker(version));
     true
 }
 
@@ -1097,12 +1174,112 @@ fn relaunch_script(pid: u32, exe: &Path) -> String {
     format!("Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Start-Process {}", ps_quote(&exe.to_string_lossy()))
 }
 
+/// What the relaunch helper needs to watch a new version and, if it never starts OK,
+/// put `previous` back. Paths travel as separate values, never inside script text
+/// on unix, and quoted by `ps_quote` on Windows.
+struct Watch {
+    root: PathBuf,
+    previous: PathBuf,
+    exe: PathBuf,
+    marker: PathBuf,
+    pending: PathBuf,
+    /// The version that must start OK.
+    new: String,
+    /// The version that is running now (the one to go back to).
+    old: String,
+}
+
+/// A version fit for a JSON string typed by a script.
+fn plain_version(v: &str) -> bool {
+    !v.is_empty() && v.len() <= 40 && v.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+}
+
+/// The watch for a version `swap` just put in place. None: nothing to go back to.
+fn watch(root: &Path) -> Option<Watch> {
+    let new = State::load().trying.filter(|v| plain_version(v))?;
+    let old = env!("CARGO_PKG_VERSION").to_owned();
+    let previous = beside(root, ".previous");
+    (plain_version(&old) && previous.is_dir()).then(|| Watch {
+        root: root.to_path_buf(),
+        previous,
+        exe: exe_in(root),
+        marker: started_marker(&new),
+        pending: pending_path(),
+        new,
+        old,
+    })
+}
+
+/// The sh helper. `$0` is the pid to wait for, then `$1` root, `$2` previous, `$3` exe,
+/// `$4` marker, `$5` pending-rollback file, `$6` new version, `$7` old version. Nothing
+/// from the paths is ever parsed as shell text. `ps` ends the wait early when the new
+/// version has died (a dead child stays a zombie, which `kill -0` still accepts).
+#[cfg(any(unix, test))]
+const WATCH_SH: &str = r#"while kill -0 "$0" 2>/dev/null; do sleep 0.1; done
+"$3" &
+new=$!
+n=0
+while [ ! -e "$4" ] && [ "$n" -lt 60 ]; do
+  case "$(ps -o stat= -p "$new" 2>/dev/null)" in ""|Z*) break;; esac
+  sleep 1
+  n=$((n + 1))
+done
+[ -e "$4" ] && exit 0
+case "$(ps -o stat= -p "$new" 2>/dev/null)" in
+  ""|Z*) reason="the new version exited before it started OK";;
+  *) reason="the new version did not start OK within 60 seconds"; kill "$new" 2>/dev/null; sleep 2; kill -9 "$new" 2>/dev/null;;
+esac
+i=1
+while [ -e "$1.failed-$i" ]; do i=$((i + 1)); done
+mv "$1" "$1.failed-$i" || exit 1
+mv "$2" "$1" || { mv "$1.failed-$i" "$1"; exit 1; }
+printf '{"from":"%s","to":"%s","reason":"%s"}' "$6" "$7" "$reason" > "$5"
+exec "$3"
+"#;
+
+/// The PowerShell helper: the values first (each through `ps_quote`), then fixed text.
+#[cfg(any(windows, test))]
+fn watch_script(pid: u32, w: &Watch) -> String {
+    let q = |p: &Path| ps_quote(&p.to_string_lossy());
+    format!(
+        "$old = {pid}; $exe = {}; $root = {}; $previous = {}; $marker = {}; $pending = {}; $newVersion = {}; $oldVersion = {}\n{WATCH_PS}",
+        q(&w.exe),
+        q(&w.root),
+        q(&w.previous),
+        q(&w.marker),
+        q(&w.pending),
+        ps_quote(&w.new),
+        ps_quote(&w.old),
+    )
+}
+
+#[cfg(any(windows, test))]
+const WATCH_PS: &str = r"Wait-Process -Id $old -ErrorAction SilentlyContinue
+$p = Start-Process -FilePath $exe -PassThru
+$deadline = (Get-Date).AddSeconds(60)
+while (-not (Test-Path -LiteralPath $marker) -and -not $p.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+if (Test-Path -LiteralPath $marker) { exit 0 }
+if ($p.HasExited) { $reason = 'the new version exited before it started OK' } else { $reason = 'the new version did not start OK within 60 seconds'; Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2 }
+function Move-Retry($source, $dest) { for ($i = 0; $i -lt 10; $i++) { try { Move-Item -LiteralPath $source -Destination $dest -ErrorAction Stop; return $true } catch { Start-Sleep -Seconds 1 } }; return $false }
+$n = 1
+while (Test-Path -LiteralPath ($root + '.failed-' + $n)) { $n++ }
+$failed = $root + '.failed-' + $n
+if (-not (Move-Retry $root $failed)) { exit 1 }
+if (-not (Move-Retry $previous $root)) { Move-Retry $failed $root | Out-Null; exit 1 }
+$json = @{ from = $newVersion; to = $oldVersion; reason = $reason } | ConvertTo-Json -Compress
+[System.IO.File]::WriteAllText($pending, $json, (New-Object System.Text.UTF8Encoding($false)))
+Start-Process -FilePath $exe
+";
+
 #[cfg(windows)]
 fn relaunch_expected(expected: Option<&str>) -> bool {
     let Some(root) = root() else { return false };
     // The system's own PowerShell: one earlier on PATH must not run here.
     let Some(system_root) = std::env::var_os("SystemRoot") else { return false };
-    let script = relaunch_script(std::process::id(), &exe_in(&root));
+    let script = match watch(&root) {
+        Some(w) => watch_script(std::process::id(), &w),
+        None => relaunch_script(std::process::id(), &exe_in(&root)),
+    };
     let mut command = crate::spawn::command(PathBuf::from(system_root).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe"));
     if let Some(expected) = expected {
         command.env("H0X_ADE_UPDATE_EXPECTED", expected);
@@ -1132,7 +1309,12 @@ fn relaunch_expected(expected: Option<&str>) -> bool {
     } else {
         "exec \"$1/h0x-ade\""
     };
-    let script = format!("while kill -0 \"$0\" 2>/dev/null; do sleep 0.1; done; {open}");
+    let plain = format!("while kill -0 \"$0\" 2>/dev/null; do sleep 0.1; done; {open}");
+    let pid = std::process::id().to_string();
+    let (script, args): (&str, Vec<&std::ffi::OsStr>) = match &watch(&root) {
+        Some(w) => (WATCH_SH, vec![w.root.as_os_str(), w.previous.as_os_str(), w.exe.as_os_str(), w.marker.as_os_str(), w.pending.as_os_str(), std::ffi::OsStr::new(&w.new), std::ffi::OsStr::new(&w.old)]),
+        None => (plain.as_str(), vec![root.as_os_str()]),
+    };
     let spawned = {
         use std::os::unix::process::CommandExt;
         let mut command = Command::new("sh");
@@ -1142,8 +1324,8 @@ fn relaunch_expected(expected: Option<&str>) -> bool {
         command
             .arg("-c")
             .arg(script)
-            .arg(std::process::id().to_string())
-            .arg(&root)
+            .arg(&pid)
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1164,6 +1346,154 @@ fn marker() -> PathBuf {
     crate::mods::app_dir().join(".updated")
 }
 
+/// Written by `started_ok`; the relaunch helper waits for it.
+fn started_marker(version: &str) -> PathBuf {
+    crate::mods::app_dir().join(format!("started-{version}"))
+}
+
+/// Left by a rollback for the old version to report on its next start.
+fn pending_path() -> PathBuf {
+    crate::mods::app_dir().join("pending-rollback.json")
+}
+
+/// The version that last started OK (`last-good.json`).
+fn last_good() -> Option<String> {
+    let bytes = std::fs::read(crate::mods::app_dir().join("last-good.json")).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&bytes).ok()?["version"].as_str().map(str::to_owned)
+}
+
+/// Starts of a new version that must succeed before `<install>.previous` goes.
+const OK_STARTS: u32 = 3;
+/// Failures in a row of one version after which it is skipped.
+const FAILURES: u32 = 2;
+
+/// What the updater remembers between starts (`update-state.json` in the app home).
+#[derive(Default, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct State {
+    /// The version `ok` counts.
+    current: String,
+    /// How many times `current` started OK.
+    ok: u32,
+    /// Swapped in and not started OK yet.
+    trying: Option<String>,
+    /// Launched and neither started OK nor quit on purpose since.
+    launching: Option<String>,
+    /// The version whose update last failed, and how many times in a row.
+    failed: Option<String>,
+    failures: u32,
+    /// Skipped until a newer release appears.
+    bad: Option<String>,
+}
+
+impl State {
+    fn load() -> Self {
+        std::fs::read(crate::mods::app_dir().join("update-state.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    }
+
+    fn save(&self) {
+        let dir = crate::mods::app_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(text) = serde_json::to_string(self) {
+            let _ = std::fs::write(dir.join("update-state.json"), text);
+        }
+    }
+
+    /// `version` was put in place.
+    fn swapped(&mut self, version: &str) {
+        self.current = version.to_owned();
+        self.ok = 0;
+        self.trying = Some(version.to_owned());
+        self.launching = None;
+    }
+
+    /// `version` is starting. True: it was launched before, never started OK and did not quit on purpose.
+    fn launch(&mut self, version: &str) -> bool {
+        if self.trying.as_deref() != Some(version) {
+            return false;
+        }
+        let crashed = self.launching.as_deref() == Some(version);
+        self.launching = Some(version.to_owned());
+        crashed
+    }
+
+    /// `version` started OK. True: it has now done so `OK_STARTS` times, so `previous` can go.
+    fn started(&mut self, version: &str) -> bool {
+        if self.current != version {
+            self.current = version.to_owned();
+            self.ok = 0;
+        }
+        self.ok += 1;
+        if self.trying.as_deref() == Some(version) {
+            self.trying = None;
+        }
+        self.launching = None;
+        if self.failed.as_deref() == Some(version) {
+            self.failed = None;
+            self.failures = 0;
+        }
+        self.ok >= OK_STARTS
+    }
+
+    /// The update to `from` was undone. Returns the failures in a row for it.
+    fn rolled_back(&mut self, from: &str) -> u32 {
+        self.trying = None;
+        self.launching = None;
+        self.failures = if self.failed.as_deref() == Some(from) { self.failures + 1 } else { 1 };
+        self.failed = Some(from.to_owned());
+        if self.failures >= FAILURES {
+            self.bad = Some(from.to_owned());
+        }
+        self.failures
+    }
+
+    /// The updater leaves `version` alone: it failed twice, and nothing newer is out.
+    fn skips(&self, version: &str) -> bool {
+        self.bad.as_deref().is_some_and(|bad| !newer(version, bad))
+    }
+}
+
+/// `<install>.failed-<n>`: where a version that did not start is kept.
+fn failed_path(root: &Path, n: u32) -> PathBuf {
+    let mut name = root.as_os_str().to_os_string();
+    name.push(format!(".failed-{n}"));
+    PathBuf::from(name)
+}
+
+/// Moves the install to a free `.failed-<n>` and `<install>.previous` into its place.
+fn roll_back(root: &Path) -> Result<PathBuf, String> {
+    let previous = beside(root, ".previous");
+    if !previous.is_dir() {
+        return Err(format!("{} is not there", previous.display()));
+    }
+    let failed = (1..1000).map(|n| failed_path(root, n)).find(|p| !p.exists()).ok_or("too many failed versions kept")?;
+    std::fs::rename(root, &failed).map_err(|e| format!("{}: {e}", root.display()))?;
+    if let Err(e) = std::fs::rename(&previous, root) {
+        let _ = std::fs::rename(&failed, root);
+        return Err(format!("{}: {e}", previous.display()));
+    }
+    Ok(failed)
+}
+
+struct Pending {
+    from: String,
+    to: String,
+    reason: String,
+}
+
+fn write_pending(path: &Path, from: &str, to: &str, reason: &str) {
+    let _ = std::fs::write(path, serde_json::json!({ "from": from, "to": to, "reason": reason }).to_string());
+}
+
+/// Reads and deletes what a rollback left. None: no rollback, or the file is not ours.
+fn take_pending(path: &Path) -> Option<Pending> {
+    let bytes = std::fs::read(path).ok()?;
+    let _ = std::fs::remove_file(path);
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let text = |key: &str| value[key].as_str().map(str::to_owned);
+    Some(Pending { from: text("from")?, to: text("to")?, reason: text("reason")? })
+}
+
 /// The first start after an app update brings the core to the latest release
 /// of this app's generation (`h0x-core update --version`, terminals kept). If the
 /// release check fails or offers another generation, keep the minimum pin.
@@ -1182,9 +1512,6 @@ pub fn after_update() {
         core.updating = false;
         match result {
             Ok(now) => {
-                if let Some(root) = root() {
-                    let _ = std::fs::remove_dir_all(beside(&root, ".old"));
-                }
                 tracing::info!("h0x-core is {now}");
                 core.version = Some(now.trim_start_matches("h0x-core ").to_owned());
                 core.error = None;
@@ -1541,7 +1868,7 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
     #[ignore = "downloads the current release; runs real codesign on isolated bundles"]
     fn macos_unpack_preserves_release_signature_and_prepares_dev_builds() {
         let version = env!("CARGO_PKG_VERSION");
-        let manifest: serde_json::Value = serde_json::from_str(&curl_text(&format!("{}/download/v{version}/latest.json", releases())).unwrap()).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(&curl_text(&format!("{}/download/v{version}/latest.json", releases()[0])).unwrap()).unwrap();
         let work = std::env::temp_dir().join(format!("h0x-ade-signature-test-{}", std::process::id()));
         let signed = work.join("signed");
         let reference = work.join("reference");
@@ -2076,5 +2403,241 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
     #[test]
     fn sha256_is_hex() {
         assert_eq!(sha256(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn previous_goes_only_after_three_ok_starts() {
+        let mut state = State::default();
+        state.swapped("0.2.0");
+        assert_eq!(state.trying.as_deref(), Some("0.2.0"));
+        assert!(!state.started("0.2.0"));
+        assert!(state.trying.is_none(), "one OK start ends the trial");
+        assert!(!state.started("0.2.0"));
+        assert!(state.started("0.2.0"), "the third OK start drops previous");
+        // A newer swap starts the count again.
+        state.swapped("0.3.0");
+        assert!(!state.started("0.3.0"));
+        assert_eq!(state.ok, 1);
+        // A state file that never saw a swap counts too (an empty or older file).
+        let mut fresh = State::default();
+        assert!(!fresh.started("0.1.0") && !fresh.started("0.1.0") && fresh.started("0.1.0"));
+    }
+
+    #[test]
+    fn a_version_that_failed_twice_in_a_row_is_skipped_until_a_newer_one() {
+        let mut state = State::default();
+        assert!(!state.skips("0.2.0"), "nothing is skipped at first");
+        state.swapped("0.2.0");
+        assert_eq!(state.rolled_back("0.2.0"), 1);
+        assert!(!state.skips("0.2.0"), "one failure still retries");
+        state.swapped("0.2.0");
+        assert_eq!(state.rolled_back("0.2.0"), 2);
+        assert!(state.skips("0.2.0"));
+        assert!(state.skips("0.1.9"), "older than the bad one is skipped too");
+        assert!(!state.skips("0.2.1"), "a newer release is tried");
+        assert!(!state.skips("0.3.0"));
+    }
+
+    #[test]
+    fn failures_must_be_in_a_row_for_the_same_version() {
+        let mut state = State::default();
+        assert_eq!(state.rolled_back("0.2.0"), 1);
+        assert_eq!(state.rolled_back("0.2.1"), 1, "another version starts the count over");
+        assert!(state.bad.is_none());
+        state.swapped("0.2.1");
+        assert!(!state.started("0.2.1"));
+        assert!(state.failed.is_none(), "a good start clears the failure");
+        assert_eq!(state.rolled_back("0.2.1"), 1);
+    }
+
+    #[test]
+    fn a_launch_that_neither_started_ok_nor_quit_is_a_crash() {
+        let mut state = State::default();
+        assert!(!state.launch("0.2.0"), "a version that was not swapped in is not watched");
+        state.swapped("0.2.0");
+        assert!(!state.launch("0.2.0"), "the first start of a new version");
+        assert!(state.launch("0.2.0"), "the next one finds it never ended well");
+        // A clean quit (launching cleared) is not a crash.
+        let mut quit = State::default();
+        quit.swapped("0.2.0");
+        assert!(!quit.launch("0.2.0"));
+        quit.launching = None;
+        assert!(!quit.launch("0.2.0"));
+        // Started OK ends the watch.
+        let mut ok = State::default();
+        ok.swapped("0.2.0");
+        assert!(!ok.launch("0.2.0"));
+        ok.started("0.2.0");
+        assert!(!ok.launch("0.2.0"));
+        // Another version's record does not count.
+        let mut other = State::default();
+        other.swapped("0.2.0");
+        assert!(!other.launch("0.2.0"));
+        assert!(!other.launch("0.1.9"));
+    }
+
+    #[test]
+    fn state_survives_a_round_trip_and_garbage_is_empty() {
+        let mut state = State::default();
+        state.swapped("0.2.0");
+        state.rolled_back("0.2.0");
+        state.rolled_back("0.2.0");
+        let text = serde_json::to_string(&state).unwrap();
+        assert_eq!(serde_json::from_str::<State>(&text).unwrap(), state);
+        assert_eq!(serde_json::from_str::<State>("{}").unwrap(), State::default(), "missing fields default");
+        assert!(serde_json::from_str::<State>("[1]").is_err());
+        assert!(serde_json::from_str::<State>("").is_err());
+    }
+
+    #[test]
+    fn roll_back_keeps_each_failed_install_and_restores_previous() {
+        let parent = std::env::temp_dir().join(format!("h0x-ade-roll-back-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        let root = parent.join("My Apps").join("it's h0x-ade");
+        let previous = beside(&root, ".previous");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&previous).unwrap();
+        std::fs::write(root.join("which"), "new").unwrap();
+        std::fs::write(previous.join("which"), "old").unwrap();
+        let failed = roll_back(&root).unwrap();
+        assert_eq!(failed, failed_path(&root, 1));
+        assert_eq!(std::fs::read_to_string(root.join("which")).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(failed.join("which")).unwrap(), "new");
+        assert!(!previous.exists());
+        // Nothing left to go back to: an error, and the install stays as it is.
+        assert!(roll_back(&root).is_err());
+        assert_eq!(std::fs::read_to_string(root.join("which")).unwrap(), "old");
+        // A second failure does not overwrite the first.
+        std::fs::create_dir_all(&previous).unwrap();
+        std::fs::write(previous.join("which"), "older").unwrap();
+        assert_eq!(roll_back(&root).unwrap(), failed_path(&root, 2));
+        assert!(failed.is_dir());
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn pending_rollback_is_read_once_and_deleted() {
+        let dir = std::env::temp_dir().join(format!("h0x-ade-pending-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pending-rollback.json");
+        assert!(take_pending(&path).is_none(), "no file, no rollback");
+        write_pending(&path, "0.2.0", "0.1.9", "it \"crashed\"");
+        let pending = take_pending(&path).unwrap();
+        assert_eq!((pending.from.as_str(), pending.to.as_str(), pending.reason.as_str()), ("0.2.0", "0.1.9", "it \"crashed\""));
+        assert!(!path.exists());
+        assert!(take_pending(&path).is_none());
+        // Not ours, or missing a field: ignored and still deleted.
+        for text in ["", "[]", "{\"from\":\"0.2.0\"}", "{\"from\":1,\"to\":2,\"reason\":3}"] {
+            std::fs::write(&path, text).unwrap();
+            assert!(take_pending(&path).is_none(), "{text}");
+            assert!(!path.exists());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plain_versions_are_safe_to_type_into_a_script() {
+        for v in ["0.2.0", "0.2.0-rc.1", "1_2"] {
+            assert!(plain_version(v), "{v}");
+        }
+        for v in ["", "0.2.0\"", "a b", "$(x)", "0.2.0'", "a;b", "0.2.0\n", "1".repeat(41).as_str()] {
+            assert!(!plain_version(v), "{v:?}");
+        }
+    }
+
+    fn watch_of(root: &str, previous: &str, marker: &str, pending: &str) -> Watch {
+        Watch {
+            root: PathBuf::from(root),
+            previous: PathBuf::from(previous),
+            exe: PathBuf::from(root).join("h0x-ade.exe"),
+            marker: PathBuf::from(marker),
+            pending: PathBuf::from(pending),
+            new: "0.2.0".into(),
+            old: "0.1.9".into(),
+        }
+    }
+
+    #[test]
+    fn watch_script_quotes_every_path_even_with_spaces_quotes_and_non_ascii() {
+        let w = watch_of(
+            "C:/Users/O\u{2019}Neil/My Apps/it's here/h0x-ade",
+            "C:/Users/O\u{2019}Neil/My Apps/it's here/h0x-ade.previous",
+            "C:/Users/Zo\u{eb} \u{4e2d}\u{6587}/h0x-ade/started-0.2.0",
+            "C:/Users/Zo\u{eb} \u{4e2d}\u{6587}/h0x-ade/pending-rollback.json",
+        );
+        let script = watch_script(42, &w);
+        let head = script.lines().next().unwrap();
+        assert_eq!(
+            head,
+            "$old = 42; $exe = 'C:/Users/O\u{2019}\u{2019}Neil/My Apps/it''s here/h0x-ade/h0x-ade.exe'; \
+             $root = 'C:/Users/O\u{2019}\u{2019}Neil/My Apps/it''s here/h0x-ade'; \
+             $previous = 'C:/Users/O\u{2019}\u{2019}Neil/My Apps/it''s here/h0x-ade.previous'; \
+             $marker = 'C:/Users/Zo\u{eb} \u{4e2d}\u{6587}/h0x-ade/started-0.2.0'; \
+             $pending = 'C:/Users/Zo\u{eb} \u{4e2d}\u{6587}/h0x-ade/pending-rollback.json'; \
+             $newVersion = '0.2.0'; $oldVersion = '0.1.9'"
+        );
+        // After the values only fixed text: no path can reach it.
+        assert!(script.ends_with(WATCH_PS));
+        assert!(!WATCH_PS.contains("C:/"));
+    }
+
+    #[test]
+    fn watch_script_cannot_be_broken_out_of_by_a_hostile_path() {
+        let w = watch_of("C:/a'; Remove-Item -Recurse C:/ ; '", "C:/p$(calc)", "C:/m`n", "C:/q\u{201b}x");
+        let script = watch_script(1, &w);
+        let head = script.lines().next().unwrap();
+        assert!(head.contains("$root = 'C:/a''; Remove-Item -Recurse C:/ ; '''; "), "{head}");
+        assert!(head.contains("$previous = 'C:/p$(calc)'; "), "single quotes keep $( literal");
+        assert!(head.contains("$pending = 'C:/q\u{201b}\u{201b}x'; "), "{head}");
+        assert_eq!(script.lines().count(), 1 + WATCH_PS.lines().count());
+    }
+
+    #[test]
+    fn watch_script_waits_60_seconds_kills_moves_back_and_leaves_the_note() {
+        let ps = WATCH_PS;
+        assert!(ps.contains("AddSeconds(60)"));
+        assert!(ps.contains("Test-Path -LiteralPath $marker"));
+        assert!(ps.contains("Stop-Process -Id $p.Id -Force"), "a hung new process is killed");
+        assert!(ps.contains("$root + '.failed-' + $n"));
+        let failed = ps.find("Move-Retry $root $failed").unwrap();
+        let restore = ps.find("Move-Retry $previous $root").unwrap();
+        let note = ps.find("WriteAllText($pending").unwrap();
+        let start_old = ps.rfind("Start-Process -FilePath $exe").unwrap();
+        assert!(failed < restore && restore < note && note < start_old, "the note is written before the old version starts");
+        assert!(ps.contains("UTF8Encoding($false)"), "no byte order mark: the reader is serde_json");
+        assert!(ps.contains("exit 0"), "a marker ends the watch");
+        assert!(!ps.contains('"'), "no double quote to escape through the command line");
+    }
+
+    #[test]
+    fn watch_sh_takes_every_path_as_an_argument() {
+        let sh = WATCH_SH;
+        for arg in ["$0", "$1", "$2", "$3", "$4", "$5", "$6", "$7"] {
+            assert!(sh.contains(arg), "{arg}");
+        }
+        // Every expansion is double-quoted, so a path with spaces or a quote stays one word.
+        for line in sh.lines() {
+            for arg in ["$1", "$2", "$3", "$4", "$5"] {
+                for (at, _) in line.match_indices(arg) {
+                    assert!(line[..at].ends_with('"'), "{arg} unquoted in: {line}");
+                }
+            }
+        }
+        assert!(sh.contains("-lt 60"), "waits 60 seconds");
+        assert!(sh.contains("kill \"$new\"") && sh.contains("kill -9 \"$new\""));
+        assert!(sh.contains("\"$1.failed-$i\""));
+        let failed = sh.find("mv \"$1\" \"$1.failed-$i\"").unwrap();
+        let restore = sh.find("mv \"$2\" \"$1\"").unwrap();
+        let note = sh.find("> \"$5\"").unwrap();
+        let start_old = sh.rfind("exec \"$3\"").unwrap();
+        assert!(failed < restore && restore < note && note < start_old, "the note is written before the old version starts");
+        // The command line never carries path text.
+        assert!(!sh.contains("eval") && !sh.contains("sh -c"));
+    }
+
+    #[test]
+    fn rollback_text_and_report_wording() {
+        assert_eq!(rolled_back_text("App", "0.2.0", "0.1.9"), "App update to 0.2.0 failed, HyperOx went back to 0.1.9. A report was sent.");
     }
 }

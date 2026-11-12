@@ -3969,6 +3969,9 @@ impl AppWindow {
             self.close_overlay(&id, window, cx);
         }
         let visible = window.is_visible();
+        if visible {
+            crate::update::started_ok();
+        }
         let visibility_changed = visible != self.window_visible;
         self.window_visible = visible;
         let active = window.is_window_active();
