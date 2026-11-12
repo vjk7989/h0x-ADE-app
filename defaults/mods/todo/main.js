@@ -18,11 +18,13 @@ const FULL = "This list is full (64 KB, about 2,900 tasks). Start a new list for
 // files over 1 MiB, and this keeps every list we write well clear of it.
 const MAX_BYTES = 64 * 1024;
 // UTF-8 length by hand: the mod runtime has no TextEncoder.
+// ASCII counts once; only the other characters are looked at one by one (fast for big plain lists).
 const utf8Length = (text) => {
-  let n = 0;
-  for (const ch of text) {
+  let n = text.length;
+  for (const ch of text.match(/[^\x00-\x7f]/gu) ?? []) {
     const c = ch.codePointAt(0);
-    n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+    // Extra bytes beyond one per UTF-16 unit: 2-byte chars +1, 3-byte +2, 4-byte (a 2-unit pair) +2.
+    n += c < 0x800 ? 1 : 2;
   }
   return n;
 };

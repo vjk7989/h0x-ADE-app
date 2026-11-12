@@ -5967,6 +5967,13 @@ fn todo_list_over_the_read_limit_says_so_and_is_never_written(cx: &mut TestAppCo
             break;
         }
     }
+    // A slow runner can cut the save itself off (500 ms budget): the tick is shown and pending with the save
+    // flag left set. The panel heals that after 10 s of wall-clock time on its next look at the disk.
+    if host.borrow().writes.is_empty() && state["flushing"] == json!(true) && state["pending"] != json!(0) {
+        std::thread::sleep(std::time::Duration::from_millis(10_500));
+        todo_step(cx, &host, "reload");
+        state = todo_state(cx, &host);
+    }
     let ticked = big.replacen("- [ ] edge", "- [x] edge", 1);
     assert_eq!(ticked.len(), size);
     assert_eq!(todo_written(&host), [ticked.clone()], "a same-size change is written; the panel: {state}");
