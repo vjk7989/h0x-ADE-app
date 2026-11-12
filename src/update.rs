@@ -2631,7 +2631,7 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
              $marker = 'C:/Users/Zo\u{eb} \u{4e2d}\u{6587}/h0x-ade/started-0.2.0'; \
              $pending = 'C:/Users/Zo\u{eb} \u{4e2d}\u{6587}/h0x-ade/pending-rollback.json'; \
              $newVersion = '0.2.0'; $oldVersion = '0.1.9'; \
-             $quit = 'C:/Users/Zo\u{eb} \u{4e2d}\u{6587}/h0x-ade/quit-0.2.0'")
+             $quit = 'C:/Users/Zo\u{eb} \u{4e2d}\u{6587}/h0x-ade{sep}quit-0.2.0'")
         );
         // After the values only fixed text: no path can reach it.
         assert!(script.ends_with(WATCH_PS));
