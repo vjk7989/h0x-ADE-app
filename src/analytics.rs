@@ -144,9 +144,10 @@ fn iso8601(ms: u64) -> String {
     )
 }
 
-/// True if a whitespace-separated piece of `s` looks like an absolute path.
-fn path_like(s: &str) -> bool {
-    s.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | ',' | ';' | '='))
+/// True if `word` holds something that looks like an absolute path (a drive path, a UNC or
+/// `\?\` path, or a Unix path with two or more segments).
+fn path_like(word: &str) -> bool {
+    word.split(|c: char| matches!(c, '"' | '\'' | '(' | ')' | ',' | ';' | '='))
         .any(|t| {
             let b = t.as_bytes();
             let drive = b.len() >= 3
@@ -158,23 +159,53 @@ fn path_like(s: &str) -> bool {
         })
 }
 
-/// Removes the traces of this machine from `v`: a string that holds `home` or looks like an
-/// absolute path becomes `[path]`, and every other string is cut to 500 characters.
+/// `s` with every `pat` replaced by `~` (ASCII case-insensitive on Windows).
+fn replace_home(s: &str, pat: &str) -> String {
+    if !cfg!(windows) {
+        return s.replace(pat, "~");
+    }
+    let (lower, lpat) = (s.to_ascii_lowercase(), pat.to_ascii_lowercase());
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    for (i, _) in lower.match_indices(&lpat) {
+        out.push_str(&s[last..i]);
+        out.push('~');
+        last = i + pat.len();
+    }
+    out.push_str(&s[last..]);
+    out
+}
+
+/// One line of `s` with the traces of this machine removed: the home folder (either separator
+/// form) becomes `~`, every path-like word becomes `[path]`, and the result is cut to 500 characters.
+fn scrub_text(s: &str, home: &str) -> String {
+    let mut text = s.to_string();
+    if !home.is_empty() && home != "/" {
+        let backslashed = home.replace('/', "\\");
+        let slashed = home.replace('\\', "/");
+        text = replace_home(&text, &backslashed);
+        if slashed != backslashed {
+            text = replace_home(&text, &slashed);
+        }
+    }
+    let line = text
+        .split_whitespace()
+        .map(|w| if path_like(w) { "[path]" } else { w })
+        .collect::<Vec<_>>()
+        .join(" ");
+    line.chars().take(STRING_MAX).collect()
+}
+
+/// `v` with every string (and object key) passed through `scrub_text`.
 fn scrub(v: Value, home: &str) -> Value {
     match v {
-        Value::String(s) => {
-            let home_hit =
-                !home.is_empty() && (s.contains(home) || s.contains(&home.replace('\\', "/")));
-            if home_hit || path_like(&s) {
-                Value::String("[path]".into())
-            } else {
-                Value::String(s.chars().take(STRING_MAX).collect())
-            }
-        }
+        Value::String(s) => Value::String(scrub_text(&s, home)),
         Value::Array(a) => Value::Array(a.into_iter().map(|x| scrub(x, home)).collect()),
-        Value::Object(o) => {
-            Value::Object(o.into_iter().map(|(k, x)| (k, scrub(x, home))).collect())
-        }
+        Value::Object(o) => Value::Object(
+            o.into_iter()
+                .map(|(k, x)| (scrub_text(&k, home), scrub(x, home)))
+                .collect(),
+        ),
         other => other,
     }
 }
@@ -201,9 +232,6 @@ impl Analytics {
         props.insert("app_version".into(), env!("CARGO_PKG_VERSION").into());
         props.insert("os".into(), std::env::consts::OS.into());
         props.insert("arch".into(), std::env::consts::ARCH.into());
-        // Per-install analytics: the random install ID is the person, so profiles stay on. No
-        // IP-based location is kept.
-        props.insert("$geoip_disable".into(), true.into());
         let ms = now_ms();
         let name = if failure {
             format!("failure_{name}")
@@ -259,7 +287,8 @@ impl Analytics {
     }
 
     /// Sends every queued event through `send(url, body)`: failure reports first, then usage.
-    /// What was sent is deleted; on an error the rest stays for the next time.
+    /// What was sent (or refused by the server) is deleted; on any other error the rest stays
+    /// for the next time.
     fn flush(&self, send: &dyn Fn(&str, &str) -> Result<(), String>) {
         let Some(token) = &self.token else { return };
         let url = format!("{}/batch/", self.host);
@@ -284,9 +313,10 @@ impl Analytics {
             let events: Vec<Value> = chunk
                 .iter()
                 .filter_map(|p| std::fs::read_to_string(p).ok())
-                .filter_map(|t| serde_json::from_str(&t).ok())
+                .filter_map(|t| serde_json::from_str::<Value>(&t).ok())
+                .filter(Value::is_object)
                 .collect();
-            if !events.is_empty() && send(&url, &body(&events)).is_err() {
+            if !events.is_empty() && !deliver(send, &url, &body(&events)) {
                 return;
             }
             let _guard = FILES.lock().unwrap_or_else(|e| e.into_inner());
@@ -300,7 +330,7 @@ impl Analytics {
                 .iter()
                 .filter_map(|l| serde_json::from_str(l).ok())
                 .collect();
-            if !events.is_empty() && send(&url, &body(&events)).is_err() {
+            if !events.is_empty() && !deliver(send, &url, &body(&events)) {
                 break;
             }
             sent += chunk.len();
@@ -320,6 +350,22 @@ impl Analytics {
     }
 }
 
+/// The start of the error `post` returns when the server answered with an HTTP 4xx.
+const REFUSED: &str = "refused: ";
+
+/// Sends one batch. True when it is done with: sent, or refused by the server (dropped, since
+/// sending it again would be refused again). False when it should be tried again later.
+fn deliver(send: &dyn Fn(&str, &str) -> Result<(), String>, url: &str, body: &str) -> bool {
+    match send(url, body) {
+        Ok(()) => true,
+        Err(e) if e.starts_with(REFUSED) => {
+            tracing::warn!("analytics batch dropped: {e}");
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// POSTs `body` to `url` with curl: https only, no shell, a short timeout, the body on stdin.
 fn post(url: &str, body: &str) -> Result<(), String> {
     if !url.starts_with("https://") {
@@ -327,7 +373,11 @@ fn post(url: &str, body: &str) -> Result<(), String> {
     }
     let mut curl = crate::spawn::command(crate::update::system("curl"));
     curl.args([
-        "-fsS",
+        "-sS",
+        "-o",
+        if cfg!(windows) { "NUL" } else { "/dev/null" },
+        "-w",
+        "%{http_code}",
         "--max-time",
         "5",
         "-H",
@@ -339,7 +389,7 @@ fn post(url: &str, body: &str) -> Result<(), String> {
     .arg(url);
     let mut child = curl
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("curl: {e}"))?;
@@ -349,10 +399,15 @@ fn post(url: &str, body: &str) -> Result<(), String> {
             .map_err(|e| format!("curl: {e}"))?;
     }
     let out = child.wait_with_output().map_err(|e| format!("curl: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    match code.chars().next() {
+        Some('2') => Ok(()),
+        // 408 and 429 mean "later", not "never": those are tried again.
+        Some('4') if code != "408" && code != "429" => Err(format!("{REFUSED}HTTP {code}")),
+        _ => Err(format!("HTTP {code}")),
     }
 }
 
@@ -493,11 +548,12 @@ mod tests {
             }),
             home,
         );
+        // The home folder becomes `~`; other path words become `[path]`; the rest stays.
         assert_eq!(
             (&v["a"], &v["b"], &v["c"], &v["d"]),
             (
-                &json!("[path]"),
-                &json!("[path]"),
+                &json!("~\\repo"),
+                &json!("opened [path] now"),
                 &json!("[path]"),
                 &json!("[path]")
             )
@@ -505,8 +561,15 @@ mod tests {
         assert_eq!(v["e"], "fine and/or ok https://github.com/x");
         assert_eq!(v["f"].as_str().unwrap().chars().count(), 500);
         assert_eq!(v["g"], json!(["[path]", 3, true, null]));
-        assert_eq!(v["h"]["i"], "[path]");
+        // The home is matched without regard to case on Windows only.
+        assert_eq!(v["h"]["i"], if cfg!(windows) { "~/x" } else { "[path]" });
         assert_eq!(scrub(json!("/tmp"), ""), json!("/tmp"));
+        // Object keys are scrubbed too; a lone "/" home is not replaced.
+        assert_eq!(
+            scrub(json!({ "/a/b/c": 1 }), "/"),
+            json!({ "[path]": 1 })
+        );
+        assert_eq!(scrub(json!("go /x/y"), "/"), json!("go [path]"));
     }
 
     #[test]
@@ -550,5 +613,211 @@ mod tests {
     #[test]
     fn post_refuses_plain_http() {
         assert!(post("http://example.test/batch/", "{}").is_err());
+    }
+
+    fn event_names(batch: &Value) -> Vec<String> {
+        batch["body"]["batch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["event"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn reports_go_first_and_everything_goes_in_batches_of_100() {
+        let dir = home_dir("batches");
+        let a = make(&dir, Some("t"));
+        for i in 0..150 {
+            a.record(true, &format!("r{i}"), json!({}));
+            a.record(false, &format!("u{i}"), json!({}));
+        }
+        let sent = sent_batches(&a, true);
+        let names: Vec<Vec<String>> = sent.iter().map(event_names).collect();
+        assert_eq!(
+            names.iter().map(Vec::len).collect::<Vec<_>>(),
+            [100, 50, 100, 50]
+        );
+        assert!(
+            names[..2]
+                .iter()
+                .flatten()
+                .all(|n| n.starts_with("failure_r"))
+        );
+        assert!(names[2..].iter().flatten().all(|n| n.starts_with('u')));
+        assert_eq!(
+            (names[2][0].as_str(), names[3][49].as_str()),
+            ("u0", "u149")
+        );
+        assert_eq!(std::fs::read_dir(a.reports()).unwrap().count(), 0);
+        assert_eq!(std::fs::read_to_string(a.queue()).unwrap(), "");
+    }
+
+    #[test]
+    fn a_send_failing_midway_keeps_only_the_unsent_usage_events() {
+        let dir = home_dir("midway");
+        let a = make(&dir, Some("t"));
+        for i in 0..150 {
+            a.record(false, &format!("u{i}"), json!({}));
+        }
+        let calls = std::cell::Cell::new(0);
+        a.flush(&|_, _| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                Err("offline".into())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(calls.get(), 2);
+        let left = std::fs::read_to_string(a.queue()).unwrap();
+        assert_eq!(left.lines().count(), 50);
+        assert!(left.lines().next().unwrap().contains("\"u100\""));
+        let sent = sent_batches(&a, true);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(event_names(&sent[0]).last().unwrap(), "u149");
+    }
+
+    #[test]
+    fn an_empty_or_unparsable_queue_sends_nothing_and_its_junk_is_cleared() {
+        let dir = home_dir("junk");
+        let a = make(&dir, Some("t"));
+        std::fs::create_dir_all(a.queue().parent().unwrap()).unwrap();
+        // A 0-byte queue file.
+        std::fs::write(a.queue(), "").unwrap();
+        assert!(sent_batches(&a, true).is_empty());
+        // Only lines that are not JSON: nothing is sent and they do not stay.
+        std::fs::write(a.queue(), "not json\n\n{\"event\":\n").unwrap();
+        assert!(sent_batches(&a, true).is_empty());
+        assert_eq!(std::fs::read_to_string(a.queue()).unwrap(), "");
+        // A line that is not JSON between two events: the events go, the junk goes with them.
+        a.record(false, "first", json!({}));
+        a.append("garbage {").unwrap();
+        a.record(false, "second", json!({}));
+        let sent = sent_batches(&a, true);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(event_names(&sent[0]), ["first", "second"]);
+        assert_eq!(std::fs::read_to_string(a.queue()).unwrap(), "");
+    }
+
+    #[test]
+    fn the_cap_keeps_a_queue_of_exactly_1_mb_and_never_keeps_an_oversized_event() {
+        let dir = home_dir("capedge");
+        let a = make(&dir, Some("t"));
+        // One line plus its newline is exactly the limit: kept.
+        a.append(&"x".repeat(QUEUE_MAX as usize - 1)).unwrap();
+        assert_eq!(std::fs::metadata(a.queue()).unwrap().len(), QUEUE_MAX);
+        // One byte over: the oldest line goes.
+        a.append("y").unwrap();
+        assert_eq!(std::fs::read_to_string(a.queue()).unwrap(), "y\n");
+        // A single event larger than the limit cannot be kept at all.
+        a.append(&"z".repeat(QUEUE_MAX as usize)).unwrap();
+        assert_eq!(std::fs::read_to_string(a.queue()).unwrap(), "");
+    }
+
+    #[test]
+    fn concurrent_failure_reports_land_in_distinct_files() {
+        let dir = home_dir("concurrent");
+        let a = make(&dir, Some("t"));
+        std::thread::scope(|s| {
+            for t in 0..8 {
+                let a = &a;
+                s.spawn(move || {
+                    for i in 0..5 {
+                        a.record(true, &format!("t{t}_{i}"), json!({}));
+                    }
+                });
+            }
+        });
+        assert_eq!(std::fs::read_dir(a.reports()).unwrap().count(), 40);
+        let names: std::collections::HashSet<String> = sent_batches(&a, true)
+            .iter()
+            .flat_map(event_names)
+            .collect();
+        assert_eq!(names.len(), 40);
+    }
+
+    #[test]
+    fn scrub_handles_windows_homes_with_spaces_and_non_ascii() {
+        let home = "C:\\Users\\Jörg Müller";
+        let v = scrub(
+            json!({
+                "a": "saved in C:\\Users\\Jörg Müller\\notes",
+                "b": "C:/Users/Jörg Müller/x",
+                "c": "C:\\Program Files\\HyperOx\\h0x-ade.exe",
+                "d": "/é/ü",
+                "e": "é".repeat(500),
+                "f": "é".repeat(501),
+            }),
+            home,
+        );
+        assert_eq!(v["a"], "saved in ~\\notes");
+        assert_eq!(v["b"], "~/x");
+        // Only the word with the drive letter is a path word; no part of the home stays.
+        assert_eq!(v["c"], "[path] Files\\HyperOx\\h0x-ade.exe");
+        assert_eq!(v["d"], "[path]");
+        assert!(!v.to_string().contains("Müller"));
+        assert_eq!(v["e"], "é".repeat(500));
+        assert_eq!(v["f"], "é".repeat(500));
+    }
+
+    #[test]
+    fn scrub_with_an_empty_home_redacts_only_absolute_paths() {
+        for kept in ["", "plain text", "/", "/tmp", "C:", "a/b/c", "x:y"] {
+            assert_eq!(scrub(json!(kept), ""), json!(kept), "{kept}");
+        }
+        for path in ["C:\\", "c:/", "/a/b", "\\\\?\\C:\\x", "f(/a/b)"] {
+            assert_eq!(scrub(json!(path), ""), json!("[path]"), "{path}");
+        }
+        assert_eq!(scrub(json!(null), ""), json!(null));
+        assert_eq!(scrub(json!({}), ""), json!({}));
+        assert_eq!(scrub(json!([]), ""), json!([]));
+    }
+
+    #[test]
+    fn iso8601_handles_leap_days_and_century_boundaries() {
+        assert_eq!(iso8601(946_684_799_000), "1999-12-31T23:59:59.000Z");
+        assert_eq!(iso8601(951_868_799_999), "2000-02-29T23:59:59.999Z");
+        assert_eq!(iso8601(4_107_542_399_999), "2100-02-28T23:59:59.999Z");
+        assert_eq!(iso8601(4_107_542_400_000), "2100-03-01T00:00:00.000Z");
+        assert!(iso8601(u64::MAX).ends_with('Z'));
+    }
+
+    #[test]
+    fn a_batch_the_server_refuses_is_dropped_but_other_errors_are_retried() {
+        let dir = home_dir("refused");
+        let a = make(&dir, Some("t"));
+        a.record(false, "one", json!({}));
+        a.flush(&|_, _| Err(format!("{REFUSED}HTTP 400")));
+        assert_eq!(std::fs::read_to_string(a.queue()).unwrap(), "");
+        a.record(false, "two", json!({}));
+        a.flush(&|_, _| Err("HTTP 503".into()));
+        assert_eq!(std::fs::read_to_string(a.queue()).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn a_report_that_is_not_an_object_is_deleted_not_sent() {
+        let dir = home_dir("notobject");
+        let a = make(&dir, Some("t"));
+        std::fs::create_dir_all(a.reports()).unwrap();
+        std::fs::write(a.reports().join("1.json"), "[1]").unwrap();
+        assert!(sent_batches(&a, true).is_empty());
+        assert!(!a.reports().join("1.json").exists());
+    }
+
+    #[test]
+    fn post_refuses_anything_but_https_without_running_curl() {
+        for url in [
+            "",
+            "ftp://example.test/",
+            "file:///etc/passwd",
+            " https://example.test/",
+            "HTTP://example.test/",
+        ] {
+            assert!(
+                post(url, "{}").unwrap_err().starts_with("not https"),
+                "{url}"
+            );
+        }
     }
 }

@@ -1,7 +1,7 @@
 //! Crash reports and the device details of failure reports. A panic writes its report
 //! synchronously (no lock, no network); the flusher sends it at the next start.
 
-use super::{GLOBAL, STRING_MAX, now_ms, path_like, session_seconds};
+use super::{GLOBAL, STRING_MAX, now_ms, scrub_text, session_seconds};
 use serde_json::{Value, json};
 use std::io::Write;
 
@@ -44,16 +44,21 @@ fn write_crash(info: &std::panic::PanicHookInfo<'_>) {
     props.insert("app_version".into(), env!("CARGO_PKG_VERSION").into());
     props.insert("os".into(), std::env::consts::OS.into());
     props.insert("arch".into(), std::env::consts::ARCH.into());
-    props.insert("$geoip_disable".into(), true.into());
     let ms = now_ms();
     let event = json!({ "event": "failure_crash", "distinct_id": a.id, "timestamp": super::iso8601(ms), "properties": props });
     let dir = a.reports();
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let file = dir.join(format!("{ms}-{}-crash.json", std::process::id()));
-    if let Ok(mut f) = std::fs::File::create(file) {
-        let _ = f.write_all(event.to_string().as_bytes());
+    // Written under a name the flusher ignores, then renamed: it never sees half a report.
+    let name = format!("{ms}-{}-crash", std::process::id());
+    let tmp = dir.join(format!("{name}.tmp"));
+    if let Ok(mut f) = std::fs::File::create(&tmp) {
+        let done = f.write_all(event.to_string().as_bytes()).is_ok();
+        drop(f);
+        if !done || std::fs::rename(&tmp, dir.join(format!("{name}.json"))).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -66,21 +71,6 @@ pub fn report(kind: &str, step: &str, error: &str) {
 /// The last component of a file path, either separator.
 fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
-}
-
-/// Free text with its path-like words (and anything holding `home`) replaced by `[path]`, on
-/// one line and cut to 500 characters.
-fn scrub_text(s: &str, home: &str) -> String {
-    let slashed = home.replace('\\', "/");
-    let text = s
-        .split_whitespace()
-        .map(|w| {
-            let home_hit = !home.is_empty() && (w.contains(home) || w.contains(&slashed));
-            if home_hit || path_like(w) { "[path]" } else { w }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    text.chars().take(STRING_MAX).collect()
 }
 
 /// The function names of a printed backtrace: its `at file:line` lines go, so do hashes and the
@@ -185,8 +175,8 @@ fn language() -> Option<String> {
     ["LC_ALL", "LC_MESSAGES", "LANG"]
         .iter()
         .filter_map(|k| std::env::var(k).ok())
-        .find(|v| !v.is_empty() && v != "C" && v != "POSIX")
         .map(|v| v.split(['.', '@']).next().unwrap_or_default().to_string())
+        .find(|v| !v.is_empty() && v != "C" && v != "POSIX")
 }
 
 fn time_zone() -> Option<String> {
@@ -216,9 +206,9 @@ mod tests {
     #[test]
     fn panic_messages_lose_paths_and_the_home_folder() {
         let m = scrub_text("cannot open C:\\Users\\me\\a.txt: gone", "C:\\Users\\me");
-        assert_eq!(m, "cannot open [path] gone");
+        assert_eq!(m, "cannot open ~\\a.txt: gone");
         assert_eq!(scrub_text("failed at /home/me/x/y", ""), "failed at [path]");
-        assert_eq!(scrub_text("in /home/me.cfg", "/home/me"), "in [path]");
+        assert_eq!(scrub_text("in /home/me.cfg", "/home/me"), "in ~.cfg");
         assert_eq!(scrub_text("index out of bounds", "/home/me"), "index out of bounds");
         assert_eq!(scrub_text("", "/home/me"), "");
         assert_eq!(scrub_text("a\nb\tc", ""), "a b c");
@@ -244,6 +234,97 @@ mod tests {
         for (k, v) in o {
             assert!(!v.is_null() && *v != "", "{k} is empty");
         }
+    }
+
+    #[test]
+    fn the_crash_hook_chains_to_the_previous_hook_and_never_panics_without_analytics() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static SEEN: AtomicBool = AtomicBool::new(false);
+        const MARK: &str = "h0x-crash-hook-test-panic";
+        let original = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if info.payload().downcast_ref::<&str>() == Some(&MARK) {
+                SEEN.store(true, Ordering::SeqCst);
+            }
+            original(info);
+        }));
+        install_crash_hook();
+        // Tests carry no token, so no analytics: the hook must still return (a panic inside a
+        // panic hook aborts the test process) and hand over to the previous hook.
+        let unwound = std::panic::catch_unwind(|| {
+            std::panic::panic_any(MARK);
+        });
+        assert!(unwound.is_err());
+        assert!(SEEN.load(Ordering::SeqCst));
+        // A report without analytics is a no-op, not a panic.
+        report(
+            "update_failed",
+            "swap",
+            "C:\\Users\\Jörg Müller\\h0x-ade.exe",
+        );
+    }
+
+    #[test]
+    fn a_backtrace_strips_only_real_hashes_and_ignores_location_lines() {
+        let printed = concat!(
+            "  0: h0x_ade::window::hello_world\n",
+            "  1: h0x_ade::a::b::h0123456789abcde\n",
+            "  2: h0x_ade::a::c::hzzzzzzzzzzzzzzzz\n",
+            "  3: <alloc::boxed::Box<F> as core::ops::FnOnce<A>>::call_once::h0123456789abcdef\n",
+            "  4:\n",
+            "             at C:\\Program Files\\Rust: x\\src\\lib.rs:1:1\n",
+            "             at /home/me/a b/c.rs:2:2\n",
+            "  x: not_a_frame\n",
+            "  5: core::panicking::panic_fmt\n",
+            "  6: rust_begin_unwind\n",
+        );
+        assert_eq!(
+            frames(printed),
+            vec![
+                "h0x_ade::window::hello_world",
+                "h0x_ade::a::b::h0123456789abcde",
+                "h0x_ade::a::c::hzzzzzzzzzzzzzzzz",
+                "<alloc::boxed::Box<F> as core::ops::FnOnce<A>>::call_once",
+            ]
+        );
+        // Exactly 12 frames after the panic machinery is skipped.
+        let many = (0..14)
+            .map(|i| {
+                if i < 2 {
+                    format!("  {i}: std::panicking::f{i}\n")
+                } else {
+                    format!("  {i}: app::f{i}\n")
+                }
+            })
+            .collect::<String>();
+        let kept = frames(&many);
+        assert_eq!(kept.len(), FRAMES);
+        assert_eq!(
+            (kept[0].as_str(), kept[11].as_str()),
+            ("app::f2", "app::f13")
+        );
+    }
+
+    #[test]
+    fn device_details_survive_the_report_scrub() {
+        let d = device_details();
+        let scrubbed = super::super::scrub(d.clone(), "");
+        for k in ["os", "arch", "cpu_cores", "uptime_seconds"] {
+            assert_eq!(scrubbed.get(k), d.get(k), "{k}");
+        }
+    }
+
+    #[test]
+    fn panic_messages_with_windows_homes_holding_spaces_lose_every_piece() {
+        // A home folder with a space spans two words; no piece of it may stay in the report.
+        let m = scrub_text(
+            "cannot open C:\\Users\\Jörg Müller\\a.txt now",
+            "C:\\Users\\Jörg Müller",
+        );
+        assert_eq!(m, "cannot open ~\\a.txt now");
+        assert!(!m.contains("C:\\") && !m.contains("Müller"), "{m}");
+        assert_eq!(scrub_text("at \\\\server\\share\\x", ""), "at [path]");
+        assert_eq!(scrub_text("   ", "C:\\Users\\me"), "");
     }
 
     #[test]

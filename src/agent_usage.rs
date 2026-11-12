@@ -31,9 +31,8 @@ pub struct Usage {
 /// Token totals for the agent session that ran in `folder` between `start` and
 /// `end`. `None` when nothing was found or the logs are unreadable.
 pub fn usage(kind: AgentKind, folder: &Path, start: SystemTime, end: SystemTime) -> Option<Usage> {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)?;
+    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
+    let home = PathBuf::from(env("USERPROFILE").or_else(|| env("HOME"))?);
     usage_in(&home, kind, folder, start, end)
 }
 
@@ -194,7 +193,12 @@ fn claude(
             if msg.model.is_some() {
                 model = msg.model;
             }
-            match l.request_id.or(msg.id) {
+            let key = match (msg.id, l.request_id) {
+                (Some(id), _) => Some(format!("m:{id}")),
+                (None, Some(id)) => Some(format!("r:{id}")),
+                (None, None) => None,
+            };
+            match key {
                 // A streamed response repeats its id with growing counters.
                 Some(id) => {
                     let e = by_id.entry(id).or_default();
@@ -218,10 +222,10 @@ fn claude(
         ..Usage::default()
     };
     for u in by_id.values().chain(anonymous.iter()) {
-        out.input += u.input_tokens.unwrap_or(0);
-        out.output += u.output_tokens.unwrap_or(0);
-        out.cache_read += u.cache_read_input_tokens.unwrap_or(0);
-        out.cache_write += u.cache_creation_input_tokens.unwrap_or(0);
+        out.input = out.input.saturating_add(u.input_tokens.unwrap_or(0));
+        out.output = out.output.saturating_add(u.output_tokens.unwrap_or(0));
+        out.cache_read = out.cache_read.saturating_add(u.cache_read_input_tokens.unwrap_or(0));
+        out.cache_write = out.cache_write.saturating_add(u.cache_creation_input_tokens.unwrap_or(0));
     }
     Some(out)
 }
@@ -254,7 +258,9 @@ struct CodexTotals {
 
 impl CodexTotals {
     fn weight(&self) -> u64 {
-        self.input_tokens.unwrap_or(0) + self.output_tokens.unwrap_or(0)
+        self.input_tokens
+            .unwrap_or(0)
+            .saturating_add(self.output_tokens.unwrap_or(0))
     }
 }
 
@@ -307,10 +313,10 @@ fn codex(
                     }
                     let mut best: Option<CodexTotals> = None;
                     let mut model = None;
-                    let mut cwd_ok = true;
+                    let mut cwd_ok = false;
                     let mut cwd_seen = false;
                     for_each_line(&path, budget, |line| {
-                        if !cwd_ok {
+                        if cwd_seen && !cwd_ok {
                             return;
                         }
                         let Ok(l) = serde_json::from_slice::<CodexLine>(line) else {
@@ -348,10 +354,14 @@ fn codex(
                     found = true;
                     // Codex input counts include cached tokens; split them.
                     let cached = t.cached_input_tokens.unwrap_or(0);
-                    out.input += t.input_tokens.unwrap_or(0).saturating_sub(cached);
-                    out.cache_read += cached;
-                    out.output += t.output_tokens.unwrap_or(0);
-                    out.reasoning += t.reasoning_output_tokens.unwrap_or(0);
+                    out.input = out
+                        .input
+                        .saturating_add(t.input_tokens.unwrap_or(0).saturating_sub(cached));
+                    out.cache_read = out.cache_read.saturating_add(cached);
+                    out.output = out.output.saturating_add(t.output_tokens.unwrap_or(0));
+                    out.reasoning = out
+                        .reasoning
+                        .saturating_add(t.reasoning_output_tokens.unwrap_or(0));
                     if model.is_some() {
                         out.model = model;
                     }
@@ -365,9 +375,13 @@ fn codex(
 /// USD per 1M tokens: (model name contains, input, output, cache read, cache write).
 /// Update when prices change. First match wins, so specific names come first.
 const PRICES: &[(&str, f64, f64, f64, f64)] = &[
+    ("claude-3-opus", 15.0, 75.0, 1.5, 18.75),
+    ("claude-opus-4-0", 15.0, 75.0, 1.5, 18.75),
+    ("claude-opus-4-1", 15.0, 75.0, 1.5, 18.75),
     ("opus", 5.0, 25.0, 0.5, 6.25),
     ("sonnet", 3.0, 15.0, 0.3, 3.75),
     ("haiku", 1.0, 5.0, 0.1, 1.25),
+    ("codex-mini", 0.25, 2.0, 0.025, 0.0),
     ("gpt-5-mini", 0.25, 2.0, 0.025, 0.0),
     ("gpt-5-nano", 0.05, 0.4, 0.005, 0.0),
     ("gpt-5", 1.25, 10.0, 0.125, 0.0),
@@ -526,6 +540,240 @@ mod tests {
         };
         assert_eq!(cost("mystery-model", &u), None);
         assert!(cost("claude-sonnet-4-5", &u).is_some());
+    }
+
+    #[test]
+    fn slug_rule_handles_non_ascii_spaces_and_unc_paths() {
+        assert_eq!(
+            slug(Path::new(r"C:\Users\Jörg Müller\my app")),
+            "C--Users-J-rg-M-ller-my-app"
+        );
+        assert_eq!(slug(Path::new(r"\\server\share\x")), "--server-share-x");
+        assert_eq!(slug(Path::new("")), "");
+    }
+
+    #[test]
+    fn timestamps_reject_offsets_and_keep_millisecond_boundaries() {
+        // Only UTC `Z` timestamps are read; an offset is rejected, not converted.
+        assert_eq!(parse_ts("2026-01-01T05:30:00+05:30"), None);
+        assert_eq!(parse_ts("2026-01-01T00:00:00+00:00"), None);
+        assert_eq!(parse_ts("2026-01-01T00:00:00z"), None);
+        assert_eq!(parse_ts("2026-01-01 00:00:00Z"), None);
+        assert_eq!(parse_ts("2026-01-01T00:00:00ZZ"), None);
+        assert_eq!(parse_ts("2026-01-01T24:00:00Z"), None);
+        assert_eq!(parse_ts("2026-01-01T00:00:0éZ"), None);
+        assert_eq!(
+            parse_ts("2026-01-01T00:00:00.123456789Z"),
+            Some(T0 as i64 * 1000 + 123)
+        );
+        assert_eq!(parse_ts("2000-02-29T23:59:59.999Z"), Some(951_868_799_999));
+        assert_eq!(parse_ts("2100-03-01T00:00:00Z"), Some(4_107_542_400_000));
+    }
+
+    fn claude_dir(home: &Path, folder: &Path) -> PathBuf {
+        let dir = home.join(".claude").join("projects").join(slug(folder));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn claude_window_is_inclusive_and_a_backwards_window_finds_nothing() {
+        let home = tmp("claude-window");
+        let folder = Path::new(r"C:\Users\Jörg Müller\my app");
+        let line = |ts: &str, id: &str, n: u64| {
+            format!(
+                r#"{{"timestamp":"{ts}","requestId":"{id}","message":{{"usage":{{"input_tokens":{n}}}}}}}"#
+            )
+        };
+        let lines = [
+            line("2026-01-01T00:00:00Z", "a", 1),
+            line("2026-01-01T00:00:10Z", "b", 2),
+            line("2026-01-01T00:00:10.001Z", "c", 4),
+            line("2025-12-31T23:59:59.999Z", "d", 8),
+            line("2026-01-01T05:30:00+05:30", "e", 16),
+        ];
+        std::fs::write(claude_dir(&home, folder).join("s.jsonl"), lines.join("\n")).unwrap();
+        let u = usage_in(&home, AgentKind::Claude, folder, at(T0), at(T0 + 10)).unwrap();
+        assert_eq!(u.input, 3);
+        // The clock went backwards: end before start.
+        assert!(usage_in(&home, AgentKind::Claude, folder, at(T0 + 10), at(T0)).is_none());
+        assert!(usage_in(&home, AgentKind::Codex, folder, at(T0 + 10), at(T0)).is_none());
+        // A start before 1970 is not a window.
+        let before = UNIX_EPOCH - Duration::from_secs(1);
+        assert!(usage_in(&home, AgentKind::Claude, folder, before, at(T0 + 10)).is_none());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn claude_keeps_the_max_of_each_field_and_sums_lines_without_ids() {
+        let home = tmp("claude-max");
+        let folder = Path::new(r"G:\max");
+        let ts = "2026-01-01T00:00:05Z";
+        let mut text = Vec::new();
+        for l in [
+            // Same requestId: the larger value of each field, even when a later line is smaller.
+            format!(
+                r#"{{"timestamp":"{ts}","requestId":"r1","message":{{"model":"mystery-1","usage":{{"input_tokens":10,"output_tokens":1}}}}}}"#
+            ),
+            format!(
+                r#"{{"timestamp":"{ts}","requestId":"r1","message":{{"usage":{{"input_tokens":5,"output_tokens":20}}}}}}"#
+            ),
+            // No requestId: message.id dedupes.
+            format!(
+                r#"{{"timestamp":"{ts}","message":{{"id":"m9","usage":{{"input_tokens":3}}}}}}"#
+            ),
+            format!(
+                r#"{{"timestamp":"{ts}","message":{{"id":"m9","usage":{{"input_tokens":4}}}}}}"#
+            ),
+            // No id at all: every line counts.
+            format!(
+                r#"{{"timestamp":"{ts}","message":{{"usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+            ),
+            format!(
+                r#"{{"timestamp":"{ts}","message":{{"usage":{{"input_tokens":2,"output_tokens":2}}}}}}"#
+            ),
+        ] {
+            // Windows line endings.
+            text.extend_from_slice(l.as_bytes());
+            text.extend_from_slice(b"\r\n");
+        }
+        // A line that is not UTF-8 is skipped.
+        text.extend_from_slice(b"\xff\xfe{\"timestamp\"\r\n");
+        std::fs::write(claude_dir(&home, folder).join("s.jsonl"), text).unwrap();
+        let u = usage_in(&home, AgentKind::Claude, folder, at(T0), at(T0 + 60)).unwrap();
+        assert_eq!((u.input, u.output), (10 + 4 + 1 + 2, 20 + 1 + 2));
+        assert_eq!(u.model.as_deref(), Some("mystery-1"));
+        assert_eq!(u.cost_usd, None);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_huge_line_is_counted_without_keeping_its_text() {
+        let home = tmp("claude-huge");
+        let folder = Path::new(r"G:\huge");
+        let secret = format!("SECRET{}", "x".repeat(4 * 1024 * 1024));
+        let line = format!(
+            r#"{{"timestamp":"2026-01-01T00:00:05Z","requestId":"r1","message":{{"content":"{secret}","usage":{{"input_tokens":7}}}}}}"#
+        );
+        std::fs::write(claude_dir(&home, folder).join("s.jsonl"), line).unwrap();
+        let u = usage_in(&home, AgentKind::Claude, folder, at(T0), at(T0 + 60)).unwrap();
+        assert_eq!(u.input, 7);
+        assert!(!format!("{u:?}").contains("SECRET"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_budget_admits_a_line_of_exactly_its_size_and_a_missing_file_costs_nothing() {
+        let home = tmp("budget-edge");
+        let p = home.join("x.jsonl");
+        std::fs::write(&p, "aaaa\nbbbb\n").unwrap();
+        let (mut budget, mut n) = (5, 0);
+        for_each_line(&p, &mut budget, |_| n += 1);
+        assert_eq!((n, budget), (1, 0));
+        let (mut budget, mut n) = (10, 0);
+        for_each_line(&p, &mut budget, |_| n += 1);
+        assert_eq!((n, budget), (2, 0));
+        let (mut budget, mut n) = (0, 0);
+        for_each_line(&p, &mut budget, |_| n += 1);
+        assert_eq!((n, budget), (0, 0));
+        let (mut budget, mut n) = (10, 0);
+        for_each_line(&home.join("missing.jsonl"), &mut budget, |_| n += 1);
+        assert_eq!((n, budget), (0, 10));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_sums_matching_rollouts_and_ignores_other_names_and_folders() {
+        let home = tmp("codex-sum");
+        let sessions = home.join(".codex").join("sessions");
+        let tc = |ts: &str, i: u64, c: u64, o: u64, r: u64| {
+            format!(
+                r#"{{"timestamp":"{ts}","payload":{{"info":{{"total_token_usage":{{"input_tokens":{i},"cached_input_tokens":{c},"output_tokens":{o},"reasoning_output_tokens":{r}}}}}}}}}"#
+            )
+        };
+        let write = |rel: &str, cwd: &str, rest: &[String]| {
+            let p = sessions.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let meta =
+                format!(r#"{{"timestamp":"2026-01-01T00:00:01Z","payload":{{"cwd":"{cwd}"}}}}"#);
+            let mut lines = vec![meta];
+            lines.extend_from_slice(rest);
+            std::fs::write(p, lines.join("\n")).unwrap();
+        };
+        // The same folder written two ways (case, separators, trailing slash, non-ASCII).
+        write(
+            "2026/01/01/rollout-a.jsonl",
+            "c:/users/jörg müller/app/",
+            &[
+                tc("2026-01-01T00:00:05Z", 100, 40, 10, 1),
+                // No timestamp: not in the window.
+                r#"{"payload":{"info":{"total_token_usage":{"input_tokens":9999,"output_tokens":9999}}}}"#.to_string(),
+            ],
+        );
+        // More cached than input: input saturates at 0.
+        write(
+            "2026/01/02/rollout-b.jsonl",
+            r"C:\\Users\\JÖRG Müller\\app",
+            &[tc("2026-01-01T00:00:06Z", 50, 60, 5, 0)],
+        );
+        // Not a rollout file, and not under a numeric year folder.
+        write(
+            "2026/01/01/notes.jsonl",
+            "c:/users/jörg müller/app",
+            &[tc("2026-01-01T00:00:05Z", 7000, 0, 7000, 0)],
+        );
+        write(
+            "archive/01/01/rollout-c.jsonl",
+            "c:/users/jörg müller/app",
+            &[tc("2026-01-01T00:00:05Z", 8000, 0, 8000, 0)],
+        );
+        let u = usage_in(
+            &home,
+            AgentKind::Codex,
+            Path::new(r"C:\Users\JÖRG Müller\app"),
+            at(T0),
+            at(T0 + 3600),
+        )
+        .unwrap();
+        assert_eq!(
+            (u.input, u.cache_read, u.output, u.reasoning),
+            (60, 100, 15, 1)
+        );
+        // No model line: no model, so no cost.
+        assert_eq!((u.model, u.cost_usd), (None, None));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn an_empty_home_finds_nothing() {
+        let folder = Path::new(r"Z:\h0x-agent-usage-no-such-folder");
+        for kind in [AgentKind::Claude, AgentKind::Codex] {
+            assert!(usage_in(Path::new(""), kind, folder, at(T0), at(T0 + 10)).is_none());
+        }
+    }
+
+    #[test]
+    fn prices_pick_the_specific_model_first_and_ignore_case() {
+        let million = |input, output, cache_read, cache_write| Usage {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            ..Usage::default()
+        };
+        let one_in = million(1_000_000, 0, 0, 0);
+        assert_eq!(cost("gpt-5-mini", &one_in), Some(0.25));
+        assert_eq!(cost("GPT-5", &one_in), Some(1.25));
+        assert_eq!(cost("gpt-5-nano-2025", &one_in), Some(0.05));
+        assert_eq!(
+            cost(
+                "claude-opus-4-5",
+                &million(1_000_000, 1_000_000, 1_000_000, 1_000_000)
+            ),
+            Some(5.0 + 25.0 + 0.5 + 6.25)
+        );
+        assert_eq!(cost("claude-haiku-4-5", &Usage::default()), Some(0.0));
+        assert_eq!(cost("", &one_in), None);
     }
 
     #[test]
