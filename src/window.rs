@@ -3701,16 +3701,22 @@ impl AppWindow {
     /// Opens a clicked text file in the files panel, showing the panel first. The file is
     /// shown in its folder only when the panel can't be shown or its mod doesn't listen.
     fn open_in_files(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if mods::send_command("files", &format!("open:{}", path.display())) {
+        // The panel reads only inside the folders mods may use; elsewhere the system opens it.
+        if crate::mod_files::check(&path, &crate::mod_files::allowed_roots()).is_err() {
+            crate::links::open_text_elsewhere(&path);
+            return;
+        }
+        let command = format!("open:{}", path.display());
+        if mods::send_command("files", &command) {
             return;
         }
         let mut ok = |this: &mut Self, name: &str, args: Value| this.run_as(name, args, true, window, cx).get("error").is_none();
-        if ok(self, "layout.select", json!({ "stack": "panel-body", "child": "files" })) && ok(self, "layout.show", json!({ "id": "panel" })) {
-            // The mod's copy starts, or shows, on the next `sync`, which delivers it.
-            self.pending_open = Some(path);
-            cx.notify();
-        } else {
+        if !(ok(self, "layout.select", json!({ "stack": "panel-body", "child": "files" })) && ok(self, "layout.show", json!({ "id": "panel" }))) {
             crate::links::open(&crate::links::Target::File(path));
+        } else if !mods::send_command("files", &command) {
+            // The mod's copy starts on a `sync`, which delivers it (or shows the folder).
+            self.pending_open = Some(path);
+            self.sync(window, cx);
         }
     }
 
@@ -5919,6 +5925,67 @@ export default class Probe extends View {
             cx.deactivate_window();
             assert_eq!(seen(cx), Some(json!(false)), "blurred: {:?}", crate::mods::shared("probe.seen"));
         }
+    }
+
+    #[test]
+    fn a_clicked_text_file_shows_the_hidden_files_panel_and_opens_there() {
+        in_own_process("open_in_files_window");
+    }
+
+    /// A stand-in `files` mod records what reaches its `nextCommand()`. Hidden, the panel is
+    /// shown with its files tab first and the open follows; shown, the open goes straight in.
+    #[gpui::test]
+    fn open_in_files_window(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("open_in_files_window") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { nextCommand, shared, setShared } from "h0x";
+
+export default class Files extends View {
+  init(_props, cx) {
+    cx.spawn(async cx => {
+      for (;;) {
+        const c = await nextCommand();
+        setShared("files-test.got", [...(shared("files-test.got") ?? []), c]);
+      }
+    });
+  }
+  render() { return div(); }
+}
+"#;
+        let layout = json!({ "id": "root", "type": "row", "children": [
+            { "id": "panel", "type": "column", "hidden": true, "children": [
+                { "id": "panel-body", "type": "stack", "active": "other", "children": [
+                    { "id": "files", "type": "block", "content": { "mod": "files" } },
+                    { "id": "other", "type": "block", "content": { "tab": "active" } }
+                ] }
+            ] }
+        ] });
+        let (view, cx) = open_window(cx, "files", probe, layout);
+        cx.run_until_parked();
+        let got = || crate::mods::shared("files-test.got").unwrap_or(json!([]));
+        assert!(!crate::mods::send_command("files", "probe"), "hidden, the files mod gets nothing");
+
+        // A Windows path with spaces and mixed slashes travels as written.
+        let first = std::path::PathBuf::from(r"C:\My Files/notes a.txt");
+        view.update_in(cx, |this, window, cx| this.open_in_files(first.clone(), window, cx));
+        view.update(cx, |this, _| {
+            assert!(!this.chrome.find("panel").unwrap().hidden, "the panel is shown");
+            let tab = this.chrome.find("panel-body").and_then(|s| s.active_child()).map(|c| c.id.clone());
+            assert_eq!(tab.as_deref(), Some("files"), "the files tab is selected");
+        });
+        cx.run_until_parked();
+        assert_eq!(got(), json!([r"open:C:\My Files/notes a.txt"]), "delivered once the panel shows, without another event");
+        assert_eq!(view.update(cx, |this, _| this.pending_open.clone()), None);
+
+        // Shown now: the next click goes straight to the mod.
+        let second = std::path::PathBuf::from("/home/me/a b.md");
+        view.update_in(cx, |this, window, cx| this.open_in_files(second.clone(), window, cx));
+        assert_eq!(view.update(cx, |this, _| this.pending_open.clone()), None, "nothing waits for a shown panel");
+        cx.run_until_parked();
+        assert_eq!(got(), json!([r"open:C:\My Files/notes a.txt", "open:/home/me/a b.md"]));
     }
 
     include!("window/pane_size_tests.rs");

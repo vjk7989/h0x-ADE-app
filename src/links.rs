@@ -220,8 +220,8 @@ pub enum Kind {
 
 pub fn kind(path: &Path) -> Kind {
     fn by_extension(path: &Path) -> Kind {
-        // An extension with anything but letters and digits (`a.txt:stream`) is not one.
-        let Some(ext) = path.extension().and_then(|e| e.to_str()).filter(|e| e.bytes().all(|b| b.is_ascii_alphanumeric())) else {
+        // An extension with anything but letters and digits (`a.txt:stream`, `a.`) is not one.
+        let Some(ext) = path.extension().and_then(|e| e.to_str()).filter(|e| !e.is_empty() && e.bytes().all(|b| b.is_ascii_alphanumeric())) else {
             return Kind::Reveal;
         };
         let ext = ext.to_ascii_lowercase();
@@ -233,7 +233,9 @@ pub fn kind(path: &Path) -> Kind {
             Kind::System
         }
     }
-    if path.is_dir() {
+    // Windows ignores a trailing dot or space, so `a.exe.` is `a.exe`.
+    let trailing = path.file_name().and_then(|n| n.to_str()).is_none_or(|n| n.ends_with(['.', ' ']));
+    if trailing || path.is_dir() {
         return Kind::Reveal;
     }
     let kind = by_extension(path);
@@ -324,6 +326,18 @@ pub fn open_default(path: &Path) {
         let mut command = std::process::Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" });
         command.arg(path);
         spawn(command);
+    }
+}
+
+/// A text file the editor may not read: the system opens it, except scripts,
+/// which their handler could run (`.js`, `.py`): those are shown in their folder.
+pub fn open_text_elsewhere(path: &Path) {
+    const SCRIPTS: &[&str] = &["js", "mjs", "cjs", "py", "sh", "bash", "zsh", "fish", "rb", "php"];
+    let script = path.extension().and_then(|e| e.to_str()).is_some_and(|e| SCRIPTS.iter().any(|s| e.eq_ignore_ascii_case(s)));
+    if script {
+        open(&Target::File(path.to_path_buf()));
+    } else {
+        open_default(path);
     }
 }
 
@@ -571,12 +585,19 @@ mod tests {
 
     #[test]
     fn query_links_keep_their_full_target() {
-        for url in ["https://example.com/?a=1&b=2", "https://localhost:17480/login?t=abc%3D%3D", "file:///C:/Windows/System32/winver.exe"] {
+        for url in ["https://example.com/?a=1&b=2", "https://localhost:17480/login?t=abc%3D%3D"] {
             let text = format!("Dashboard: {url}");
             let range = find(&text, text.find(url).unwrap()).unwrap();
             assert_eq!(&text[range.clone()], url);
             assert_eq!(resolve(&text[range], None), Some(Target::Url(url.into())));
         }
+        // A file: link is never a Url: it names a local file that exists, or nothing.
+        let winver = "file:///C:/Windows/System32/winver.exe";
+        let text = format!("Dashboard: {winver}");
+        let range = find(&text, text.find(winver).unwrap()).unwrap();
+        assert_eq!(&text[range.clone()], winver);
+        let expected = (cfg!(windows) && Path::new("C:/Windows/System32/winver.exe").exists()).then(|| Target::File(PathBuf::from("C:/Windows/System32/winver.exe")));
+        assert_eq!(resolve(&text[range], None), expected);
         // The whole query reaches the handler; a file: link still never does.
         for url in ["https://example.com/?a=1&b=2", "https://localhost:17480/login?t=abc%3D%3D"] {
             assert_eq!(opener_args(&Target::Url(url.into())), Some(vec![url.to_owned()]), "{url}");
@@ -748,6 +769,169 @@ mod tests {
             assert!(web_or_mail(url), "{url}");
             assert_eq!(opener_args(&Target::Url(url.into())), Some(vec![url.to_owned()]), "{url}");
         }
+    }
+
+    #[test]
+    fn file_uris_name_a_path_of_this_machine_only() {
+        for (uri, path) in [
+            ("file:///tmp/a.txt", "/tmp/a.txt"),
+            ("FILE:///tmp/a.txt", "/tmp/a.txt"),
+            ("File://localhost/tmp/a.txt", "/tmp/a.txt"),
+            ("file://LOCALHOST/tmp/a.txt", "/tmp/a.txt"),
+            ("file:///tmp/My%20Notes/a%20b.txt", "/tmp/My Notes/a b.txt"),
+            ("file:///tmp/a.txt?line=4#L4", "/tmp/a.txt"),
+            ("file:///tmp/a.txt#?x", "/tmp/a.txt"),
+            // Encoded `#` and `?` are part of the name, decoded only after the query is cut.
+            ("file:///tmp/a%23b%3fc.txt", "/tmp/a#b?c.txt"),
+            ("file:///tmp/%C3%BC%c3%bc.txt", "/tmp/üü.txt"),
+            ("file:///tmp/ü.txt", "/tmp/ü.txt"),
+            ("file:///", "/"),
+        ] {
+            assert_eq!(file_uri_path(uri).as_deref(), Some(path), "{uri}");
+        }
+        // `/C:/…` is a drive path on Windows only.
+        for (uri, drive) in [("file:///C:/Users/a%20b/x.txt", "C:/Users/a b/x.txt"), ("file://localhost/c:/x.txt", "c:/x.txt")] {
+            let expected = if cfg!(windows) { drive.to_owned() } else { format!("/{drive}") };
+            assert_eq!(file_uri_path(uri), Some(expected), "{uri}");
+        }
+        for uri in [
+            // Another machine, however it is spelled.
+            "file://server/share/a.txt",
+            "file://evil.com/etc/passwd",
+            "file://localhost.evil.com/tmp/a.txt",
+            "file://127.0.0.1/tmp/a.txt",
+            "file://user@localhost/tmp/a.txt",
+            "file://localhost:80/tmp/a.txt",
+            "file://localhost?x",
+            // Not `file://`.
+            "file:",
+            "file:/tmp/a.txt",
+            "file:tmp/a.txt",
+            // No path.
+            "file://",
+            "file://localhost",
+            "file://?/tmp/a.txt",
+            // Bad escapes, NUL and bytes that are not UTF-8.
+            "file:///tmp/%zz.txt",
+            "file:///tmp/%2",
+            "file:///tmp/%",
+            "file:///tmp/%g0.txt",
+            "file:///tmp/a%00.txt",
+            "file:///%00",
+            "file:///tmp/%ff.txt",
+            "file:///tmp/%C3.txt",
+            "file:///tmp/%C3%28.txt",
+        ] {
+            assert_eq!(file_uri_path(uri), None, "{uri}");
+            assert_eq!(resolve(uri, Some(&std::env::temp_dir())), None, "{uri}");
+        }
+    }
+
+    #[test]
+    fn file_uris_resolve_to_files_that_exist_here_and_never_to_shares() {
+        let dir = std::env::temp_dir().join(format!("h0x-file-uri-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("My Notes")).unwrap();
+        let file = dir.join("My Notes").join("a b.txt");
+        std::fs::write(&file, "").unwrap();
+        // `file:///C:/…` on Windows, `file:///tmp/…` elsewhere.
+        let uri = |path: &Path| {
+            let text = path.to_str().unwrap().replace('\\', "/").replace(' ', "%20");
+            if text.starts_with('/') { format!("file://{text}") } else { format!("file:///{text}") }
+        };
+        let found = Some(Target::File(file.clone()));
+        assert_eq!(resolve(&uri(&file), None), found);
+        assert_eq!(resolve(&format!("{}?x=1#top", uri(&file)), None), found);
+        assert_eq!(resolve(&uri(&file).replacen("file://", "file://localhost", 1), None), found);
+        assert_eq!(resolve(&uri(&file).replacen("file://", "FILE://", 1), Some(Path::new("/elsewhere"))), found);
+        assert_eq!(resolve(&uri(&dir), None), Some(Target::File(dir.clone())));
+        assert_eq!(resolve(&uri(&dir.join("gone.txt")), None), None);
+        assert_eq!(resolve(&uri(&file).replacen("file://", "file://server", 1), None), None);
+        // A file: link never becomes a web link handed to the opener.
+        assert!(!matches!(resolve(&uri(&file), None), Some(Target::Url(_))));
+        // Shares hidden in the path: an empty host, then `//server` or encoded backslashes.
+        for uri in [
+            "file:////server/share/a.txt",
+            "file://localhost//server/share/a.txt",
+            "file:///%5C%5Cserver%5Cshare%5Ca.txt",
+            "file:///%2F%2Fserver/share/a.txt",
+            "file:///%5C%3F%3F%5CUNC%5Cserver%5Cshare%5Ca.txt",
+        ] {
+            assert_eq!(resolve(uri, None), None, "{uri}");
+            assert_eq!(resolve(uri, Some(&dir)), None, "{uri}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn text_files_open_in_the_editor_programs_are_revealed_and_the_rest_go_to_the_system() {
+        let dir = std::env::temp_dir().join(format!("h0x-kind-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let touch = |name: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, "").unwrap();
+            path
+        };
+        for name in [
+            "a.txt", "a.md", "a.markdown", "a.json", "a.jsonc", "Cargo.toml", "a.yaml", "a.yml", "a.rs", "a.js", "a.mjs", "a.cjs", "a.ts", "a.tsx", "a.jsx", "a.py",
+            "a.go", "a.java", "a.kt", "a.c", "a.h", "a.cpp", "a.hpp", "a.cs", "a.rb", "a.php", "a.sh", "a.bash", "a.zsh", "a.fish", "a.html", "a.htm", "a.css",
+            "a.scss", "a.xml", "a.csv", "a.log", "a.ini", "a.cfg", "a.conf", "UPPER.TXT", "Mixed.Md", "release.notes.rs", "a b.txt",
+        ] {
+            assert_eq!(kind(&touch(name)), Kind::Text, "{name}");
+        }
+        // Windows mixed slashes.
+        std::fs::write(dir.join("sub").join("b.md"), "").unwrap();
+        assert_eq!(kind(&dir.join("sub/b.md")), Kind::Text);
+        for ext in PROGRAMS {
+            for name in [format!("x.{ext}"), format!("X.{}", ext.to_ascii_uppercase()), format!("notes.txt.{ext}")] {
+                assert_eq!(kind(&touch(&name)), Kind::Reveal, "{name}");
+            }
+        }
+        for name in ["Run.Bat", "a.AppImage", "SETUP.Exe", "a.MsI"] {
+            assert_eq!(kind(&touch(name)), Kind::Reveal, "{name}");
+        }
+        for name in ["a.png", "a.PDF", "a.docx", "a.svg", "a.mp4", "a.zip", "a.xlsx", "a.tar.gz"] {
+            assert_eq!(kind(&touch(name)), Kind::System, "{name}");
+        }
+        // No plain extension: none, an empty one, a dotfile, a stream, a lookalike letter.
+        for name in ["Makefile", ".bashrc", ".txt", "a.txt:stream", "a.txt::$DATA", "a.еxe", "a.tхt", "a.exe ", "a.txt.", "a.exe.", "a."] {
+            let path = dir.join(name);
+            let _ = std::fs::write(&path, "");
+            assert_eq!(kind(&path), Kind::Reveal, "{name:?}");
+        }
+        // A folder, even one named like a document, and a file that is gone.
+        std::fs::create_dir_all(dir.join("folder.txt")).unwrap();
+        assert_eq!(kind(&dir.join("folder.txt")), Kind::Reveal);
+        assert_eq!(kind(&dir), Kind::Reveal);
+        assert_eq!(kind(&dir.join("gone.txt")), Kind::Reveal);
+        assert_eq!(kind(Path::new("")), Kind::Reveal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_link_named_like_a_document_that_leads_to_a_program_is_only_revealed() {
+        let dir = std::env::temp_dir().join(format!("h0x-kind-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for target in ["prog.exe", "setup.MSI", "script"] {
+            std::fs::write(dir.join(target), "").unwrap();
+        }
+        std::fs::create_dir_all(dir.join("folder")).unwrap();
+        #[cfg(unix)]
+        let link = |target: &str, name: &str| std::os::unix::fs::symlink(dir.join(target), dir.join(name)).is_ok();
+        // Symbolic links need Developer Mode or elevation on Windows: skipped without.
+        #[cfg(windows)]
+        let link = |target: &str, name: &str| {
+            if target == "folder" {
+                std::os::windows::fs::symlink_dir(dir.join(target), dir.join(name)).is_ok()
+            } else {
+                std::os::windows::fs::symlink_file(dir.join(target), dir.join(name)).is_ok()
+            }
+        };
+        for (target, name) in [("prog.exe", "notes.txt"), ("setup.MSI", "photo.png"), ("script", "readme.md"), ("folder", "doc.txt")] {
+            if link(target, name) {
+                assert_eq!(kind(&dir.join(name)), Kind::Reveal, "{name} -> {target}");
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(windows)]
