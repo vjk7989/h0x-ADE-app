@@ -112,7 +112,8 @@ export default class Welcome extends View {
         const raw = await readTextFile(file);
         let p = {};
         try {
-          p = raw ? JSON.parse(raw) : {};
+          p = raw ? JSON.parse(raw.replace(/^\uFEFF/, "")) : {};
+          if (p === null || typeof p !== "object" || Array.isArray(p)) return;
         } catch {
           return;
         }
@@ -436,7 +437,7 @@ export default class Welcome extends View {
     const found = (id, label, value) => this.button(t, id, label, false, (_e, cx) => this.setFoundVia(value, cx));
     return v_flex()
       .gap(16)
-      // Asked once, at the end and below everything else: answer or skip, then it is gone for good.
+      // Asked once, first on this page: answer or skip, then it is gone for good.
       .when(this.foundVia === null, (el) =>
         el.child(
           v_flex()

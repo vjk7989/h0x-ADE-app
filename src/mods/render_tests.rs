@@ -1921,6 +1921,262 @@ fn settings_info_buttons_open_only_allowed_links_and_feedback_is_coming_soon(cx:
     assert_eq!(notes, [&json!({"title":"The feedback forum is coming soon.","level":"info"})], "feedback shows only the notice, never an error: {:?}", c.effects);
 }
 
+// `entry` with settings.json in `values`' app home holding `settings` (None: missing) and `setup` run after its
+// init. A press is what `setup` leaves in `this.press`: a timer runs it with a live cx, as a click would. Describes
+// the entry once its tasks have finished, then again after each of `presses` presses; returns each description.
+fn describe_pressing(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    entry: &str,
+    values: BTreeMap<String, Value>,
+    settings: Option<&str>,
+    setup: &str,
+    presses: usize,
+) -> (Vec<String>, Rc<RefCell<Calls>>) {
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    // Any scripted reply records the disk; no core or exec call starts with this one.
+    calls.borrow_mut().replies.insert("fixture-unused".into(), Value::Null);
+    if let Some(text) = settings {
+        let home = values["appHome"].as_str().unwrap();
+        calls.borrow_mut().files.insert(format!("{home}/settings.json"), text.into());
+    }
+    let policy = Policy::new()
+        .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+        .with_host_module(module(values, calls.clone()))
+        .unwrap();
+    let setup = format!("{setup} cx.timer.every(50, (cx) => {{ const press = this.press; this.press = null; if (press) {{ press(null, cx); cx.notify(); }} }});");
+    let root = staged.wrapper(entry, &setup);
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root, policy, window, cx))
+        .unwrap()
+        .unwrap();
+    let mut trees = Vec::new();
+    for _ in 0..=presses {
+        advance(cx, 150);
+        trees.push(window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap());
+    }
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    (trees, calls)
+}
+
+fn info_values() -> BTreeMap<String, Value> {
+    let mut p = props();
+    p["section"] = json!("info");
+    fixture(true, p, updates("current", "current"))
+}
+
+// The written settings.json files, each read back as JSON.
+fn written(calls: &Rc<RefCell<Calls>>, path: &str) -> Vec<Value> {
+    let c = calls.borrow();
+    c.writes
+        .iter()
+        .map(|(p, text)| {
+            assert_eq!(p, path, "only settings.json is written: {:?}", c.writes);
+            serde_json::from_str(text).unwrap_or_else(|e| panic!("{text:?}: {e}"))
+        })
+        .collect()
+}
+
+const ANALYTICS_SWITCH_PRESS: &str = "const toggle = this.toggle.bind(this); \
+    this.toggle = (t, id, on, onClick) => { if (id === 'st-analytics') this.press = onClick; return toggle(t, id, on, onClick); };";
+
+#[gpui::test]
+fn settings_analytics_switch_turns_sharing_off_then_on_again_keeping_every_other_key(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let off = json!({"share_analytics": false});
+    // settings.json, then what each of two presses writes: off is share_analytics false, on removes the key.
+    // Only false is off; anything else shows (and so turns) as on.
+    for (file, first, second) in [
+        (None, off.clone(), json!({})),
+        (Some("{}"), off.clone(), json!({})),
+        (Some(r#"{"share_analytics": true, "zoom": 1.25}"#), json!({"share_analytics": false, "zoom": 1.25}), json!({"zoom": 1.25})),
+        (Some(r#"{"share_analytics": false, "zoom": 1.25}"#), json!({"zoom": 1.25}), json!({"share_analytics": false, "zoom": 1.25})),
+        (Some(r#"{"share_analytics": null}"#), off.clone(), json!({})),
+        (Some(r#"{"share_analytics": "no"}"#), off.clone(), json!({})),
+        (Some(r#"{"share_analytics": 0}"#), off.clone(), json!({})),
+        (Some("\u{feff}{\"share_analytics\": false}"), json!({}), off.clone()),
+    ] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", info_values(), file, ANALYTICS_SWITCH_PRESS, 2);
+        assert_eq!(written(&calls, "/fixture/app/settings.json"), [first, second], "{file:?}");
+        for tree in &trees {
+            assert!(tree.contains("Share usage analytics") && tree.contains("st-analytics"), "{file:?}: {tree}");
+            assert!(!tree.contains("can't be read"), "{file:?}: {tree}");
+        }
+        assert!(calls.borrow().unexpected.is_empty(), "{file:?}: {:?}", calls.borrow().unexpected);
+    }
+}
+
+#[gpui::test]
+fn settings_analytics_switch_never_overwrites_a_settings_file_it_could_not_read(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for bad in ["", "   ", "{not json", "[]", "null", "\"share_analytics\""] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", info_values(), Some(bad), ANALYTICS_SWITCH_PRESS, 1);
+        assert!(calls.borrow().writes.is_empty(), "{bad:?}: {:?}", calls.borrow().writes);
+        assert!(trees[1].contains("can't be read"), "{bad:?}: the page says why nothing changed: {}", trees[1]);
+    }
+}
+
+const ANALYTICS_TITLE: &str = "How HyperOx handles your data (beta)";
+const ANALYTICS_ABOUT: [&str; 3] = [
+    "During the beta, HyperOx sends usage data and failure reports so we can fix problems and improve the app. You are identified by a random install ID, not your name or email. We never send what you type, your prompts, agent replies, terminal contents, file or folder names, or your keys. IP addresses are not stored; the approximate country is.",
+    "After the beta we plan to move data collection to zero-knowledge proofs.",
+    "You can turn usage analytics off any time. Failure reports stay on so we can fix crashes and update problems.",
+];
+
+#[gpui::test]
+fn settings_analytics_about_is_closed_until_asked_and_click_here_opens_only_pavii_tech(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Closed at first, whatever the switch says.
+    for file in [None, Some(r#"{"share_analytics": false}"#)] {
+        let (trees, _) = describe_pressing(cx, &staged, "frame/settings", info_values(), file, "", 0);
+        assert!(trees[0].contains("st-analytics-info"), "{file:?}: the i button is there: {}", trees[0]);
+        assert!(!trees[0].contains(ANALYTICS_TITLE) && !trees[0].contains("st-analytics-more") && !trees[0].contains("Click here"), "{file:?}: {}", trees[0]);
+        assert!(ANALYTICS_ABOUT.iter().all(|p| !trees[0].contains(p)), "{file:?}: {}", trees[0]);
+    }
+    // Open: the title, the three paragraphs word for word, and Click here, which opens pavii.tech.
+    let setup = "this.analyticsAbout = true; const button = this.button.bind(this); \
+        this.button = (t, id, label, onClick) => { if (id === 'st-analytics-more') this.press = onClick; return button(t, id, label, onClick); };";
+    let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", info_values(), None, setup, 1);
+    for tree in &trees {
+        for text in [ANALYTICS_TITLE, ANALYTICS_ABOUT[0], ANALYTICS_ABOUT[1], ANALYTICS_ABOUT[2], "Click here", "st-analytics-more"] {
+            assert!(tree.contains(text), "the open panel shows {text:?}: {tree}");
+        }
+    }
+    let c = calls.borrow();
+    let links: Vec<&Value> = c.effects.iter().filter(|(n, _)| n == "openLink").map(|(_, a)| &a[0]).collect();
+    assert_eq!(links, [&json!("https://pavii.tech")], "{:?}", c.effects);
+    assert!(allowed_link("https://pavii.tech"));
+    assert!(!c.effects.iter().any(|(n, _)| n == "notify"), "no \"Can't open the link\": {:?}", c.effects);
+    assert!(c.writes.is_empty() && c.unexpected.is_empty(), "{:?} {:?}", c.writes, c.unexpected);
+}
+
+const FOUND_VIA_QUESTION: &str = "How did you find HyperOx?";
+const FOUND_VIA: [(&str, &str, &str); 6] = [
+    ("w-found-friend", "Friend", "friend"),
+    ("w-found-x", "X / Twitter", "x"),
+    ("w-found-github", "GitHub", "github"),
+    ("w-found-search", "Search", "search"),
+    ("w-found-other", "Other", "other"),
+    ("w-found-skip", "Skip", "skip"),
+];
+
+// The welcome on its last page, pressing its button `id`.
+fn welcome_pressing(id: &str) -> String {
+    format!(
+        "this.page = 4; const button = this.button.bind(this); \
+        this.button = (t, id, label, primary, onClick, icon) => {{ if (id === '{id}') this.press = onClick; return button(t, id, label, primary, onClick, icon); }};"
+    )
+}
+
+#[gpui::test]
+fn welcome_asks_how_you_found_hyperox_once_and_saves_each_answer_with_the_other_keys(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (id, _, answer) in FOUND_VIA {
+        let values = fixture(true, props(), updates("current", "current"));
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/welcome", values, Some(r#"{"appearance": "dark", "zoom": 1.25}"#), &welcome_pressing(id), 1);
+        assert!(trees[0].contains(FOUND_VIA_QUESTION) && trees[0].contains("Make it yours"), "{id}: {}", trees[0]);
+        for (id, label, _) in FOUND_VIA {
+            assert!(trees[0].contains(id) && trees[0].contains(label), "{id} {label:?}: {}", trees[0]);
+        }
+        assert_eq!(written(&calls, "/fixture/app/settings.json"), [json!({"appearance": "dark", "zoom": 1.25, "found_via": answer})], "{id}");
+        // Answered: gone, and the rest of the page (and Done) is still there.
+        assert!(!trees[1].contains(FOUND_VIA_QUESTION) && !trees[1].contains("w-found-"), "{id}: {}", trees[1]);
+        assert!(trees[1].contains("Make it yours") && trees[1].contains("w-start"), "{id}: {}", trees[1]);
+        assert!(calls.borrow().unexpected.is_empty(), "{id}: {:?}", calls.borrow().unexpected);
+    }
+}
+
+#[gpui::test]
+fn welcome_asks_only_while_found_via_was_never_set_and_only_on_the_last_page(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (file, asked) in [
+        (None, true),
+        (Some("{}"), true),
+        (Some(r#"{"found_via": null}"#), true),
+        (Some(r#"{"zoom": 1.25, "share_analytics": false}"#), true),
+        // Any answer counts as asked, even one this version doesn't know.
+        (Some(r#"{"found_via": "skip"}"#), false),
+        (Some(r#"{"found_via": "github"}"#), false),
+        (Some(r#"{"found_via": "carrier-pigeon"}"#), false),
+        (Some(r#"{"found_via": ""}"#), false),
+        (Some(r#"{"found_via": 0}"#), false),
+        // A settings.json the welcome can't read: it doesn't ask.
+        (Some(""), false),
+        (Some("{not json"), false),
+        (Some("null"), false),
+    ] {
+        let values = fixture(true, props(), updates("current", "current"));
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/welcome", values, file, "this.page = 4;", 0);
+        assert_eq!(trees[0].contains(FOUND_VIA_QUESTION), asked, "{file:?}: {}", trees[0]);
+        assert_eq!(trees[0].contains("w-found-skip"), asked, "{file:?}: {}", trees[0]);
+        assert!(trees[0].contains("w-start"), "{file:?}: {}", trees[0]);
+        assert!(calls.borrow().writes.is_empty(), "{file:?}: only an answer writes: {:?}", calls.borrow().writes);
+    }
+    for page in 1..=3 {
+        let values = fixture(true, props(), updates("current", "current"));
+        let (trees, _) = describe_pressing(cx, &staged, "frame/welcome", values, None, &format!("this.page = {page};"), 0);
+        assert!(!trees[0].contains(FOUND_VIA_QUESTION), "page {page}: {}", trees[0]);
+    }
+}
+
+#[gpui::test]
+fn welcome_done_and_open_a_space_work_without_answering_how_you_found_hyperox(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (has_spaces, label) in [(true, "Done"), (false, "Open a space")] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        if !has_spaces {
+            values.insert("spaces".into(), json!([]));
+        }
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/welcome", values, None, &welcome_pressing("w-start"), 1);
+        assert!(trees[0].contains(FOUND_VIA_QUESTION) && trees[0].contains(label), "{label}: {}", trees[0]);
+        let c = calls.borrow();
+        assert_eq!(c.shared.get("frame.welcomed"), Some(&json!("finished")), "{label}: {:?}", c.shared);
+        assert!(c.effects.iter().any(|(n, a)| n == "closeOverlay" && a.first() == Some(&json!("o1"))), "{label}: {:?}", c.effects);
+        assert_eq!(c.effects.iter().any(|(n, a)| n == "run" && a.first() == Some(&json!("space.new"))), !has_spaces, "{label}: {:?}", c.effects);
+        assert!(c.writes.is_empty(), "{label}: closing unanswered writes nothing: {:?}", c.writes);
+    }
+}
+
+#[gpui::test]
+fn welcome_appearance_and_answer_edit_settings_json_in_a_windows_app_home_and_keep_each_other(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let home = "C:\\Users\\Zo\u{eb} Q\\AppData\\Roaming\\h0x-ade";
+    let path = format!("{home}/settings.json");
+    let values = || {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("appHome".into(), json!(home));
+        values
+    };
+    // setAppearance as before the edit() refactor: a value is set, System (null) removes the key, other keys stay.
+    let both = r#"{"found_via": "github", "appearance": "light"}"#;
+    for (file, value, expected) in [
+        (both, "'dark'", Some(json!({"found_via": "github", "appearance": "dark"}))),
+        (both, "null", Some(json!({"found_via": "github"}))),
+        ("{}", "'light'", Some(json!({"appearance": "light"}))),
+        ("{not json", "'dark'", None),
+    ] {
+        let setup = format!("this.page = 4; this.press = (_e, cx) => this.setAppearance({value}, cx);");
+        let (_, calls) = describe_pressing(cx, &staged, "frame/welcome", values(), Some(file), &setup, 0);
+        assert_eq!(written(&calls, &path), expected.into_iter().collect::<Vec<_>>(), "{file} {value}");
+        assert!(calls.borrow().unexpected.is_empty(), "{file} {value}: {:?}", calls.borrow().unexpected);
+    }
+    // The answer, written to the same file, keeps the appearance.
+    let (trees, calls) = describe_pressing(cx, &staged, "frame/welcome", values(), Some(r#"{"appearance": "dark"}"#), &welcome_pressing("w-found-skip"), 1);
+    assert!(trees[0].contains(FOUND_VIA_QUESTION) && !trees[1].contains(FOUND_VIA_QUESTION), "{}\n{}", trees[0], trees[1]);
+    assert_eq!(written(&calls, &path), [json!({"appearance": "dark", "found_via": "skip"})]);
+    // An unreadable file is never written over, by an answer either.
+    let (_, calls) = describe_pressing(cx, &staged, "frame/welcome", values(), Some("{not json"), "this.page = 4; this.press = (_e, cx) => this.setFoundVia('skip', cx);", 0);
+    assert!(calls.borrow().writes.is_empty(), "{:?}", calls.borrow().writes);
+}
+
 // The scripted answer to a `core` or `writeTextFile` call, recording it; None when nothing is scripted.
 fn scripted(calls: &Rc<RefCell<Calls>>, name: &str, first: &Value, text: Option<Value>) -> Option<Value> {
     let mut c = calls.borrow_mut();
