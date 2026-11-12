@@ -2585,7 +2585,7 @@ fn settings_look_lists_the_new_themes_under_dark_and_light(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn brand_logo_is_the_white_mark_on_a_dark_tile_only_on_a_light_chrome(cx: &mut TestAppContext) {
+fn brand_logo_is_the_same_foreground_coloured_svg_mark_on_every_chrome(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let file_chrome = |text: &str| serde_json::from_str::<Value>(text).unwrap()["colors"]["chrome"].as_str().unwrap().to_owned();
@@ -2605,26 +2605,27 @@ fn brand_logo_is_the_white_mark_on_a_dark_tile_only_on_a_light_chrome(cx: &mut T
         ("white", "#ffffff".to_owned(), true),
         ("translucent light", "#f0f0f0ff".to_owned(), true),
     ];
+    let mark = "mods/workspace-chrome/hyperox-mark.svg";
     for (label, chrome, light) in cases {
         let mut values = fixture(true, props(), updates("current", "current"));
         values.get_mut("theme").unwrap()["chrome"] = json!(chrome);
+        // Each chrome gets a readable foreground: dark text on a light chrome, light on a dark one.
+        values.get_mut("theme").unwrap()["foreground"] = json!(if light { "#1c1c1c" } else { "#ededed" });
         values.get_mut("layout").unwrap()["children"][0]["size"]["px"] = json!(268);
         let tree = describe_with_values(cx, &staged, "mods/workspace-chrome", values.clone(), None).unwrap();
         let lines: Vec<&str> = tree.lines().collect();
-        let (shown, hidden) = if light { ("mods/workspace-chrome/hyperox-white.png", "frame/welcome/hyperox.png") } else { ("frame/welcome/hyperox.png", "mods/workspace-chrome/hyperox-white.png") };
-        let image = lines.iter().position(|l| l.contains(shown)).unwrap_or_else(|| panic!("{label} ({chrome}): no {shown}: {tree}"));
-        assert!(!tree.contains(hidden), "{label} ({chrome}): one logo only: {tree}");
-        if light {
-            assert!(lines[image].contains(".size[Number(14.0)]"), "{label}: the mark is centred small: {}", lines[image]);
-            let tile = lines[image - 1];
-            assert!(tile.contains("#111111") && tile.contains(".size[Number(20.0)]") && tile.contains(".rounded[Number(5.0)]"), "{label}: a 20 px near-black tile: {tile}");
-        } else {
-            assert!(lines[image].contains(".size[Number(20.0)]") && !tree.contains("#111111"), "{label}: today's logo: {}", lines[image]);
-        }
-        // The rail hides the brand, either logo.
+        let logos: Vec<&&str> = lines.iter().filter(|l| l.contains(mark)).collect();
+        assert_eq!(logos.len(), 1, "{label} ({chrome}): one logo: {tree}");
+        let logo = logos[0];
+        assert!(logo.trim_start().starts_with("svg"), "{label}: an svg, not an image: {logo}");
+        assert!(logo.contains(".size[Number(20.0)]"), "{label}: 20 px: {logo}");
+        let color = format!(".text_color[Str({})]", values["theme"]["foreground"]);
+        assert!(logo.contains(&color), "{label}: coloured by the theme's foreground {color}: {logo}");
+        assert!(!tree.contains("#111111") && !tree.contains(".png"), "{label} ({chrome}): no tile, no PNG: {tree}");
+        // The rail hides the brand.
         values.get_mut("layout").unwrap()["children"][0]["size"]["px"] = json!(44);
         let tree = describe_with_values(cx, &staged, "mods/workspace-chrome", values, None).unwrap();
-        assert!(!tree.contains("hyperox.png") && !tree.contains("hyperox-white.png"), "{label}: rail: {tree}");
+        assert!(!tree.contains(mark) && !tree.contains(".png"), "{label}: rail: {tree}");
     }
 }
 
