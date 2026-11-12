@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.1.23] - 2026-11-12
+
+A sharper logo and image paste on Windows. Bundles h0x-core 0.1.15.
+
+### Fixed
+
+- The HyperOx logo at the top left is sharp in every theme and follows the theme's text colour.
+- On Windows, Ctrl+V with a screenshot on the clipboard now works in a terminal: the image is saved as a file and its path is pasted, so Claude Code and other agents attach it.
+
 ## [0.1.22] - 2026-11-12
 
 A sturdier to-do list. Bundles h0x-core 0.1.15.
