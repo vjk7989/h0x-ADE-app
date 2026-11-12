@@ -246,7 +246,7 @@ impl Analytics {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
-            crate::persist::write_atomic(&file, event.to_string())
+            std::fs::create_dir_all(self.reports()).and_then(|()| crate::persist::write_atomic(&file, event.to_string()))
         } else {
             self.append(&event.to_string())
         };
