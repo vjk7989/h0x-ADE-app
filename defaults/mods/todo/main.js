@@ -78,7 +78,7 @@ export default class Todo extends View {
     if (p.celebrate !== undefined) { this.handle.focus(); return; }
     this.dir = `${appHome()}/todo`;
     this.index = []; this.indexText = null; this.cur = null; this.list = parseList(""); this.text = ""; this.disk = "";
-    this.pending = []; this.finishing = new WeakSet(); this.open = new Set(); this.showDone = false; this.sel = { k: "head" }; this.pos = 0;
+    this.pending = []; this.finishing = new WeakSet(); this.open = new Set(); this.wide = new Set(); this.showDone = false; this.sel = { k: "head" }; this.pos = 0;
     this.edit = null; this.naming = null; this.menu = false; this.menuAt = 0; this.confirming = false; this.hover = null;
     this.readonly = false; this.ready = false; this.error = null; this.shown = false; this.wantFocus = false; this.badIndex = null;
     this.add = this.makeAdd();
@@ -156,7 +156,7 @@ export default class Todo extends View {
 
   async openListFrom(slug, cx) {
     while (this.flushBusy(cx)) await cx.sleep(50);
-    this.cur = slug; this.pending = []; this.retryMs = 0; this.edit = null; this.error = null; this.readonly = false;
+    this.cur = slug; this.pending = []; this.wide.clear(); this.retryMs = 0; this.edit = null; this.error = null; this.readonly = false;
     localStorage.setItem("todo.list", slug);
     let text;
     try { text = await readTextFile(this.file(slug)); } catch { text = undefined; }
@@ -723,12 +723,21 @@ export default class Todo extends View {
         : div().text_size(12).child("Add step")), t);
   }
 
-  // Done text is struck through by a line over it (the style kit has no text decoration) and dimmer.
+  wideKey(item, step) { return `${step ? "s" : "t"}:${item.title}`; }
+
+  // A click toggles the full wrapped title; the second click of a double click undoes it before editing.
+  toggleWide(item, step) {
+    const k = this.wideKey(item, step);
+    if (this.wide.has(k)) this.wide.delete(k); else this.wide.add(k);
+  }
+
+  // Done text is struck through by a line over it (the style kit has no text decoration) and dimmer; a wrapped (wide) title is only dimmer.
   titleEl(item, step, t) {
-    const text = this.face(div().min_w(0).truncate().text_size(this.hand ? (step ? 14.5 : 16) : (step ? 12.5 : 13.5))
+    const wide = this.wide.has(this.wideKey(item, step));
+    const text = this.face(div().min_w(0).when(wide, (el) => el.flex_1()).when(!wide, (el) => el.truncate()).text_size(this.hand ? (step ? 14.5 : 16) : (step ? 12.5 : 13.5))
       .text_color(item.done ? t.muted : t.foreground).child(item.title));
-    return div().relative().min_w(0).flex().child(text)
-      .when(item.done, (el) => el.child(div().absolute().inset(0).flex().items_center().child(div().w_full().h(1).bg(t.muted))));
+    return div().relative().min_w(0).flex().when(wide, (el) => el.flex_1()).child(text)
+      .when(item.done && !wide, (el) => el.child(div().absolute().inset(0).flex().items_center().child(div().w_full().h(1).bg(t.muted))));
   }
 
   taskRow(r, t) {
@@ -742,18 +751,18 @@ export default class Todo extends View {
       .hover((s) => s.border_color(t.accent))
       .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.tick(r, cx); })
       .when(item.done, (el) => el.child(svg("mods/workspace-chrome/check.svg").size(step ? 10 : 13).text_color(t.accent_foreground)));
-    const open = this.open.has(item.title), steps = step ? [] : item.steps;
-    const row = h_flex().id(`todo-row-${key}`).min_h(step ? 32 : 44).px(10).gap(10).items_center().cursor_pointer()
+    const open = this.open.has(item.title), wide = this.wide.has(this.wideKey(item, step)), steps = step ? [] : item.steps;
+    const row = h_flex().id(`todo-row-${key}`).min_h(step ? 32 : 44).px(10).gap(10).items_center().cursor_pointer().when(wide, (el) => el.items_start().py(8))
       .when(step, (el) => el.flex_1().min_w(0).rounded(8))
       .when(!step, (el) => el.flex_none().rounded(12).border_1().border_color(t.border).bg(t.surface))
       .when(sel, (el) => el.bg(t.selected)).hover((s) => s.bg(t.hover))
       .on_hover((h, cx) => { this.hover = h ? key : (this.hover === key ? null : this.hover); cx.notify(); })
-      .on_mouse_down("left", (e, cx) => { this.select(r, cx); if (e.click_count === 2) this.startEdit(r, cx); })
+      .on_mouse_down("left", (e, cx) => { this.select(r, cx); if (!editing && e.click_count <= 2) this.toggleWide(item, step); if (e.click_count === 2) this.startEdit(r, cx); })
       .child(circle)
       .child(editing
         ? this.face(Input.new(this.edit.input).flex_1().min_w(0).h(28).px(6).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(this.hand ? 15 : 12.5).text_color(t.foreground))
         : this.titleEl(item, step, t))
-      .when(!editing, (el) => el.child(div().flex_1()))
+      .when(!editing && !wide, (el) => el.child(div().flex_1()))
       .when(steps.length > 0 && !editing, (el) => el.child(div().flex_none().h(18).px(7).rounded(9).bg(t.hover).flex().items_center().text_size(10.5).text_color(t.dim)
         .child(`${steps.filter((s) => s.done).length}/${steps.length}`)))
       .when(!step && !editing, (el) => el.child(div().id(`todo-fold-${key}`).w(16).flex_none().cursor_pointer()

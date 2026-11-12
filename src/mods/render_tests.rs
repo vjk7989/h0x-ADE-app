@@ -5550,6 +5550,8 @@ export default class Scenario extends Real {
         else if (verb === 'undo') this.undo(cx);
         else if (verb === 'reload') this.reload(cx);
         else if (verb === 'focus') this.handle.focus();
+        // `wide <row>`: the full-title toggle a click on the row makes, without the click.
+        else if (verb === 'wide') this.toggleWide(this.item(row), row.k === 'step');
         // `stuck <ms ago> [writing]`: a save flag left set, as if a cut-off write loop never reset it.
         else if (verb === 'stuck') {
           const [ago, writing] = arg.split(' ');
@@ -5564,7 +5566,7 @@ export default class Scenario extends Real {
             edit: this.edit ? this.edit.input.value() : null, pending: this.pending.length, cur: this.cur, badIndex: Boolean(this.badIndex),
             confirming: this.confirming, naming: Boolean(this.naming), flushing: Boolean(this.flushing),
             menu: this.menu, menuAt: this.menuAt, nameValue: this.naming ? this.naming.input.value() : null,
-            firstDone: this.list?.tasks[0]?.done ?? null, cut: this.cut, slowMs: this.slowMs }));
+            firstDone: this.list?.tasks[0]?.done ?? null, cut: this.cut, slowMs: this.slowMs, wide: [...this.wide], open: [...this.open] }));
         }
         this.running = null;
         this.slowMs = Math.max(this.slowMs, Date.now() - started);
@@ -6885,6 +6887,257 @@ fn todo_switching_lists_heals_a_stuck_save_and_saves_to_the_list_it_was_made_in(
         (json!("work"), json!(TODO_WORK_TEXT), json!(false), Value::Null, json!(false)),
         "{state}"
     );
+}
+
+// TD-WRAP AC1/AC4: a wide row wraps its full title (no truncate, the title takes the rest of the row, no spacer, the
+// row top-aligned with 8 px above and below) and a wide done item has no strike line but stays dimmed; collapsed rows
+// keep today's look, strike line included. A step with its task's title stays collapsed when only the task is wide,
+// and an empty title widens like any other. Widening writes nothing.
+#[gpui::test]
+fn todo_wide_rows_wrap_their_title_without_a_strike_and_collapsed_rows_keep_todays_look(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] Same\n  - [ ] Same\n  - [x] Done step\n- [x] Done task\n- [ ] \n- [x] Old\n";
+    let values = todo_values();
+    let (muted, fg) = (values["theme"]["muted"].clone(), values["theme"]["foreground"].clone());
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), values, &host);
+    assert_eq!(todo_state(cx, &host)["sel"], json!({"k":"task", "i":0}));
+    // Unfold Same's steps, walk past them, Add step and the empty task to Completed, and show the done tasks.
+    for command in ["key right", "key down", "key down", "key down", "key down", "key down"] {
+        todo_step(cx, &host, command);
+    }
+    assert_eq!(todo_state(cx, &host)["sel"], json!({"k":"head"}));
+    todo_step(cx, &host, "key enter");
+    for command in ["wide 0", "wide 0.1", "wide 1", "wide 2"] {
+        todo_step(cx, &host, command);
+    }
+    assert_eq!(todo_state(cx, &host)["wide"], json!(["t:Same", "s:Done step", "t:Done task", "t:"]));
+    assert!(host.borrow().writes.is_empty(), "widening writes nothing");
+    let tree = todo_describe(cx, window, session);
+    let depth = |l: &str| l.len() - l.trim_start().len();
+    // (row, title, wide, done)
+    let rows = [
+        ("todo-row-0.", "Same", true, false),
+        ("todo-row-0.0", "Same", false, false),
+        ("todo-row-0.1", "Done step", true, true),
+        ("todo-row-1.", "Done task", true, true),
+        ("todo-row-2.", "", true, false),
+        ("todo-row-3.", "Old", false, true),
+    ];
+    for (id, title, wide, done) in rows {
+        let row = todo_element(&tree, id);
+        assert_eq!(row[0].contains(".items_start") && row[0].contains(".py[Number(8.0)]"), wide, "{id} top-aligned: {}", row[0]);
+        let spacer = row.iter().any(|l| depth(l) == depth(&row[0]) + 2 && l.split_whitespace().eq(["div", ".flex_1"]));
+        assert_eq!(spacer, !wide, "{id} spacer: {row:#?}");
+        if title.is_empty() {
+            continue;
+        }
+        let at = row.iter().position(|l| l.trim() == format!("text {title:?}")).unwrap_or_else(|| panic!("no {title} in {id}: {row:#?}"));
+        assert_eq!(row[at - 1].contains(".truncate"), !wide, "{id} truncated: {}", row[at - 1]);
+        assert_eq!(row[at - 1].contains(".flex_1"), wide, "{id} title takes the rest of the row: {}", row[at - 1]);
+        let color = format!(".text_color[Str({})]", if done { &muted } else { &fg });
+        assert!(row[at - 1].contains(&color), "{id} dimmed only when done: {}", row[at - 1]);
+        let struck = row.get(at + 1).is_some_and(|l| l.contains(".absolute") && l.contains(".inset[Number(0.0)]"));
+        assert_eq!(struck, done && !wide, "{id} struck through: {:?}", row.get(at + 1));
+    }
+}
+
+// Presses the left button at `at` on a fresh frame; a `click_count` of 2 is the second press of a double click.
+fn todo_press(visual: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>, click_count: usize) {
+    let (modifiers, button) = (gpui::Modifiers::none(), gpui::MouseButton::Left);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.simulate_event(gpui::MouseDownEvent { position: at, modifiers, button, click_count, first_mouse: false });
+    visual.simulate_event(gpui::MouseUpEvent { position: at, modifiers, button, click_count });
+}
+
+fn todo_wide(visual: &mut gpui::VisualTestContext, host: &Rc<RefCell<TodoHost>>) -> Value {
+    todo_mounted_state(visual, host)["wide"].clone()
+}
+
+// Presses down the middle of the panel (clear of the tick circle on the left and a row's controls on the right) from
+// `from` px until the full titles read `want`; returns that press, which is within 2 px of the row's top edge. Above
+// the rows (header, progress, add box) nothing a press reaches toggles a title.
+fn todo_press_down_the_middle(visual: &mut gpui::VisualTestContext, host: &Rc<RefCell<TodoHost>>, from: f32, want: Value) -> gpui::Point<gpui::Pixels> {
+    let x = visual.update(|window, _| window.viewport_size().width) * 0.5;
+    for y in (from as i32..800).step_by(2) {
+        let at = gpui::point(x, gpui::px(y as f32));
+        todo_press(visual, at, 1);
+        if todo_wide(visual, host) == want {
+            return at;
+        }
+    }
+    panic!("no press down the middle of the panel from {from} px made the full titles {want}");
+}
+
+// TD-WRAP AC1/AC2/AC5 through the row's own handler: one click widens a task's full title, a second collapses it, a
+// third widens it again; an empty title toggles like any other. A double click on the wide row edits the title and
+// leaves it wide. Nothing is written.
+#[gpui::test]
+fn todo_a_click_toggles_a_tasks_full_title_and_a_double_click_on_a_wide_row_edits_it_still_wide(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] Same\n- [ ] \n")], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    let found = todo_press_down_the_middle(&mut visual, &host, 48., json!(["t:Same"]));
+    // Well inside the row (44 px collapsed), so every press below meets it however tall it is.
+    let task = gpui::point(found.x, found.y + gpui::px(10.));
+    todo_press(&mut visual, task, 1);
+    assert_eq!(todo_wide(&mut visual, &host), json!([]), "a second click collapses it");
+    todo_press(&mut visual, task, 1);
+    assert_eq!(todo_wide(&mut visual, &host), json!(["t:Same"]), "a third widens it again");
+    let empty = todo_press_down_the_middle(&mut visual, &host, f32::from(found.y) + 46., json!(["t:Same", "t:"]));
+    todo_press(&mut visual, gpui::point(empty.x, empty.y + gpui::px(10.)), 1);
+    assert_eq!(todo_wide(&mut visual, &host), json!(["t:Same"]), "the empty title collapses again");
+    // A double click on the wide row: its first press collapses it, its second widens it again and edits.
+    todo_press(&mut visual, task, 1);
+    todo_press(&mut visual, task, 2);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(
+        (state["wide"].clone(), state["edit"].clone(), state["sel"].clone()),
+        (json!(["t:Same"]), json!("Same"), json!({"k":"task", "i":0})),
+        "{state}"
+    );
+    assert!(host.borrow().writes.is_empty(), "toggling and starting an edit write nothing: {:?}", host.borrow().writes);
+}
+
+// TD-WRAP AC1/AC2/AC5: a step and its task with the same title are separate rows: a click on the step widens only the
+// step, a second collapses only the step. A double click on the collapsed step edits it and leaves it collapsed.
+#[gpui::test]
+fn todo_a_step_with_its_tasks_title_toggles_on_its_own_and_a_double_click_edits_it_collapsed(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] Same\n  - [ ] Same\n- [ ] two\n")], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    files_keys(&mut visual, "right");
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["open"], json!(["Same"]), "Same's steps are shown");
+    let task = todo_press_down_the_middle(&mut visual, &host, 48., json!(["t:Same"]));
+    let found = todo_press_down_the_middle(&mut visual, &host, f32::from(task.y) + 46., json!(["t:Same", "s:Same"]));
+    let step = gpui::point(found.x, found.y + gpui::px(10.));
+    todo_press(&mut visual, step, 1);
+    assert_eq!(todo_wide(&mut visual, &host), json!(["t:Same"]), "the second click collapses only the step");
+    todo_press(&mut visual, gpui::point(task.x, task.y + gpui::px(10.)), 1);
+    assert_eq!(todo_wide(&mut visual, &host), json!([]));
+    todo_press(&mut visual, step, 1);
+    todo_press(&mut visual, step, 2);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(
+        (state["wide"].clone(), state["edit"].clone(), state["sel"].clone()),
+        (json!([]), json!("Same"), json!({"k":"step", "i":0, "j":0})),
+        "{state}"
+    );
+    assert!(host.borrow().writes.is_empty(), "{:?}", host.borrow().writes);
+}
+
+// TD-WRAP AC3: presses on the fold chevron, the delete × and the tick circle act and never toggle the full title.
+// Each control is found by pressing along the row's middle; a press that toggles the row itself is undone at once.
+#[gpui::test]
+fn todo_presses_on_the_fold_delete_and_tick_controls_never_toggle_the_full_title(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] one\n  - [ ] a\n- [ ] two\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    let found = todo_press_down_the_middle(&mut visual, &host, 48., json!(["t:one"]));
+    // The collapsed row's middle, where its controls sit; the press leaves "one" selected, so its × shows.
+    let y = found.y + gpui::px(22.);
+    todo_press(&mut visual, gpui::point(found.x, y), 1);
+    assert_eq!(todo_wide(&mut visual, &host), json!([]));
+    let width = f32::from(visual.update(|window, _| window.viewport_size().width));
+    let (mut folds, mut deleted) = (0, false);
+    for x in ((width - 100.) as i32..width as i32).step_by(2) {
+        let at = gpui::point(gpui::px(x as f32), y);
+        let open = todo_mounted_state(&mut visual, &host)["open"].clone();
+        todo_press(&mut visual, at, 1);
+        let state = todo_mounted_state(&mut visual, &host);
+        if host.borrow().files[TODO_TASKS] != start {
+            assert_eq!(state["wide"], json!([]), "the delete × at {x} toggled the title");
+            deleted = true;
+            break;
+        }
+        if state["open"] != open {
+            assert_eq!(state["wide"], json!([]), "the fold chevron at {x} toggled the title");
+            folds += 1;
+        } else if state["wide"] != json!([]) {
+            todo_press(&mut visual, at, 1);
+            assert_eq!(todo_wide(&mut visual, &host), json!([]), "the row at {x} toggles back");
+        }
+    }
+    assert!(folds > 0 && deleted, "the fold chevron ({folds} presses) and the delete × ({deleted}) were both pressed");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] two\n");
+    // "two" is the first row now; from the left edge the press reaches its tick circle.
+    let mut ticked = false;
+    for x in (0..100).step_by(2) {
+        let at = gpui::point(gpui::px(x as f32), y);
+        todo_press(&mut visual, at, 1);
+        let wide = todo_wide(&mut visual, &host);
+        if host.borrow().files[TODO_TASKS] != "# Tasks\n- [ ] two\n" {
+            assert_eq!(wide, json!([]), "the tick circle at {x} toggled the title");
+            ticked = true;
+            break;
+        }
+        if wide != json!([]) {
+            todo_press(&mut visual, at, 1);
+            assert_eq!(todo_wide(&mut visual, &host), json!([]), "the row at {x} toggles back");
+        }
+    }
+    assert!(ticked, "a press reached the tick circle");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [x] two\n");
+}
+
+// TD-WRAP AC5: a wide title stays wide when its tick moves it under Completed and across a reload of an outside
+// edit; switching lists clears it, even for a same-titled task in the other list, and switching back does not bring
+// it back. Only the tick is written.
+#[gpui::test]
+fn todo_a_wide_title_survives_a_tick_and_a_reload_and_a_list_switch_clears_it(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let work = "# Work\n- [ ] same\n";
+    let host = todo_host(&[(TODO_LISTS, TODO_TWO_LISTS), (TODO_TASKS, "# Tasks\n- [ ] same\n- [ ] other\n"), (TODO_WORK, work)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    todo_press_down_the_middle(&mut visual, &host, 48., json!(["t:same"]));
+    files_keys(&mut visual, "space");
+    files_wait(&mut visual, 50);
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [x] same\n- [ ] other\n");
+    assert_eq!(todo_wide(&mut visual, &host), json!(["t:same"]), "ticked and moved under Completed, still wide");
+    let outside = "# Tasks\n- [x] same\n- [ ] other\n- [ ] new\n";
+    host.borrow_mut().files.insert(TODO_TASKS.into(), outside.into());
+    host.borrow_mut().commands.push_back("reload".into());
+    files_wait(&mut visual, 50);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["text"].clone(), state["wide"].clone()), (json!(outside), json!(["t:same"])), "{state}");
+    files_keys(&mut visual, "ctrl-l down enter");
+    files_wait(&mut visual, 100);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["cur"].clone(), state["wide"].clone()), (json!("work"), json!([])), "{state}");
+    files_keys(&mut visual, "ctrl-l up enter");
+    files_wait(&mut visual, 100);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["cur"].clone(), state["text"].clone(), state["wide"].clone()), (json!("tasks"), json!(outside), json!([])), "{state}");
+    assert_eq!(host.borrow().writes.len(), 1, "only the tick is written: {:?}", host.borrow().writes);
+    assert_eq!(host.borrow().files[TODO_WORK], work);
+}
+
+// TD-WRAP AC1: in a narrow panel a wide title of 300 letters and no spaces wraps over several lines, so the row grows
+// past where the next row began; collapsed, it is one line again and the same press meets the next row.
+#[gpui::test]
+fn todo_a_long_title_without_spaces_wraps_over_several_lines_when_wide(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let long = "x".repeat(300);
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &format!("# Tasks\n- [ ] {long}\n- [ ] next\n"))], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    visual.simulate_resize(gpui::size(gpui::px(320.), gpui::px(800.)));
+    visual.run_until_parked();
+    let found = todo_press_down_the_middle(&mut visual, &host, 48., json!([format!("t:{long}")]));
+    // 64 px below the long row's top: inside it while it is wide, in "next" (4 px gap after 44 px) once it is not.
+    let below = gpui::point(found.x, found.y + gpui::px(64.));
+    todo_press(&mut visual, below, 1);
+    assert_eq!(todo_wide(&mut visual, &host), json!([]), "the wide row reaches 64 px down and collapses");
+    todo_press(&mut visual, below, 1);
+    assert_eq!(todo_wide(&mut visual, &host), json!(["t:next"]), "collapsed, the long row is one line and the press meets next");
+    assert!(host.borrow().writes.is_empty(), "{:?}", host.borrow().writes);
 }
 
 // An unreadable lists.md is left alone until "Start a new index" is clicked; then the index and an empty Tasks list are
