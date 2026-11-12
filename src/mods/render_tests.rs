@@ -6434,6 +6434,7 @@ fn todo_progress_header_and_completed_count_from_no_tasks_to_all_done(cx: &mut T
 }
 
 // AC2: a delete posts an Undo notice; undo puts the task (with its steps) or the step back once.
+// UPD-D1 AC3: the notice shows 6 s with an Undo button (todo.undo) and an OK button that only closes it.
 #[gpui::test]
 fn todo_delete_posts_an_undo_notice_and_undo_restores_it_once(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
@@ -6445,7 +6446,7 @@ fn todo_delete_posts_an_undo_notice_and_undo_restores_it_once(cx: &mut TestAppCo
     assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] a\n- [ ] c\n");
     assert_eq!(
         todo_effects(&host, "notify"),
-        [json!([{"title":"Task deleted", "body":"b", "timeout":8000, "action":{"name":"todo.undo"}}])]
+        [json!([{"title":"Task deleted", "body":"b", "timeout":6000, "actions":[{"label":"Undo", "name":"todo.undo"}, {"label":"OK"}]}])]
     );
     todo_step(cx, &host, "undo");
     assert_eq!(host.borrow().files[TODO_TASKS], start, "the task comes back where it was, steps and note included");
@@ -6459,6 +6460,132 @@ fn todo_delete_posts_an_undo_notice_and_undo_restores_it_once(cx: &mut TestAppCo
     todo_step(cx, &host, "undo");
     assert_eq!(host.borrow().files[TODO_TASKS], start);
     todo_describe(cx, window, session);
+}
+
+// UPD-D1 AC3: the notice's 6 s is only how long it shows: once it has gone (OK pressed or timed out) the task stays
+// deleted and nothing runs, and todo.undo still restores it. Undo has no clock: it holds the latest delete only.
+#[gpui::test]
+fn todo_undo_after_the_notice_has_gone_still_restores_only_the_latest_delete(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] a\n  - [ ] a1\n- [ ] b\n- [ ] c\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    todo_step(cx, &host, "delete 0");
+    let deleted = "# Tasks\n- [ ] b\n- [ ] c\n";
+    assert_eq!(host.borrow().files[TODO_TASKS], deleted);
+    let writes = host.borrow().writes.len();
+    cx.executor().advance_clock(std::time::Duration::from_millis(6001));
+    cx.run_until_parked();
+    assert_eq!(host.borrow().files[TODO_TASKS], deleted, "the task stays deleted after the notice's 6 s");
+    assert_eq!(host.borrow().writes.len(), writes, "nothing is written when the notice goes");
+    assert!(todo_effects(&host, "run").is_empty(), "nothing runs when the notice goes: {:?}", host.borrow().effects);
+    todo_step(cx, &host, "undo");
+    assert_eq!(host.borrow().files[TODO_TASKS], start, "undo after the notice has gone restores the task with its step");
+
+    // Two deletes (a, then b): undo brings back b only, and a second undo does nothing.
+    todo_step(cx, &host, "delete 0");
+    todo_step(cx, &host, "delete 0");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] c\n");
+    todo_step(cx, &host, "undo");
+    assert_eq!(host.borrow().files[TODO_TASKS], deleted, "the latest delete comes back");
+    let writes = host.borrow().writes.len();
+    todo_step(cx, &host, "undo");
+    assert_eq!(host.borrow().writes.len(), writes, "the earlier delete is not undone");
+    assert_eq!(host.borrow().files[TODO_TASKS], deleted);
+    todo_describe(cx, window, session);
+}
+
+// UPD-D1 AC1/AC2: the toast draws one button per `actions` entry with a label, in order (entries without a label, null
+// or not objects are skipped); an empty list, a list that is not an array, an old single-action notice and a bare one
+// draw none.
+#[gpui::test]
+fn toast_draws_one_button_per_labelled_action_and_none_for_old_or_bare_notices(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let cases = [
+        (json!({"title":"Task deleted", "body":"b", "timeout":6000, "actions":[{"label":"Undo", "name":"todo.undo"}, {"label":"OK"}]}), vec!["Undo", "OK"]),
+        (
+            json!({"title":"t", "actions":[{"name":"app.help"}, null, 7, {"label":""}, {"label":"Later"}, {"label":"Go", "name":"agent.focus", "args":{"terminal":"t1"}}]}),
+            vec!["Later", "Go"],
+        ),
+        (json!({"title":"t", "actions":[]}), vec![]),
+        (json!({"title":"t", "actions":{"label":"Undo", "name":"todo.undo"}}), vec![]),
+        (json!({"title":"t", "actions":null}), vec![]),
+        (json!({"title":"Done", "body":"Build complete", "action":{"name":"app.help"}}), vec![]),
+        (json!({"title":"Done"}), vec![]),
+        (json!({}), vec![]),
+    ];
+    for (notification, labels) in cases {
+        let mut p = notification.clone();
+        p["overlay"] = json!("o1");
+        let tree = describe(cx, &staged, "mods/toast", true, p, updates("current", "current"), None).unwrap_or_else(|e| panic!("{notification}: {e:#}"));
+        for (i, label) in labels.iter().enumerate() {
+            let button = todo_element(&tree, &format!("toast-action-{i}"));
+            assert!(button.iter().any(|l| l.trim() == format!("text {label:?}")), "{notification}: button {i} is {label}: {button:#?}");
+        }
+        let extra = format!(":id[Str({:?})]", format!("toast-action-{}", labels.len()));
+        assert!(!tree.contains(&extra), "{notification}: {} buttons only: {tree}", labels.len());
+    }
+}
+
+// UPD-D1 AC1/AC2/AC3 with real clicks across the middle of a mounted toast, right to left, each click on a fresh frame:
+// what each click ran, with repeats of the same outcome merged. A button runs its own command (with its args) or none
+// and closes the toast, never the whole-toast action; a click on the body (padding, gaps, text) runs that action and
+// closes it, as before `actions` existed.
+#[gpui::test]
+fn toast_buttons_run_only_their_own_command_and_the_body_still_runs_the_toast_action(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let close = json!(["closeOverlay", ["o1"]]);
+    let body = json!([["run", ["app.help", {}]], close]);
+    let only_close = json!([close]);
+    let cases = [
+        // The to-do delete notice, plus a whole-toast action: OK only closes, Undo runs todo.undo.
+        (
+            json!({"title":"Task deleted", "body":"b", "timeout":6000, "action":{"name":"app.help"}, "actions":[{"label":"Undo", "name":"todo.undo"}, {"label":"OK"}]}),
+            vec![body.clone(), only_close.clone(), body.clone(), json!([["run", ["todo.undo", {}]], close]), body.clone()],
+        ),
+        // Args reach the command; an entry without a label is no button (its command would show in a click).
+        (
+            json!({"title":"t", "action":{"name":"app.help"}, "actions":[{"label":"Go", "name":"agent.focus", "args":{"terminal":"t1"}}, {"name":"todo.undo"}, {"label":"Later"}]}),
+            vec![body.clone(), only_close.clone(), body.clone(), json!([["run", ["agent.focus", {"terminal":"t1"}]], close]), body.clone()],
+        ),
+        // An old single-action toast, and one with neither: the whole toast is one target.
+        (json!({"title":"Done", "action":{"name":"agent.focus", "args":{"terminal":"t2"}}}), vec![json!([["run", ["agent.focus", {"terminal":"t2"}]], close])]),
+        (json!({"title":"Done"}), vec![only_close.clone()]),
+        // No buttons for an empty list or one that is not an array.
+        (json!({"title":"t", "action":{"name":"app.help"}, "actions":[]}), vec![body.clone()]),
+        (json!({"title":"t", "actions":{"label":"Undo", "name":"todo.undo"}}), vec![only_close.clone()]),
+    ];
+    for (notification, want) in cases {
+        let host = todo_host(&[], &[]);
+        let mut values = todo_values();
+        let mut p = notification.clone();
+        p["overlay"] = json!("o1");
+        values.insert("props".into(), p);
+        gpui_shell::policy::set_default(todo_policy(&staged, values, &host));
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let root = staged.0.join("mods/toast");
+        let window = cx.add_window(|window, cx| FilesMounted(runtime.try_load(&root, window, cx).unwrap()));
+        let mut visual = gpui::VisualTestContext::from_window(*window, cx);
+        visual.run_until_parked();
+        visual.update(|window, _| window.activate_window());
+        let size = visual.update(|window, _| window.viewport_size());
+        let y = size.height * 0.5;
+        let mut seen: Vec<Value> = Vec::new();
+        for from_right in (2..(f32::from(size.width) * 0.5) as i32).step_by(3) {
+            host.borrow_mut().effects.clear();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            visual.simulate_click(gpui::point(size.width - gpui::px(from_right as f32), y), gpui::Modifiers::none());
+            visual.run_until_parked();
+            let ran = json!(host.borrow().effects.iter().map(|(n, a)| json!([n, a])).collect::<Vec<_>>());
+            if seen.last() != Some(&ran) {
+                seen.push(ran);
+            }
+        }
+        assert_eq!(seen, want, "{notification}");
+    }
 }
 
 // AC2 keys, through the panel's key handler: arrows, Tab/Shift+Tab, Alt+Up, Space, Delete, Enter.
@@ -7138,6 +7265,104 @@ fn todo_a_long_title_without_spaces_wraps_over_several_lines_when_wide(cx: &mut 
     todo_press(&mut visual, below, 1);
     assert_eq!(todo_wide(&mut visual, &host), json!(["t:next"]), "collapsed, the long row is one line and the press meets next");
     assert!(host.borrow().writes.is_empty(), "{:?}", host.borrow().writes);
+}
+
+// UPD-D1 AC4 (TD4 part 2) with real keys in the edit box: select all, copy, cut and paste (secondary = Cmd on macOS,
+// Ctrl elsewhere) reach the box, and the panel's own keys (Delete) edit the text instead of the list. Nothing is
+// written until Enter, which saves a pasted Windows path as it is.
+#[gpui::test]
+fn todo_edit_box_takes_select_all_copy_cut_and_paste_and_writes_only_on_enter(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] Milk run\n- [ ] two\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    files_keys(&mut visual, "enter");
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["edit"].clone(), state["sel"].clone()), (json!("Milk run"), json!({"k":"task", "i":0})), "{state}");
+    let clipboard = |visual: &gpui::VisualTestContext| visual.read_from_clipboard().and_then(|c| c.text());
+    // The box opens with its title selected; End drops that, so the copy below is select all's.
+    files_keys(&mut visual, "end secondary-a secondary-c");
+    assert_eq!(clipboard(&visual).as_deref(), Some("Milk run"));
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], json!("Milk run"), "copy leaves the text");
+    files_keys(&mut visual, "secondary-x");
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["edit"].clone(), state["menu"].clone()), (json!(""), json!(false)), "cut empties the box: {state}");
+    assert_eq!(clipboard(&visual).as_deref(), Some("Milk run"));
+    files_keys(&mut visual, "secondary-v secondary-v");
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], json!("Milk runMilk run"));
+    // Delete at the start removes a letter, never the task.
+    files_keys(&mut visual, "home delete");
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], json!("ilk runMilk run"));
+    let path = r"C:\Users\me\notes.md";
+    visual.write_to_clipboard(gpui::ClipboardItem::new_string(path.to_string()));
+    files_keys(&mut visual, "secondary-a secondary-v");
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["edit"].clone(), state["sel"].clone()), (json!(path), json!({"k":"task", "i":0})), "{state}");
+    {
+        let h = host.borrow();
+        assert!(h.writes.is_empty(), "cut and paste change only the box until Enter: {:?}", h.writes);
+        assert_eq!(h.files[TODO_TASKS], start);
+        assert!(h.effects.iter().all(|(n, _)| n != "notify"), "no delete notice: {:?}", h.effects);
+    }
+    files_keys(&mut visual, "enter");
+    files_wait(&mut visual, 100);
+    assert_eq!(todo_written(&host), [format!("# Tasks\n- [ ] {path}\n- [ ] two\n")]);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], Value::Null);
+}
+
+// UPD-D1 AC4 (TD4 part 2) with the mouse in the edit box opened by a double click: a drag selects part of the text and
+// a double click selects a word (each copied), and neither ends the edit nor loses its unsaved text. Escape then
+// writes nothing.
+#[gpui::test]
+fn todo_mouse_selection_in_the_edit_box_keeps_the_edit_and_its_unsaved_text(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Long enough that the middle of the panel is over the text.
+    let title = (0..60).map(|i| format!("word{i:02}")).collect::<Vec<_>>().join(" ");
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &format!("# Tasks\n- [ ] {title}\n- [ ] two\n"))], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    let found = todo_press_down_the_middle(&mut visual, &host, 48., json!([format!("t:{title}")]));
+    // 20 px below the row's top: inside the edit box whether the row is wide (box from 8 px) or not (centred in 44 px).
+    let at = gpui::point(found.x, found.y + gpui::px(20.));
+    todo_press(&mut visual, at, 1);
+    todo_press(&mut visual, at, 2);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], json!(title), "the double click edits the row");
+    files_keys(&mut visual, "end");
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.simulate_input(" zz");
+    let typed = format!("{title} zz");
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], json!(typed));
+    let clipboard = |visual: &gpui::VisualTestContext| visual.read_from_clipboard().and_then(|c| c.text());
+    let copied_part = |visual: &mut gpui::VisualTestContext, what: &str| {
+        visual.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()));
+        files_keys(visual, "secondary-c");
+        let copied = clipboard(&*visual).unwrap_or_default();
+        assert!(copied != "sentinel" && !copied.is_empty() && copied.len() < typed.len() && typed.contains(&copied), "{what} selects part of the text: {copied:?}");
+    };
+
+    // A drag 80 px to the left.
+    let (modifiers, button) = (gpui::Modifiers::none(), gpui::MouseButton::Left);
+    let to = gpui::point(at.x - gpui::px(80.), at.y);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.simulate_event(gpui::MouseDownEvent { position: at, modifiers, button, click_count: 1, first_mouse: false });
+    visual.simulate_event(gpui::MouseMoveEvent { position: to, pressed_button: Some(button), modifiers });
+    visual.simulate_event(gpui::MouseUpEvent { position: to, modifiers, button, click_count: 1 });
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["edit"].clone(), state["sel"].clone()), (json!(typed), json!({"k":"task", "i":0})), "a drag keeps the edit: {state}");
+    copied_part(&mut visual, "the drag");
+
+    // A double click on a word, at the drag's end.
+    todo_press(&mut visual, to, 1);
+    todo_press(&mut visual, to, 2);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], json!(typed), "a double click keeps the edit and its text");
+    copied_part(&mut visual, "the double click");
+
+    assert!(host.borrow().writes.is_empty(), "selecting writes nothing: {:?}", host.borrow().writes);
+    files_keys(&mut visual, "escape");
+    files_wait(&mut visual, 100);
+    assert!(host.borrow().writes.is_empty(), "Escape drops the edit: {:?}", host.borrow().writes);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], Value::Null);
 }
 
 // An unreadable lists.md is left alone until "Start a new index" is clicked; then the index and an empty Tasks list are

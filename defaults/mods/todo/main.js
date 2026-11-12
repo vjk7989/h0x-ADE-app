@@ -11,6 +11,7 @@ const HAND = "Patrick Hand";
 
 const ACTIONS = ["new", "rename", "delete"];
 const DEFAULT = { name: "Tasks", slug: "tasks" };
+const DRAG_PX = 4;
 const UNDO_MS = 6000, CONFETTI_MS = 1500, CONFETTI_PIECES = 36;
 const READ_FAIL = "This list can't be read (over 1 MB or unreadable). It is left untouched and read-only.";
 const FULL = "This list is full (64 KB, about 2,900 tasks). Start a new list for more tasks.";
@@ -61,6 +62,25 @@ const indent = (ref, parent) => on(ref, (a, k, tasks) => {
   const [t] = a.splice(k, 1);
   tasks[p].steps.push({ title: t.title, done: t.done, extra: t.extra });
 });
+// Drag and drop. A task goes before/after another task (`to` = { i, title, after }); no-op when no open task lies between.
+const placeTask = (ref, to) => on(ref, (a, k) => {
+  const p = findTask({ tasks: a }, to.i, to.title);
+  if (p < 0 || p === k) return false;
+  const at = to.after ? p + 1 : p;
+  if (a.slice(Math.min(k + 1, at), Math.max(k, at)).every((t) => t.done)) return false;
+  const [t] = a.splice(k, 1);
+  a.splice(at > k ? at - 1 : at, 0, t);
+});
+// A step goes into the steps of a task before the step titled `to.beforeTitle` (the end when null); it keeps its done state.
+const placeStep = (ref, to) => on(ref, (steps, k, tasks, i) => {
+  const p = findTask({ tasks }, to.i, to.title);
+  if (p < 0) return false;
+  const dest = tasks[p].steps;
+  const at = to.beforeTitle == null ? dest.length : findStep(tasks[p], to.j, to.beforeTitle);
+  if (at < 0 || (p === i && (at === k || at === k + 1))) return false;
+  const [s] = steps.splice(k, 1);
+  dest.splice(p === i && at > k ? at - 1 : at, 0, s);
+});
 const outdent = (ref) => on(ref, (steps, j, tasks, i) => {
   const [s] = steps.splice(j, 1);
   tasks.splice(i + 1, 0, { title: s.title, done: s.done, steps: [], extra: s.extra });
@@ -79,7 +99,7 @@ export default class Todo extends View {
     this.dir = `${appHome()}/todo`;
     this.index = []; this.indexText = null; this.cur = null; this.list = parseList(""); this.text = ""; this.disk = "";
     this.pending = []; this.finishing = new WeakSet(); this.open = new Set(); this.wide = new Set(); this.showDone = false; this.sel = { k: "head" }; this.pos = 0;
-    this.edit = null; this.naming = null; this.menu = false; this.menuAt = 0; this.confirming = false; this.hover = null;
+    this.press = null; this.drag = null; this.edit = null; this.naming = null; this.menu = false; this.menuAt = 0; this.confirming = false; this.hover = null;
     this.readonly = false; this.ready = false; this.error = null; this.shown = false; this.wantFocus = false; this.badIndex = null;
     this.add = this.makeAdd();
     this.load(cx);
@@ -156,7 +176,7 @@ export default class Todo extends View {
 
   async openListFrom(slug, cx) {
     while (this.flushBusy(cx)) await cx.sleep(50);
-    this.cur = slug; this.pending = []; this.wide.clear(); this.retryMs = 0; this.edit = null; this.error = null; this.readonly = false;
+    this.cur = slug; this.pending = []; this.wide.clear(); this.retryMs = 0; this.press = null; this.drag = null; this.edit = null; this.error = null; this.readonly = false;
     localStorage.setItem("todo.list", slug);
     let text;
     try { text = await readTextFile(this.file(slug)); } catch { text = undefined; }
@@ -517,6 +537,63 @@ export default class Todo extends View {
     if (this.commit(move(this.ref(row), dir), cx)) this.sel = row.j == null ? { k: "task", i: to } : { k: "step", i: row.i, j: to };
   }
 
+  // A press that moves DRAG_PX or more becomes a drag; the click toggle it already made is undone.
+  dragMove(r, e, cx) {
+    const p = this.press;
+    if (!p) return;
+    let changed = false;
+    if (!this.drag) {
+      if (Math.hypot(e.position.x - p.x, e.position.y - p.y) < DRAG_PX) return;
+      if (p.toggled) { this.toggleWide(p.item, p.step); p.toggled = false; }
+      this.drag = { src: p.ref, slot: null };
+      changed = true;
+    }
+    const slot = this.slotFor(r, e);
+    if (JSON.stringify(slot) !== JSON.stringify(this.drag.slot)) { this.drag.slot = slot; changed = true; }
+    if (changed) cx.notify();
+  }
+
+  // Where a drop over row `r` would land: a task among the open tasks, a step in any open task (null when there is no place).
+  slotFor(r, e) {
+    const src = this.drag.src, task = this.list.tasks[r.i];
+    if (r.k === "head" || !task || task.done) return null;
+    const after = e.local_position.y > e.bounds.height / 2, title = task.title;
+    if (src.j == null) return r.i === src.i ? null : { k: "task", i: r.i, title, after: r.k !== "task" || after };
+    const end = { k: "step", i: r.i, title, j: task.steps.length, beforeTitle: null };
+    if (r.k === "task") return r.i === src.i ? null : end;
+    if (r.k === "add") return end;
+    const j = after ? r.j + 1 : r.j;
+    if (r.i === src.i && (j === src.j || j === src.j + 1)) return null;
+    return j >= task.steps.length ? end : { ...end, j, beforeTitle: task.steps[j].title };
+  }
+
+  // "top" or "bottom" when the drop slot is at that edge of row `r`.
+  lineOf(r) {
+    const s = this.drag?.slot;
+    if (!s || r.i !== s.i) return null;
+    const open = this.open.has(s.title);
+    if (s.k === "task") return s.after ? (r.k === (open ? "add" : "task") ? "bottom" : null) : (r.k === "task" ? "top" : null);
+    if (s.beforeTitle != null) return r.k === "step" && r.j === s.j ? "top" : null;
+    return open ? (r.k === "add" ? "top" : null) : (r.k === "task" ? "bottom" : null);
+  }
+
+  endDrag(cx) {
+    const d = this.drag;
+    this.press = null; this.drag = null;
+    if (d?.slot && !this.readonly) {
+      const { src, slot } = d;
+      if (this.commit(src.j == null ? placeTask(src, slot) : placeStep(src, slot), cx)) {
+        const tasks = this.list.tasks, i = tasks.findIndex((t) => t.title === (src.j == null ? src.title : slot.title));
+        if (src.j == null) this.sel = { k: "task", i };
+        else {
+          this.open.add(slot.title);
+          this.sel = { k: "step", i, j: tasks[i].steps.findIndex((s) => s.title === src.stepTitle) };
+        }
+      }
+    }
+    cx.notify();
+  }
+
   indentRow(row, cx) {
     if (row.k !== "task" || this.item(row).steps.length) return;
     // The task shown above it in the same part of the screen (never a hidden finished one).
@@ -542,7 +619,8 @@ export default class Todo extends View {
     const typing = this.edit || this.naming || this.addFocus;
     if (k === "enter" && this.justSubmitted) return;
     if (k === "escape") {
-      if (this.edit) { this.edit = null; this.handle.focus(); }
+      if (this.drag) { this.press = null; this.drag = null; }
+      else if (this.edit) { this.edit = null; this.handle.focus(); }
       else if (this.naming) { this.naming = null; this.handle.focus(); }
       else if (this.confirming) this.confirming = false;
       else if (this.menu) this.menu = false;
@@ -613,6 +691,8 @@ export default class Todo extends View {
     const rows = this.ready ? this.current() : [], busy = this.edit || this.naming;
     return v_flex().id("todo").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
+      .on_mouse_up("left", (_e, cx) => { if (this.press) this.endDrag(cx); })
+      .on_hover((h, cx) => { if (!h && this.press) { this.press = null; this.drag = null; cx.notify(); } })
       .child(this.header(t))
       .when(this.menu, (el) => el.child(this.switcher(t)))
       .when(this.confirming, (el) => el.child(this.confirmBar(t)))
@@ -621,6 +701,7 @@ export default class Todo extends View {
       .when(Boolean(this.badIndex), (el) => el.child(this.newIndexBar(t)))
       .when(!this.readonly && this.ready, (el) => el.child(this.addBar(t)))
       .child(v_flex().id("todo-list").flex_1().min_h(0).overflow_y_scrollbar().px(10).py(6).gap(4)
+        .on_hover((h, cx) => { if (!h && this.drag?.slot) { this.drag.slot = null; cx.notify(); } })
         .children(rows.map((r) => this.row(r, t)))
         .when(this.ready && !this.readonly && !this.list.tasks.length, (el) => el.child(this.emptyNote("square-pen", "No tasks yet. Add one above.", t)))
         .when(this.ready && this.list.tasks.length > 0 && openCount(this.list) === 0, (el) => el.child(this.emptyNote("circle-check", "All done for today", t))))
@@ -715,12 +796,19 @@ export default class Todo extends View {
 
   addStepRow(r, t) {
     const editing = this.edit && same(this.edit.row, r), sel = same(r, this.sel);
-    return this.stepWrap(h_flex().id(`todo-addstep-${r.i}`).flex_1().min_w(0).min_h(30).px(8).gap(8).items_center().rounded(8).cursor_pointer().text_color(t.dim)
+    return this.stepWrap(h_flex().id(`todo-addstep-${r.i}`).relative().flex_1().min_w(0).min_h(30).px(8).gap(8).items_center().rounded(8).cursor_pointer().text_color(t.dim)
       .when(sel && !editing, (el) => el.bg(t.selected)).hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => this.startStep(r.i, cx))
+      .on_mouse_move((e, cx) => this.dragMove(r, e, cx))
+      .when(this.lineOf(r) !== null, (el) => el.child(this.dropLine(r, t)))
       .child(svg("mods/workspace-chrome/plus.svg").size(12).flex_none())
       .child(editing ? this.face(Input.new(this.edit.input).flex_1().min_w(0).h(28).px(6).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(this.hand ? 14 : 12.5).text_color(t.foreground))
         : div().text_size(12).child("Add step")), t);
+  }
+
+  dropLine(r, t) {
+    const at = this.lineOf(r);
+    return at && div().absolute().left(0).right(0).h(2).bg(t.accent).when(at === "top", (el) => el.top(0)).when(at === "bottom", (el) => el.bottom(0));
   }
 
   wideKey(item, step) { return `${step ? "s" : "t"}:${item.title}`; }
@@ -752,12 +840,26 @@ export default class Todo extends View {
       .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.tick(r, cx); })
       .when(item.done, (el) => el.child(svg("mods/workspace-chrome/check.svg").size(step ? 10 : 13).text_color(t.accent_foreground)));
     const open = this.open.has(item.title), wide = this.wide.has(this.wideKey(item, step)), steps = step ? [] : item.steps;
-    const row = h_flex().id(`todo-row-${key}`).min_h(step ? 32 : 44).px(10).gap(10).items_center().cursor_pointer().when(wide, (el) => el.items_start().py(8))
+    const dragging = this.drag && this.drag.src.i === r.i && (this.drag.src.j ?? null) === (r.j ?? null);
+    const row = h_flex().id(`todo-row-${key}`).relative().min_h(step ? 32 : 44).px(10).gap(10).items_center().cursor_pointer().when(wide, (el) => el.items_start().py(8))
       .when(step, (el) => el.flex_1().min_w(0).rounded(8))
       .when(!step, (el) => el.flex_none().rounded(12).border_1().border_color(t.border).bg(t.surface))
       .when(sel, (el) => el.bg(t.selected)).hover((s) => s.bg(t.hover))
       .on_hover((h, cx) => { this.hover = h ? key : (this.hover === key ? null : this.hover); cx.notify(); })
-      .on_mouse_down("left", (e, cx) => { this.select(r, cx); if (!editing && e.click_count <= 2) this.toggleWide(item, step); if (e.click_count === 2) this.startEdit(r, cx); })
+      .when(dragging, (el) => el.opacity(0.5))
+      .when(this.lineOf(r) !== null, (el) => el.child(this.dropLine(r, t)))
+      .on_mouse_move((e, cx) => this.dragMove(r, e, cx))
+      .on_mouse_down("left", (e, cx) => {
+        // The row being edited leaves presses to its edit box: selecting, word picks and drags stay in the text.
+        if (editing) return;
+        this.select(r, cx);
+        const toggled = e.click_count <= 2;
+        if (toggled) this.toggleWide(item, step);
+        if (e.click_count === 2) this.startEdit(r, cx);
+        const open = step ? !this.list.tasks[r.i]?.done : !item.done;
+        this.drag = null;
+        this.press = e.click_count === 1 && !this.readonly && open ? { ref: this.ref(r), x: e.position.x, y: e.position.y, item, step, toggled } : null;
+      })
       .child(circle)
       .child(editing
         ? this.face(Input.new(this.edit.input).flex_1().min_w(0).h(28).px(6).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(this.hand ? 15 : 12.5).text_color(t.foreground))
