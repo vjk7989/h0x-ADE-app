@@ -870,6 +870,8 @@ export default class Todo extends View {
         this.drag = null;
         this.press = e.click_count === 1 && !this.readonly && open ? { ref: this.ref(r), x: e.position.x, y: e.position.y, item, step, toggled } : null;
       })
+      // The panel takes focus on a press (after the row's handler), so the box opened by a double click is refocused on release.
+      .on_mouse_up("left", () => { if (this.edit && same(this.edit.row, r)) this.edit.input.focus(); })
       .child(circle)
       .child(editing
         ? this.face(Input.new(this.edit.input).flex_1().min_w(0).h(28).px(6).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(this.hand ? 15 : 12.5).text_color(t.foreground))
