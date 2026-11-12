@@ -6810,9 +6810,10 @@ fn todo_a_save_stuck_writing_for_over_60_s_is_reset_by_the_next_tick(cx: &mut Te
         (Value::Null, json!(false), json!(0)),
         "{state}"
     );
+    // "one" moved to Completed, so the selection is now on "two": the next Space ticks it and is saved too.
     files_keys(&mut visual, "space");
     files_wait(&mut visual, 50);
-    assert_eq!(todo_written(&host), ["# Tasks\n- [x] one\n- [ ] two\n", "# Tasks\n- [ ] one\n- [ ] two\n"], "and keeps saving");
+    assert_eq!(todo_written(&host), ["# Tasks\n- [x] one\n- [ ] two\n", "# Tasks\n- [x] one\n- [x] two\n"], "and keeps saving");
 }
 
 // Under 10 s, or while a write has been in progress for under 60 s, the flag is never reset and the change waits; past
