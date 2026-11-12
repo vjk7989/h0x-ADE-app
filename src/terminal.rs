@@ -1193,7 +1193,10 @@ fn image_file(item: &ClipboardItem) -> Option<std::path::PathBuf> {
     static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     let dir = DIR.get_or_init(|| private_dir(&std::env::temp_dir())).as_ref()?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
-    write_new(&dir.join(format!("paste-{stamp}.{ext}")), &bytes)
+    // Two pastes in the same clock tick (coarse clocks, or at once) still get their own file.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    write_new(&dir.join(format!("paste-{stamp}{n:06}.{ext}")), &bytes)
 }
 
 /// A directory only this user can enter, new in `parent`, with a name no one can predict.
