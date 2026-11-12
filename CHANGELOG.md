@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.1.25] - 2026-11-13
+
+Updates that look after themselves, and a better to-do list. Bundles h0x-core 0.1.16.
+
+### Added
+- HyperOx keeps the app, the core and the runtime up to date by itself. The core and runtime update once no agent has worked for 2 minutes; the app updates when you quit. A short notice says what was updated.
+- If a new version doesn't start properly, HyperOx goes back to the previous one by itself and tells you. A version that fails twice is skipped until a newer one comes out.
+- Usage analytics and failure reports help us fix problems during the beta. Turn usage analytics off any time in Settings → Info; the "i" next to the switch explains exactly what is sent. Failure reports stay on.
+- To-do: Undo and OK buttons after deleting a task (6 seconds), and drag tasks and sub-tasks to move them, including onto another task.
+- Ctrl+click a file name in a terminal to open it: text, code and Markdown open in HyperOx, other files in your usual program.
+- A one-time "How did you find HyperOx?" question at the end of the welcome.
+
+### Fixed
+- After double-clicking a to-do to edit it, typing goes straight into the box.
+
 ## [0.1.24] - 2026-11-12
 
 Read long to-do tasks in full. Bundles h0x-core 0.1.15.
