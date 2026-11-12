@@ -2,7 +2,7 @@
 // themselves (VS Code-style auto-save); remote and truncated files are read-only previews.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { spaces, panes, focused, agents, core, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, windowVisible, layout } from "h0x";
+import { spaces, panes, focused, agents, core, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, windowVisible, layout, nextCommand } from "h0x";
 
 // Whether the layout shows this panel (as the sessions panel asks): no hidden
 // node on the way, and the selected child of each stack. Not in the layout: shown.
@@ -70,6 +70,10 @@ export default class Files extends View {
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.refresh(cx);
     cx.timer.every(1000, cx => this.tick(cx));
+    // `files.open:<path>` from a terminal link click.
+    cx.spawn(async cx => {
+      for (;;) { const c = await nextCommand(); if (c.startsWith("open:")) this.openFile(c.slice(5), cx); }
+    });
   }
 
   // Every 10 s while shown. Hidden (another panel tab, a closed panel) or the window in the
@@ -168,7 +172,14 @@ export default class Files extends View {
     cx.notify();
   }
 
-  show(path, cx) {
+  // A terminal link opens a file of this machine, by its full path, whatever machine the panel lists.
+  openFile(full, cx) {
+    const path = full.replaceAll("\\", "/"), root = this.root?.replaceAll("\\", "/");
+    this.show(root && !this.on && path.startsWith(root + "/") ? path.slice(root.length + 1) : path, cx, true);
+    cx.notify();
+  }
+
+  show(path, cx, local) {
     const prev = this.doc;
     if (prev && cx) {
       // Leaving a file saves it; edits held back by a disk conflict wait for its reopening.
@@ -178,7 +189,7 @@ export default class Files extends View {
     prev?.timer?.cancel();
     this.code?.release(); this.code = null; this.doc = null; this.file = path; this.fileError = null;
     if (!path || !cx) return;
-    const context = this.context, root = this.root, on = this.on, full = `${root}/${path}`;
+    const context = this.context, root = this.root, on = local ? null : this.on, full = /^(\/|[A-Za-z]:\/)/.test(path) ? path : `${root}/${path}`;
     cx.spawn(async cx => {
       try {
         const disk = await readTextFile(full, { on });

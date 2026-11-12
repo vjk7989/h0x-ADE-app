@@ -44,6 +44,8 @@ enum LinkTarget {
 
 pub enum TerminalEvent {
     Peek(String),
+    /// A text file clicked: HyperOx's editor shows it.
+    OpenFile(std::path::PathBuf),
     TitleChanged,
     /// The program ended.
     Ended,
@@ -2043,6 +2045,12 @@ impl Render for TerminalView {
                     && let Some((target, _)) = this.link_at(ev.position)
                 {
                     match target {
+                        // A file on another machine is not ours to open: it is shown in its folder as before.
+                        LinkTarget::External(links::Target::File(path)) if !this.address.contains('/') => match links::kind(&path) {
+                            links::Kind::Text => cx.emit(TerminalEvent::OpenFile(path)),
+                            links::Kind::System => links::open_default(&path),
+                            links::Kind::Reveal => links::open(&links::Target::File(path)),
+                        },
                         LinkTarget::External(target) => links::open(&target),
                         LinkTarget::Terminal(address) => cx.emit(TerminalEvent::Peek(address)),
                     }
@@ -3181,6 +3189,59 @@ mod tests {
         cx.simulate_mouse_down(point(px(50.), px(50.)), MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_up(point(px(50.), px(50.)), MouseButton::Left, Modifiers::default());
         assert_eq!(terminal.read_with(cx, |t, _| t.grid.borrow().vt.selection_text()), None);
+    }
+
+    /// Only text files are clicked here: anything else would start the system's opener.
+    #[gpui::test]
+    fn a_link_click_on_a_local_text_file_asks_for_the_editor_and_a_plain_click_does_not(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        use std::{cell::RefCell, rc::Rc};
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(400.)).h(px(100.)).child(self.0.clone())
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("h0x-term-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "").unwrap();
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| super::TerminalView::attach(crate::core_link::offline(), "t1".into(), (40, 5), cx)))
+        });
+        cx.run_until_parked();
+        let terminal = root.read_with(cx, |root, _| root.0.clone());
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let seen = opened.clone();
+        cx.update(|_, app| {
+            app.subscribe(&terminal, move |_, event: &super::TerminalEvent, _| {
+                if let super::TerminalEvent::OpenFile(path) = event {
+                    seen.borrow_mut().push(path.clone());
+                }
+            })
+            .detach()
+        });
+        terminal.update(cx, |t, _| {
+            t.cwd = Some(dir.clone());
+            t.grid.borrow_mut().vt.write(b"./a.txt");
+        });
+        cx.run_until_parked();
+        let at = point(px(3.), px(3.));
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        assert!(opened.borrow().is_empty(), "a plain click opens nothing: {:?}", opened.borrow());
+        // Shift or Alt with the link key is not a link click either.
+        let key = if cfg!(target_os = "macos") { Modifiers { platform: true, ..Default::default() } } else { Modifiers { control: true, ..Default::default() } };
+        for other in [Modifiers { shift: true, ..key }, Modifiers { alt: true, ..key }] {
+            cx.simulate_mouse_down(at, MouseButton::Left, other);
+            cx.simulate_mouse_up(at, MouseButton::Left, other);
+        }
+        assert!(opened.borrow().is_empty(), "{:?}", opened.borrow());
+        cx.simulate_mouse_down(at, MouseButton::Left, key);
+        cx.simulate_mouse_up(at, MouseButton::Left, key);
+        assert_eq!(*opened.borrow(), vec![dir.join("a.txt")]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[gpui::test]
