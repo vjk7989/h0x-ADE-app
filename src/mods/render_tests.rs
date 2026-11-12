@@ -2021,7 +2021,7 @@ fn settings_analytics_switch_never_overwrites_a_settings_file_it_could_not_read(
 
 const ANALYTICS_TITLE: &str = "How HyperOx handles your data (beta)";
 const ANALYTICS_ABOUT: [&str; 3] = [
-    "During the beta, HyperOx sends usage data and failure reports so we can fix problems and improve the app. You are identified by a random install ID, not your name or email. We never send what you type, your prompts, agent replies, terminal contents, file or folder names, or your keys. IP addresses are not stored; the approximate country is.",
+    "During the beta, HyperOx sends usage data and failure reports so we can fix problems and improve the app. You are identified by a random install ID, not your name or email. We never send what you type, your prompts, agent replies, terminal contents, file or folder names, or your keys. IP addresses are not stored; your approximate location (country and city) is.",
     "After the beta we plan to move data collection to zero-knowledge proofs.",
     "You can turn usage analytics off any time. Failure reports stay on so we can fix crashes and update problems.",
 ];
