@@ -2621,15 +2621,17 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         );
         let script = watch_script(42, &w);
         let head = script.lines().next().unwrap();
+        // The exe is joined onto the root with the platform's own separator.
+        let sep = std::path::MAIN_SEPARATOR;
         assert_eq!(
             head,
-            "$old = 42; $exe = 'C:/Users/O\u{2019}\u{2019}Neil/My Apps/it''s here/h0x-ade/h0x-ade.exe'; \
+            format!("$old = 42; $exe = 'C:/Users/O\u{2019}\u{2019}Neil/My Apps/it''s here/h0x-ade{sep}h0x-ade.exe'; \
              $root = 'C:/Users/O\u{2019}\u{2019}Neil/My Apps/it''s here/h0x-ade'; \
              $previous = 'C:/Users/O\u{2019}\u{2019}Neil/My Apps/it''s here/h0x-ade.previous'; \
              $marker = 'C:/Users/Zo\u{eb} \u{4e2d}\u{6587}/h0x-ade/started-0.2.0'; \
              $pending = 'C:/Users/Zo\u{eb} \u{4e2d}\u{6587}/h0x-ade/pending-rollback.json'; \
              $newVersion = '0.2.0'; $oldVersion = '0.1.9'; \
-             $quit = 'C:/Users/Zo\u{eb} \u{4e2d}\u{6587}/h0x-ade/quit-0.2.0'"
+             $quit = 'C:/Users/Zo\u{eb} \u{4e2d}\u{6587}/h0x-ade/quit-0.2.0'")
         );
         // After the values only fixed text: no path can reach it.
         assert!(script.ends_with(WATCH_PS));
