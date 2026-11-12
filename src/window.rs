@@ -375,6 +375,8 @@ pub struct AppWindow {
     /// Mod copies by slot (block id, `<stack>#header`, or `overlay:<id>`).
     copies: HashMap<String, Copy>,
     overlays: Vec<Overlay>,
+    /// A text file clicked in a terminal, waiting for the files panel to show.
+    pending_open: Option<PathBuf>,
     folders: BTreeMap<String, Found>,
     /// Mods placed once; later the layout decides where (or whether) they show.
     seen: BTreeSet<String>,
@@ -496,6 +498,7 @@ impl AppWindow {
             terms: HashMap::new(),
             copies: HashMap::new(),
             overlays: Vec::new(),
+            pending_open: None,
             folders: mods::scan().into_iter().map(|f| (f.id.clone(), f)).collect(),
             seen,
             bounds: Default::default(),
@@ -1410,6 +1413,7 @@ impl AppWindow {
             let (block, addr) = (id.clone(), address.clone());
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
+                TerminalEvent::OpenFile(path) => this.open_in_files(path.clone(), window, cx),
                 TerminalEvent::TitleChanged => this.publish(cx),
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
@@ -1447,6 +1451,9 @@ impl AppWindow {
             }
         }
         self.publish_shown_copies();
+        if let Some(path) = self.pending_open.take() {
+            self.open_in_files_now(&path);
+        }
 
         // Keyboard to the focused pane when it changes (never steal it from an open dialog).
         let model_pane = self.model.focused_pane();
@@ -3737,6 +3744,34 @@ impl AppWindow {
         cx.notify();
     }
 
+    /// Opens a clicked text file in the files panel, showing the panel first. The file is
+    /// shown in its folder only when the panel can't be shown or its mod doesn't listen.
+    fn open_in_files(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // The panel reads only inside the folders mods may use; elsewhere the system opens it.
+        if crate::mod_files::check(&path, &crate::mod_files::allowed_roots()).is_err() {
+            crate::links::open_text_elsewhere(&path);
+            return;
+        }
+        let command = format!("open:{}", path.display());
+        if mods::send_command("files", &command) {
+            return;
+        }
+        let mut ok = |this: &mut Self, name: &str, args: Value| this.run_as(name, args, true, window, cx).get("error").is_none();
+        if !(ok(self, "layout.select", json!({ "stack": "panel-body", "child": "files" })) && ok(self, "layout.show", json!({ "id": "panel" }))) {
+            crate::links::open(&crate::links::Target::File(path));
+        } else if !mods::send_command("files", &command) {
+            // The mod's copy starts on a `sync`, which delivers it (or shows the folder).
+            self.pending_open = Some(path);
+            self.sync(window, cx);
+        }
+    }
+
+    fn open_in_files_now(&self, path: &std::path::Path) {
+        if !mods::send_command("files", &format!("open:{}", path.display())) {
+            crate::links::open(&crate::links::Target::File(path.to_path_buf()));
+        }
+    }
+
     fn peek_terminal(&mut self, address: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.close_overlay("terminal-peek", window, cx);
         self.open_overlay("terminal-peek".into(), json!({
@@ -5943,6 +5978,69 @@ export default class Probe extends View {
             cx.deactivate_window();
             assert_eq!(seen(cx), Some(json!(false)), "blurred: {:?}", crate::mods::shared("probe.seen"));
         }
+    }
+
+    #[test]
+    fn a_clicked_text_file_shows_the_hidden_files_panel_and_opens_there() {
+        in_own_process("open_in_files_window");
+    }
+
+    /// A stand-in `files` mod records what reaches its `nextCommand()`. Hidden, the panel is
+    /// shown with its files tab first and the open follows; shown, the open goes straight in.
+    #[gpui::test]
+    fn open_in_files_window(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("open_in_files_window") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { nextCommand, shared, setShared } from "h0x";
+
+export default class Files extends View {
+  init(_props, cx) {
+    cx.spawn(async cx => {
+      for (;;) {
+        const c = await nextCommand();
+        setShared("files-test.got", [...(shared("files-test.got") ?? []), c]);
+      }
+    });
+  }
+  render() { return div(); }
+}
+"#;
+        let layout = json!({ "id": "root", "type": "row", "children": [
+            { "id": "panel", "type": "column", "hidden": true, "children": [
+                { "id": "panel-body", "type": "stack", "active": "other", "children": [
+                    { "id": "files", "type": "block", "content": { "mod": "files" } },
+                    { "id": "other", "type": "block", "content": { "tab": "active" } }
+                ] }
+            ] }
+        ] });
+        let (view, cx) = open_window(cx, "files", probe, layout);
+        cx.run_until_parked();
+        let got = || crate::mods::shared("files-test.got").unwrap_or(json!([]));
+        assert!(!crate::mods::send_command("files", "probe"), "hidden, the files mod gets nothing");
+
+        // A path with spaces travels as written. It sits in the app folder: the panel reads
+        // only inside the folders mods may use.
+        let first = crate::mods::app_dir().join("My Files").join("notes a.txt");
+        let opened = |p: &std::path::Path| json!(format!("open:{}", p.display()));
+        view.update_in(cx, |this, window, cx| this.open_in_files(first.clone(), window, cx));
+        view.update(cx, |this, _| {
+            assert!(!this.chrome.find("panel").unwrap().hidden, "the panel is shown");
+            let tab = this.chrome.find("panel-body").and_then(|s| s.active_child()).map(|c| c.id.clone());
+            assert_eq!(tab.as_deref(), Some("files"), "the files tab is selected");
+        });
+        cx.run_until_parked();
+        assert_eq!(got(), json!([opened(&first)]), "delivered once the panel shows, without another event");
+        assert_eq!(view.update(cx, |this, _| this.pending_open.clone()), None);
+
+        // Shown now: the next click goes straight to the mod.
+        let second = crate::mods::app_dir().join("a b.md");
+        view.update_in(cx, |this, window, cx| this.open_in_files(second.clone(), window, cx));
+        assert_eq!(view.update(cx, |this, _| this.pending_open.clone()), None, "nothing waits for a shown panel");
+        cx.run_until_parked();
+        assert_eq!(got(), json!([opened(&first), opened(&second)]));
     }
 
     include!("window/pane_size_tests.rs");

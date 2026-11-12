@@ -3509,6 +3509,7 @@ export default class Scenario extends Real {
       for (let c = command(); c !== null; c = command()) {
         const at = c.indexOf(' '), verb = at < 0 ? c : c.slice(0, at), arg = c.slice(at + 1);
         if (verb === 'open') this.show(arg, cx);
+        else if (verb === 'openfile') this.openFile(arg, cx);
         else if (verb === 'back') this.show(null, cx);
         else if (verb === 'keep') this.save(cx, true);
         else if (verb === 'reload') this.reload(cx);
@@ -3543,7 +3544,9 @@ fn files_module(values: BTreeMap<String, Value>, disk: Rc<RefCell<FilesDisk>>) -
     for (name, value) in values {
         module = module.function(name, move |_| Ok(to_host(&value)));
     }
-    module = module.async_function("watchFolder", |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
+    for name in ["nextCommand", "watchFolder"] {
+        module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
+    }
     module = module.async_function("exec", |_| Ok(std::future::ready(Ok(to_host(&json!({"code":0,"stdout":"","stderr":""}))))));
     let read = disk.clone();
     module = module.async_function("readTextFile", move |a| {
@@ -4124,6 +4127,82 @@ fn files_panel_keeps_windows_paths_with_spaces_unchanged(cx: &mut TestAppContext
         vec![vec!["send".to_string(), "idle1".into(), files_note("notes file.txt"), "--if".into(), "idle".into()]],
         "the path travels inside one argv element"
     );
+}
+
+// A terminal link click opens a file of this machine by its full path: inside the listed folder
+// by its relative name, outside it (or a folder that only shares the prefix) by the full path.
+#[gpui::test]
+fn files_panel_opens_a_clicked_local_file_inside_and_outside_its_folder(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (notes, other, sibling) = ("/fixture/project/src/notes.txt", "/elsewhere/a b.md", "/fixture/project-old/a.txt");
+    let disk = files_disk(&[(notes, "mine\n"), (other, "other\n"), (sibling, "old\n")]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(json!([])), &disk);
+    for (clicked, file, value) in [(notes, "src/notes.txt", "mine\n"), (other, other, "other\n"), (sibling, sibling, "old\n")] {
+        files_step(&mut visual, &disk, &format!("openfile {clicked}"));
+        let state = files_state(&mut visual, &disk);
+        assert_eq!(
+            (state["file"].clone(), state["value"].clone(), state["editable"].clone(), state["hint"].clone()),
+            (json!(file), json!(value), json!(true), Value::Null),
+            "{clicked}: {state}"
+        );
+        assert_eq!(disk.borrow().reads.last(), Some(&json!([clicked, {"on":null}])), "{clicked}");
+    }
+}
+
+// The panel lists another machine, but the click was in a terminal of this one: the file is
+// read here (no `on`), whole path kept, and it is editable rather than a remote preview.
+#[gpui::test]
+fn files_panel_opens_a_clicked_local_file_here_while_it_lists_a_remote_machine(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let notes = "/fixture/project/notes.txt";
+    let disk = files_disk(&[(notes, "local\n")]);
+    let mut values = files_values(json!([]));
+    values.get_mut("spaces").unwrap()[0]["machine"] = json!("remote");
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, values, &disk);
+    files_step(&mut visual, &disk, &format!("openfile {notes}"));
+    let state = files_state(&mut visual, &disk);
+    assert_eq!(
+        (state["file"].clone(), state["value"].clone(), state["editable"].clone(), state["hint"].clone()),
+        (json!(notes), json!("local\n"), json!(true), Value::Null),
+        "{state}"
+    );
+    assert_eq!(disk.borrow().reads.last(), Some(&json!([notes, {"on":null}])));
+    // A plain open from the list still reads the remote machine.
+    files_step(&mut visual, &disk, "open notes.txt");
+    assert_eq!(disk.borrow().reads.last(), Some(&json!([notes, {"on":"remote"}])));
+}
+
+// Windows: backslashes, mixed slashes, spaces and a lowercase drive. Inside the folder the
+// relative name joins the folder as listed; outside it the path is read with forward slashes.
+#[gpui::test]
+fn files_panel_opens_clicked_windows_paths_with_spaces_and_mixed_slashes(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let folder = r"C:\Users\Me\My Project";
+    let inside = format!(r"{folder}/sub/notes file.txt");
+    let disk = files_disk(&[(inside.as_str(), "in\r\n"), ("D:/Other Dir/a.txt", "out\n"), ("c:/x/b.md", "low\n")]);
+    let mut values = files_values(json!([]));
+    values.insert(
+        "window".into(),
+        json!({"platform":"windows","titlebar":"none","buttons":true,"maximized":false,"fullscreen":false,"active":true}),
+    );
+    values.get_mut("spaces").unwrap()[0]["folder"] = json!(folder);
+    values.get_mut("panes").unwrap()[0]["cwd"] = json!(folder);
+    values.get_mut("focused").unwrap()["cwd"] = json!(folder);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, values, &disk);
+    for (clicked, file, read) in [
+        (r"C:\Users\Me\My Project\sub\notes file.txt", "sub/notes file.txt", inside.as_str()),
+        (r"C:\Users\Me\My Project/sub\notes file.txt", "sub/notes file.txt", inside.as_str()),
+        (r"D:\Other Dir\a.txt", "D:/Other Dir/a.txt", "D:/Other Dir/a.txt"),
+        (r"c:\x\b.md", "c:/x/b.md", "c:/x/b.md"),
+    ] {
+        files_step(&mut visual, &disk, &format!("openfile {clicked}"));
+        let state = files_state(&mut visual, &disk);
+        assert_eq!((state["file"].clone(), state["editable"].clone()), (json!(file), json!(true)), "{clicked}: {state}");
+        assert_eq!(disk.borrow().reads.last(), Some(&json!([read, {"on":null}])), "{clicked}");
+    }
 }
 
 #[gpui::test]
@@ -5822,7 +5901,9 @@ export default class Scenario extends Real {
             edit: this.edit ? this.edit.input.value() : null, pending: this.pending.length, cur: this.cur, badIndex: Boolean(this.badIndex),
             confirming: this.confirming, naming: Boolean(this.naming), flushing: Boolean(this.flushing),
             menu: this.menu, menuAt: this.menuAt, nameValue: this.naming ? this.naming.input.value() : null,
-            firstDone: this.list?.tasks[0]?.done ?? null, cut: this.cut, slowMs: this.slowMs, wide: [...this.wide], open: [...this.open] }));
+            firstDone: this.list?.tasks[0]?.done ?? null, cut: this.cut, slowMs: this.slowMs, wide: [...this.wide], open: [...this.open],
+            hover: this.hover, press: Boolean(this.press), drag: this.drag,
+            lines: this.ready ? this.rows().map((r) => [r, this.lineOf(r)]).filter((l) => l[1] !== null) : [] }));
         }
         this.running = null;
         this.slowMs = Math.max(this.slowMs, Date.now() - started);
@@ -6690,6 +6771,7 @@ fn todo_progress_header_and_completed_count_from_no_tasks_to_all_done(cx: &mut T
 }
 
 // AC2: a delete posts an Undo notice; undo puts the task (with its steps) or the step back once.
+// UPD-D1 AC3: the notice shows 6 s with an Undo button (todo.undo) and an OK button that only closes it.
 #[gpui::test]
 fn todo_delete_posts_an_undo_notice_and_undo_restores_it_once(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
@@ -6701,7 +6783,7 @@ fn todo_delete_posts_an_undo_notice_and_undo_restores_it_once(cx: &mut TestAppCo
     assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] a\n- [ ] c\n");
     assert_eq!(
         todo_effects(&host, "notify"),
-        [json!([{"title":"Task deleted", "body":"b", "timeout":8000, "action":{"name":"todo.undo"}}])]
+        [json!([{"title":"Task deleted", "body":"b", "timeout":6000, "actions":[{"label":"Undo", "name":"todo.undo"}, {"label":"OK"}]}])]
     );
     todo_step(cx, &host, "undo");
     assert_eq!(host.borrow().files[TODO_TASKS], start, "the task comes back where it was, steps and note included");
@@ -6715,6 +6797,132 @@ fn todo_delete_posts_an_undo_notice_and_undo_restores_it_once(cx: &mut TestAppCo
     todo_step(cx, &host, "undo");
     assert_eq!(host.borrow().files[TODO_TASKS], start);
     todo_describe(cx, window, session);
+}
+
+// UPD-D1 AC3: the notice's 6 s is only how long it shows: once it has gone (OK pressed or timed out) the task stays
+// deleted and nothing runs, and todo.undo still restores it. Undo has no clock: it holds the latest delete only.
+#[gpui::test]
+fn todo_undo_after_the_notice_has_gone_still_restores_only_the_latest_delete(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] a\n  - [ ] a1\n- [ ] b\n- [ ] c\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (window, session) = load_todo(cx, &staged, todo_root(&staged), todo_values(), &host);
+    todo_step(cx, &host, "delete 0");
+    let deleted = "# Tasks\n- [ ] b\n- [ ] c\n";
+    assert_eq!(host.borrow().files[TODO_TASKS], deleted);
+    let writes = host.borrow().writes.len();
+    cx.executor().advance_clock(std::time::Duration::from_millis(6001));
+    cx.run_until_parked();
+    assert_eq!(host.borrow().files[TODO_TASKS], deleted, "the task stays deleted after the notice's 6 s");
+    assert_eq!(host.borrow().writes.len(), writes, "nothing is written when the notice goes");
+    assert!(todo_effects(&host, "run").is_empty(), "nothing runs when the notice goes: {:?}", host.borrow().effects);
+    todo_step(cx, &host, "undo");
+    assert_eq!(host.borrow().files[TODO_TASKS], start, "undo after the notice has gone restores the task with its step");
+
+    // Two deletes (a, then b): undo brings back b only, and a second undo does nothing.
+    todo_step(cx, &host, "delete 0");
+    todo_step(cx, &host, "delete 0");
+    assert_eq!(host.borrow().files[TODO_TASKS], "# Tasks\n- [ ] c\n");
+    todo_step(cx, &host, "undo");
+    assert_eq!(host.borrow().files[TODO_TASKS], deleted, "the latest delete comes back");
+    let writes = host.borrow().writes.len();
+    todo_step(cx, &host, "undo");
+    assert_eq!(host.borrow().writes.len(), writes, "the earlier delete is not undone");
+    assert_eq!(host.borrow().files[TODO_TASKS], deleted);
+    todo_describe(cx, window, session);
+}
+
+// UPD-D1 AC1/AC2: the toast draws one button per `actions` entry with a label, in order (entries without a label, null
+// or not objects are skipped); an empty list, a list that is not an array, an old single-action notice and a bare one
+// draw none.
+#[gpui::test]
+fn toast_draws_one_button_per_labelled_action_and_none_for_old_or_bare_notices(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let cases = [
+        (json!({"title":"Task deleted", "body":"b", "timeout":6000, "actions":[{"label":"Undo", "name":"todo.undo"}, {"label":"OK"}]}), vec!["Undo", "OK"]),
+        (
+            json!({"title":"t", "actions":[{"name":"app.help"}, null, 7, {"label":""}, {"label":"Later"}, {"label":"Go", "name":"agent.focus", "args":{"terminal":"t1"}}]}),
+            vec!["Later", "Go"],
+        ),
+        (json!({"title":"t", "actions":[]}), vec![]),
+        (json!({"title":"t", "actions":{"label":"Undo", "name":"todo.undo"}}), vec![]),
+        (json!({"title":"t", "actions":null}), vec![]),
+        (json!({"title":"Done", "body":"Build complete", "action":{"name":"app.help"}}), vec![]),
+        (json!({"title":"Done"}), vec![]),
+        (json!({}), vec![]),
+    ];
+    for (notification, labels) in cases {
+        let mut p = notification.clone();
+        p["overlay"] = json!("o1");
+        let tree = describe(cx, &staged, "mods/toast", true, p, updates("current", "current"), None).unwrap_or_else(|e| panic!("{notification}: {e:#}"));
+        for (i, label) in labels.iter().enumerate() {
+            let button = todo_element(&tree, &format!("toast-action-{i}"));
+            assert!(button.iter().any(|l| l.trim() == format!("text {label:?}")), "{notification}: button {i} is {label}: {button:#?}");
+        }
+        let extra = format!(":id[Str({:?})]", format!("toast-action-{}", labels.len()));
+        assert!(!tree.contains(&extra), "{notification}: {} buttons only: {tree}", labels.len());
+    }
+}
+
+// UPD-D1 AC1/AC2/AC3 with real clicks across the middle of a mounted toast, right to left, each click on a fresh frame:
+// what each click ran, with repeats of the same outcome merged. A button runs its own command (with its args) or none
+// and closes the toast, never the whole-toast action; a click on the body (padding, gaps, text) runs that action and
+// closes it, as before `actions` existed.
+#[gpui::test]
+fn toast_buttons_run_only_their_own_command_and_the_body_still_runs_the_toast_action(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let close = json!(["closeOverlay", ["o1"]]);
+    let body = json!([["run", ["app.help", {}]], close]);
+    let only_close = json!([close]);
+    let cases = [
+        // The to-do delete notice, plus a whole-toast action: OK only closes, Undo runs todo.undo.
+        (
+            json!({"title":"Task deleted", "body":"b", "timeout":6000, "action":{"name":"app.help"}, "actions":[{"label":"Undo", "name":"todo.undo"}, {"label":"OK"}]}),
+            vec![body.clone(), only_close.clone(), body.clone(), json!([["run", ["todo.undo", {}]], close]), body.clone()],
+        ),
+        // Args reach the command; an entry without a label is no button (its command would show in a click).
+        (
+            json!({"title":"t", "action":{"name":"app.help"}, "actions":[{"label":"Go", "name":"agent.focus", "args":{"terminal":"t1"}}, {"name":"todo.undo"}, {"label":"Later"}]}),
+            vec![body.clone(), only_close.clone(), body.clone(), json!([["run", ["agent.focus", {"terminal":"t1"}]], close]), body.clone()],
+        ),
+        // An old single-action toast, and one with neither: the whole toast is one target.
+        (json!({"title":"Done", "action":{"name":"agent.focus", "args":{"terminal":"t2"}}}), vec![json!([["run", ["agent.focus", {"terminal":"t2"}]], close])]),
+        (json!({"title":"Done"}), vec![only_close.clone()]),
+        // No buttons for an empty list or one that is not an array.
+        (json!({"title":"t", "action":{"name":"app.help"}, "actions":[]}), vec![body.clone()]),
+        (json!({"title":"t", "actions":{"label":"Undo", "name":"todo.undo"}}), vec![only_close.clone()]),
+    ];
+    for (notification, want) in cases {
+        let host = todo_host(&[], &[]);
+        let mut values = todo_values();
+        let mut p = notification.clone();
+        p["overlay"] = json!("o1");
+        values.insert("props".into(), p);
+        gpui_shell::policy::set_default(todo_policy(&staged, values, &host));
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let root = staged.0.join("mods/toast");
+        let window = cx.add_window(|window, cx| FilesMounted(runtime.try_load(&root, window, cx).unwrap()));
+        let mut visual = gpui::VisualTestContext::from_window(*window, cx);
+        visual.run_until_parked();
+        visual.update(|window, _| window.activate_window());
+        let size = visual.update(|window, _| window.viewport_size());
+        let y = size.height * 0.5;
+        let mut seen: Vec<Value> = Vec::new();
+        for from_right in (2..(f32::from(size.width) * 0.5) as i32).step_by(3) {
+            host.borrow_mut().effects.clear();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            visual.simulate_click(gpui::point(size.width - gpui::px(from_right as f32), y), gpui::Modifiers::none());
+            visual.run_until_parked();
+            let ran = json!(host.borrow().effects.iter().map(|(n, a)| json!([n, a])).collect::<Vec<_>>());
+            if seen.last() != Some(&ran) {
+                seen.push(ran);
+            }
+        }
+        assert_eq!(seen, want, "{notification}");
+    }
 }
 
 // AC2 keys, through the panel's key handler: arrows, Tab/Shift+Tab, Alt+Up, Space, Delete, Enter.
@@ -7394,6 +7602,710 @@ fn todo_a_long_title_without_spaces_wraps_over_several_lines_when_wide(cx: &mut 
     todo_press(&mut visual, below, 1);
     assert_eq!(todo_wide(&mut visual, &host), json!(["t:next"]), "collapsed, the long row is one line and the press meets next");
     assert!(host.borrow().writes.is_empty(), "{:?}", host.borrow().writes);
+}
+
+// UPD-D1 AC4 (TD4 part 2) with real keys in the edit box: select all, copy, cut and paste (secondary = Cmd on macOS,
+// Ctrl elsewhere) reach the box, and the panel's own keys (Delete) edit the text instead of the list. Nothing is
+// written until Enter, which saves a pasted Windows path as it is.
+#[gpui::test]
+fn todo_edit_box_takes_select_all_copy_cut_and_paste_and_writes_only_on_enter(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] Milk run\n- [ ] two\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    files_keys(&mut visual, "enter");
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["edit"].clone(), state["sel"].clone()), (json!("Milk run"), json!({"k":"task", "i":0})), "{state}");
+    let clipboard = |visual: &gpui::VisualTestContext| visual.read_from_clipboard().and_then(|c| c.text());
+    // The box opens with its title selected; End drops that, so the copy below is select all's.
+    files_keys(&mut visual, "end secondary-a secondary-c");
+    assert_eq!(clipboard(&visual).as_deref(), Some("Milk run"));
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], json!("Milk run"), "copy leaves the text");
+    files_keys(&mut visual, "secondary-x");
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["edit"].clone(), state["menu"].clone()), (json!(""), json!(false)), "cut empties the box: {state}");
+    assert_eq!(clipboard(&visual).as_deref(), Some("Milk run"));
+    files_keys(&mut visual, "secondary-v secondary-v");
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], json!("Milk runMilk run"));
+    // Delete at the start removes a letter, never the task.
+    files_keys(&mut visual, "home delete");
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], json!("ilk runMilk run"));
+    let path = r"C:\Users\me\notes.md";
+    visual.write_to_clipboard(gpui::ClipboardItem::new_string(path.to_string()));
+    files_keys(&mut visual, "secondary-a secondary-v");
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["edit"].clone(), state["sel"].clone()), (json!(path), json!({"k":"task", "i":0})), "{state}");
+    {
+        let h = host.borrow();
+        assert!(h.writes.is_empty(), "cut and paste change only the box until Enter: {:?}", h.writes);
+        assert_eq!(h.files[TODO_TASKS], start);
+        assert!(h.effects.iter().all(|(n, _)| n != "notify"), "no delete notice: {:?}", h.effects);
+    }
+    files_keys(&mut visual, "enter");
+    files_wait(&mut visual, 100);
+    assert_eq!(todo_written(&host), [format!("# Tasks\n- [ ] {path}\n- [ ] two\n")]);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], Value::Null);
+}
+
+// UPD-D1 AC4 (TD4 part 2) with the mouse in the edit box opened by a double click: a drag selects part of the text and
+// a double click selects a word (each copied), and neither ends the edit nor loses its unsaved text. Escape then
+// writes nothing.
+#[gpui::test]
+fn todo_mouse_selection_in_the_edit_box_keeps_the_edit_and_its_unsaved_text(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Long enough that the middle of the panel is over the text.
+    let title = (0..60).map(|i| format!("word{i:02}")).collect::<Vec<_>>().join(" ");
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &format!("# Tasks\n- [ ] {title}\n- [ ] two\n"))], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    let found = todo_press_down_the_middle(&mut visual, &host, 48., json!([format!("t:{title}")]));
+    // 20 px below the row's top: inside the edit box whether the row is wide (box from 8 px) or not (centred in 44 px).
+    let at = gpui::point(found.x, found.y + gpui::px(20.));
+    todo_press(&mut visual, at, 1);
+    todo_press(&mut visual, at, 2);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], json!(title), "the double click edits the row");
+    files_keys(&mut visual, "end");
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.simulate_input(" zz");
+    let typed = format!("{title} zz");
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], json!(typed));
+    let clipboard = |visual: &gpui::VisualTestContext| visual.read_from_clipboard().and_then(|c| c.text());
+    let copied_part = |visual: &mut gpui::VisualTestContext, what: &str| {
+        visual.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()));
+        files_keys(visual, "secondary-c");
+        let copied = clipboard(&*visual).unwrap_or_default();
+        assert!(copied != "sentinel" && !copied.is_empty() && copied.len() < typed.len() && typed.contains(&copied), "{what} selects part of the text: {copied:?}");
+    };
+
+    // A drag 80 px to the left.
+    let (modifiers, button) = (gpui::Modifiers::none(), gpui::MouseButton::Left);
+    let to = gpui::point(at.x - gpui::px(80.), at.y);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.simulate_event(gpui::MouseDownEvent { position: at, modifiers, button, click_count: 1, first_mouse: false });
+    visual.simulate_event(gpui::MouseMoveEvent { position: to, pressed_button: Some(button), modifiers });
+    visual.simulate_event(gpui::MouseUpEvent { position: to, modifiers, button, click_count: 1 });
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["edit"].clone(), state["sel"].clone()), (json!(typed), json!({"k":"task", "i":0})), "a drag keeps the edit: {state}");
+    copied_part(&mut visual, "the drag");
+
+    // A double click on a word, at the drag's end.
+    todo_press(&mut visual, to, 1);
+    todo_press(&mut visual, to, 2);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], json!(typed), "a double click keeps the edit and its text");
+    copied_part(&mut visual, "the double click");
+
+    assert!(host.borrow().writes.is_empty(), "selecting writes nothing: {:?}", host.borrow().writes);
+    files_keys(&mut visual, "escape");
+    files_wait(&mut visual, 100);
+    assert!(host.borrow().writes.is_empty(), "Escape drops the edit: {:?}", host.borrow().writes);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], Value::Null);
+}
+
+// The left button goes down at `at` on a fresh frame; a `click_count` of 2 is the second press of a double click.
+fn todo_down(visual: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>, click_count: usize) {
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let (modifiers, button) = (gpui::Modifiers::none(), gpui::MouseButton::Left);
+    visual.simulate_event(gpui::MouseDownEvent { position: at, modifiers, button, click_count, first_mouse: false });
+}
+
+fn todo_up(visual: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let (modifiers, button) = (gpui::Modifiers::none(), gpui::MouseButton::Left);
+    visual.simulate_event(gpui::MouseUpEvent { position: at, modifiers, button, click_count: 1 });
+}
+
+// The pointer moves to `at` on a fresh frame, the left button held when `held`.
+fn todo_move(visual: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>, held: bool) {
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let pressed_button = held.then_some(gpui::MouseButton::Left);
+    visual.simulate_event(gpui::MouseMoveEvent { position: at, pressed_button, modifiers: gpui::Modifiers::none() });
+}
+
+// A drag not yet released: the left button goes down at `from`, moves 6 px down (past the 4 px that make a press a drag,
+// still inside a pressed row of 30 px or more when `from` is its middle), then over `to`.
+fn todo_drag_over(visual: &mut gpui::VisualTestContext, from: gpui::Point<gpui::Pixels>, to: gpui::Point<gpui::Pixels>) {
+    todo_down(visual, from, 1);
+    todo_move(visual, gpui::point(from.x, from.y + gpui::px(6.)), true);
+    todo_move(visual, to, true);
+}
+
+// The task and step rows down the middle of the panel from 48 px to `until`, found by hovering with no button held: each
+// row's hover key (`i.` a task, `i.j` a step) with the first and last y that hovered it, top to bottom. Add step rows and
+// the Completed head have no hover key; they are in the gaps between these.
+fn todo_rows(visual: &mut gpui::VisualTestContext, host: &Rc<RefCell<TodoHost>>, until: i32) -> Vec<(String, f32, f32)> {
+    let x = visual.update(|window, _| window.viewport_size().width) * 0.5;
+    let mut rows: Vec<(String, f32, f32)> = Vec::new();
+    for y in (48..until).step_by(2) {
+        todo_move(visual, gpui::point(x, gpui::px(y as f32)), false);
+        let state = todo_mounted_state(visual, host);
+        let Some(key) = state["hover"].as_str() else { continue };
+        match rows.last_mut() {
+            Some(row) if row.0 == key => row.2 = y as f32,
+            _ => rows.push((key.to_string(), y as f32, y as f32)),
+        }
+    }
+    rows
+}
+
+fn todo_row(rows: &[(String, f32, f32)], key: &str) -> (f32, f32) {
+    let row = rows.iter().find(|r| r.0 == key).unwrap_or_else(|| panic!("no row {key} in {rows:?}"));
+    (row.1, row.2)
+}
+
+// A point down the middle of the panel in row `key`, `at` of the way from its top (0.0) to its bottom (1.0).
+fn todo_at(visual: &mut gpui::VisualTestContext, rows: &[(String, f32, f32)], key: &str, at: f32) -> gpui::Point<gpui::Pixels> {
+    let x = visual.update(|window, _| window.viewport_size().width) * 0.5;
+    let (top, bottom) = todo_row(rows, key);
+    gpui::point(x, gpui::px(top + (bottom - top) * at))
+}
+
+fn todo_row_keys(rows: &[(String, f32, f32)]) -> Vec<&str> {
+    rows.iter().map(|r| r.0.as_str()).collect()
+}
+
+// UPD-D2 AC1/AC5: a task dragged with the mouse shows a drop line where it would land and, released, moves among the open
+// tasks (stepping over the done task between them, its note line going with it): one write per completed drag, the
+// moved task selected, the wide toggle of each press undone. Dropping past the last open task works; a drop that leaves
+// the order as it is (only a done task in between) or on its own row writes nothing.
+#[gpui::test]
+fn todo_dragging_a_task_moves_it_among_the_open_tasks_with_one_write_per_drop(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] one\n- [x] done\n- [ ] two\n- [ ] three\n  > note\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    let rows = todo_rows(&mut visual, &host, 400);
+    assert_eq!(todo_row_keys(&rows), ["0.", "2.", "3."], "{rows:?}");
+
+    // three up to the top of one.
+    let (from, to) = (todo_at(&mut visual, &rows, "3.", 0.5), todo_at(&mut visual, &rows, "0.", 0.2));
+    todo_drag_over(&mut visual, from, to);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(state["drag"]["slot"], json!({"k":"task", "i":0, "title":"one", "after":false}), "{state}");
+    assert_eq!(state["lines"], json!([[{"k":"task", "i":0}, "top"]]), "the drop line is at the top of one: {state}");
+    assert!(host.borrow().writes.is_empty(), "nothing is written before the release");
+    todo_up(&mut visual, to);
+    files_wait(&mut visual, 50);
+    let first = "# Tasks\n- [ ] three\n  > note\n- [ ] one\n- [x] done\n- [ ] two\n";
+    assert_eq!(todo_written(&host), [first]);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(
+        (state["sel"].clone(), state["drag"].clone(), state["press"].clone(), state["lines"].clone()),
+        (json!({"k":"task", "i":0}), Value::Null, json!(false), json!([])),
+        "the moved task is selected and the drag is over: {state}"
+    );
+
+    // one past the last open task: the bottom half of two, over the done task.
+    let rows = todo_rows(&mut visual, &host, 400);
+    assert_eq!(todo_row_keys(&rows), ["0.", "1.", "3."], "{rows:?}");
+    let (from, to) = (todo_at(&mut visual, &rows, "1.", 0.5), todo_at(&mut visual, &rows, "3.", 0.8));
+    todo_drag_over(&mut visual, from, to);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(state["drag"]["slot"], json!({"k":"task", "i":3, "title":"two", "after":true}), "{state}");
+    assert_eq!(state["lines"], json!([[{"k":"task", "i":3}, "bottom"]]), "the drop line is under two: {state}");
+    todo_up(&mut visual, to);
+    files_wait(&mut visual, 50);
+    let second = "# Tasks\n- [ ] three\n  > note\n- [x] done\n- [ ] two\n- [ ] one\n";
+    assert_eq!(todo_written(&host), [first, second]);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["sel"], json!({"k":"task", "i":3}));
+
+    // two onto the bottom half of three: only the done task lies between, so nothing changes and nothing is written.
+    let rows = todo_rows(&mut visual, &host, 400);
+    assert_eq!(todo_row_keys(&rows), ["0.", "2.", "3."], "{rows:?}");
+    let (from, to) = (todo_at(&mut visual, &rows, "2.", 0.5), todo_at(&mut visual, &rows, "0.", 0.8));
+    todo_drag_over(&mut visual, from, to);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(state["drag"]["slot"], json!({"k":"task", "i":0, "title":"three", "after":true}), "{state}");
+    todo_up(&mut visual, to);
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_written(&host), [first, second], "the drop at its own place writes nothing");
+
+    // one over its own row: a drag with no slot and no line; released, nothing is written.
+    let (from, to) = (todo_at(&mut visual, &rows, "3.", 0.5), todo_at(&mut visual, &rows, "3.", 0.9));
+    todo_drag_over(&mut visual, from, to);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["drag"]["slot"].clone(), state["lines"].clone()), (Value::Null, json!([])), "{state}");
+    assert!(!state["drag"].is_null(), "it is a drag: {state}");
+    todo_up(&mut visual, to);
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_written(&host), [first, second]);
+    assert_eq!(host.borrow().files[TODO_TASKS], second);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["drag"].clone(), state["press"].clone(), state["wide"].clone()), (Value::Null, json!(false), json!([])), "{state}");
+}
+
+// UPD-D2 AC5 at the 4 px boundary: a press that moves 3 px is a click (the full title toggles, no drag, nothing written);
+// one that moves exactly 4 px is a drag that undoes the toggle its press made. A real drag afterwards still moves the
+// task, and its title stays as wide as before the press.
+#[gpui::test]
+fn todo_a_press_moving_under_4_px_is_a_click_and_at_4_px_a_drag_that_undoes_the_wide_toggle(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] one\n- [ ] two\n")], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    let rows = todo_rows(&mut visual, &host, 300);
+    assert_eq!(todo_row_keys(&rows), ["0.", "1."], "{rows:?}");
+    let at = todo_at(&mut visual, &rows, "0.", 0.5);
+    let by = |dy: f32| gpui::point(at.x, at.y + gpui::px(dy));
+
+    todo_down(&mut visual, at, 1);
+    todo_move(&mut visual, by(3.), true);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(
+        (state["press"].clone(), state["drag"].clone(), state["wide"].clone()),
+        (json!(true), Value::Null, json!(["t:one"])),
+        "3 px is still a click: {state}"
+    );
+    todo_up(&mut visual, by(3.));
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(
+        (state["press"].clone(), state["wide"].clone(), state["sel"].clone()),
+        (json!(false), json!(["t:one"]), json!({"k":"task", "i":0})),
+        "the click toggled the full title: {state}"
+    );
+
+    todo_down(&mut visual, at, 1);
+    assert_eq!(todo_wide(&mut visual, &host), json!([]), "the press toggles it back at once");
+    todo_move(&mut visual, by(4.), true);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert!(!state["drag"].is_null(), "4 px starts a drag: {state}");
+    assert_eq!((state["wide"].clone(), state["drag"]["slot"].clone()), (json!(["t:one"]), Value::Null), "the drag undid the press's toggle: {state}");
+    todo_up(&mut visual, by(4.));
+    assert_eq!(todo_wide(&mut visual, &host), json!(["t:one"]));
+    assert!(host.borrow().writes.is_empty(), "{:?}", host.borrow().writes);
+
+    let to = todo_at(&mut visual, &rows, "1.", 0.8);
+    todo_drag_over(&mut visual, at, to);
+    todo_up(&mut visual, to);
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_written(&host), ["# Tasks\n- [ ] two\n- [ ] one\n"]);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["wide"].clone(), state["sel"].clone()), (json!(["t:one"]), json!({"k":"task", "i":1})), "{state}");
+}
+
+// UPD-D2 AC2: a step moves within its task before or after a step by the row half it is dropped on, onto another task's
+// row (folded: it becomes its last step and the task opens) or onto its Add step row (the last step), keeping its done
+// state, with the selection following it. A step dropped on its own task's row, right next to itself, or on its own
+// task's Add step row when it is already last writes nothing.
+#[gpui::test]
+fn todo_dragging_a_step_moves_it_within_its_task_or_to_the_end_of_another_keeping_its_done_state(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] A\n  - [ ] a1\n  - [x] a2\n  - [ ] a3\n- [ ] B\n  - [ ] b1\n- [ ] C\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    files_keys(&mut visual, "right");
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["open"], json!(["A"]));
+    let rows = todo_rows(&mut visual, &host, 560);
+    assert_eq!(todo_row_keys(&rows), ["0.", "0.0", "0.1", "0.2", "1.", "2."], "{rows:?}");
+
+    // a3 to the top half of a1.
+    let (from, to) = (todo_at(&mut visual, &rows, "0.2", 0.5), todo_at(&mut visual, &rows, "0.0", 0.2));
+    todo_drag_over(&mut visual, from, to);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(state["drag"]["slot"], json!({"k":"step", "i":0, "title":"A", "j":0, "beforeTitle":"a1"}), "{state}");
+    assert_eq!(state["lines"], json!([[{"k":"step", "i":0, "j":0}, "top"]]), "{state}");
+    todo_up(&mut visual, to);
+    files_wait(&mut visual, 50);
+    let w1 = "# Tasks\n- [ ] A\n  - [ ] a3\n  - [ ] a1\n  - [x] a2\n- [ ] B\n  - [ ] b1\n- [ ] C\n";
+    assert_eq!(todo_written(&host), [w1]);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["sel"], json!({"k":"step", "i":0, "j":0}));
+
+    // The done a2 onto folded B's row: B's last step, still done; B opens.
+    let (from, to) = (todo_at(&mut visual, &rows, "0.2", 0.5), todo_at(&mut visual, &rows, "1.", 0.5));
+    todo_drag_over(&mut visual, from, to);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(state["drag"]["slot"], json!({"k":"step", "i":1, "title":"B", "j":1, "beforeTitle":null}), "{state}");
+    assert_eq!(state["lines"], json!([[{"k":"task", "i":1}, "bottom"]]), "{state}");
+    todo_up(&mut visual, to);
+    files_wait(&mut visual, 50);
+    let w2 = "# Tasks\n- [ ] A\n  - [ ] a3\n  - [ ] a1\n- [ ] B\n  - [ ] b1\n  - [x] a2\n- [ ] C\n";
+    assert_eq!(todo_written(&host), [w1, w2]);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["open"].clone(), state["sel"].clone()), (json!(["A", "B"]), json!({"k":"step", "i":1, "j":1})), "{state}");
+
+    // a1 onto B's Add step row (between B's last step and C).
+    let rows = todo_rows(&mut visual, &host, 560);
+    assert_eq!(todo_row_keys(&rows), ["0.", "0.0", "0.1", "1.", "1.0", "1.1", "2."], "{rows:?}");
+    let add_b = gpui::point(todo_at(&mut visual, &rows, "2.", 0.).x, gpui::px((todo_row(&rows, "1.1").1 + todo_row(&rows, "2.").0) / 2.));
+    let from = todo_at(&mut visual, &rows, "0.1", 0.5);
+    todo_drag_over(&mut visual, from, add_b);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!(state["drag"]["slot"], json!({"k":"step", "i":1, "title":"B", "j":2, "beforeTitle":null}), "{state}");
+    assert_eq!(state["lines"], json!([[{"k":"add", "i":1}, "top"]]), "{state}");
+    todo_up(&mut visual, add_b);
+    files_wait(&mut visual, 50);
+    let w3 = "# Tasks\n- [ ] A\n  - [ ] a3\n- [ ] B\n  - [ ] b1\n  - [x] a2\n  - [ ] a1\n- [ ] C\n";
+    assert_eq!(todo_written(&host), [w1, w2, w3]);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["sel"].clone(), state["edit"].clone()), (json!({"k":"step", "i":1, "j":2}), Value::Null), "no Add step edit opens: {state}");
+
+    // No-ops: a3 onto its own task's row; a1 onto the bottom half of a2 (where it already is); a1 onto B's Add step row
+    // when it is already B's last step (a slot is shown, but nothing changes).
+    let rows = todo_rows(&mut visual, &host, 560);
+    assert_eq!(todo_row_keys(&rows), ["0.", "0.0", "1.", "1.0", "1.1", "1.2", "2."], "{rows:?}");
+    let add_b = gpui::point(todo_at(&mut visual, &rows, "2.", 0.).x, gpui::px((todo_row(&rows, "1.2").1 + todo_row(&rows, "2.").0) / 2.));
+    let cases = [
+        ("a3 onto A", todo_at(&mut visual, &rows, "0.0", 0.5), todo_at(&mut visual, &rows, "0.", 0.5), false),
+        ("a1 below a2", todo_at(&mut visual, &rows, "1.2", 0.5), todo_at(&mut visual, &rows, "1.1", 0.8), false),
+        ("a1 onto B's Add step", todo_at(&mut visual, &rows, "1.2", 0.5), add_b, true),
+    ];
+    for (what, from, to, slot) in cases {
+        todo_drag_over(&mut visual, from, to);
+        let state = todo_mounted_state(&mut visual, &host);
+        assert!(!state["drag"].is_null(), "{what} is a drag: {state}");
+        assert_eq!(!state["drag"]["slot"].is_null(), slot, "{what}: {state}");
+        todo_up(&mut visual, to);
+        files_wait(&mut visual, 50);
+        assert_eq!(todo_written(&host), [w1, w2, w3], "{what} writes nothing");
+    }
+    assert_eq!(host.borrow().files[TODO_TASKS], w3);
+}
+
+// UPD-D2 AC3: no drag starts from a done task, a step of a done task, the Completed head, an Add step row, the second
+// press of a double click or the row being edited (its edit stays open); nor on a read-only list. A step over a done
+// task and a task over the Completed head have nowhere to land. Nothing is written, no Add step edit opens and the done
+// tasks stay shown.
+#[gpui::test]
+fn todo_done_rows_the_completed_head_add_step_rows_double_clicks_edits_and_read_only_lists_never_drag(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] one\n  - [ ] s\n- [x] old\n  - [x] os\n- [ ] two\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    // Open one; walk past s, Add step and two to Completed and show it; open old.
+    files_keys(&mut visual, "right down down down down enter down right");
+    files_wait(&mut visual, 50);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["open"].clone(), state["sel"].clone()), (json!(["one", "old"]), json!({"k":"task", "i":1})), "{state}");
+    let rows = todo_rows(&mut visual, &host, 640);
+    assert_eq!(todo_row_keys(&rows), ["0.", "0.0", "2.", "1.", "1.0"], "{rows:?}");
+    let x = todo_at(&mut visual, &rows, "0.", 0.).x;
+    let between = |a: &str, b: &str| gpui::point(x, gpui::px((todo_row(&rows, a).1 + todo_row(&rows, b).0) / 2.));
+    let (add_one, head) = (between("0.0", "2."), between("2.", "1."));
+    let one_top = todo_at(&mut visual, &rows, "0.", 0.2);
+    let two = todo_at(&mut visual, &rows, "2.", 0.5);
+    let no_drag = [
+        ("the done task", todo_at(&mut visual, &rows, "1.", 0.5), one_top),
+        ("the done task's step", todo_at(&mut visual, &rows, "1.0", 0.5), two),
+        ("the Completed head", head, one_top),
+        ("the Add step row", add_one, one_top),
+    ];
+    for (what, from, to) in no_drag {
+        todo_drag_over(&mut visual, from, to);
+        let state = todo_mounted_state(&mut visual, &host);
+        assert_eq!((state["press"].clone(), state["drag"].clone(), state["lines"].clone()), (json!(false), Value::Null, json!([])), "{what}: {state}");
+        todo_up(&mut visual, to);
+        let state = todo_mounted_state(&mut visual, &host);
+        assert_eq!((state["edit"].clone(), state["open"].clone()), (Value::Null, json!(["one", "old"])), "{what}: {state}");
+    }
+    let nowhere = [
+        ("s over the done task", todo_at(&mut visual, &rows, "0.0", 0.5), todo_at(&mut visual, &rows, "1.", 0.5)),
+        ("two over the Completed head", two, head),
+    ];
+    for (what, from, to) in nowhere {
+        todo_drag_over(&mut visual, from, to);
+        let state = todo_mounted_state(&mut visual, &host);
+        assert!(!state["drag"].is_null(), "{what} is a drag: {state}");
+        assert_eq!((state["drag"]["slot"].clone(), state["lines"].clone()), (Value::Null, json!([])), "{what}: {state}");
+        todo_up(&mut visual, to);
+    }
+    files_wait(&mut visual, 50);
+    assert!(host.borrow().writes.is_empty(), "{:?}", host.borrow().writes);
+
+    // A double click's second press edits two and starts no drag.
+    todo_press(&mut visual, two, 1);
+    todo_down(&mut visual, two, 2);
+    todo_move(&mut visual, gpui::point(two.x, two.y + gpui::px(6.)), true);
+    todo_move(&mut visual, one_top, true);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["press"].clone(), state["drag"].clone(), state["edit"].clone()), (json!(false), Value::Null, json!("two")), "{state}");
+    todo_up(&mut visual, one_top);
+    // The row being edited leaves the press to its edit box: dragging from it onto one moves nothing, the edit stays.
+    todo_drag_over(&mut visual, two, one_top);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["press"].clone(), state["drag"].clone(), state["edit"].clone()), (json!(false), Value::Null, json!("two")), "{state}");
+    todo_up(&mut visual, one_top);
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], json!("two"));
+    files_keys(&mut visual, "escape");
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["edit"], Value::Null);
+    assert!(host.borrow().writes.is_empty(), "{:?}", host.borrow().writes);
+
+    // The list turns read-only (now over the read limit) with its rows still shown: no press becomes a drag.
+    let big = "x".repeat(1024 * 1024 + 1);
+    host.borrow_mut().files.insert(TODO_TASKS.into(), big.clone());
+    host.borrow_mut().commands.push_back("reload".into());
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["readonly"], json!(true));
+    let rows = todo_rows(&mut visual, &host, 640);
+    assert_eq!(todo_row_keys(&rows), ["0.", "0.0", "2.", "1.", "1.0"], "{rows:?}");
+    let (from, to) = (todo_at(&mut visual, &rows, "2.", 0.5), todo_at(&mut visual, &rows, "0.", 0.2));
+    todo_drag_over(&mut visual, from, to);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["press"].clone(), state["drag"].clone()), (json!(false), Value::Null), "read-only: {state}");
+    todo_up(&mut visual, to);
+    files_wait(&mut visual, 50);
+    assert!(host.borrow().writes.is_empty(), "{:?}", host.borrow().writes.len());
+    assert_eq!(host.borrow().files[TODO_TASKS], big, "left untouched");
+}
+
+// UPD-D2 AC3: presses on the fold chevron, the delete × and the tick circle act and never start a drag, while presses on
+// the rest of the row do. Each spot along the first row is pressed, moved 4 px and released: right of the title from the
+// left (the chevron folds, the × deletes), then from the left edge (the circle ticks). Only the delete and the tick write.
+#[gpui::test]
+fn todo_presses_on_the_tick_fold_and_delete_controls_never_start_a_drag(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, "# Tasks\n- [ ] one\n  - [ ] s\n- [ ] two\n- [ ] three\n")], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    let rows = todo_rows(&mut visual, &host, 300);
+    let y = todo_at(&mut visual, &rows, "0.", 0.5).y;
+    let width = f32::from(visual.update(|window, _| window.viewport_size().width));
+    let (mut body, mut folds, mut deleted, mut ticked) = (0, 0, false, false);
+    let right = ((width - 100.) as i32..width as i32).step_by(2);
+    let left = (0..100).step_by(2);
+    for (side, x) in right.map(|x| ("right", x)).chain(left.map(|x| ("left", x))) {
+        if (side == "right" && deleted) || ticked {
+            continue;
+        }
+        let (at, moved) = (gpui::point(gpui::px(x as f32), y), gpui::point(gpui::px(x as f32), y + gpui::px(4.)));
+        let open = todo_mounted_state(&mut visual, &host)["open"].clone();
+        let text = host.borrow().files[TODO_TASKS].clone();
+        todo_down(&mut visual, at, 1);
+        todo_move(&mut visual, moved, true);
+        let held = todo_mounted_state(&mut visual, &host);
+        todo_up(&mut visual, moved);
+        files_wait(&mut visual, 50);
+        let state = todo_mounted_state(&mut visual, &host);
+        let file = host.borrow().files[TODO_TASKS].clone();
+        if file != text || state["open"] != open {
+            assert_eq!((held["press"].clone(), held["drag"].clone()), (json!(false), Value::Null), "the control at {x} started a drag: {held}");
+            if file.matches("- [").count() < text.matches("- [").count() {
+                deleted = true;
+            } else if file.contains("[x]") {
+                ticked = true;
+            } else {
+                folds += 1;
+            }
+        } else if !held["drag"].is_null() {
+            body += 1;
+        }
+    }
+    assert!(body > 0 && folds > 0 && deleted && ticked, "row body {body}, chevron {folds}, × {deleted}, circle {ticked}");
+    assert_eq!(todo_written(&host), ["# Tasks\n- [ ] two\n- [ ] three\n", "# Tasks\n- [x] two\n- [ ] three\n"]);
+    assert_eq!(todo_wide(&mut visual, &host), json!([]), "every drag undid its press's toggle");
+}
+
+// UPD-D2 AC4: Esc while dragging cancels it (and does nothing else Esc would do, such as leaving the panel); leaving the
+// list area clears the slot and coming back shows it again; the pointer leaving the panel cancels the drag. Moving on and
+// releasing afterwards writes nothing.
+#[gpui::test]
+fn todo_escape_or_leaving_the_panel_cancels_a_drag_and_leaving_the_list_clears_its_slot(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] one\n- [ ] two\n- [ ] three\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    let rows = todo_rows(&mut visual, &host, 300);
+    assert_eq!(todo_row_keys(&rows), ["0.", "1.", "2."], "{rows:?}");
+    let (one_top, two, three) =
+        (todo_at(&mut visual, &rows, "0.", 0.2), todo_at(&mut visual, &rows, "1.", 0.5), todo_at(&mut visual, &rows, "2.", 0.5));
+    let slot = json!({"k":"task", "i":0, "title":"one", "after":false});
+
+    todo_drag_over(&mut visual, three, one_top);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["drag"]["slot"], slot);
+    files_keys(&mut visual, "escape");
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["press"].clone(), state["drag"].clone(), state["lines"].clone()), (json!(false), Value::Null, json!([])), "{state}");
+    todo_move(&mut visual, two, true);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["drag"], Value::Null, "moving on does not start it again");
+    todo_up(&mut visual, two);
+    files_wait(&mut visual, 50);
+    assert!(host.borrow().writes.is_empty(), "{:?}", host.borrow().writes);
+    let left_panel = todo_effects(&host, "run").iter().any(|a| a[0] == json!("pane.go"));
+    assert!(!left_panel, "Esc only cancelled the drag: {:?}", todo_effects(&host, "run"));
+
+    // Above the list (over the add box) there is no slot; back over one it returns; released above, nothing is written.
+    let above = gpui::point(one_top.x, gpui::px(todo_row(&rows, "0.").0 - 20.));
+    todo_drag_over(&mut visual, three, one_top);
+    todo_move(&mut visual, above, true);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert!(!state["drag"].is_null(), "still dragging: {state}");
+    assert_eq!((state["drag"]["slot"].clone(), state["lines"].clone()), (Value::Null, json!([])), "{state}");
+    todo_move(&mut visual, one_top, true);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["drag"]["slot"], slot);
+    todo_move(&mut visual, above, true);
+    todo_up(&mut visual, above);
+    files_wait(&mut visual, 50);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["press"].clone(), state["drag"].clone()), (json!(false), Value::Null), "{state}");
+    assert!(host.borrow().writes.is_empty(), "{:?}", host.borrow().writes);
+
+    // Out of the panel (past the window's right edge): cancelled; back over one and released there, nothing is written.
+    let width = visual.update(|window, _| window.viewport_size().width);
+    todo_drag_over(&mut visual, three, one_top);
+    todo_move(&mut visual, gpui::point(width + gpui::px(40.), one_top.y), true);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["press"].clone(), state["drag"].clone()), (json!(false), Value::Null), "{state}");
+    todo_move(&mut visual, one_top, true);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["drag"], Value::Null);
+    todo_up(&mut visual, one_top);
+    files_wait(&mut visual, 50);
+    assert!(host.borrow().writes.is_empty(), "{:?}", host.borrow().writes);
+    assert_eq!(host.borrow().files[TODO_TASKS], start);
+}
+
+// UPD-D2 AC1 edge: with one open task (the other done) a drag has nowhere to land: not on its own row, the Completed head,
+// the empty list below or the shown done task. Nothing is written.
+#[gpui::test]
+fn todo_a_list_with_one_open_task_has_nowhere_to_drop_it(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] only\n- [x] old\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    let rows = todo_rows(&mut visual, &host, 300);
+    assert_eq!(todo_row_keys(&rows), ["0."], "{rows:?}");
+    let only = todo_at(&mut visual, &rows, "0.", 0.5);
+    let bottom = todo_row(&rows, "0.").1;
+    // Completed sits 4 px (gap) + 6 px (margin) under the row and is 32 px tall; the list is empty further down.
+    let (head, empty) = (gpui::point(only.x, gpui::px(bottom + 26.)), gpui::point(only.x, gpui::px(bottom + 120.)));
+    for (what, to) in [("its own row", todo_at(&mut visual, &rows, "0.", 0.9)), ("Completed", head), ("the empty list", empty)] {
+        todo_drag_over(&mut visual, only, to);
+        let state = todo_mounted_state(&mut visual, &host);
+        assert!(!state["drag"].is_null(), "{what}: {state}");
+        assert_eq!((state["drag"]["slot"].clone(), state["lines"].clone()), (Value::Null, json!([])), "{what}: {state}");
+        todo_up(&mut visual, to);
+        files_wait(&mut visual, 50);
+    }
+    files_keys(&mut visual, "down enter");
+    files_wait(&mut visual, 50);
+    let rows = todo_rows(&mut visual, &host, 300);
+    assert_eq!(todo_row_keys(&rows), ["0.", "1."], "{rows:?}");
+    let (from, to) = (todo_at(&mut visual, &rows, "0.", 0.5), todo_at(&mut visual, &rows, "1.", 0.5));
+    todo_drag_over(&mut visual, from, to);
+    assert_eq!(todo_mounted_state(&mut visual, &host)["drag"]["slot"], Value::Null, "a done task is no place to drop");
+    todo_up(&mut visual, to);
+    files_wait(&mut visual, 50);
+    assert!(host.borrow().writes.is_empty(), "{:?}", host.borrow().writes);
+    assert_eq!(host.borrow().files[TODO_TASKS], start);
+}
+
+// UPD-D2 edge: two tasks share a title. A drop made while someone else appended to the file is written once more over the
+// fresh text, finding its tasks by title near their old place, so the right one moves and the outside line stays. The
+// selection follows the moved task, not the first task with its title.
+#[gpui::test]
+fn todo_a_drop_among_duplicate_titles_replays_over_an_outside_edit_and_selects_the_moved_task(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] a\n  - [ ] x\n- [ ] b\n- [ ] a\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    let rows = todo_rows(&mut visual, &host, 300);
+    assert_eq!(todo_row_keys(&rows), ["0.", "1.", "2."], "{rows:?}");
+    let outside = format!("{start}- [ ] new\n");
+    host.borrow_mut().files.insert(TODO_TASKS.into(), outside.clone());
+    let (from, to) = (todo_at(&mut visual, &rows, "2.", 0.5), todo_at(&mut visual, &rows, "1.", 0.2));
+    todo_drag_over(&mut visual, from, to);
+    todo_up(&mut visual, to);
+    files_wait(&mut visual, 100);
+    let merged = "# Tasks\n- [ ] a\n  - [ ] x\n- [ ] a\n- [ ] b\n- [ ] new\n";
+    assert_eq!(
+        todo_written(&host),
+        ["# Tasks\n- [ ] a\n  - [ ] x\n- [ ] a\n- [ ] b\n", merged],
+        "the stale write is refused and the drop replayed once"
+    );
+    assert_eq!(host.borrow().writes[1].2, json!(outside), "over the fresh text");
+    assert_eq!(host.borrow().files[TODO_TASKS], merged);
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["text"].clone(), state["error"].clone(), state["pending"].clone()), (json!(merged), Value::Null, json!(0)), "{state}");
+    assert_eq!(state["sel"], json!({"k":"task", "i":1}), "the moved a (no steps) is selected, not the first a: {state}");
+}
+
+// UPD-D2 edge: drops while the save queue is busy (TD3 stuck flag) wait, are shown, and are written together once the
+// flag heals: nothing lost, nothing written twice. The next drop is written on its own.
+#[gpui::test]
+fn todo_drops_while_the_save_queue_is_busy_are_written_once_when_it_frees(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let start = "# Tasks\n- [ ] one\n- [ ] two\n- [ ] three\n";
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, start)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    let rows = todo_rows(&mut visual, &host, 300);
+    assert_eq!(todo_row_keys(&rows), ["0.", "1.", "2."], "{rows:?}");
+    let (first_top, second_top, third) =
+        (todo_at(&mut visual, &rows, "0.", 0.2), todo_at(&mut visual, &rows, "1.", 0.2), todo_at(&mut visual, &rows, "2.", 0.5));
+    host.borrow_mut().commands.push_back("stuck 0".into());
+    files_wait(&mut visual, 50);
+    // three to the top, then two (now last) above one.
+    todo_drag_over(&mut visual, third, first_top);
+    todo_up(&mut visual, first_top);
+    files_wait(&mut visual, 50);
+    todo_drag_over(&mut visual, third, second_top);
+    todo_up(&mut visual, second_top);
+    files_wait(&mut visual, 50);
+    let both = "# Tasks\n- [ ] three\n- [ ] two\n- [ ] one\n";
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["text"].clone(), state["pending"].clone(), state["flushing"].clone()), (json!(both), json!(2), json!(true)), "{state}");
+    assert!(host.borrow().writes.is_empty(), "nothing is written while the flag is set: {:?}", host.borrow().writes);
+    host.borrow_mut().commands.extend(["stuck 11000", "reload"].map(String::from));
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_written(&host), [both], "both drops in one write");
+    assert_eq!(host.borrow().writes[0].2, json!(start));
+    let state = todo_mounted_state(&mut visual, &host);
+    assert_eq!((state["pending"].clone(), state["flushing"].clone(), state["error"].clone()), (json!(0), json!(false), Value::Null), "{state}");
+    todo_drag_over(&mut visual, third, first_top);
+    todo_up(&mut visual, first_top);
+    files_wait(&mut visual, 50);
+    assert_eq!(todo_written(&host), [both, "# Tasks\n- [ ] one\n- [ ] three\n- [ ] two\n"]);
+}
+
+// UPD-D2 edge: in a list already over the 64 KB write limit (it still opens editable) a drop is refused with the reason:
+// nothing is written or shown moved, and the selection stays on the pressed task.
+#[gpui::test]
+fn todo_a_drop_in_a_list_over_the_64_kb_limit_is_refused_and_writes_nothing(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let full = "This list is full (64 KB, about 2,900 tasks). Start a new list for more tasks.";
+    let big = format!("# Tasks\n- [ ] one\n- [ ] two\n  > {}\n", "y".repeat(65 * 1024));
+    let host = todo_host(&[(TODO_LISTS, "- [Tasks](tasks.md)\n"), (TODO_TASKS, &big)], &[]);
+    let (mut visual, _runtime, _shell) = mount_todo(cx, &staged, &host);
+    // A big list takes a moment of real time to arrive and parse.
+    let mut state = todo_mounted_state(&mut visual, &host);
+    for _ in 0..2400 {
+        if state["ready"] == json!(true) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        visual.run_until_parked();
+        state = todo_mounted_state(&mut visual, &host);
+    }
+    assert_eq!((state["ready"].clone(), state["readonly"].clone()), (json!(true), json!(false)), "{state}");
+    let rows = todo_rows(&mut visual, &host, 300);
+    assert_eq!(todo_row_keys(&rows), ["0.", "1."], "{rows:?}");
+    let (from, to) = (todo_at(&mut visual, &rows, "1.", 0.5), todo_at(&mut visual, &rows, "0.", 0.2));
+    // A release cut off by the sandbox's 500 ms budget before it refused changed nothing, so it is dragged again.
+    for _ in 0..5 {
+        todo_drag_over(&mut visual, from, to);
+        todo_up(&mut visual, to);
+        files_wait(&mut visual, 50);
+        state = todo_mounted_state(&mut visual, &host);
+        if state["error"] == json!(full) {
+            break;
+        }
+    }
+    assert_eq!(state["error"], json!(full), "the reason is shown: {}", state["error"]);
+    assert!(host.borrow().writes.is_empty(), "{}", host.borrow().writes.len());
+    assert_eq!(host.borrow().files[TODO_TASKS], big);
+    assert_eq!(
+        (state["textLen"].clone(), state["sel"].clone(), state["drag"].clone()),
+        (json!(big.chars().count()), json!({"k":"task", "i":1}), Value::Null),
+        "not shown moved; the selection stays on two"
+    );
 }
 
 // An unreadable lists.md is left alone until "Start a new index" is clicked; then the index and an empty Tasks list are
