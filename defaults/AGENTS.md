@@ -764,6 +764,10 @@ What's about the user, never a look:
   theirs. Also in Settings → Terminal.
 - `check_updates`: `false` stops the automatic update checks (default `true`);
   Check now in Settings → Updates still works.
+- `share_analytics`: `false` turns usage analytics off (default `true`); Settings →
+  Info has the switch. `found_via`: the answer to the welcome's one-time "How did
+  you find HyperOx?" (`friend`, `x`, `github`, `search`, `other` or `skip`); once
+  set it is not asked again.
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and

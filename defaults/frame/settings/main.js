@@ -46,6 +46,7 @@ export default class Settings extends View {
       if (edit?.action === "rename") this.machineAction(edit.machine, "rename", cx, edit.name);
     });
     this.person = {};
+    this.analyticsAbout = false;
     this.raw = null;
     this.unreadable = false;
     this.error = null;
@@ -1187,8 +1188,32 @@ export default class Settings extends View {
         .child(div().h(1).bg(t.border))
         .child(partner("Security & blockchain partner", "Buckleson", "st-info-buckleson", "https://buckleson.com", "buckleson.com")))
       .child(div().h(2))
+      .child(this.analytics(t, open))
+      .child(div().h(2))
       .child(small("Currently closed source (open source soon)"))
       .child(small(`Version ${u.app.version} \u00b7 Core ${u.core.version || "unknown"} \u00b7 Open-source notices`));
+  }
+
+  // "Share usage analytics": the switch (settings.json share_analytics), and an "i" that opens what is sent.
+  analytics(t, open) {
+    const on = this.person.share_analytics !== false;
+    const para = (text) => div().w_full().text_size(12.5).line_height("18px").text_color(t.muted).child(text);
+    return v_flex()
+      .w(460)
+      .gap(8)
+      .child(h_flex().gap(10).items_center().justify_center()
+        .child(div().text_size(13).text_color(t.foreground).child("Share usage analytics"))
+        .child(this.toggle(t, "st-analytics", on, (_e, cx) => this.change((p) => { if (on) p.share_analytics = false; else delete p.share_analytics; }, cx)))
+        .child(div().id("st-analytics-info").w(18).h(18).rounded(9).flex().items_center().justify_center().border_1().border_color(t.border)
+          .text_size(11).font_semibold().text_color(this.analyticsAbout ? t.accent : t.dim).cursor_pointer().hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => { this.analyticsAbout = !this.analyticsAbout; cx.notify(); })
+          .child("i")))
+      .when(Boolean(this.analyticsAbout), (el) => el.child(v_flex().w_full().gap(8).p(12).rounded(9).border_1().border_color(t.border).bg(t.raised)
+        .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("How HyperOx handles your data (beta)"))
+        .child(para("During the beta, HyperOx sends usage data and failure reports so we can fix problems and improve the app. You are identified by a random install ID, not your name or email. We never send what you type, your prompts, agent replies, terminal contents, file or folder names, or your keys. IP addresses are not stored; the approximate country is."))
+        .child(para("After the beta we plan to move data collection to zero-knowledge proofs."))
+        .child(para("You can turn usage analytics off any time. Failure reports stay on so we can fix crashes and update problems."))
+        .child(h_flex().child(this.button(t, "st-analytics-more", "Click here", open("https://pavii.tech"))))));
   }
 
   // ----------------------------------------------------------------------

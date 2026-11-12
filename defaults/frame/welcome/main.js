@@ -44,6 +44,7 @@ export default class Welcome extends View {
     this.machines = [];
     this.copied = null;
     this.appearance = null;
+    this.foundVia = true; // settings.json found_via; null (not yet asked) shows the question
     this.handle = cx.focus_handle();
     this.handle.focus();
     // It opens while the window is still starting, which takes the keyboard
@@ -51,7 +52,9 @@ export default class Welcome extends View {
     cx.timer.after(600, () => this.handle.focus());
     cx.spawn(async (cx) => {
       try {
-        this.appearance = JSON.parse((await readTextFile(`${appHome()}/settings.json`)) ?? "{}").appearance ?? null;
+        const saved = JSON.parse((await readTextFile(`${appHome()}/settings.json`)) ?? "{}");
+        this.appearance = saved.appearance ?? null;
+        this.foundVia = saved.found_via ?? null;
       } catch {}
       await this.loadMachines();
       cx.notify();
@@ -87,6 +90,22 @@ export default class Welcome extends View {
 
   setAppearance(value, cx) {
     this.appearance = value;
+    this.edit((p) => {
+      if (value === null) delete p.appearance;
+      else p.appearance = value;
+    }, cx);
+    cx.notify();
+  }
+
+  // The one-time "How did you find HyperOx?": the answer (or "skip") is kept, and it is not asked again.
+  setFoundVia(value, cx) {
+    this.foundVia = value;
+    this.edit((p) => { p.found_via = value; }, cx);
+    cx.notify();
+  }
+
+  // Changes settings.json: read, change, write back only if nobody changed it meanwhile.
+  edit(change, cx) {
     cx.spawn(async (cx) => {
       const file = `${appHome()}/settings.json`;
       for (let i = 0; i < 3; i++) {
@@ -97,8 +116,7 @@ export default class Welcome extends View {
         } catch {
           return;
         }
-        if (value === null) delete p.appearance;
-        else p.appearance = value;
+        change(p);
         try {
           await writeTextFile(file, JSON.stringify(p, null, 2) + "\n", raw);
           break;
@@ -106,7 +124,6 @@ export default class Welcome extends View {
       }
       cx.notify();
     });
-    cx.notify();
   }
 
   // The panels picked: the tab bar shows a button for each.
@@ -416,8 +433,31 @@ export default class Welcome extends View {
 
   pageFour(t) {
     const pal = bound("app.palette");
+    const found = (id, label, value) => this.button(t, id, label, false, (_e, cx) => this.setFoundVia(value, cx));
     return v_flex()
       .gap(16)
+      // Asked once, at the end and below everything else: answer or skip, then it is gone for good.
+      .when(this.foundVia === null, (el) =>
+        el.child(
+          v_flex()
+            .gap(8)
+            .p(12)
+            .rounded(10)
+            .bg(t.raised)
+            .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("How did you find HyperOx?"))
+            .child(
+              h_flex()
+                .gap(4)
+                .flex_wrap()
+                .child(found("w-found-friend", "Friend", "friend"))
+                .child(found("w-found-x", "X / Twitter", "x"))
+                .child(found("w-found-github", "GitHub", "github"))
+                .child(found("w-found-search", "Search", "search"))
+                .child(found("w-found-other", "Other", "other"))
+                .child(found("w-found-skip", "Skip", "skip")),
+            ),
+        ),
+      )
       .when(Boolean(pal), (el) =>
         el.child(
           h_flex()

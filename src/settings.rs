@@ -394,6 +394,12 @@ pub struct Person {
     /// Look for HyperOx and h0x-core updates in the background; "Check now" always works.
     #[serde(skip_serializing_if = "is_true")]
     pub check_updates: bool,
+    /// Send usage analytics (Settings > Info). Failure reports are not governed by this.
+    #[serde(skip_serializing_if = "is_true")]
+    pub share_analytics: bool,
+    /// The welcome's one-time "How did you find HyperOx?": the choice, or "skip". Set means asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub found_via: Option<String>,
     /// A draggable scroll position thumb at a terminal pane's right edge.
     #[serde(skip_serializing_if = "is_true")]
     pub pane_scrollbars: bool,
@@ -475,6 +481,27 @@ fn scrollback_or_default<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, 
     Ok(v.as_f64().filter(|n| n.fract() == 0.0 && (SCROLLBACK_MIN as f64..=SCROLLBACK_MAX as f64).contains(n)).map_or(SCROLLBACK_DEFAULT, |n| n as u32))
 }
 
+/// This install's random ID (128 bits, hex): `install-id` in `dir`, the app home. Made on first
+/// need and reused; made again only if the file is missing or not 32 hex digits.
+#[allow(dead_code)] // sent by the analytics step
+pub fn install_id(dir: &std::path::Path) -> String {
+    let file = dir.join("install-id");
+    if let Ok(text) = std::fs::read_to_string(&file) {
+        let id = text.trim();
+        if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return id.to_ascii_lowercase();
+        }
+    }
+    use std::hash::{BuildHasher, Hasher};
+    // RandomState is seeded by the OS (as Model::fresh_id does).
+    let random = || std::collections::hash_map::RandomState::new().build_hasher().finish();
+    let id = format!("{:016x}{:016x}", random(), random());
+    if let Err(e) = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&file, &id)) {
+        tracing::warn!("install-id not saved: {e}");
+    }
+    id
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -495,6 +522,8 @@ impl Default for Person {
             ui_font: None,
             clipboard_write: false,
             check_updates: true,
+            share_analytics: true,
+            found_via: None,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
             scrollback_lines: SCROLLBACK_DEFAULT,
@@ -536,6 +565,7 @@ pub struct Settings {
     pub terminal_opacity: f32,
     pub clipboard_write: bool,
     pub check_updates: bool,
+    pub share_analytics: bool,
     pub minimum_contrast: f32,
     /// Scrollback lines per new terminal pane.
     pub scrollback_lines: u32,
@@ -581,6 +611,7 @@ impl Default for Settings {
             terminal_opacity: 1.0,
             clipboard_write: false,
             check_updates: true,
+            share_analytics: true,
             minimum_contrast: 1.0,
             scrollback_lines: SCROLLBACK_DEFAULT,
             option_as_alt: OptionAsAlt::Auto,
@@ -622,6 +653,7 @@ impl Settings {
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
             check_updates: person.check_updates,
+            share_analytics: person.share_analytics,
             minimum_contrast: person.minimum_contrast,
             scrollback_lines: person.scrollback_lines,
             option_as_alt: person.option_as_alt,
@@ -1291,6 +1323,33 @@ mod tests {
 
     /// The guide's stated defaults are what an empty settings.json gives, and
     /// every key it documents is one settings.json keeps.
+    #[test]
+    fn share_analytics_defaults_on_and_round_trips() {
+        let old: Person = serde_json::from_str(r#"{"telemetry":false}"#).unwrap();
+        assert!(old.share_analytics && old.found_via.is_none());
+        assert!(serde_json::to_value(&old).unwrap().get("share_analytics").is_none());
+        let off: Person = serde_json::from_str(r#"{"share_analytics":false,"found_via":"skip"}"#).unwrap();
+        assert!(!Settings::compose(&off, &crate::layout::Look::default(), true).share_analytics);
+        let v = serde_json::to_value(&off).unwrap();
+        assert_eq!((&v["share_analytics"], &v["found_via"]), (&serde_json::json!(false), &serde_json::json!("skip")));
+        assert!(serde_json::from_str::<Person>(r#"{"share_analytics":"no"}"#).is_err());
+    }
+
+    #[test]
+    fn install_id_is_made_once_and_remade_only_when_invalid() {
+        let dir = std::env::temp_dir().join(format!("h0x-install-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let id = install_id(&dir);
+        assert!(id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()), "{id}");
+        assert_eq!(install_id(&dir), id);
+        assert_eq!(std::fs::read_to_string(dir.join("install-id")).unwrap(), id);
+        std::fs::write(dir.join("install-id"), "not an id").unwrap();
+        let again = install_id(&dir);
+        assert!(again != id && again.len() == 32);
+        assert_eq!(install_id(&dir), again);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_guide_states_the_real_clipboard_write_and_check_updates_defaults() {
         let guide = include_str!("../defaults/AGENTS.md");
