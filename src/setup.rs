@@ -167,11 +167,11 @@ impl Setup {
     }
 
     fn install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.run("Installing h0x-core…", || crate::core_bin::install().map(Some), window, cx);
+        self.run("Installing h0x-core…", || crate::core_bin::install().map(Some).inspect_err(|e| crate::analytics::report("core_install_failed", "install", e)), window, cx);
     }
 
     fn update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.run("Updating h0x-core… your terminals keep running.", || crate::core_bin::update().map(|_| None), window, cx);
+        self.run("Updating h0x-core… your terminals keep running.", || crate::core_bin::update().map(|_| None).inspect_err(|e| crate::analytics::report("core_update_failed", "update", e)), window, cx);
     }
 
     fn choose(&mut self, window: &mut Window, cx: &mut Context<Self>) {

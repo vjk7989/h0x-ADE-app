@@ -837,6 +837,8 @@ impl AppWindow {
 
     /// Runs with the shown layout's look (its root node) at the person's zoom.
     fn apply_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The switch in Settings takes effect at once.
+        crate::analytics::set_sharing(self.person.share_analytics);
         // A layout's fonts arrive with its mod: added since the start, they load now.
         if settings::load_home_fonts(cx) {
             mods::note_fonts(cx);
@@ -862,6 +864,11 @@ impl AppWindow {
             let loaded = settings::load_person();
             match loaded {
                 Ok(p) => {
+                    if self.person.found_via.is_none()
+                        && let Some(answer) = &p.found_via
+                    {
+                        crate::events::found_via(answer);
+                    }
                     self.person = p;
                     let _ = std::fs::remove_file(file("settings.error"));
                 }
@@ -2100,12 +2107,16 @@ impl AppWindow {
         let mut changed = self.reconcile(window, cx);
         let visible: HashSet<String> = self.visible_addresses().into_iter().collect();
         let mut alerts = Vec::new();
+        let mut running = Vec::new();
         for (addr, rec) in &self.live {
             let word = rec.get("status").and_then(Value::as_str).map(str::to_owned);
             let app = rec.get("report").and_then(|r| r.get("app")).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
             let looking = visible.contains(addr) && self.window_active;
             let prev = self.model.agents.get(addr).and_then(|a| a.word.clone());
             let child = rec.get("parent").and_then(Value::as_str).is_some_and(|p| !p.is_empty());
+            if let Some(app) = &app {
+                running.push(crate::events::Seen { address: addr.clone(), app: app.clone(), folder: self.cwds.get(addr).cloned() });
+            }
             if let Some(alert) = self.model.alert_for(addr, child, prev.as_deref(), word.as_deref(), looking) {
                 alerts.push((addr.clone(), alert, looking));
             }
@@ -2115,6 +2126,12 @@ impl AppWindow {
             changed |= self.model.set_turn(addr, turn, label.max(self.written_seen.get(addr).copied()));
         }
         self.written_seen.retain(|a, _| self.live.contains_key(a));
+        crate::events::agents(&running, !self.listed_once);
+        crate::update::note_agents(self.live.values().any(|rec| rec["status"] == "working"));
+        crate::events::hourly();
+        if crate::events::daily_due() {
+            crate::events::daily_device(self.workspace_shape(window));
+        }
         changed |= self.share_seen(cx);
         // Changes already made before HyperOx started aren't news.
         if self.listed_once {
@@ -2134,6 +2151,29 @@ impl AppWindow {
             self.sync(window, cx);
         } else if listed {
             self.publish(cx);
+        }
+    }
+
+    /// Counts for the daily usage event: sizes and program names only.
+    fn workspace_shape(&self, window: &Window) -> crate::events::Shape {
+        let tabs = self.model.spaces.iter().flat_map(|s| s.tabs.iter());
+        let machines: BTreeSet<&str> = self.model.spaces.iter().filter_map(|s| s.machine.as_deref()).collect();
+        let programs = self
+            .live
+            .values()
+            .filter(|r| r["program"]["shell"].as_bool() == Some(true))
+            .filter_map(|r| r["argv"].get(0).and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        let layout = if shipped_layouts().contains(&self.layout_name.as_str()) { self.layout_name.clone() } else { "custom".to_owned() };
+        crate::events::Shape {
+            spaces: self.model.spaces.len(),
+            tabs: self.model.spaces.iter().map(|s| s.tabs.len()).sum(),
+            panes: tabs.map(|c| c.root.panes().len()).sum(),
+            terminals: self.live.len(),
+            remote_machines: machines.len(),
+            layout,
+            window_size: crate::events::size_bucket(f32::from(window.viewport_size().width)),
+            programs,
         }
     }
 
@@ -2760,6 +2800,7 @@ impl AppWindow {
     }
 
     fn run_key(&mut self, name: &str, args: Value, window: &mut Window, cx: &mut Context<Self>) {
+        crate::events::shortcut_used(name);
         // Close the dialog holding the keyboard, not the terminal behind it.
         let implicit_close = match crate::keys::current(name).as_str() {
             "tab.close" => Self::arg(&args, "id").is_none(),
@@ -3368,6 +3409,9 @@ impl AppWindow {
                 if self.overlays.iter().any(|o| o.id == id) {
                     self.close_overlay(&id, window, cx);
                 } else {
+                    if matches!(name, "todo" | "files" | "changes" | "sessions" | "worktree" | "help" | "peek") {
+                        crate::events::panel_opened(name);
+                    }
                     self.open_overlay(id, spec, window, cx);
                 }
             }
@@ -3416,6 +3460,7 @@ impl AppWindow {
                     self.close_overlay("settings", window, cx);
                 }
                 if !open || section.is_some() {
+                    crate::events::panel_opened("settings");
                     let spec = json!({ "mod": "frame-settings", "kind": "dialog", "width": 880, "props": { "section": section } });
                     self.open_overlay("settings".into(), spec, window, cx);
                 }
@@ -3449,6 +3494,7 @@ impl AppWindow {
                     light: settings::get().theme_light.clone(),
                     dark: settings::get().theme_dark.clone(),
                 };
+                crate::events::theme_changed(&name);
                 self.chrome.look.theme = Some(with_theme(Some(current), name));
                 self.picked_theme = self.chrome.look.theme.clone();
                 self.save();
@@ -3921,6 +3967,10 @@ impl AppWindow {
 
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.flush_documents(false, window, cx);
+        for notice in crate::update::take_notices() {
+            let spec = json!({"kind":"toast", "notification":{"title":"Updates","body":notice.text,"level":notice.level}});
+            self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+        }
         let versions = Self::update_versions();
         if versions != self.update_versions {
             self.update_ready = Self::update_label(&versions);
@@ -3954,6 +4004,9 @@ impl AppWindow {
             self.close_overlay(&id, window, cx);
         }
         let visible = window.is_visible();
+        if visible {
+            crate::update::started_ok();
+        }
         let visibility_changed = visible != self.window_visible;
         self.window_visible = visible;
         let active = window.is_window_active();

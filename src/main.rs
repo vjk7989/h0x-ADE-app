@@ -1,6 +1,10 @@
 // Windows: a window app, no console of its own (see `attach_console`).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod agent_usage;
+mod analytics;
+#[path = "analytics/events.rs"]
+mod events;
 mod bench;
 mod commands;
 mod control;
@@ -80,6 +84,8 @@ fn attach_console() -> bool {
 }
 
 fn main() {
+    events::process_started();
+    analytics::install_crash_hook();
     let args: Vec<String> = std::env::args().collect();
     #[cfg(windows)]
     if args.len() > 1 {
@@ -96,12 +102,16 @@ fn main() {
     }
     // Anything else from a shell answers in the shell; only a bare launch opens the window.
     let mut quiet = false;
+    let mut launched_from = "shortcut";
     match args.get(1).map(String::as_str) {
         // Already open on this home: that window comes to the front.
         // `--launched-in <folder>` is the detached copy a shell launch starts on unix: a bare launch in that folder.
         None | Some("--launched-in") => {
             let detached = args.len() > 1;
             let from_shell = !detached && launch::from_shell();
+            if detached || from_shell {
+                launched_from = "terminal";
+            }
             if detached {
                 launch::init_with(args.get(2).cloned());
             } else {
@@ -151,7 +161,7 @@ fn main() {
         log.init();
     }
 
-    if update::apply_on_startup() {
+    if update::apply_on_startup() || update::begin_start() {
         return;
     }
 
@@ -179,11 +189,19 @@ fn main() {
     if core.is_ok() {
         update::after_update();
     }
-    // A first run: no update check before the welcome has shown the setting.
-    if mods::shared("frame.welcomed").is_none() {
+    // A first run: no update check, and no usage event, before the welcome has shown the setting.
+    let welcomed = mods::shared("frame.welcomed").is_some();
+    if !welcomed {
         update::hold_until_welcomed();
     }
     update::start();
+    // On by default: a first run shares until the welcome's switch says otherwise.
+    analytics::start(person.as_ref().map_or(true, |p| p.share_analytics));
+    update::after_start();
+    if !welcomed {
+        analytics::event("first_run", serde_json::json!({}));
+    }
+    analytics::event("app_started", serde_json::json!({ "launched_from": launched_from }));
     bench::start();
     if let Err(e) = mods::write_workspace() {
         eprintln!("h0x-ade: cannot write {}: {e}", mods::app_dir().display());
@@ -213,6 +231,9 @@ fn main() {
                     }
                 }
                 mods::finish_shared();
+                analytics::event("app_closed", serde_json::json!({ "session_seconds": analytics::session_seconds() }));
+                analytics::flush();
+                update::clean_exit();
                 update::apply();
                 async {}
             })
@@ -263,6 +284,7 @@ pub fn open_main(core: std::sync::Arc<core_link::Core>, requests: async_channel:
             cx.open_window(options, |window, cx| cx.new(|cx| window::AppWindow::new(core, requests, window, cx)))
                 .expect("cannot open the HyperOx window");
             cx.activate(true);
+            events::window_shown();
 }
 
 #[cfg(test)]
