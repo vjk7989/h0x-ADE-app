@@ -47,7 +47,14 @@ Do not assume every download is notarized or signed.
 
 ## What HyperOx sends
 
-HyperOx sends no usage telemetry. Nothing leaves your computer unless you ask for it: update checks (above), network requests made by mods you install, and feedback you choose to send.
+Release builds send two kinds of anonymous data to PostHog (EU), and only these:
+
+- Usage events (app started and closed, which features are used): sent unless you turn off "Share usage analytics" in Settings > Info. Turning it off sends what is already queued, then stops.
+- Failure reports (a crash or an update failure, with a short fixed code): sent whatever that setting says, so bugs can be fixed.
+
+Each event carries a random install ID (made on this computer, not linked to you), the HyperOx version, the operating system and the CPU architecture. It never carries file paths, terminal content, commands or names; paths and long text are removed before anything is queued. Location from your IP address is not kept. Events wait in `analytics/` and `reports/` in the app home and are sent about once a minute and when the app quits, over https only. Builds made without a PostHog key (your own builds) send nothing.
+
+Besides this, nothing leaves your computer unless you ask for it: update checks (above), network requests made by mods you install, and feedback you choose to send.
 Feedback is drafted for you to review; sending opens a prefilled issue on the HyperOx GitHub repository in your browser, and nothing is posted by the app itself.
 
 [Back to HyperOx](../README.md)

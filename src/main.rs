@@ -1,6 +1,7 @@
 // Windows: a window app, no console of its own (see `attach_console`).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod analytics;
 mod bench;
 mod commands;
 mod control;
@@ -179,11 +180,14 @@ fn main() {
     if core.is_ok() {
         update::after_update();
     }
-    // A first run: no update check before the welcome has shown the setting.
-    if mods::shared("frame.welcomed").is_none() {
+    // A first run: no update check, and no usage event, before the welcome has shown the setting.
+    let welcomed = mods::shared("frame.welcomed").is_some();
+    if !welcomed {
         update::hold_until_welcomed();
     }
     update::start();
+    analytics::start(welcomed && person.as_ref().map_or(true, |p| p.share_analytics));
+    analytics::event("app_started", serde_json::json!({}));
     bench::start();
     if let Err(e) = mods::write_workspace() {
         eprintln!("h0x-ade: cannot write {}: {e}", mods::app_dir().display());
@@ -213,6 +217,8 @@ fn main() {
                     }
                 }
                 mods::finish_shared();
+                analytics::event("app_closed", serde_json::json!({ "session_seconds": analytics::session_seconds() }));
+                analytics::flush();
                 update::apply();
                 async {}
             })
