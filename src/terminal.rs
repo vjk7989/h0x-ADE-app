@@ -646,12 +646,23 @@ impl TerminalView {
         }
     }
 
-    /// Ctrl+V: a remote image, clipboard text on Windows, or the key itself.
+    /// Ctrl+V: a remote image, a local image's file path or clipboard text on
+    /// Windows, or the key itself.
     pub fn paste_image(&mut self, cx: &mut Context<Self>) {
         if self.send_image(cx) {
             return;
         }
-        let text = if cfg!(windows) { cx.read_from_clipboard().and_then(|c| c.text()) } else { None };
+        let item = if cfg!(windows) { cx.read_from_clipboard() } else { None };
+        // Claude Code on Windows does not read the clipboard on Ctrl+V: the
+        // image goes in as a file path, as a dropped file does.
+        if let Some(item) = &item
+            && item.text().is_none()
+            && let Some(path) = image_file(item)
+        {
+            self.dropped(vec![path], cx);
+            return;
+        }
+        let text = item.and_then(|c| c.text());
         let bytes = paste_image_fallback(&mut self.grid.borrow_mut().vt, text.as_deref());
         if let Some(bytes) = bytes {
             self.send(&bytes);
@@ -3319,6 +3330,77 @@ mod tests {
         let (_, bytes) = paste_image_bytes(ImageFormat::Jpeg, b"unchanged").unwrap();
         assert!(matches!(bytes, std::borrow::Cow::Borrowed(_)));
         assert_eq!(&*bytes, b"unchanged");
+    }
+
+    #[test]
+    fn a_clipboard_bitmap_is_saved_as_a_png_file_to_paste_by_path() {
+        let original = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255])));
+        let mut bmp = std::io::Cursor::new(Vec::new());
+        original.write_to(&mut bmp, image::ImageFormat::Bmp).unwrap();
+        let item = gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(gpui::ImageFormat::Bmp, bmp.into_inner()));
+        let path = super::image_file(&item).unwrap();
+        assert_eq!(path.extension().unwrap(), "png");
+        assert_eq!(image::load_from_memory(&std::fs::read(&path).unwrap()).unwrap().to_rgba8(), original.to_rgba8());
+        let _ = std::fs::remove_file(&path);
+        assert!(super::image_file(&gpui::ClipboardItem::new_string("text".into())).is_none());
+    }
+
+    #[test]
+    fn an_empty_or_broken_clipboard_bitmap_gives_no_file_to_paste() {
+        let mut bmp = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(4, 4, image::Rgba([9, 9, 9, 255]))).write_to(&mut bmp, image::ImageFormat::Bmp).unwrap();
+        let truncated = bmp.into_inner()[..20].to_vec();
+        for format in [gpui::ImageFormat::Bmp, gpui::ImageFormat::Tiff] {
+            for bytes in [Vec::new(), vec![0], b"not an image at all".to_vec(), truncated.clone()] {
+                let item = gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(format, bytes.clone()));
+                assert!(super::image_file(&item).is_none(), "{format:?} {bytes:?}");
+            }
+        }
+        // An empty text clipboard has no image either.
+        assert!(super::image_file(&gpui::ClipboardItem::new_string(String::new())).is_none());
+    }
+
+    #[test]
+    fn a_clipboard_png_or_jpeg_is_saved_unchanged_under_its_own_extension_in_a_private_temp_dir() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]))).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let png = png.into_inner();
+        let mut paths = Vec::new();
+        for (format, bytes, ext) in [(gpui::ImageFormat::Png, png.clone(), "png"), (gpui::ImageFormat::Jpeg, b"jpeg bytes".to_vec(), "jpg")] {
+            let item = gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(format, bytes.clone()));
+            let path = super::image_file(&item).unwrap();
+            assert_eq!(path.extension().unwrap(), ext, "{path:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{format:?} is saved as it came");
+            assert!(path.is_absolute() && path.starts_with(std::env::temp_dir()), "{path:?}");
+            let dir = path.parent().unwrap().file_name().unwrap().to_string_lossy().into_owned();
+            assert!(dir.starts_with("h0x-paste-"), "{path:?}");
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            assert!(name.strip_prefix("paste-").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())), "{path:?}");
+            paths.push(path);
+        }
+        for path in paths {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    #[test]
+    fn a_saved_paste_path_under_a_temp_dir_with_spaces_is_quoted_for_each_shell() {
+        let q = |shell: Quoting, p: &str| super::quote_paths([p.to_string()], shell);
+        let win = r"C:\Users\Jo Doe\AppData\Local\Temp\h0x-paste-12-345\paste-678.png";
+        assert_eq!(q(Quoting::PowerShell, win), format!("'{win}' "));
+        assert_eq!(q(Quoting::Cmd, win), format!("\"{win}\" "));
+        assert_eq!(q(Quoting::Posix, win), format!("'{win}' "));
+        assert_eq!(q(Quoting::Fish, win), r"'C:\\Users\\Jo Doe\\AppData\\Local\\Temp\\h0x-paste-12-345\\paste-678.png' ");
+        assert_eq!(q(Quoting::Unknown, win), "", "an unknown program gets no path it might split");
+        // A short (8.3) temp dir has no space: cmd takes it bare, the others still quote the backslashes.
+        let short = r"C:\Users\JODOE~1\AppData\Local\Temp\h0x-paste-1-2\paste-3.png";
+        assert_eq!(q(Quoting::Cmd, short), format!("{short} "));
+        assert_eq!(q(Quoting::PowerShell, short), format!("'{short}' "));
+        assert_eq!(q(Quoting::Posix, short), format!("'{short}' "));
+        let unix = "/tmp/my dir/h0x-paste-1-2/paste-3.png";
+        assert_eq!(q(Quoting::Posix, unix), format!("'{unix}' "));
+        assert_eq!(q(Quoting::Fish, unix), format!("'{unix}' "));
+        assert_eq!(q(Quoting::Unknown, "/tmp/h0x-paste-1-2/paste-3.png"), "/tmp/h0x-paste-1-2/paste-3.png ");
     }
 
     #[test]

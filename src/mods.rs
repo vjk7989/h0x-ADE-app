@@ -1890,22 +1890,31 @@ mod tests {
     }
 
     #[test]
-    fn the_light_theme_logo_is_an_embedded_64_px_png_beside_the_original() {
+    fn the_sidebar_logo_is_an_embedded_one_path_svg_mark_and_the_frame_keeps_the_png() {
         let file = |files: &'static [(&'static str, &'static [u8])], path: &str| -> &'static [u8] {
             files.iter().find(|(p, _)| *p == path).map(|(_, b)| *b).unwrap_or_else(|| panic!("{path} is not embedded"))
         };
-        let size = |png: &[u8]| (u32::from_be_bytes(png[16..20].try_into().unwrap()), u32::from_be_bytes(png[20..24].try_into().unwrap()));
-        for png in [file(DEFAULT_MODS, "workspace-chrome/hyperox-white.png"), file(FRAME_MODS, "welcome/hyperox.png")] {
-            assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "a PNG");
-            assert_eq!(&png[12..16], b"IHDR");
+        let mark = file(DEFAULT_MODS, "workspace-chrome/hyperox-mark.svg");
+        assert!(!mark.is_empty() && mark.len() < 8 * 1024, "a small mark: {} bytes", mark.len());
+        let mark = std::str::from_utf8(mark).unwrap();
+        assert!(mark.trim_start().starts_with("<svg") && mark.contains("viewBox=\""), "{mark}");
+        assert_eq!(mark.matches("<path").count(), 1, "a single path: {mark}");
+        assert!(mark.contains("fill=\"currentColor\""), "coloured by the text colour: {mark}");
+        for other in ["<image", "<style", "<script", "href=", "data:"] {
+            assert!(!mark.contains(other), "no {other} in the mark: {mark}");
         }
-        let white = file(DEFAULT_MODS, "workspace-chrome/hyperox-white.png");
-        assert_eq!(size(white), (64, 64), "crisp at 200% for a 14 px mark");
-        assert_eq!(white[25], 6, "RGBA: a white mark needs transparency around it, or it is a white square");
-        // The chrome mod names exactly the paths the app installs them under (mods/…, frame/…).
+        assert!(DEFAULT_MODS.iter().all(|(p, _)| !p.ends_with("hyperox-white.png")), "the white PNG is gone");
+        // The welcome, settings and what's-new pages keep the PNG.
+        let png = file(FRAME_MODS, "welcome/hyperox.png");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "a PNG");
+        for page in ["welcome/main.js", "settings/main.js", "whatsnew/main.js"] {
+            let page = std::str::from_utf8(file(FRAME_MODS, page)).unwrap();
+            assert!(page.contains("image(\"frame/welcome/hyperox.png\")"), "{page}");
+        }
+        // The chrome mod names exactly the path the app installs it under, and no PNG logo.
         let chrome = std::str::from_utf8(file(DEFAULT_MODS, "workspace-chrome/main.js")).unwrap();
-        assert!(chrome.contains("image(\"mods/workspace-chrome/hyperox-white.png\")"), "{chrome}");
-        assert!(chrome.contains("image(\"frame/welcome/hyperox.png\")"), "{chrome}");
+        assert!(chrome.contains("svg(\"mods/workspace-chrome/hyperox-mark.svg\")"), "{chrome}");
+        assert!(!chrome.contains("hyperox.png") && !chrome.contains("hyperox-white.png"), "{chrome}");
     }
 
     #[test]
