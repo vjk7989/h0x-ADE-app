@@ -12,13 +12,16 @@
 //! builds) sets `H0X_ADE_RELEASE`. `scripts/install-macos` makes a
 //! HyperOx.app too, so the install's shape alone can't tell.
 //!
-//! The core is checked on the same clock (the core release's `latest.json`): a newer core
-//! of the same generation is offered (also applied after an app update), unless
-//! a package manager owns it. Within a generation a newer core only adds.
+//! Each part reads its own signed `latest.json` (app, core and runtime each have a releases
+//! repo; the older repo is the fallback when that one fails to fetch or verify). The core is
+//! checked on the same clock: a newer core of the same generation is applied once no agent has
+//! worked for two minutes (also after an app update), unless a package manager owns it. Within
+//! a generation a newer core only adds. A runtime (`h0x` on PATH, not nix) updates itself the
+//! same way with `h0x update --yes --json`; none installed, nothing happens.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -225,12 +228,78 @@ fn verify(bytes: &[u8], sig: Option<&[u8]>, key: &str, name: &str) -> Result<(),
     }
 }
 
-fn releases() -> String {
-    env_url("H0X_ADE_RELEASES_URL").unwrap_or_else(|| "https://github.com/vjk7989/h0x-ADE-app/releases".into())
+/// Where a part's signed `latest.json` is read, in order: its own releases repo, then the older
+/// one. A test site (`env`) is the only source.
+fn sources(env: Option<String>, own: &str, older: &str) -> Vec<String> {
+    env.map_or_else(|| vec![own.to_owned(), older.to_owned()], |url| vec![url])
+}
+
+fn releases() -> Vec<String> {
+    sources(env_url("H0X_ADE_RELEASES_URL"), "https://github.com/buckleson/h0x-ADE-Releases/releases", "https://github.com/vjk7989/h0x-ADE-app/releases")
+}
+
+fn core_sources() -> Vec<String> {
+    sources(env_url("H0X_CORE_RELEASES_URL"), "https://github.com/buckleson/h0x-ADE-Core-Releases/releases", "https://github.com/vjk7989/h0x-ADE-core/releases")
+}
+
+fn runtime_sources() -> Vec<String> {
+    sources(None, "https://github.com/buckleson/h0x-ADE-Runtime-Releases/releases", "https://github.com/vjk7989/h0x-ADE-Runtime/releases")
+}
+
+/// `f` on each source until one works (a fetch or signature failure moves on); the first
+/// error if none does.
+fn first_ok<T>(sources: &[String], mut f: impl FnMut(&str) -> Result<T, String>) -> Result<T, String> {
+    let mut first = None;
+    for source in sources {
+        match f(source) {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                tracing::warn!("{source}: {e}");
+                first.get_or_insert(e);
+            }
+        }
+    }
+    Err(first.unwrap_or_else(|| "no release source".into()))
 }
 
 pub(crate) fn core_releases() -> String {
     env_url("H0X_CORE_RELEASES_URL").unwrap_or_else(|| "https://github.com/vjk7989/h0x-ADE-core/releases".into())
+}
+
+/// What the 2-minute idle gate waits on: when an agent last worked (unix seconds; 0 = never).
+static LAST_WORKING: AtomicU64 = AtomicU64::new(0);
+/// Core and runtime updates wait until no agent has worked for this long.
+const IDLE: u64 = 2 * 60;
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// The window's tick: whether any agent is working now.
+pub fn note_agents(working: bool) {
+    if working {
+        LAST_WORKING.store(unix_now(), Ordering::Relaxed);
+    }
+}
+
+fn idle(last_working: u64, now: u64) -> bool {
+    now.saturating_sub(last_working) >= IDLE
+}
+
+/// A line for the person about what an update did; the window shows each as a toast.
+pub struct Notice {
+    pub level: &'static str,
+    pub text: String,
+}
+
+static NOTICES: Mutex<Vec<Notice>> = Mutex::new(Vec::new());
+
+fn notify(level: &'static str, text: String) {
+    NOTICES.lock().unwrap().push(Notice { level, text });
+}
+
+pub fn take_notices() -> Vec<Notice> {
+    std::mem::take(&mut *NOTICES.lock().unwrap())
 }
 
 /// The version downloaded and waiting for a restart.
@@ -377,6 +446,9 @@ pub fn start() {
     }
     RUNNING.store(true, Ordering::Relaxed);
     CHECKING.store(true, Ordering::Relaxed);
+    if core {
+        std::thread::spawn(apply_when_idle);
+    }
     std::thread::spawn(move || {
         let mut asked = sleep(Duration::from_secs(10));
         loop {
@@ -392,8 +464,12 @@ pub fn start() {
             if let Some(root) = &app {
                 match check(root) {
                     Ok(found) => {
-                        if found.is_some() {
-                            *READY.lock().unwrap() = found;
+                        crate::events::update_checked("app");
+                        if let Some(version) = found {
+                            if READY.lock().unwrap().as_deref() != Some(&version) {
+                                crate::events::update_downloaded("app", &version);
+                            }
+                            *READY.lock().unwrap() = Some(version);
                         }
                     }
                     Err(e) => {
@@ -404,18 +480,50 @@ pub fn start() {
                     }
                 }
             }
-            if core && let Err(e) = check_core() {
-                tracing::warn!("core update check: {e}");
-                crate::analytics::report("core_update_failed", "check", &e);
-                wait = RETRY;
-                succeeded = false;
+            if core {
+                match check_core() {
+                    Ok(()) => crate::events::update_checked("core"),
+                    Err(e) => {
+                        tracing::warn!("core update check: {e}");
+                        crate::analytics::report("core_update_failed", "check", &e);
+                        wait = RETRY;
+                        succeeded = false;
+                    }
+                }
+                if let Err(e) = check_runtime() {
+                    tracing::warn!("runtime update check: {e}");
+                    crate::analytics::report("runtime_update_failed", "check", &e);
+                    wait = RETRY;
+                    succeeded = false;
+                }
             }
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let now = unix_now();
             *CHECKED.lock().unwrap() = checked_at(succeeded, now);
             CHECKING.store(false, Ordering::Relaxed);
             asked = sleep(wait);
         }
     });
+}
+
+/// A newer core or runtime waits until no agent has worked for two minutes, then goes in.
+/// Automatic checks off: nothing goes in on its own.
+fn apply_when_idle() {
+    loop {
+        std::thread::sleep(Duration::from_secs(30));
+        if !AUTO.load(Ordering::Relaxed) || !idle(LAST_WORKING.load(Ordering::Relaxed), unix_now()) {
+            continue;
+        }
+        if core_waiting(&core()) {
+            update_core();
+        }
+        update_runtime();
+    }
+}
+
+/// A newer core is ready, nobody else owns it, none is going in and the last try didn't fail
+/// (a failed one is tried again by hand).
+fn core_waiting(core: &CoreInfo) -> bool {
+    core.ready.is_some() && core.managed.is_none() && !core.updating && core.error.is_none()
 }
 
 fn checked_at(succeeded: bool, now: u64) -> Option<u64> {
@@ -445,8 +553,161 @@ struct CoreRelease {
 }
 
 fn latest_core() -> Result<CoreRelease, String> {
-    let text = curl_text(&format!("{}/latest/download/latest.json", core_releases()))?;
-    serde_json::from_str(&text).map_err(|e| format!("core latest.json: {e}"))
+    first_ok(&core_sources(), |releases| {
+        let text = curl_text(&format!("{releases}/latest/download/latest.json"))?;
+        serde_json::from_str(&text).map_err(|e| format!("core latest.json: {e}"))
+    })
+}
+
+/// The runtime (`h0x` on PATH) and its newer release, waiting for the idle gate.
+struct RuntimeInfo {
+    ready: Option<String>,
+    /// A version whose update failed: not tried again until a newer one is out.
+    failed: Option<String>,
+    updating: bool,
+}
+
+static RUNTIME: Mutex<RuntimeInfo> = Mutex::new(RuntimeInfo { ready: None, failed: None, updating: false });
+
+/// What the runtime's own `h0x update --yes --json` prints, and how to find it. Not installed,
+/// or owned by a package manager: left alone.
+mod runtime {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    use std::process::Stdio;
+
+    /// The one JSON line `h0x update --yes --json` prints.
+    #[derive(serde::Deserialize, Default)]
+    #[serde(default)]
+    pub struct Update {
+        pub updated: bool,
+        pub to: Option<String>,
+        pub rolled_back: bool,
+        pub error: Option<serde_json::Value>,
+    }
+
+    impl Update {
+        /// Whether it failed, and whether the old runtime was put back.
+        pub fn failure(&self) -> Option<(bool, String)> {
+            let text = |v: &serde_json::Value| v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+            match (&self.error, self.rolled_back) {
+                (Some(e), rolled_back) => Some((rolled_back, text(e))),
+                (None, true) => Some((true, "rolled back".into())),
+                (None, false) => None,
+            }
+        }
+    }
+
+    /// The last non-empty line of stdout, as JSON.
+    pub fn parse(stdout: &[u8]) -> Result<Update, String> {
+        let text = String::from_utf8_lossy(stdout);
+        let line = text.lines().rev().find(|l| !l.trim().is_empty()).ok_or("h0x update printed nothing")?;
+        serde_json::from_str(line).map_err(|e| format!("h0x update: unreadable reply: {e}"))
+    }
+
+    pub fn run(bin: &Path) -> Result<Update, String> {
+        let out = crate::spawn::command(bin).args(["update", "--yes", "--json"]).stdin(Stdio::null()).output().map_err(|e| format!("cannot run h0x update: {e}"))?;
+        parse(&out.stdout).map_err(|e| format!("{e} {}", String::from_utf8_lossy(&out.stderr).trim()).trim().to_owned())
+    }
+
+    /// The first absolute PATH entry holding `h0x`.
+    pub fn find_in(path: &OsStr) -> Option<PathBuf> {
+        let name = if cfg!(windows) { "h0x.exe" } else { "h0x" };
+        std::env::split_paths(path).filter(|dir| dir.is_absolute()).map(|dir| dir.join(name)).find(|bin| bin.is_file())
+    }
+
+    pub fn find() -> Option<PathBuf> {
+        find_in(&std::env::var_os("PATH")?)
+    }
+
+    /// A nix profile or store path: nix owns that runtime.
+    pub fn managed(bin: &Path) -> bool {
+        let nix = |p: &Path| {
+            let p = p.to_string_lossy().replace('\\', "/");
+            ["/nix/store/", "/.nix-profile/", "/etc/profiles/", "/run/current-system/"].iter().any(|marker| p.contains(marker))
+        };
+        nix(bin) || std::fs::canonicalize(bin).is_ok_and(|real| nix(&real))
+    }
+
+    /// `X.Y.Z` from `h0x X.Y.Z`.
+    pub fn version_in(text: &str) -> Option<String> {
+        text.trim().strip_prefix("h0x ")?.split_whitespace().next().map(str::to_owned)
+    }
+
+    pub fn version(bin: &Path) -> Option<String> {
+        let out = crate::spawn::command(bin).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+        out.status.success().then(|| version_in(&String::from_utf8_lossy(&out.stdout))).flatten()
+    }
+
+    pub fn latest_version(manifest: &str) -> Result<String, String> {
+        let value: serde_json::Value = serde_json::from_str(manifest).map_err(|e| format!("runtime latest.json: {e}"))?;
+        value["version"].as_str().map(str::to_owned).ok_or_else(|| "runtime latest.json: no version".into())
+    }
+}
+
+/// Looks for a newer runtime; nothing to do when none is installed.
+fn check_runtime() -> Result<(), String> {
+    check_runtime_of(runtime::find())
+}
+
+fn check_runtime_of(bin: Option<PathBuf>) -> Result<(), String> {
+    let Some(bin) = bin.filter(|bin| !runtime::managed(bin)) else {
+        RUNTIME.lock().unwrap().ready = None;
+        return Ok(());
+    };
+    let have = runtime::version(&bin).ok_or("h0x --version doesn't run")?;
+    let latest = first_ok(&runtime_sources(), |releases| runtime::latest_version(&curl_text(&format!("{releases}/latest/download/latest.json"))?))?;
+    crate::events::update_checked("runtime");
+    let mut r = RUNTIME.lock().unwrap();
+    r.ready = (newer(&latest, &have) && r.failed.as_deref() != Some(latest.as_str())).then_some(latest);
+    Ok(())
+}
+
+/// `h0x update --yes --json`, in the background, for a newer runtime found by the check.
+fn update_runtime() {
+    let version = {
+        let mut r = RUNTIME.lock().unwrap();
+        if r.updating {
+            return;
+        }
+        let Some(version) = r.ready.take() else { return };
+        r.updating = true;
+        version
+    };
+    std::thread::spawn(move || {
+        let Some(bin) = runtime::find() else {
+            RUNTIME.lock().unwrap().updating = false;
+            return;
+        };
+        let from = runtime::version(&bin).unwrap_or_default();
+        let started = unix_now();
+        let result = runtime::run(&bin);
+        let mut r = RUNTIME.lock().unwrap();
+        r.updating = false;
+        let failure = match &result {
+            Ok(update) => update.failure(),
+            Err(e) => Some((false, e.clone())),
+        };
+        match (failure, result) {
+            (Some((rolled_back, error)), _) => {
+                r.failed = Some(version.clone());
+                crate::analytics::report("runtime_update_failed", if rolled_back { "rollback" } else { "update" }, &error);
+                if rolled_back {
+                    crate::events::update_rolled_back("runtime", &from, &version);
+                    notify("error", rolled_back_text("Runtime", &version, &from));
+                } else {
+                    notify("error", "Runtime update failed. A report was sent.".into());
+                }
+            }
+            (None, Ok(update)) if update.updated => {
+                let to = update.to.unwrap_or(version);
+                crate::events::update_applied("runtime", &from, &to, unix_now().saturating_sub(started));
+                notify("success", format!("Runtime updated to {to}"));
+            }
+            // Deferred, or nothing to do: the next check looks again.
+            _ => {}
+        }
+    });
 }
 
 fn after_update_target<'a>(have: &str, latest: Option<&'a CoreRelease>, generation: u64, core_min: &'a str) -> &'a str {
@@ -467,25 +728,43 @@ pub fn update_core() {
         c.error = None;
     }
     std::thread::spawn(|| {
-        let result = crate::core_bin::update();
+        let (from, target) = {
+            let c = CORE.lock().unwrap();
+            (c.version.clone().unwrap_or_default(), c.ready.clone().unwrap_or_else(|| "the latest".into()))
+        };
+        let started = unix_now();
+        let result = crate::core_bin::update_detailed(None);
         let mut c = CORE.lock().unwrap();
         c.updating = false;
         match result {
             Ok(now) => {
-                c.version = Some(now.trim_start_matches("h0x-core ").to_owned());
+                let now = now.trim_start_matches("h0x-core ").to_owned();
+                crate::events::update_applied("core", &from, &now, unix_now().saturating_sub(started));
+                notify("success", format!("Core updated to {now}"));
+                c.version = Some(now);
                 c.ready = None;
             }
             Err(e) => {
-                crate::analytics::report("core_update_failed", "update", &e);
-                c.error = Some(e);
+                if e.rolled_back {
+                    crate::analytics::report("core_update_failed", "rollback", &e.message);
+                    crate::events::update_rolled_back("core", &from, &target);
+                    notify("error", rolled_back_text("Core", &target, &from));
+                } else {
+                    crate::analytics::report("core_update_failed", "update", &e.message);
+                }
+                c.error = Some(e.message);
             }
         }
     });
 }
 
+fn rolled_back_text(part: &str, to: &str, from: &str) -> String {
+    format!("{part} update to {to} failed, HyperOx went back to {from}. A report was sent.")
+}
+
 /// Downloads the latest release if it's newer. Ok(Some): a version is ready.
 fn check(root: &Path) -> Result<Option<String>, String> {
-    check_from(root, &releases())
+    first_ok(&releases(), |source| check_from(root, source))
 }
 
 fn check_from(root: &Path, releases: &str) -> Result<Option<String>, String> {
@@ -1271,18 +1550,27 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
     fn release_urls_treat_empty_as_unset_and_drop_a_trailing_slash() {
         // Only this test sets these variables inside the unit-test binary.
         for (key, read, default) in [
-            ("H0X_ADE_RELEASES_URL", releases as fn() -> String, "https://github.com/vjk7989/h0x-ADE-app/releases"),
-            ("H0X_CORE_RELEASES_URL", core_releases as fn() -> String, "https://github.com/vjk7989/h0x-ADE-core/releases"),
+            (
+                "H0X_ADE_RELEASES_URL",
+                releases as fn() -> Vec<String>,
+                vec!["https://github.com/buckleson/h0x-ADE-Releases/releases".to_owned(), "https://github.com/vjk7989/h0x-ADE-app/releases".to_owned()],
+            ),
+            (
+                "H0X_CORE_RELEASES_URL",
+                core_sources as fn() -> Vec<String>,
+                vec!["https://github.com/buckleson/h0x-ADE-Core-Releases/releases".to_owned(), "https://github.com/vjk7989/h0x-ADE-core/releases".to_owned()],
+            ),
         ] {
             unsafe { std::env::set_var(key, "https://mirror.example/releases/") };
-            assert_eq!(read(), "https://mirror.example/releases");
+            assert_eq!(read(), ["https://mirror.example/releases"], "a test site is the only source");
             for empty in ["", " ", "\t\n"] {
                 unsafe { std::env::set_var(key, empty) };
                 assert_eq!(read(), default, "{key}={empty:?} counts as unset");
             }
             unsafe { std::env::remove_var(key) };
-            assert_eq!(read(), default);
+            assert_eq!(read(), default, "the part's own repo first, then the older one");
         }
+        assert_eq!(core_releases(), "https://github.com/vjk7989/h0x-ADE-core/releases", "the installer still reads the older repo");
         if option_env!("H0X_ADE_RELEASE").is_none() {
             unsafe { std::env::set_var("H0X_ADE_RELEASES_URL", " ") };
             assert!(!checks_core(), "an empty test server URL does not turn checks on");
@@ -1480,6 +1768,146 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         assert!(due(AUTO.load(Ordering::Relaxed), true), "Check now while off");
         set_auto(true);
         assert!(due(AUTO.load(Ordering::Relaxed), false));
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_part_reads_its_own_repo_first_then_the_older_one() {
+        assert_eq!(sources(None, "own", "older"), strings(&["own", "older"]));
+        assert_eq!(sources(Some("site".into()), "own", "older"), strings(&["site"]), "a test site stands alone");
+        assert_eq!(runtime_sources(), strings(&["https://github.com/buckleson/h0x-ADE-Runtime-Releases/releases", "https://github.com/vjk7989/h0x-ADE-Runtime/releases"]));
+    }
+
+    #[test]
+    fn a_failed_source_falls_back_and_all_failing_reports_the_first_error() {
+        let both = strings(&["own", "older"]);
+        let mut tried = Vec::new();
+        let got = first_ok(&both, |s| {
+            tried.push(s.to_owned());
+            if s == "own" { Err("not signed".to_owned()) } else { Ok(s.len()) }
+        });
+        assert_eq!((got, tried), (Ok(5), both.clone()));
+        let mut tried = 0;
+        let got: Result<(), String> = first_ok(&both, |s| {
+            tried += 1;
+            Err(format!("{s} down"))
+        });
+        assert_eq!((got, tried), (Err("own down".to_owned()), 2));
+        let mut tried = 0;
+        assert_eq!(first_ok(&strings(&["own", "older"]), |s| { tried += 1; Ok::<_, String>(s.to_owned()) }), Ok("own".to_owned()));
+        assert_eq!(tried, 1, "a source that works ends the search");
+        assert!(first_ok::<()>(&[], |_| Ok(())).is_err(), "no source is an error, not a success");
+    }
+
+    #[test]
+    fn core_and_runtime_wait_for_two_quiet_minutes() {
+        assert!(!idle(1000, 1000), "an agent is working right now");
+        assert!(!idle(1000, 1000 + IDLE - 1));
+        assert!(idle(1000, 1000 + IDLE));
+        assert!(idle(0, unix_now()), "no agent ever worked");
+        assert!(!idle(2000, 1000), "a clock that went back is not idle");
+        note_agents(false);
+        let before = LAST_WORKING.load(Ordering::Relaxed);
+        note_agents(true);
+        assert!(LAST_WORKING.load(Ordering::Relaxed) >= before);
+        assert!(!idle(LAST_WORKING.load(Ordering::Relaxed), unix_now()), "a working agent starts the wait");
+    }
+
+    #[test]
+    fn a_core_goes_in_only_when_ready_unowned_idle_and_not_failed() {
+        let ready = CoreInfo { version: Some("0.1.0".into()), ready: Some("0.1.1".into()), ..CoreInfo::default() };
+        assert!(core_waiting(&ready));
+        assert!(!core_waiting(&CoreInfo { ready: None, ..ready.clone() }), "nothing newer");
+        assert!(!core_waiting(&CoreInfo { managed: Some("nix".into()), ..ready.clone() }), "a package manager owns it");
+        assert!(!core_waiting(&CoreInfo { updating: true, ..ready.clone() }));
+        assert!(!core_waiting(&CoreInfo { error: Some("x".into()), ..ready }), "a failed try is not repeated on its own");
+    }
+
+    #[test]
+    fn the_rollback_notice_names_both_versions() {
+        assert_eq!(rolled_back_text("Core", "0.1.2", "0.1.1"), "Core update to 0.1.2 failed, HyperOx went back to 0.1.1. A report was sent.");
+    }
+
+    #[test]
+    fn notices_are_handed_over_once() {
+        let _ = take_notices();
+        notify("success", "Core updated to 0.1.2".into());
+        let got = take_notices();
+        assert_eq!((got.len(), got[0].level, got[0].text.as_str()), (1, "success", "Core updated to 0.1.2"));
+        assert!(take_notices().is_empty());
+    }
+
+    #[test]
+    fn the_runtime_reply_is_one_json_line() {
+        let ok = runtime::parse(b"{\"updated\":true,\"from\":\"0.9.5\",\"to\":\"0.9.6\",\"rolled_back\":false,\"deferred\":false}\n").unwrap();
+        assert!(ok.updated && ok.to.as_deref() == Some("0.9.6") && ok.failure().is_none());
+        let back = runtime::parse(b"warming up\n{\"updated\":false,\"rolled_back\":true,\"error\":\"smoke test failed\"}\n\n").unwrap();
+        assert_eq!(back.failure(), Some((true, "smoke test failed".to_owned())), "the last line counts");
+        let err = runtime::parse(b"{\"updated\":false,\"error\":{\"message\":\"no space\"}}").unwrap();
+        assert_eq!(err.failure(), Some((false, "{\"message\":\"no space\"}".to_owned())));
+        let bare = runtime::parse(b"{\"rolled_back\":true}").unwrap();
+        assert_eq!(bare.failure(), Some((true, "rolled back".to_owned())));
+        let deferred = runtime::parse(b"{\"updated\":false,\"deferred\":true}").unwrap();
+        assert!(!deferred.updated && deferred.failure().is_none());
+        assert!(runtime::parse(b"").is_err());
+        assert!(runtime::parse(b"  \n\n").is_err());
+        assert!(runtime::parse(b"not json").is_err());
+        assert!(runtime::parse(&[0xff, 0xfe]).is_err());
+    }
+
+    #[test]
+    fn the_runtime_is_the_first_absolute_path_entry_holding_h0x() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-runtime-find-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (empty, with) = (root.join("empty"), root.join("with"));
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(&with).unwrap();
+        let name = if cfg!(windows) { "h0x.exe" } else { "h0x" };
+        std::fs::write(with.join(name), b"").unwrap();
+        let path = |dirs: &[PathBuf]| std::env::join_paths(dirs).unwrap();
+        assert_eq!(runtime::find_in(&path(&[empty.clone(), with.clone()])), Some(with.join(name)));
+        assert_eq!(runtime::find_in(&path(&[empty.clone()])), None, "not installed");
+        assert_eq!(runtime::find_in(std::ffi::OsStr::new("")), None, "an empty PATH");
+        assert_eq!(runtime::find_in(&path(&[PathBuf::from("rel")])), None, "relative entries are skipped");
+        std::fs::create_dir_all(empty.join(name)).unwrap();
+        assert_eq!(runtime::find_in(&path(&[empty])), None, "a folder named h0x is not the program");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_nix_runtime_is_left_alone() {
+        for owned in ["/nix/store/abc-h0x-0.9.5/bin/h0x", "/home/me/.nix-profile/bin/h0x", "/etc/profiles/per-user/me/bin/h0x", "/run/current-system/sw/bin/h0x"] {
+            assert!(runtime::managed(Path::new(owned)), "{owned}");
+        }
+        for own in ["/usr/local/bin/h0x", "/home/me/.local/bin/h0x", r"C:\Users\me\AppData\Local\Programs\h0x\h0x.exe", ""] {
+            assert!(!runtime::managed(Path::new(own)), "{own}");
+        }
+        assert!(runtime::managed(Path::new(r"\nix\store\abc\bin\h0x")), "separators don't matter");
+    }
+
+    #[test]
+    fn no_runtime_or_a_nix_one_means_no_update_check() {
+        RUNTIME.lock().unwrap().ready = Some("9.9.9".into());
+        assert_eq!(check_runtime_of(None), Ok(()));
+        assert_eq!(RUNTIME.lock().unwrap().ready, None, "not installed: nothing waits");
+        RUNTIME.lock().unwrap().ready = Some("9.9.9".into());
+        assert_eq!(check_runtime_of(Some(PathBuf::from("/nix/store/abc-h0x/bin/h0x"))), Ok(()), "no fetch for a package-managed one");
+        assert_eq!(RUNTIME.lock().unwrap().ready, None);
+    }
+
+    #[test]
+    fn runtime_versions_and_manifests_are_read_strictly() {
+        assert_eq!(runtime::version_in("h0x 0.9.5\n").as_deref(), Some("0.9.5"));
+        assert_eq!(runtime::version_in("h0x 0.9.5 (abc123)").as_deref(), Some("0.9.5"));
+        assert_eq!(runtime::version_in("h0x-core 0.1.0"), None);
+        assert_eq!(runtime::version_in("h0x "), None);
+        assert_eq!(runtime::version_in(""), None);
+        assert_eq!(runtime::latest_version("{\"version\":\"0.9.6\"}"), Ok("0.9.6".to_owned()));
+        assert!(runtime::latest_version("{}").is_err());
+        assert!(runtime::latest_version("<html>").is_err());
     }
 
     #[test]

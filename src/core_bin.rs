@@ -253,22 +253,42 @@ pub fn update() -> Result<String, String> {
     update_to(None)
 }
 
+/// Why `h0x-core update` failed; `rolled_back`: it put the old core back.
+pub struct UpdateError {
+    pub message: String,
+    pub rolled_back: bool,
+}
+
 /// `h0x-core update --version X`: at least X (a newer core stays).
 pub fn update_to(at_least: Option<&str>) -> Result<String, String> {
+    update_detailed(at_least).map_err(|e| e.message)
+}
+
+/// `update_to`, saying whether a failed update was rolled back.
+pub fn update_detailed(at_least: Option<&str>) -> Result<String, UpdateError> {
     let mut cmd = crate::spawn::command(path());
     cmd.args(["update", "--json"]);
     if let Some(v) = at_least {
         cmd.args(["--version", v]);
     }
-    let out = cmd.stdin(Stdio::null()).output().map_err(|e| format!("cannot run h0x-core update: {e}"))?;
-    let reply: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-    if out.status.success() {
+    let out = cmd.stdin(Stdio::null()).output().map_err(|e| UpdateError { message: format!("cannot run h0x-core update: {e}"), rolled_back: false })?;
+    parse_update(out.status.success(), &out.stdout, &out.stderr)
+}
+
+/// The `--json` reply: `{"now": X}` on stdout; on failure stderr holds
+/// `{"rolled_back": bool, "error": "text"}` (or `"error": {"message", "hint"}`).
+fn parse_update(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<String, UpdateError> {
+    let reply: serde_json::Value = serde_json::from_slice(stdout).unwrap_or_default();
+    if success {
         return Ok(reply.get("now").and_then(|v| v.as_str()).unwrap_or("the latest").to_owned());
     }
-    let err: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap_or_default();
-    let message = err.pointer("/error/message").and_then(|v| v.as_str()).map(str::to_owned);
+    let err: serde_json::Value = serde_json::from_slice(stderr).unwrap_or_default();
+    let message = err.get("error").and_then(|v| v.as_str()).or_else(|| err.pointer("/error/message").and_then(|v| v.as_str())).map(str::to_owned);
     let hint = err.pointer("/error/hint").and_then(|v| v.as_str()).map(|h| format!(" ({h})")).unwrap_or_default();
-    Err(message.map(|m| m + &hint).unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_owned()))
+    Err(UpdateError {
+        message: message.map(|m| m + &hint).unwrap_or_else(|| String::from_utf8_lossy(stderr).trim().to_owned()),
+        rolled_back: err.get("rolled_back").and_then(|v| v.as_bool()) == Some(true),
+    })
 }
 
 #[cfg(test)]
@@ -533,5 +553,21 @@ echo '{hello}'
             assert!(core_in(&dirs[0]).ends_with(r"Programs\h0x-core\h0x-core.exe"));
             assert!(dirs.iter().all(|d| !d.to_string_lossy().contains("herdr")), "{dirs:?}");
         }
+    }
+
+    #[test]
+    fn update_replies_parse_success_rollback_error_and_garbage() {
+        assert_eq!(parse_update(true, br#"{"now":"h0x-core 0.1.2"}"#, b"").ok().as_deref(), Some("h0x-core 0.1.2"));
+        assert_eq!(parse_update(true, b"", b"").ok().as_deref(), Some("the latest"));
+        let e = parse_update(false, b"", br#"{"rolled_back":true,"error":"smoke test failed"}"#).err().unwrap();
+        assert!(e.rolled_back && e.message == "smoke test failed");
+        let e = parse_update(false, b"", br#"{"error":{"message":"no space","hint":"free some"}}"#).err().unwrap();
+        assert!(!e.rolled_back && e.message == "no space (free some)");
+        let e = parse_update(false, b"", br#"{"rolled_back":false,"error":"x"}"#).err().unwrap();
+        assert!(!e.rolled_back);
+        let e = parse_update(false, b"", b"  boom  ").err().unwrap();
+        assert!(!e.rolled_back && e.message == "boom");
+        let e = parse_update(false, b"", b"").err().unwrap();
+        assert!(!e.rolled_back && e.message.is_empty());
     }
 }
