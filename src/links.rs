@@ -75,6 +75,9 @@ pub enum Target {
 /// What a link opens. File paths count only when they exist here; relative
 /// ones need the terminal's folder.
 pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
+    if link.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("file:")) {
+        return file_uri_path(link).and_then(|path| resolve(&path, cwd));
+    }
     let scheme = link.split_once(':').is_some_and(|(s, _)| {
         s.len() > 1 && s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
     });
@@ -116,6 +119,47 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
     Path::new(bare).exists().then(|| Target::File(PathBuf::from(bare)))
 }
 
+/// The local path a `file:` URI names: no host or `localhost`, percent-decoded.
+/// Any other host is another machine and is refused.
+fn file_uri_path(uri: &str) -> Option<String> {
+    let rest = uri.get(5..)?.strip_prefix("//")?;
+    let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
+        tracing::warn!("refusing file link to another machine {host:?}");
+        return None;
+    }
+    let path = path.split(['?', '#']).next()?;
+    let raw = path.as_bytes();
+    let mut bytes = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' {
+            let hex = raw.get(i + 1..i + 3)?;
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            bytes.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
+            i += 3;
+        } else {
+            bytes.push(raw[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8(bytes).ok()?;
+    if path.is_empty() || path.contains('\0') {
+        return None;
+    }
+    // `/C:/dir/file` is a drive path on Windows.
+    if cfg!(windows)
+        && let Some(drive) = path.strip_prefix('/')
+        && drive.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && drive.as_bytes().get(1) == Some(&b':')
+    {
+        return Some(drive.to_owned());
+    }
+    Some(path)
+}
+
 /// UNC, `//host`, device and NT object paths (`\??\UNC\host\…`) in any slash
 /// mix, which can name another machine. On Windows any prefix but a drive
 /// letter is refused too.
@@ -149,6 +193,56 @@ fn web_or_mail(url: &str) -> bool {
         scheme.eq_ignore_ascii_case("mailto")
             || ((scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) && rest.starts_with("//"))
     })
+}
+
+/// Extensions that open in HyperOx's editor (scripts too: they are read, never run).
+const TEXT: &[&str] = &[
+    "txt", "md", "markdown", "json", "jsonc", "toml", "yaml", "yml", "rs", "js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "go", "java", "kt", "c", "h", "cpp",
+    "hpp", "cs", "rb", "php", "sh", "bash", "zsh", "fish", "html", "htm", "css", "scss", "xml", "csv", "log", "ini", "cfg", "conf",
+];
+
+/// Executables, installers and shortcuts: shown in their folder, never opened.
+const PROGRAMS: &[&str] = &[
+    "exe", "bat", "cmd", "com", "ps1", "psm1", "vbs", "vbe", "wsf", "msi", "msp", "lnk", "scr", "reg", "app", "dmg", "pkg", "deb", "rpm", "appimage", "jar", "url",
+    "hta", "jse", "wsh", "wsc", "pif", "cpl", "msc", "inf", "scf", "application", "appx", "msix", "command", "run",
+];
+
+/// What a click on a file does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind {
+    /// Opens in HyperOx's editor.
+    Text,
+    /// Opens in the system's default app.
+    System,
+    /// Shown in its folder: folders, programs and files without a plain extension.
+    Reveal,
+}
+
+pub fn kind(path: &Path) -> Kind {
+    fn by_extension(path: &Path) -> Kind {
+        // An extension with anything but letters and digits (`a.txt:stream`) is not one.
+        let Some(ext) = path.extension().and_then(|e| e.to_str()).filter(|e| e.bytes().all(|b| b.is_ascii_alphanumeric())) else {
+            return Kind::Reveal;
+        };
+        let ext = ext.to_ascii_lowercase();
+        if PROGRAMS.contains(&ext.as_str()) {
+            Kind::Reveal
+        } else if TEXT.contains(&ext.as_str()) {
+            Kind::Text
+        } else {
+            Kind::System
+        }
+    }
+    if path.is_dir() {
+        return Kind::Reveal;
+    }
+    let kind = by_extension(path);
+    // A link named like a document can lead to a program.
+    match std::fs::canonicalize(path) {
+        Ok(real) if by_extension(&real) == Kind::Reveal => Kind::Reveal,
+        Ok(_) => kind,
+        Err(_) => Kind::Reveal,
+    }
 }
 
 /// How a target reaches the system.
@@ -209,12 +303,31 @@ fn opener(target: &Target) -> Option<Opener> {
 /// Hands a web or mail link to the system's default handler, or shows a file
 /// selected in its folder.
 pub fn open(target: &Target) {
-    let mut command = match opener(target) {
-        None => return,
-        Some(Opener::Command(command)) => command,
+    match opener(target) {
+        None => {}
+        Some(Opener::Command(command)) => spawn(command),
         #[cfg(windows)]
-        Some(Opener::Shell(url)) => return open_shell(&url),
-    };
+        Some(Opener::Shell(url)) => open_shell(std::ffi::OsStr::new(&url)),
+    }
+}
+
+/// Opens a file in the system's default app. Only for `Kind::System` files.
+pub fn open_default(path: &Path) {
+    if network(path) {
+        tracing::warn!("refusing network path link {path:?}");
+        return;
+    }
+    #[cfg(windows)]
+    open_shell(path.components().collect::<PathBuf>().as_os_str());
+    #[cfg(not(windows))]
+    {
+        let mut command = std::process::Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" });
+        command.arg(path);
+        spawn(command);
+    }
+}
+
+fn spawn(mut command: std::process::Command) {
     let spawned = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -227,16 +340,18 @@ pub fn open(target: &Target) {
     }
 }
 
-/// Opens a web or mail link (already checked by `web_or_mail`, so it has no
-/// NUL) with its registered handler, without a command line in between.
+/// Opens a web or mail link (already checked by `web_or_mail`) or a file
+/// (`Kind::System`) with its registered handler, without a command line in
+/// between. Neither has a NUL.
 #[cfg(windows)]
-fn open_shell(url: &str) {
+fn open_shell(target: &std::ffi::OsStr) {
+    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::{
         System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize},
         UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
     };
 
-    let wide: Vec<u16> = url.encode_utf16().chain([0]).collect();
+    let wide: Vec<u16> = target.encode_wide().chain([0]).collect();
     // ShellExecuteW can pump messages; never reenter GPUI while it handles a click.
     std::thread::spawn(move || {
         let initialized = unsafe { CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32) };

@@ -44,6 +44,8 @@ enum LinkTarget {
 
 pub enum TerminalEvent {
     Peek(String),
+    /// A text file clicked: HyperOx's editor shows it.
+    OpenFile(std::path::PathBuf),
     TitleChanged,
     /// The program ended.
     Ended,
@@ -2043,6 +2045,12 @@ impl Render for TerminalView {
                     && let Some((target, _)) = this.link_at(ev.position)
                 {
                     match target {
+                        // A file on another machine is not ours to open: it is shown in its folder as before.
+                        LinkTarget::External(links::Target::File(path)) if !this.address.contains('/') => match links::kind(&path) {
+                            links::Kind::Text => cx.emit(TerminalEvent::OpenFile(path)),
+                            links::Kind::System => links::open_default(&path),
+                            links::Kind::Reveal => links::open(&links::Target::File(path)),
+                        },
                         LinkTarget::External(target) => links::open(&target),
                         LinkTarget::Terminal(address) => cx.emit(TerminalEvent::Peek(address)),
                     }

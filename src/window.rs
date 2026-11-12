@@ -375,6 +375,8 @@ pub struct AppWindow {
     /// Mod copies by slot (block id, `<stack>#header`, or `overlay:<id>`).
     copies: HashMap<String, Copy>,
     overlays: Vec<Overlay>,
+    /// A text file clicked in a terminal, waiting for the files panel to show.
+    pending_open: Option<PathBuf>,
     folders: BTreeMap<String, Found>,
     /// Mods placed once; later the layout decides where (or whether) they show.
     seen: BTreeSet<String>,
@@ -496,6 +498,7 @@ impl AppWindow {
             terms: HashMap::new(),
             copies: HashMap::new(),
             overlays: Vec::new(),
+            pending_open: None,
             folders: mods::scan().into_iter().map(|f| (f.id.clone(), f)).collect(),
             seen,
             bounds: Default::default(),
@@ -1403,6 +1406,7 @@ impl AppWindow {
             let (block, addr) = (id.clone(), address.clone());
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
+                TerminalEvent::OpenFile(path) => this.open_in_files(path.clone(), window, cx),
                 TerminalEvent::TitleChanged => this.publish(cx),
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
@@ -1440,6 +1444,9 @@ impl AppWindow {
             }
         }
         self.publish_shown_copies();
+        if let Some(path) = self.pending_open.take() {
+            self.open_in_files_now(&path);
+        }
 
         // Keyboard to the focused pane when it changes (never steal it from an open dialog).
         let model_pane = self.model.focused_pane();
@@ -3689,6 +3696,28 @@ impl AppWindow {
             self.publish_shown_copies();
         }
         cx.notify();
+    }
+
+    /// Opens a clicked text file in the files panel, showing the panel first. The file is
+    /// shown in its folder only when the panel can't be shown or its mod doesn't listen.
+    fn open_in_files(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if mods::send_command("files", &format!("open:{}", path.display())) {
+            return;
+        }
+        let mut ok = |this: &mut Self, name: &str, args: Value| this.run_as(name, args, true, window, cx).get("error").is_none();
+        if ok(self, "layout.select", json!({ "stack": "panel-body", "child": "files" })) && ok(self, "layout.show", json!({ "id": "panel" })) {
+            // The mod's copy starts, or shows, on the next `sync`, which delivers it.
+            self.pending_open = Some(path);
+            cx.notify();
+        } else {
+            crate::links::open(&crate::links::Target::File(path));
+        }
+    }
+
+    fn open_in_files_now(&self, path: &std::path::Path) {
+        if !mods::send_command("files", &format!("open:{}", path.display())) {
+            crate::links::open(&crate::links::Target::File(path.to_path_buf()));
+        }
     }
 
     fn peek_terminal(&mut self, address: &str, window: &mut Window, cx: &mut Context<Self>) {
