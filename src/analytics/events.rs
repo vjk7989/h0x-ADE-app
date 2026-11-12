@@ -132,6 +132,49 @@ pub fn found_via(answer: &str) {
     }
 }
 
+/// An update check for `part` (`app`, `core` or `runtime`) finished.
+pub fn update_checked(part: &str) {
+    if word(part).is_some() && allow(&format!("update_checked:{part}"), Duration::from_secs(600)) {
+        event("update_checked", json!({ "part": part }));
+    }
+}
+
+/// A newer `version` of `part` was downloaded and is waiting.
+pub fn update_downloaded(part: &str, version: &str) {
+    if let (Some(part), Some(version)) = (word(part), word(version))
+        && allow(&format!("update_downloaded:{part}"), Duration::from_secs(60))
+    {
+        event(
+            "update_downloaded",
+            json!({ "part": part, "version": version }),
+        );
+    }
+}
+
+/// `part` went from `from` to `to`, `seconds` after the update started.
+pub fn update_applied(part: &str, from: &str, to: &str, seconds: u64) {
+    if let (Some(part), Some(from), Some(to)) = (word(part), word(from), word(to))
+        && allow(&format!("update_applied:{part}"), Duration::from_secs(60))
+    {
+        event(
+            "update_applied",
+            json!({ "part": part, "from": from, "to": to, "seconds": seconds }),
+        );
+    }
+}
+
+/// An update of `part` to `to` failed and `from` was put back.
+pub fn update_rolled_back(part: &str, from: &str, to: &str) {
+    if let (Some(part), Some(from), Some(to)) = (word(part), word(from), word(to))
+        && allow(&format!("update_rolled_back:{part}"), Duration::from_secs(60))
+    {
+        event(
+            "update_rolled_back",
+            json!({ "part": part, "from": from, "to": to }),
+        );
+    }
+}
+
 /// Once an hour, from the window's tick: memory in use (Linux only; the others have no cheap
 /// standard-library way).
 pub fn hourly() {
@@ -389,6 +432,8 @@ mod tests {
         assert_eq!(word(""), None);
         assert_eq!(word("C:\\Users\\me"), None);
         assert_eq!(word("two words"), None);
+        assert_eq!(word("0.1.25-rc.1"), Some("0.1.25-rc.1"));
+        assert_eq!(word("h0x-core 0.1.2"), None);
         assert_eq!(shell_name("C:\\Windows\\System32\\PWSH.EXE"), Some("pwsh"));
         assert_eq!(shell_name("/usr/bin/zsh"), Some("zsh"));
         assert_eq!(shell_name("htop"), None);
@@ -403,5 +448,26 @@ mod tests {
             ),
             ("S", "M", "L", "XL")
         );
+    }
+
+    #[test]
+    fn update_events_are_throttled_per_part_and_odd_text_uses_no_slot() {
+        update_checked("app");
+        assert!(
+            !allow("update_checked:app", Duration::from_secs(600)),
+            "a second app check within ten minutes is held back"
+        );
+        update_rolled_back("core", "0.1.1", "0.1.2");
+        assert!(!allow("update_rolled_back:core", Duration::from_secs(60)));
+        // The core's fallback target text is not a plain word: nothing is sent, no slot used.
+        update_applied("runtime", "0.9.5", "the latest", 3);
+        assert!(allow("update_applied:runtime", Duration::from_secs(60)));
+        update_downloaded("C:\\Users\\me", "0.1.2");
+        assert!(allow(
+            "update_downloaded:C:\\Users\\me",
+            Duration::from_secs(60)
+        ));
+        update_downloaded("", "");
+        assert!(allow("update_downloaded:", Duration::from_secs(60)));
     }
 }

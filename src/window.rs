@@ -2120,6 +2120,7 @@ impl AppWindow {
         }
         self.written_seen.retain(|a, _| self.live.contains_key(a));
         crate::events::agents(&running, !self.listed_once);
+        crate::update::note_agents(self.live.values().any(|rec| rec["status"] == "working"));
         crate::events::hourly();
         if crate::events::daily_due() {
             crate::events::daily_device(self.workspace_shape(window));
@@ -3931,6 +3932,10 @@ impl AppWindow {
 
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.flush_documents(false, window, cx);
+        for notice in crate::update::take_notices() {
+            let spec = json!({"kind":"toast", "notification":{"title":"Updates","body":notice.text,"level":notice.level}});
+            self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+        }
         let versions = Self::update_versions();
         if versions != self.update_versions {
             self.update_ready = Self::update_label(&versions);
@@ -3964,6 +3969,9 @@ impl AppWindow {
             self.close_overlay(&id, window, cx);
         }
         let visible = window.is_visible();
+        if visible {
+            crate::update::started_ok();
+        }
         let visibility_changed = visible != self.window_visible;
         self.window_visible = visible;
         let active = window.is_window_active();
