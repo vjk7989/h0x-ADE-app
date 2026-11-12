@@ -62,16 +62,19 @@ const indent = (ref, parent) => on(ref, (a, k, tasks) => {
   const [t] = a.splice(k, 1);
   tasks[p].steps.push({ title: t.title, done: t.done, extra: t.extra });
 });
-// Drag and drop. A task goes before/after another task (`to` = { i, title, after }); no-op when no open task lies between.
+// Drag and drop. A task goes before/after another task (`to` = { i, title, after }); no-op (false) when no open task lies between. Returns its new index.
 const placeTask = (ref, to) => on(ref, (a, k) => {
   const p = findTask({ tasks: a }, to.i, to.title);
   if (p < 0 || p === k) return false;
   const at = to.after ? p + 1 : p;
   if (a.slice(Math.min(k + 1, at), Math.max(k, at)).every((t) => t.done)) return false;
   const [t] = a.splice(k, 1);
-  a.splice(at > k ? at - 1 : at, 0, t);
+  const dest = at > k ? at - 1 : at;
+  a.splice(dest, 0, t);
+  return dest;
 });
-// A step goes into the steps of a task before the step titled `to.beforeTitle` (the end when null); it keeps its done state.
+// A step goes into the steps of a task before the step titled `to.beforeTitle` (the end when null); it keeps its done state. Returns { i, j }, its new place.
+// The task a step left, if it still has steps, is done exactly when every step is (the tick rule); the task it joined keeps its state.
 const placeStep = (ref, to) => on(ref, (steps, k, tasks, i) => {
   const p = findTask({ tasks }, to.i, to.title);
   if (p < 0) return false;
@@ -79,7 +82,10 @@ const placeStep = (ref, to) => on(ref, (steps, k, tasks, i) => {
   const at = to.beforeTitle == null ? dest.length : findStep(tasks[p], to.j, to.beforeTitle);
   if (at < 0 || (p === i && (at === k || at === k + 1))) return false;
   const [s] = steps.splice(k, 1);
-  dest.splice(p === i && at > k ? at - 1 : at, 0, s);
+  const j = p === i && at > k ? at - 1 : at;
+  dest.splice(j, 0, s);
+  if (steps.length) tasks[i].done = steps.every((x) => x.done);
+  return { i: p, j };
 });
 const outdent = (ref) => on(ref, (steps, j, tasks, i) => {
   const [s] = steps.splice(j, 1);
@@ -541,6 +547,7 @@ export default class Todo extends View {
   dragMove(r, e, cx) {
     const p = this.press;
     if (!p) return;
+    cx.stop_propagation();
     let changed = false;
     if (!this.drag) {
       if (Math.hypot(e.position.x - p.x, e.position.y - p.y) < DRAG_PX) return;
@@ -582,12 +589,14 @@ export default class Todo extends View {
     this.press = null; this.drag = null;
     if (d?.slot && !this.readonly) {
       const { src, slot } = d;
-      if (this.commit(src.j == null ? placeTask(src, slot) : placeStep(src, slot), cx)) {
-        const tasks = this.list.tasks, i = tasks.findIndex((t) => t.title === (src.j == null ? src.title : slot.title));
-        if (src.j == null) this.sel = { k: "task", i };
+      // The mutation reports where the item landed, so equal titles cannot send the selection to another row.
+      const place = src.j == null ? placeTask(src, slot) : placeStep(src, slot);
+      let to = null;
+      if (this.commit((list) => { const r = place(list); if (r !== false) to = r; return r; }, cx) && to !== null) {
+        if (src.j == null) this.sel = { k: "task", i: to };
         else {
           this.open.add(slot.title);
-          this.sel = { k: "step", i, j: tasks[i].steps.findIndex((s) => s.title === src.stepTitle) };
+          this.sel = { k: "step", i: to.i, j: to.j };
         }
       }
     }
@@ -702,6 +711,7 @@ export default class Todo extends View {
       .when(!this.readonly && this.ready, (el) => el.child(this.addBar(t)))
       .child(v_flex().id("todo-list").flex_1().min_h(0).overflow_y_scrollbar().px(10).py(6).gap(4)
         .on_hover((h, cx) => { if (!h && this.drag?.slot) { this.drag.slot = null; cx.notify(); } })
+        .on_mouse_move((_e, cx) => { if (this.drag?.slot) { this.drag.slot = null; cx.notify(); } })
         .children(rows.map((r) => this.row(r, t)))
         .when(this.ready && !this.readonly && !this.list.tasks.length, (el) => el.child(this.emptyNote("square-pen", "No tasks yet. Add one above.", t)))
         .when(this.ready && this.list.tasks.length > 0 && openCount(this.list) === 0, (el) => el.child(this.emptyNote("circle-check", "All done for today", t))))
