@@ -11,7 +11,7 @@ const HAND = "Patrick Hand";
 
 const ACTIONS = ["new", "rename", "delete"];
 const DEFAULT = { name: "Tasks", slug: "tasks" };
-const UNDO_MS = 8000, CONFETTI_MS = 1500, CONFETTI_PIECES = 36;
+const UNDO_MS = 6000, CONFETTI_MS = 1500, CONFETTI_PIECES = 36;
 const READ_FAIL = "This list can't be read (over 1 MB or unreadable). It is left untouched and read-only.";
 const FULL = "This list is full (64 KB, about 2,900 tasks). Start a new list for more tasks.";
 // The panel never writes a list past 64 KB (about 2,900 tasks): it draws every row, so longer lists open slowly. The host readTextFile refuses
@@ -500,7 +500,7 @@ export default class Todo extends View {
       list.tasks[k].steps.splice(Math.min(ref.j, list.tasks[k].steps.length), 0, copy);
     };
     this.undoing = { slug, restore };
-    notify({ title: ref.j == null ? "Task deleted" : "Step deleted", body: copy.title, timeout: UNDO_MS, action: { name: "todo.undo" } });
+    notify({ title: ref.j == null ? "Task deleted" : "Step deleted", body: copy.title, timeout: UNDO_MS, actions: [{ label: "Undo", name: "todo.undo" }, { label: "OK" }] });
   }
 
   undo(cx) {
