@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.1.22] - 2026-11-12
+
+A sturdier to-do list. Bundles h0x-core 0.1.15.
+
+### Fixed
+
+- A to-do save that fails retries by itself (after 5 s, growing to once a minute) instead of waiting for your next change.
+- A save interrupted halfway recovers by itself instead of blocking further saves.
+- Notes or front matter above a list's `# Title` stay above it, and a `# comment` inside front matter is no longer taken as the list name.
+- The Congratulations pop-up now follows what was actually saved, also when another program edits the list at the same time.
+- Big lists save faster.
+
 ## [0.1.21] - 2026-11-12
 
 New themes, a nicer to-do list and Telegram you can navigate. Bundles h0x-core 0.1.15.
