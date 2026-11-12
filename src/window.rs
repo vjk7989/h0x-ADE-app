@@ -5968,8 +5968,10 @@ export default class Files extends View {
         let got = || crate::mods::shared("files-test.got").unwrap_or(json!([]));
         assert!(!crate::mods::send_command("files", "probe"), "hidden, the files mod gets nothing");
 
-        // A Windows path with spaces and mixed slashes travels as written.
-        let first = std::path::PathBuf::from(r"C:\My Files/notes a.txt");
+        // A path with spaces travels as written. It sits in the app folder: the panel reads
+        // only inside the folders mods may use.
+        let first = crate::mods::app_dir().join("My Files").join("notes a.txt");
+        let opened = |p: &std::path::Path| json!(format!("open:{}", p.display()));
         view.update_in(cx, |this, window, cx| this.open_in_files(first.clone(), window, cx));
         view.update(cx, |this, _| {
             assert!(!this.chrome.find("panel").unwrap().hidden, "the panel is shown");
@@ -5977,15 +5979,15 @@ export default class Files extends View {
             assert_eq!(tab.as_deref(), Some("files"), "the files tab is selected");
         });
         cx.run_until_parked();
-        assert_eq!(got(), json!([r"open:C:\My Files/notes a.txt"]), "delivered once the panel shows, without another event");
+        assert_eq!(got(), json!([opened(&first)]), "delivered once the panel shows, without another event");
         assert_eq!(view.update(cx, |this, _| this.pending_open.clone()), None);
 
         // Shown now: the next click goes straight to the mod.
-        let second = std::path::PathBuf::from("/home/me/a b.md");
+        let second = crate::mods::app_dir().join("a b.md");
         view.update_in(cx, |this, window, cx| this.open_in_files(second.clone(), window, cx));
         assert_eq!(view.update(cx, |this, _| this.pending_open.clone()), None, "nothing waits for a shown panel");
         cx.run_until_parked();
-        assert_eq!(got(), json!([r"open:C:\My Files/notes a.txt", "open:/home/me/a b.md"]));
+        assert_eq!(got(), json!([opened(&first), opened(&second)]));
     }
 
     include!("window/pane_size_tests.rs");
