@@ -7,6 +7,9 @@
 //! reports always go. Every event is scrubbed of paths and long text first.
 
 use serde_json::{Value, json};
+mod crash;
+pub use crash::{device_details, install_crash_hook, report};
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

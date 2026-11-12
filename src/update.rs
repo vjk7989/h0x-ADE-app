@@ -398,6 +398,7 @@ pub fn start() {
                     }
                     Err(e) => {
                         tracing::warn!("update check: {e}");
+                        crate::analytics::report("update_failed", "check", &e);
                         wait = RETRY;
                         succeeded = false;
                     }
@@ -405,6 +406,7 @@ pub fn start() {
             }
             if core && let Err(e) = check_core() {
                 tracing::warn!("core update check: {e}");
+                crate::analytics::report("core_update_failed", "check", &e);
                 wait = RETRY;
                 succeeded = false;
             }
@@ -474,6 +476,7 @@ pub fn update_core() {
                 c.ready = None;
             }
             Err(e) => {
+                crate::analytics::report("core_update_failed", "update", &e);
                 c.error = Some(e);
             }
         }
@@ -721,12 +724,15 @@ fn swap(root: &Path) -> bool {
     let _ = std::fs::remove_dir_all(&old);
     if let Err(e) = std::fs::rename(root, &old) {
         tracing::warn!("update: cannot move {} aside: {e}", root.display());
+        crate::analytics::report("update_failed", "swap", &format!("cannot move the old version aside: {e}"));
         return false;
     }
     if let Err(e) = std::fs::rename(&staged, root) {
         tracing::warn!("update: cannot put the new version in place: {e}");
+        crate::analytics::report("update_failed", "swap", &format!("cannot put the new version in place: {e}"));
         if let Err(rollback) = std::fs::rename(&old, root) {
             tracing::error!("update: cannot restore the previous version: {rollback}");
+            crate::analytics::report("update_failed", "rollback", &rollback.to_string());
         }
         return false;
     }
@@ -855,6 +861,7 @@ pub fn after_update() {
             }
             Err(e) => {
                 tracing::warn!("h0x-core update: {e}");
+                crate::analytics::report("core_update_failed", "after_update", &e);
                 core.error = Some(e);
             }
         }

@@ -1,6 +1,7 @@
 // Windows: a window app, no console of its own (see `attach_console`).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod agent_usage;
 mod analytics;
 mod bench;
 mod commands;
@@ -81,6 +82,7 @@ fn attach_console() -> bool {
 }
 
 fn main() {
+    analytics::install_crash_hook();
     let args: Vec<String> = std::env::args().collect();
     #[cfg(windows)]
     if args.len() > 1 {
