@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.24] - 2026-11-12
+
+Read long to-do tasks in full. Bundles h0x-core 0.1.15.
+
+### Added
+
+- Click a task or sub-task in the to-do list to see its whole text over several lines; click it again to go back to one line. Double-click still edits it.
+
 ## [0.1.23] - 2026-11-12
 
 A sharper logo and image paste on Windows. Bundles h0x-core 0.1.15.
