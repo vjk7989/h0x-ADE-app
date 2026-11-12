@@ -3253,6 +3253,7 @@ export default class Scenario extends Real {
       for (let c = command(); c !== null; c = command()) {
         const at = c.indexOf(' '), verb = at < 0 ? c : c.slice(0, at), arg = c.slice(at + 1);
         if (verb === 'open') this.show(arg, cx);
+        else if (verb === 'openfile') this.openFile(arg, cx);
         else if (verb === 'back') this.show(null, cx);
         else if (verb === 'keep') this.save(cx, true);
         else if (verb === 'reload') this.reload(cx);
@@ -3287,7 +3288,9 @@ fn files_module(values: BTreeMap<String, Value>, disk: Rc<RefCell<FilesDisk>>) -
     for (name, value) in values {
         module = module.function(name, move |_| Ok(to_host(&value)));
     }
-    module = module.async_function("watchFolder", |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
+    for name in ["nextCommand", "watchFolder"] {
+        module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
+    }
     module = module.async_function("exec", |_| Ok(std::future::ready(Ok(to_host(&json!({"code":0,"stdout":"","stderr":""}))))));
     let read = disk.clone();
     module = module.async_function("readTextFile", move |a| {
@@ -3868,6 +3871,82 @@ fn files_panel_keeps_windows_paths_with_spaces_unchanged(cx: &mut TestAppContext
         vec![vec!["send".to_string(), "idle1".into(), files_note("notes file.txt"), "--if".into(), "idle".into()]],
         "the path travels inside one argv element"
     );
+}
+
+// A terminal link click opens a file of this machine by its full path: inside the listed folder
+// by its relative name, outside it (or a folder that only shares the prefix) by the full path.
+#[gpui::test]
+fn files_panel_opens_a_clicked_local_file_inside_and_outside_its_folder(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (notes, other, sibling) = ("/fixture/project/src/notes.txt", "/elsewhere/a b.md", "/fixture/project-old/a.txt");
+    let disk = files_disk(&[(notes, "mine\n"), (other, "other\n"), (sibling, "old\n")]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(json!([])), &disk);
+    for (clicked, file, value) in [(notes, "src/notes.txt", "mine\n"), (other, other, "other\n"), (sibling, sibling, "old\n")] {
+        files_step(&mut visual, &disk, &format!("openfile {clicked}"));
+        let state = files_state(&mut visual, &disk);
+        assert_eq!(
+            (state["file"].clone(), state["value"].clone(), state["editable"].clone(), state["hint"].clone()),
+            (json!(file), json!(value), json!(true), Value::Null),
+            "{clicked}: {state}"
+        );
+        assert_eq!(disk.borrow().reads.last(), Some(&json!([clicked, {"on":null}])), "{clicked}");
+    }
+}
+
+// The panel lists another machine, but the click was in a terminal of this one: the file is
+// read here (no `on`), whole path kept, and it is editable rather than a remote preview.
+#[gpui::test]
+fn files_panel_opens_a_clicked_local_file_here_while_it_lists_a_remote_machine(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let notes = "/fixture/project/notes.txt";
+    let disk = files_disk(&[(notes, "local\n")]);
+    let mut values = files_values(json!([]));
+    values.get_mut("spaces").unwrap()[0]["machine"] = json!("remote");
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, values, &disk);
+    files_step(&mut visual, &disk, &format!("openfile {notes}"));
+    let state = files_state(&mut visual, &disk);
+    assert_eq!(
+        (state["file"].clone(), state["value"].clone(), state["editable"].clone(), state["hint"].clone()),
+        (json!(notes), json!("local\n"), json!(true), Value::Null),
+        "{state}"
+    );
+    assert_eq!(disk.borrow().reads.last(), Some(&json!([notes, {"on":null}])));
+    // A plain open from the list still reads the remote machine.
+    files_step(&mut visual, &disk, "open notes.txt");
+    assert_eq!(disk.borrow().reads.last(), Some(&json!([notes, {"on":"remote"}])));
+}
+
+// Windows: backslashes, mixed slashes, spaces and a lowercase drive. Inside the folder the
+// relative name joins the folder as listed; outside it the path is read with forward slashes.
+#[gpui::test]
+fn files_panel_opens_clicked_windows_paths_with_spaces_and_mixed_slashes(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let folder = r"C:\Users\Me\My Project";
+    let inside = format!(r"{folder}/sub/notes file.txt");
+    let disk = files_disk(&[(inside.as_str(), "in\r\n"), ("D:/Other Dir/a.txt", "out\n"), ("c:/x/b.md", "low\n")]);
+    let mut values = files_values(json!([]));
+    values.insert(
+        "window".into(),
+        json!({"platform":"windows","titlebar":"none","buttons":true,"maximized":false,"fullscreen":false,"active":true}),
+    );
+    values.get_mut("spaces").unwrap()[0]["folder"] = json!(folder);
+    values.get_mut("panes").unwrap()[0]["cwd"] = json!(folder);
+    values.get_mut("focused").unwrap()["cwd"] = json!(folder);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, values, &disk);
+    for (clicked, file, read) in [
+        (r"C:\Users\Me\My Project\sub\notes file.txt", "sub/notes file.txt", inside.as_str()),
+        (r"C:\Users\Me\My Project/sub\notes file.txt", "sub/notes file.txt", inside.as_str()),
+        (r"D:\Other Dir\a.txt", "D:/Other Dir/a.txt", "D:/Other Dir/a.txt"),
+        (r"c:\x\b.md", "c:/x/b.md", "c:/x/b.md"),
+    ] {
+        files_step(&mut visual, &disk, &format!("openfile {clicked}"));
+        let state = files_state(&mut visual, &disk);
+        assert_eq!((state["file"].clone(), state["editable"].clone()), (json!(file), json!(true)), "{clicked}: {state}");
+        assert_eq!(disk.borrow().reads.last(), Some(&json!([read, {"on":null}])), "{clicked}");
+    }
 }
 
 #[gpui::test]
