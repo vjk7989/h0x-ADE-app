@@ -449,4 +449,25 @@ mod tests {
             ("S", "M", "L", "XL")
         );
     }
+
+    #[test]
+    fn update_events_are_throttled_per_part_and_odd_text_uses_no_slot() {
+        update_checked("app");
+        assert!(
+            !allow("update_checked:app", Duration::from_secs(600)),
+            "a second app check within ten minutes is held back"
+        );
+        update_rolled_back("core", "0.1.1", "0.1.2");
+        assert!(!allow("update_rolled_back:core", Duration::from_secs(60)));
+        // The core's fallback target text is not a plain word: nothing is sent, no slot used.
+        update_applied("runtime", "0.9.5", "the latest", 3);
+        assert!(allow("update_applied:runtime", Duration::from_secs(60)));
+        update_downloaded("C:\\Users\\me", "0.1.2");
+        assert!(allow(
+            "update_downloaded:C:\\Users\\me",
+            Duration::from_secs(60)
+        ));
+        update_downloaded("", "");
+        assert!(allow("update_downloaded:", Duration::from_secs(60)));
+    }
 }

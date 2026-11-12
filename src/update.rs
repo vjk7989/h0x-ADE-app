@@ -195,7 +195,7 @@ const PUBLIC_KEY: &str = "RWTEdqtOBn6VKQ/x9x3qWk/gIWUb/I1OlZXsTlHyrkp9Yq30qBki+t
 /// test builds) is not signed.
 fn signed(url: &str, bytes: &[u8]) -> Result<(), String> {
     let overrides = [env_url("H0X_ADE_RELEASES_URL"), env_url("H0X_CORE_RELEASES_URL")];
-    if loopback_stub(url) || under_override(url, overrides) {
+    if loopback_stub(url) || under_override(url, overrides) || under_override(url, [env_url("H0X_RUNTIME_RELEASES_URL"), None]) {
         return Ok(());
     }
     // A signature that does not download is refused below as missing.
@@ -243,7 +243,7 @@ fn core_sources() -> Vec<String> {
 }
 
 fn runtime_sources() -> Vec<String> {
-    sources(None, "https://github.com/buckleson/h0x-ADE-Runtime-Releases/releases", "https://github.com/vjk7989/h0x-ADE-Runtime/releases")
+    sources(env_url("H0X_RUNTIME_RELEASES_URL"), "https://github.com/buckleson/h0x-ADE-Runtime-Releases/releases", "https://github.com/vjk7989/h0x-ADE-Runtime/releases")
 }
 
 /// `f` on each source until one works (a fetch or signature failure moves on); the first
@@ -490,12 +490,8 @@ pub fn start() {
                         succeeded = false;
                     }
                 }
-                if let Err(e) = check_runtime() {
-                    tracing::warn!("runtime update check: {e}");
-                    crate::analytics::report("runtime_update_failed", "check", &e);
-                    wait = RETRY;
-                    succeeded = false;
-                }
+                // Its problems are reported on their own; they never move the app and core status.
+                let _ = check_runtime();
             }
             let now = unix_now();
             *CHECKED.lock().unwrap() = checked_at(succeeded, now);
@@ -562,12 +558,14 @@ fn latest_core() -> Result<CoreRelease, String> {
 /// The runtime (`h0x` on PATH) and its newer release, waiting for the idle gate.
 struct RuntimeInfo {
     ready: Option<String>,
+    /// The `h0x` that was checked: the one an update runs.
+    bin: Option<PathBuf>,
     /// A version whose update failed: not tried again until a newer one is out.
     failed: Option<String>,
     updating: bool,
 }
 
-static RUNTIME: Mutex<RuntimeInfo> = Mutex::new(RuntimeInfo { ready: None, failed: None, updating: false });
+static RUNTIME: Mutex<RuntimeInfo> = Mutex::new(RuntimeInfo { ready: None, bin: None, failed: None, updating: false });
 
 /// What the runtime's own `h0x update --yes --json` prints, and how to find it. Not installed,
 /// or owned by a package manager: left alone.
@@ -598,11 +596,17 @@ mod runtime {
         }
     }
 
-    /// The last non-empty line of stdout, as JSON.
+    /// The last stdout line that is a JSON object (lines after it, such as warnings, are skipped).
     pub fn parse(stdout: &[u8]) -> Result<Update, String> {
         let text = String::from_utf8_lossy(stdout);
-        let line = text.lines().rev().find(|l| !l.trim().is_empty()).ok_or("h0x update printed nothing")?;
-        serde_json::from_str(line).map_err(|e| format!("h0x update: unreadable reply: {e}"))
+        if text.trim().is_empty() {
+            return Err("h0x update printed nothing".into());
+        }
+        text.lines()
+            .rev()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok().filter(serde_json::Value::is_object))
+            .find_map(|value| serde_json::from_value(value).ok())
+            .ok_or_else(|| "h0x update: unreadable reply".to_owned())
     }
 
     pub fn run(bin: &Path) -> Result<Update, String> {
@@ -650,35 +654,71 @@ fn check_runtime() -> Result<(), String> {
     check_runtime_of(runtime::find())
 }
 
+/// Problems already reported in this run (runtime path and error text): each is reported once,
+/// not at every hourly check.
+static RUNTIME_REPORTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn first_report(key: String) -> bool {
+    let mut seen = RUNTIME_REPORTED.lock().unwrap();
+    if seen.contains(&key) {
+        return false;
+    }
+    if seen.len() >= 20 {
+        seen.clear();
+    }
+    seen.push(key);
+    true
+}
+
+/// Never an error for the caller: a runtime problem is reported (once) and logged, and leaves
+/// the app and core check status alone.
 fn check_runtime_of(bin: Option<PathBuf>) -> Result<(), String> {
     let Some(bin) = bin.filter(|bin| !runtime::managed(bin)) else {
-        RUNTIME.lock().unwrap().ready = None;
+        let mut r = RUNTIME.lock().unwrap();
+        r.ready = None;
+        r.bin = None;
         return Ok(());
     };
-    let have = runtime::version(&bin).ok_or("h0x --version doesn't run")?;
-    let latest = first_ok(&runtime_sources(), |releases| runtime::latest_version(&curl_text(&format!("{releases}/latest/download/latest.json"))?))?;
-    crate::events::update_checked("runtime");
-    let mut r = RUNTIME.lock().unwrap();
-    r.ready = (newer(&latest, &have) && r.failed.as_deref() != Some(latest.as_str())).then_some(latest);
+    match latest_runtime_for(&bin) {
+        Ok(latest) => {
+            crate::events::update_checked("runtime");
+            let mut r = RUNTIME.lock().unwrap();
+            r.ready = latest.filter(|v| r.failed.as_deref() != Some(v.as_str()));
+            r.bin = r.ready.is_some().then_some(bin);
+        }
+        Err(e) => {
+            tracing::warn!("runtime update check: {e}");
+            if first_report(format!("{}: {e}", bin.display())) {
+                crate::analytics::report("runtime_update_failed", "check", &e);
+            }
+        }
+    }
     Ok(())
+}
+
+/// The release version of the runtime at `bin`, when it is newer than the one installed.
+fn latest_runtime_for(bin: &Path) -> Result<Option<String>, String> {
+    let have = runtime::version(bin).ok_or("h0x --version doesn't run")?;
+    let latest = first_ok(&runtime_sources(), |releases| runtime::latest_version(&curl_text(&format!("{releases}/latest/download/latest.json"))?))?;
+    Ok(newer(&latest, &have).then_some(latest))
 }
 
 /// `h0x update --yes --json`, in the background, for a newer runtime found by the check.
 fn update_runtime() {
-    let version = {
+    let (version, bin) = {
         let mut r = RUNTIME.lock().unwrap();
         if r.updating {
             return;
         }
-        let Some(version) = r.ready.take() else { return };
+        let (Some(version), Some(bin)) = (r.ready.take(), r.bin.take()) else { return };
+        // A package manager may have taken it over since the check.
+        if runtime::managed(&bin) {
+            return;
+        }
         r.updating = true;
-        version
+        (version, bin)
     };
     std::thread::spawn(move || {
-        let Some(bin) = runtime::find() else {
-            RUNTIME.lock().unwrap().updating = false;
-            return;
-        };
         let from = runtime::version(&bin).unwrap_or_default();
         let started = unix_now();
         let result = runtime::run(&bin);
@@ -693,7 +733,7 @@ fn update_runtime() {
                 r.failed = Some(version.clone());
                 crate::analytics::report("runtime_update_failed", if rolled_back { "rollback" } else { "update" }, &error);
                 if rolled_back {
-                    crate::events::update_rolled_back("runtime", &from, &version);
+                    crate::events::update_rolled_back("runtime", known(Some(from.as_str())), &version);
                     notify("error", rolled_back_text("Runtime", &version, &from));
                 } else {
                     notify("error", "Runtime update failed. A report was sent.".into());
@@ -701,7 +741,7 @@ fn update_runtime() {
             }
             (None, Ok(update)) if update.updated => {
                 let to = update.to.unwrap_or(version);
-                crate::events::update_applied("runtime", &from, &to, unix_now().saturating_sub(started));
+                crate::events::update_applied("runtime", known(Some(from.as_str())), &to, unix_now().saturating_sub(started));
                 notify("success", format!("Runtime updated to {to}"));
             }
             // Deferred, or nothing to do: the next check looks again.
@@ -730,25 +770,28 @@ pub fn update_core() {
     std::thread::spawn(|| {
         let (from, target) = {
             let c = CORE.lock().unwrap();
-            (c.version.clone().unwrap_or_default(), c.ready.clone().unwrap_or_else(|| "the latest".into()))
+            (c.version.clone(), c.ready.clone())
         };
         let started = unix_now();
         let result = crate::core_bin::update_detailed(None);
         let mut c = CORE.lock().unwrap();
         c.updating = false;
         match result {
-            Ok(now) => {
-                let now = now.trim_start_matches("h0x-core ").to_owned();
-                crate::events::update_applied("core", &from, &now, unix_now().saturating_sub(started));
-                notify("success", format!("Core updated to {now}"));
-                c.version = Some(now);
+            Ok(_) => {
+                // The core that runs now, else the release it was offered; else unknown.
+                let now = crate::core_bin::version(&crate::core_bin::path()).map(|v| v.trim_start_matches("h0x-core ").to_owned()).or(target);
+                crate::events::update_applied("core", known(from.as_deref()), known(now.as_deref()), unix_now().saturating_sub(started));
+                notify("success", now.as_deref().map_or_else(|| "Core updated".to_owned(), |v| format!("Core updated to {v}")));
+                if now.is_some() {
+                    c.version = now;
+                }
                 c.ready = None;
             }
             Err(e) => {
                 if e.rolled_back {
                     crate::analytics::report("core_update_failed", "rollback", &e.message);
-                    crate::events::update_rolled_back("core", &from, &target);
-                    notify("error", rolled_back_text("Core", &target, &from));
+                    crate::events::update_rolled_back("core", known(from.as_deref()), known(target.as_deref()));
+                    notify("error", rolled_back_text("Core", target.as_deref().unwrap_or(""), from.as_deref().unwrap_or("")));
                 } else {
                     crate::analytics::report("core_update_failed", "update", &e.message);
                 }
@@ -758,8 +801,16 @@ pub fn update_core() {
     });
 }
 
+/// An empty `to` or `from` (not known) is left out of the text.
 fn rolled_back_text(part: &str, to: &str, from: &str) -> String {
-    format!("{part} update to {to} failed, HyperOx went back to {from}. A report was sent.")
+    let to = if to.is_empty() { String::new() } else { format!(" to {to}") };
+    let from = if from.is_empty() { String::new() } else { format!(" to {from}") };
+    format!("{part} update{to} failed, HyperOx went back{from}. A report was sent.")
+}
+
+/// A version for an event: `unknown` when it isn't.
+fn known(version: Option<&str>) -> &str {
+    version.filter(|v| !v.is_empty()).unwrap_or("unknown")
 }
 
 /// Downloads the latest release if it's newer. Ok(Some): a version is ready.
@@ -1556,6 +1607,11 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
                 vec!["https://github.com/buckleson/h0x-ADE-Releases/releases".to_owned(), "https://github.com/vjk7989/h0x-ADE-app/releases".to_owned()],
             ),
             (
+                "H0X_RUNTIME_RELEASES_URL",
+                runtime_sources as fn() -> Vec<String>,
+                vec!["https://github.com/buckleson/h0x-ADE-Runtime-Releases/releases".to_owned(), "https://github.com/vjk7989/h0x-ADE-Runtime/releases".to_owned()],
+            ),
+            (
                 "H0X_CORE_RELEASES_URL",
                 core_sources as fn() -> Vec<String>,
                 vec!["https://github.com/buckleson/h0x-ADE-Core-Releases/releases".to_owned(), "https://github.com/vjk7989/h0x-ADE-core/releases".to_owned()],
@@ -1838,6 +1894,16 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         let got = take_notices();
         assert_eq!((got.len(), got[0].level, got[0].text.as_str()), (1, "success", "Core updated to 0.1.2"));
         assert!(take_notices().is_empty());
+        // Core and runtime both went in during the same quiet spell: two toasts, in order.
+        // (Kept in this test: a second test draining the same queue in parallel would race.)
+        notify("success", "Core updated to 0.1.3".into());
+        notify("error", rolled_back_text("Runtime", "0.9.7", "0.9.6"));
+        let got: Vec<_> = take_notices().into_iter().map(|n| (n.level, n.text)).collect();
+        assert_eq!(
+            got,
+            [("success", "Core updated to 0.1.3".to_owned()), ("error", "Runtime update to 0.9.7 failed, HyperOx went back to 0.9.6. A report was sent.".to_owned())]
+        );
+        assert!(take_notices().is_empty(), "each notice is shown once");
     }
 
     #[test]
@@ -1908,6 +1974,103 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         assert_eq!(runtime::latest_version("{\"version\":\"0.9.6\"}"), Ok("0.9.6".to_owned()));
         assert!(runtime::latest_version("{}").is_err());
         assert!(runtime::latest_version("<html>").is_err());
+    }
+
+    #[test]
+    fn a_source_saying_nothing_newer_ends_the_search() {
+        let mut tried = Vec::new();
+        let got = first_ok(&strings(&["own", "older"]), |s| {
+            tried.push(s.to_owned());
+            Ok::<Option<String>, String>((s == "older").then(|| "9.9.9".to_owned()))
+        });
+        assert_eq!(got, Ok(None), "a reachable own repo with nothing newer is the answer");
+        assert_eq!(tried, ["own"], "the older repo is not asked");
+    }
+
+    #[test]
+    fn the_idle_gate_is_exactly_two_minutes_and_a_working_agent_restarts_it() {
+        assert_eq!(IDLE, 120);
+        let last = 1_700_000_000;
+        assert!(!idle(last, last + 119));
+        assert!(idle(last, last + 120), "exactly 120 s quiet is idle");
+        assert!(idle(last, u64::MAX), "no overflow at the far end");
+        note_agents(true);
+        note_agents(false);
+        let last = LAST_WORKING.load(Ordering::Relaxed);
+        let now = unix_now();
+        assert!(!idle(last, now), "an agent that started while an update waits holds it back, even once it stops");
+        assert!(idle(last, now + IDLE), "two quiet minutes later it goes in");
+    }
+
+    #[test]
+    fn a_runtime_in_a_folder_with_spaces_is_found() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-runtime-spaces-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let spaced = root.join("Program Files").join("h0x runtime");
+        std::fs::create_dir_all(&spaced).unwrap();
+        let name = if cfg!(windows) { "h0x.exe" } else { "h0x" };
+        std::fs::write(spaced.join(name), b"").unwrap();
+        let path = std::env::join_paths([root.join("missing dir"), spaced.clone()]).unwrap();
+        assert_eq!(runtime::find_in(&path), Some(spaced.join(name)));
+        assert!(!runtime::managed(&spaced.join(name)), "a folder with spaces is not a nix one");
+        assert!(!runtime::managed(Path::new(r"C:\Program Files\h0x\h0x.exe")));
+        #[cfg(windows)]
+        {
+            let quoted = std::ffi::OsString::from(format!("C:\\nowhere;\"{}\"", spaced.display()));
+            assert_eq!(runtime::find_in(&quoted), Some(spaced.join(name)), "a quoted PATH entry is the same folder");
+            let bare = root.join("bare");
+            std::fs::create_dir_all(&bare).unwrap();
+            std::fs::write(bare.join("h0x"), b"").unwrap();
+            assert_eq!(runtime::find_in(bare.as_os_str()), None, "on Windows only h0x.exe is the program");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_unreadable_runtime_version_is_not_reported_every_hour() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-runtime-badversion-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // Not a program at all, so `--version` gives nothing usable (and nothing runs).
+        let bin = root.join(if cfg!(windows) { "h0x.exe" } else { "h0x" });
+        std::fs::write(&bin, b"not a program").unwrap();
+        let key = format!("{}: h0x --version doesn't run", bin.display());
+        assert_eq!(check_runtime_of(Some(bin.clone())), Ok(()), "a runtime problem never fails the check round");
+        assert!(!first_report(key.clone()), "the first check already reported it");
+        assert_eq!(check_runtime_of(Some(bin)), Ok(()));
+        assert!(!first_report(key), "an hour later it is still the same problem, reported once");
+        assert!(first_report("another binary: another problem".into()), "a different problem is reported");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unknown_versions_stay_out_of_texts_and_events() {
+        assert_eq!(known(None), "unknown");
+        assert_eq!(known(Some("")), "unknown");
+        assert_eq!(known(Some("0.1.2")), "0.1.2");
+        assert_eq!(rolled_back_text("Core", "", "0.1.1"), "Core update failed, HyperOx went back to 0.1.1. A report was sent.");
+        assert_eq!(rolled_back_text("Core", "0.1.2", ""), "Core update to 0.1.2 failed, HyperOx went back. A report was sent.");
+        assert!(!rolled_back_text("Runtime", "", "").contains("the latest"));
+    }
+
+    #[test]
+    fn the_runtime_reply_skips_trailing_text_lines() {
+        let u = runtime::parse(b"{\"updated\":true,\"to\":\"0.9.6\"}\nnote: restart your shell\n[1, 2]\n").unwrap();
+        assert!(u.updated && u.to.as_deref() == Some("0.9.6"));
+        assert!(runtime::parse(b"[1]\n\"text\"\n").is_err(), "only a JSON object is a reply");
+    }
+
+    #[test]
+    fn a_checked_runtime_is_the_one_that_updates_and_a_nix_one_is_refused_at_apply_time() {
+        {
+            let mut r = RUNTIME.lock().unwrap();
+            r.ready = Some("9.9.9".into());
+            r.bin = Some(PathBuf::from("/nix/store/abc-h0x/bin/h0x"));
+            r.updating = false;
+        }
+        update_runtime();
+        let r = RUNTIME.lock().unwrap();
+        assert!(!r.updating, "nix took it over after the check: nothing runs");
     }
 
     #[test]

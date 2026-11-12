@@ -282,7 +282,13 @@ fn parse_update(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<String, U
     if success {
         return Ok(reply.get("now").and_then(|v| v.as_str()).unwrap_or("the latest").to_owned());
     }
-    let err: serde_json::Value = serde_json::from_slice(stderr).unwrap_or_default();
+    // Warnings may come first: the reply is the last line that is a JSON object.
+    let err = String::from_utf8_lossy(stderr)
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .find(serde_json::Value::is_object)
+        .unwrap_or_default();
     let message = err.get("error").and_then(|v| v.as_str()).or_else(|| err.pointer("/error/message").and_then(|v| v.as_str())).map(str::to_owned);
     let hint = err.pointer("/error/hint").and_then(|v| v.as_str()).map(|h| format!(" ({h})")).unwrap_or_default();
     Err(UpdateError {
@@ -569,5 +575,28 @@ echo '{hello}'
         assert!(!e.rolled_back && e.message == "boom");
         let e = parse_update(false, b"", b"").err().unwrap();
         assert!(!e.rolled_back && e.message.is_empty());
+    }
+
+    #[test]
+    fn a_rollback_after_warning_lines_on_stderr_is_still_a_rollback() {
+        let stderr = b"warning: an old setting was ignored\nWARN h0x_core: slow disk\n{\"rolled_back\":true,\"error\":\"smoke test failed\"}\n";
+        let e = parse_update(false, b"", stderr).err().unwrap();
+        assert!(e.rolled_back, "the last line is the reply");
+        assert_eq!(e.message, "smoke test failed");
+    }
+
+    #[test]
+    fn update_replies_with_windows_line_endings_blank_stderr_and_odd_values() {
+        let e = parse_update(false, b"", b"{\"rolled_back\":true,\"error\":\"x\"}\r\n").err().unwrap();
+        assert!(e.rolled_back && e.message == "x", "a Windows line ending");
+        let e = parse_update(false, b"", b" \r\n\n").err().unwrap();
+        assert!(!e.rolled_back && e.message.is_empty(), "blank stderr is a plain failure");
+        let e = parse_update(false, b"", br#"{"rolled_back":"true","error":"x"}"#).err().unwrap();
+        assert!(!e.rolled_back, "only a JSON true counts as rolled back");
+        let e = parse_update(false, br#"{"now":"0.1.2"}"#, b"").err().unwrap();
+        assert!(!e.rolled_back, "a non-zero exit fails whatever stdout says");
+        assert_eq!(parse_update(true, b"not json", b"warning").ok().as_deref(), Some("the latest"));
+        let e = parse_update(false, b"", br#"{"error":"cannot write C:\\Users\\me\\.h0x-core\\bin"}"#).err().unwrap();
+        assert_eq!(e.message, r"cannot write C:\Users\me\.h0x-core\bin", "a Windows path in the error is kept whole");
     }
 }
