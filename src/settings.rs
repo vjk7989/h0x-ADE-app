@@ -394,6 +394,12 @@ pub struct Person {
     /// Look for HyperOx and h0x-core updates in the background; "Check now" always works.
     #[serde(skip_serializing_if = "is_true")]
     pub check_updates: bool,
+    /// Send usage analytics (Settings > Info). Failure reports are not governed by this.
+    #[serde(skip_serializing_if = "is_true", deserialize_with = "bool_or_true")]
+    pub share_analytics: bool,
+    /// The welcome's one-time "How did you find HyperOx?": the choice, or "skip". Set means asked.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "string_or_none")]
+    pub found_via: Option<String>,
     /// A draggable scroll position thumb at a terminal pane's right edge.
     #[serde(skip_serializing_if = "is_true")]
     pub pane_scrollbars: bool,
@@ -475,6 +481,47 @@ fn scrollback_or_default<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, 
     Ok(v.as_f64().filter(|n| n.fract() == 0.0 && (SCROLLBACK_MIN as f64..=SCROLLBACK_MAX as f64).contains(n)).map_or(SCROLLBACK_DEFAULT, |n| n as u32))
 }
 
+/// This install's random ID (128 bits, hex): `install-id` in `dir`, the app home. Made on first
+/// need and reused; made again only if the file is missing or not 32 hex digits.
+#[allow(dead_code)] // sent by the analytics step
+pub fn install_id(dir: &std::path::Path) -> String {
+    let file = dir.join("install-id");
+    if let Ok(text) = std::fs::read_to_string(&file) {
+        let id = text.trim();
+        if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let lower = id.to_ascii_lowercase();
+            if lower != id {
+                let _ = std::fs::write(&file, &lower);
+            }
+            return lower;
+        }
+    }
+    use std::hash::{BuildHasher, Hasher};
+    // RandomState is seeded by the OS (as Model::fresh_id does).
+    let random = || std::collections::hash_map::RandomState::new().build_hasher().finish();
+    let id = format!("{:016x}{:016x}", random(), random());
+    if let Err(e) = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&file, &id)) {
+        tracing::warn!("install-id not saved: {e}");
+        // Not saved: keep one id for this process (one app home per process) so each call isn't a new install.
+        static UNSAVED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        return UNSAVED.get_or_init(|| id).clone();
+    }
+    id
+}
+
+/// A bool; any other type is the default (true), so one bad value can't discard the file.
+fn bool_or_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_bool().unwrap_or(true))
+}
+
+/// A string; any other type is None (not yet asked).
+fn string_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => Some(s),
+        _ => None,
+    })
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -495,6 +542,8 @@ impl Default for Person {
             ui_font: None,
             clipboard_write: false,
             check_updates: true,
+            share_analytics: true,
+            found_via: None,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
             scrollback_lines: SCROLLBACK_DEFAULT,
@@ -536,6 +585,7 @@ pub struct Settings {
     pub terminal_opacity: f32,
     pub clipboard_write: bool,
     pub check_updates: bool,
+    pub share_analytics: bool,
     pub minimum_contrast: f32,
     /// Scrollback lines per new terminal pane.
     pub scrollback_lines: u32,
@@ -581,6 +631,7 @@ impl Default for Settings {
             terminal_opacity: 1.0,
             clipboard_write: false,
             check_updates: true,
+            share_analytics: true,
             minimum_contrast: 1.0,
             scrollback_lines: SCROLLBACK_DEFAULT,
             option_as_alt: OptionAsAlt::Auto,
@@ -622,6 +673,7 @@ impl Settings {
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
             check_updates: person.check_updates,
+            share_analytics: person.share_analytics,
             minimum_contrast: person.minimum_contrast,
             scrollback_lines: person.scrollback_lines,
             option_as_alt: person.option_as_alt,
@@ -1291,6 +1343,147 @@ mod tests {
 
     /// The guide's stated defaults are what an empty settings.json gives, and
     /// every key it documents is one settings.json keeps.
+    #[test]
+    fn share_analytics_defaults_on_and_round_trips() {
+        let old: Person = serde_json::from_str(r#"{"telemetry":false}"#).unwrap();
+        assert!(old.share_analytics && old.found_via.is_none());
+        assert!(serde_json::to_value(&old).unwrap().get("share_analytics").is_none());
+        let off: Person = serde_json::from_str(r#"{"share_analytics":false,"found_via":"skip"}"#).unwrap();
+        assert!(!Settings::compose(&off, &crate::layout::Look::default(), true).share_analytics);
+        let v = serde_json::to_value(&off).unwrap();
+        assert_eq!((&v["share_analytics"], &v["found_via"]), (&serde_json::json!(false), &serde_json::json!("skip")));
+        // A wrong type is the default, not a reason to reject the whole file.
+        let bad: Person = serde_json::from_str(r#"{"share_analytics":"no","zoom":1.5}"#).unwrap();
+        assert!(bad.share_analytics && bad.zoom == 1.5);
+    }
+
+    #[test]
+    fn install_id_is_made_once_and_remade_only_when_invalid() {
+        let dir = std::env::temp_dir().join(format!("h0x-install-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let id = install_id(&dir);
+        assert!(id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()), "{id}");
+        assert_eq!(install_id(&dir), id);
+        assert_eq!(std::fs::read_to_string(dir.join("install-id")).unwrap(), id);
+        std::fs::write(dir.join("install-id"), "not an id").unwrap();
+        let again = install_id(&dir);
+        assert!(again != id && again.len() == 32);
+        assert_eq!(install_id(&dir), again);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn found_via_keeps_any_answer_and_null_or_missing_means_not_yet_asked() {
+        for text in ["{}", r#"{"found_via":null}"#] {
+            let person: Person = serde_json::from_str(text).unwrap();
+            assert!(person.found_via.is_none() && person.share_analytics, "{text}");
+            assert!(serde_json::to_value(&person).unwrap().get("found_via").is_none(), "{text}");
+        }
+        // The app doesn't check the answer: one it doesn't know (or an empty one) is kept as written.
+        for answer in ["friend", "x", "github", "search", "other", "skip", "carrier-pigeon", ""] {
+            let person: Person = serde_json::from_value(serde_json::json!({"found_via": answer})).unwrap();
+            assert_eq!(person.found_via.as_deref(), Some(answer));
+            assert_eq!(serde_json::to_value(&person).unwrap()["found_via"], serde_json::json!(answer));
+        }
+        for wrong in [r#"{"found_via":1}"#, r#"{"found_via":true}"#, r#"{"found_via":["x"]}"#] {
+            let person: Person = serde_json::from_str(wrong).unwrap();
+            assert!(person.found_via.is_none(), "{wrong}: a wrong type means not yet asked");
+        }
+        // share_analytics: true is the default, so it isn't written back; null is the default too.
+        let on: Person = serde_json::from_str(r#"{"share_analytics":true}"#).unwrap();
+        assert!(on.share_analytics && serde_json::to_value(&on).unwrap().get("share_analytics").is_none());
+        assert!(serde_json::from_str::<Person>(r#"{"share_analytics":null}"#).unwrap().share_analytics);
+        assert!(Person::default().share_analytics && Settings::default().share_analytics);
+        for dark in [false, true] {
+            assert!(Settings::compose(&Person::default(), &crate::layout::Look::default(), dark).share_analytics);
+        }
+    }
+
+    #[test]
+    fn install_id_keeps_a_valid_id_read_past_whitespace_and_remakes_any_other_file() {
+        let dir = std::env::temp_dir().join(format!("h0x-install-id-edges-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("install-id");
+        let lower_hex = |id: &str| id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        let kept = "0123456789abcdef0123456789abcdef";
+        // Kept: whitespace around it (an editor's newline, CRLF) and upper case, read back in lower case.
+        // The file is left as it is, except that an upper-case id is rewritten in lower case.
+        for text in [
+            "0123456789abcdef0123456789abcdef\n",
+            "  0123456789abcdef0123456789abcdef \r\n",
+            "\t0123456789ABCDEF0123456789abcdef",
+            "0123456789ABCDEF0123456789ABCDEF",
+        ] {
+            std::fs::write(&file, text).unwrap();
+            assert_eq!(install_id(&dir), kept, "{text:?}");
+            let want = if text.bytes().any(|b| b.is_ascii_uppercase()) { kept } else { text };
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), want, "{text:?}");
+        }
+        // Made again, saved and then reused: empty, one digit short or over, a non-hex digit, a 0x
+        // prefix, a space inside, a non-ASCII digit of the same byte length, a BOM, twice the length.
+        for text in [
+            "",
+            "\n",
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdef0",
+            "0123456789abcdef0123456789abcdeg",
+            "0x23456789abcdef0123456789abcdef",
+            "01234567 9abcdef0123456789abcdef",
+            "0123456789abcdef0123456789abcd\u{e9}",
+            "\u{feff}0123456789abcdef0123456789abcdef",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ] {
+            std::fs::write(&file, text).unwrap();
+            let id = install_id(&dir);
+            assert!(lower_hex(&id) && id != kept, "{text:?}: {id}");
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), id, "{text:?}: the new id is saved");
+            assert_eq!(install_id(&dir), id, "{text:?}: and reused");
+        }
+        // Not UTF-8 at all.
+        std::fs::write(&file, [0xff, 0xfe, 0x00, 0x41]).unwrap();
+        let id = install_id(&dir);
+        assert!(lower_hex(&id), "{id}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_id_without_a_writable_app_home_still_returns_an_id_the_same_one_within_the_process() {
+        let root = std::env::temp_dir().join(format!("h0x-install-id-unwritable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let lower_hex = |id: &str| id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        // The app home would be inside a file, so it can't be made.
+        let blocker = root.join("a-file");
+        std::fs::write(&blocker, "not a folder").unwrap();
+        let home = blocker.join("h0x-ade");
+        let (first, second) = (install_id(&home), install_id(&home));
+        assert!(lower_hex(&first) && lower_hex(&second), "{first} {second}");
+        assert_eq!(first, second, "nothing was saved, so the process keeps one id");
+        assert!(!home.exists());
+        // install-id is a folder: it can't be read as text or written over.
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join("install-id")).unwrap();
+        assert!(lower_hex(&install_id(&home)));
+        assert!(home.join("install-id").is_dir(), "the folder is left alone");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn install_id_makes_missing_parents_in_an_app_home_with_spaces_and_non_ascii_names() {
+        let root = std::env::temp_dir().join(format!("h0x-install-id-spaced-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // Like C:\Users\Zoë Q\AppData\Roaming\h0x-ade: parents that don't exist yet.
+        let home = root.join("Zo\u{eb} Q").join("App Data").join("h0x-ade");
+        let id = install_id(&home);
+        assert_eq!(std::fs::read_to_string(home.join("install-id")).unwrap(), id);
+        assert_eq!(install_id(&home), id);
+        // The same folder spelled another way (on Windows a \\?\ verbatim path) is the same install.
+        assert_eq!(install_id(&std::fs::canonicalize(&home).unwrap()), id);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn the_guide_states_the_real_clipboard_write_and_check_updates_defaults() {
         let guide = include_str!("../defaults/AGENTS.md");
