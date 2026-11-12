@@ -1357,7 +1357,8 @@ fn relaunch_expected(expected: Option<&str>) -> bool {
     };
     let plain = format!("while kill -0 \"$0\" 2>/dev/null; do sleep 0.1; done; {open}");
     let pid = std::process::id().to_string();
-    let (script, args): (&str, Vec<&std::ffi::OsStr>) = match &watch(&root) {
+    let watched = watch(&root);
+    let (script, args): (&str, Vec<&std::ffi::OsStr>) = match &watched {
         Some(w) => (WATCH_SH, vec![w.root.as_os_str(), w.previous.as_os_str(), w.exe.as_os_str(), w.marker.as_os_str(), w.pending.as_os_str(), std::ffi::OsStr::new(&w.new), std::ffi::OsStr::new(&w.old), w.quit.as_os_str()]),
         None => (plain.as_str(), vec![root.as_os_str()]),
     };
