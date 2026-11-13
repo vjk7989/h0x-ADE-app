@@ -3993,6 +3993,9 @@ impl AppWindow {
             let spec = json!({"kind":"toast", "notification":{"title":"Updates","body":notice.text,"level":notice.level}});
             self.open_overlay(mods::new_overlay_id(), spec, window, cx);
         }
+        for notification in crate::agent_install::take_toasts() {
+            self.open_overlay(mods::new_overlay_id(), json!({"kind":"toast", "notification":notification}), window, cx);
+        }
         let versions = Self::update_versions();
         if versions != self.update_versions {
             self.update_ready = Self::update_label(&versions);

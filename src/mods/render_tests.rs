@@ -147,7 +147,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         shared.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "playSound", "setAgentOrder", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes", "openLink", "copyText", "accountSwitch", "accountSignOut", "accountRemove", "accountCancelSignIn"] {
+    for name in ["run", "playSound", "setAgentOrder", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes", "openLink", "copyText", "accountSwitch", "accountSignOut", "accountRemove", "accountCancelSignIn", "installOpenCode"] {
         let calls = calls.clone();
         module = module.function(name, move |a| {
             if name == "run" {
@@ -2719,6 +2719,56 @@ fn welcome_asks_only_while_found_via_was_never_set_and_only_on_the_last_page(cx:
     }
 }
 
+// The welcome's OpenCode card on page 3; `press` runs at the test's press, once the card has been drawn (the
+// press timer can fire before the first page-3 render).
+fn welcome_opencode(press: &str) -> String {
+    format!(
+        "this.page = 3; const segment = this.segment.bind(this); \
+        this.segment = (t, items, now, onPick) => {{ if (items[0][1] === 'No') this.pick = onPick; return segment(t, items, now, onPick); }}; \
+        const go = (_e, cx) => {{ if (!this.pick) {{ this.press = go; return; }} const pick = this.pick; {press} }}; this.press = go;"
+    )
+}
+
+#[gpui::test]
+fn welcome_offers_opencode_defaulting_to_no_and_installs_only_after_yes_and_continuing(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let installs = |calls: &Rc<RefCell<Calls>>| calls.borrow().effects.iter().filter(|(n, _)| n == "installOpenCode").count();
+    let run = |cx: &mut TestAppContext, press: &str, presses: usize| {
+        let values = fixture(true, props(), updates("current", "current"));
+        describe_pressing(cx, &staged, "frame/welcome", values, None, &welcome_opencode(press), presses)
+    };
+    // Untouched: the card is there with No chosen, and nothing is installed (even on Done).
+    let (trees, calls) = run(cx, "this.start();", 1);
+    assert!(trees[0].contains("OpenCode CLI (free)") && trees[0].contains("w-seg-Yes") && trees[0].contains("w-seg-No"), "{}", trees[0]);
+    assert!(!trees[0].contains("Installed"), "{}", trees[0]);
+    assert_eq!(installs(&calls), 0, "{:?}", calls.borrow().effects);
+    assert_eq!(calls.borrow().shared.get("welcome.opencode"), None);
+    // Yes alone starts nothing; Yes, then Done starts it once.
+    let (_, calls) = run(cx, "pick(true, cx);", 1);
+    assert_eq!(calls.borrow().shared.get("welcome.opencode"), Some(&json!(true)));
+    assert_eq!(installs(&calls), 0, "{:?}", calls.borrow().effects);
+    let (_, calls) = run(cx, "pick(true, cx); this.start(); this.start();", 1);
+    assert_eq!(installs(&calls), 1, "{:?}", calls.borrow().effects);
+    assert!(calls.borrow().effects.iter().any(|(n, _)| n == "closeOverlay"), "onboarding still closes");
+    // No after Yes: nothing.
+    let (_, calls) = run(cx, "pick(true, cx); pick(false, cx); this.start();", 1);
+    assert_eq!(calls.borrow().shared.get("welcome.opencode"), Some(&json!(false)));
+    assert_eq!(installs(&calls), 0, "{:?}", calls.borrow().effects);
+}
+
+#[gpui::test]
+fn welcome_shows_opencode_as_installed_and_never_installs_it_again(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let values = fixture(true, props(), updates("current", "current"));
+    let setup = "this.page = 3; this.openCodeInstalled = true; this.press = (_e, cx) => { this.start(); };";
+    let (trees, calls) = describe_pressing(cx, &staged, "frame/welcome", values, None, setup, 1);
+    assert!(trees[0].contains("OpenCode CLI (free)") && trees[0].contains("Installed \u{2713}"), "{}", trees[0]);
+    assert!(!trees[0].contains("w-seg-Yes"), "{}", trees[0]);
+    assert!(!calls.borrow().effects.iter().any(|(n, _)| n == "installOpenCode"), "{:?}", calls.borrow().effects);
+}
+
 #[gpui::test]
 fn welcome_done_and_open_a_space_work_without_answering_how_you_found_hyperox(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
@@ -5008,7 +5058,7 @@ fn sessions_module(mut values: BTreeMap<String, Value>, host: Rc<RefCell<Session
         h.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "openOverlay", "closeOverlay", "notify", "setAgentOrder"] {
+    for name in ["run", "openOverlay", "closeOverlay", "notify", "setAgentOrder", "installOpenCode"] {
         let h = host.clone();
         module = module.function(name, move |a| {
             let args: Vec<Value> = (0..2).filter_map(|i| a.get(i).map(from_host)).collect();
@@ -6528,7 +6578,7 @@ fn todo_module(values: BTreeMap<String, Value>, host: Rc<RefCell<TodoHost>>) -> 
         h.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "openOverlay", "closeOverlay", "notify", "playSound", "openLink", "copyText", "accountSwitch", "accountSignOut", "accountRemove", "accountCancelSignIn"] {
+    for name in ["run", "openOverlay", "closeOverlay", "notify", "playSound", "openLink", "copyText", "accountSwitch", "accountSignOut", "accountRemove", "accountCancelSignIn", "installOpenCode"] {
         let h = host.clone();
         module = module.function(name, move |a| {
             let args: Vec<Value> = (0..2).filter_map(|i| a.get(i).map(from_host)).collect();
