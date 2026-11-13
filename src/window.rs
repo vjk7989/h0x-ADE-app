@@ -383,7 +383,7 @@ pub struct AppWindow {
     /// A text file clicked in a terminal, waiting for the files panel to show.
     pending_open: Option<(PathBuf, Option<u32>)>,
     /// The last file a terminal link opened in the Files panel, and when: a panel started again soon after gets it back.
-    last_link_open: Option<(PathBuf, Option<u32>, Instant)>,
+    last_link_open: Option<(PathBuf, Option<u32>, Instant, u32)>,
     folders: BTreeMap<String, Found>,
     /// Mods placed once; later the layout decides where (or whether) they show.
     seen: BTreeSet<String>,
@@ -1455,11 +1455,16 @@ impl AppWindow {
             if !self.copies.contains_key(&slot) {
                 // A Files panel that starts again soon after a link opened a file in the one before
                 // (its state went with it) gets the file and line back.
+                // The panel the click itself brings up (`due`) is not that: it gets the open the usual way.
                 if inst.name == "files"
-                    && let Some((path, line, at)) = self.last_link_open.clone()
-                    && reopens_after_remount(Some(at.elapsed()), self.pending_open.is_some())
+                    && let Some((path, line, at, due)) = self.last_link_open.as_mut()
                 {
-                    self.deliver_open(path, line, cx);
+                    if *due > 0 {
+                        *due -= 1;
+                    } else if reopens_after_remount(Some(at.elapsed()), self.pending_open.is_some()) {
+                        let (path, line) = (path.clone(), *line);
+                        self.deliver_open(path, line, cx);
+                    }
                 }
                 let copy = self.load(inst, window, cx);
                 if slot.starts_with("float:")
@@ -3822,7 +3827,9 @@ impl AppWindow {
             crate::links::open_text_elsewhere(&path);
             return;
         }
-        self.last_link_open = Some((path.clone(), line, Instant::now()));
+        // With no Files panel yet, the first one started from here is the one this open is for.
+        let due = u32::from(!self.copies.values().any(|c| c.inst.name == "files" && c.root.is_some()));
+        self.last_link_open = Some((path.clone(), line, Instant::now(), due));
         if send_open("files", &path, line) {
             return;
         }
