@@ -1057,9 +1057,17 @@ pub fn run_here(command: &str, args: &[String]) -> Option<String> {
 }
 
 /// The agents a machine can start (`knownAgents()`), asked at most once a minute.
+type InstalledCache = std::collections::HashMap<Option<String>, (std::time::Instant, Vec<String>, Vec<String>)>;
+static SEEN: std::sync::Mutex<Option<InstalledCache>> = std::sync::Mutex::new(None);
+
+/// Drops what `knownAgents()` remembered, after an install changed it.
+pub fn forget_known_agents() {
+    if let Ok(mut s) = SEEN.lock() {
+        *s = None;
+    }
+}
+
 fn known_agents(on: Option<String>, list: Vec<Value>) -> Value {
-    type InstalledCache = std::collections::HashMap<Option<String>, (std::time::Instant, Vec<String>, Vec<String>)>;
-    static SEEN: std::sync::Mutex<Option<InstalledCache>> = std::sync::Mutex::new(None);
     let commands: Vec<String> = list.iter().filter_map(|a| a["run"][0].as_str().map(str::to_owned)).collect();
     let cached = SEEN.lock().ok().and_then(|s| s.as_ref()?.get(&on).filter(|(at, checked, _)| at.elapsed().as_secs() < 60 && checked == &commands).map(|(_, _, v)| v.clone()));
     let have = cached.unwrap_or_else(|| {
@@ -1136,6 +1144,7 @@ fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Opti
     }
 }
 
+const INSTALL_REFUSED: &str = "installing OpenCode is for the welcome frame";
 const ACCOUNT_REFUSED: &str = "accounts are for the settings and account frames";
 
 /// Pairing a phone or Telegram, and starting the web panel, need a signed-in account: the core's
@@ -1175,6 +1184,8 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     let settings_frame = inst.name == "frame-settings";
     // Accounts are for two app frames alone (a person can't install a mod with a frame- name; mods/ is theirs to edit).
     let account_ok = settings_frame || inst.name == "frame-account";
+    // The install runs a fixed recipe, but only onboarding offers it.
+    let welcome_frame = inst.name == "frame-welcome";
     let feedback_from = inst.props.get("from").and_then(Value::as_str).unwrap_or("person").to_owned();
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
     let (cmd_tx, commands) = async_channel::unbounded::<String>();
@@ -1259,6 +1270,10 @@ fn module(inst: Instance, copy: u64) -> HostModule {
                 let _ = tx.send_blocking(known_agents(on, list));
             });
             Ok(async move { Ok(to_host(&rx.recv().await.unwrap_or(Value::Array(Vec::new())))) })
+        })
+        .function("installOpenCode", move |_| {
+            if !welcome_frame { return Err(HostError::new(INSTALL_REFUSED)); }
+            Ok(crate::agent_install::start().to_owned().into())
         })
         .async_function("pickFolder", |a| {
             let prompt = a.get(0).map(from_host).and_then(|v| v.get("prompt").and_then(Value::as_str).map(str::to_owned)).unwrap_or_else(|| "Open".into());
@@ -1945,6 +1960,19 @@ mod tests {
                 }
                 let started = host.begin("accountSignIn", &HostArguments::default()).err().map(|e| e.message().to_string());
                 assert_eq!(started.as_deref(), Some(REFUSED), "{name:?}: no sign-in is started");
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn installing_opencode_is_refused_to_every_mod_but_the_welcome_frame() {
+        std::thread::spawn(|| {
+            for name in ["", "test", "welcome", "frame-welcome-x", "Frame-Welcome", "frame-welcome ", "my-mod/frame-welcome", "frame-settings", "frame-account", "workspace-chrome"] {
+                let host = module(Instance { name: name.into(), props: Value::Null }, 1);
+                let err = host.call("installOpenCode", &gpui_shell::HostArguments::default()).expect_err(name);
+                assert_eq!(err.message(), INSTALL_REFUSED, "{name:?}");
             }
         })
         .join()

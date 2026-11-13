@@ -1,6 +1,7 @@
 // Windows: a window app, no console of its own (see `attach_console`).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod agent_install;
 mod agent_usage;
 mod analytics;
 mod auth;
