@@ -2970,9 +2970,9 @@ fn welcome_shows_state_tags_key_hints_and_the_lowercase_beta_tag(cx: &mut TestAp
     assert!(!tree.contains("BETA"), "{tree}");
     // A toggle turns that row's tag to [off]: with files off, "off" shows and "on" still shows for the others.
     assert!(trees[1].contains("text \"off\"") && trees[1].contains("text \"on\""), "{}", trees[1]);
-    // Page 2 says where the machine is with a [here] tag; page 1 hints the zoom keys and folds "Coming from h0x?".
+    // Page 2 says where each machine is with a tag (the fixture has one listed, so the button is Next, not Not now); page 1 hints the zoom keys and folds "Coming from h0x?".
     let (trees, _) = describe_pressing(cx, &staged, "frame/welcome", values(), None, "this.page = 2;", 0);
-    assert!(trees[0].contains("text \"here\"") && trees[0].contains("text \"not now\""), "{}", trees[0]);
+    assert!(trees[0].contains("text \"here\"") && trees[0].contains("text \"online\"") && trees[0].contains("text \"next\""), "{}", trees[0]);
     let (trees, _) = describe_pressing(cx, &staged, "frame/welcome", values(), None, "", 0);
     assert!(trees[0].contains("ctrl +/\u{2212}") && trees[0].contains("w-coming") && !trees[0].contains("w-migrate-copy"), "{}", trees[0]);
     let (trees, _) = describe_pressing(cx, &staged, "frame/welcome", values(), None, "this.fold = true;", 0);
