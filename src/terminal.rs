@@ -75,6 +75,8 @@ struct Grid {
     images: HashMap<(u32, u64, [u32; 4]), Arc<RenderImage>>,
     /// Where the pointer is over the pane.
     hover: Option<Point<Pixels>>,
+    /// When the view last scrolled by wheel, page click or command: the scrollbar shows plainly for a while after.
+    scrolled_at: Option<Instant>,
     /// The link under the pointer to underline: (row, first column, last column).
     link_spans: vt::Spans,
     /// Text an input method is still composing ("nihao" before "\u{4f60}\u{597d}"),
@@ -127,6 +129,10 @@ pub struct TerminalView {
     typed_at: Cell<Option<Instant>>,
     /// Scrolled this gesture, in lines, toward the next whole one.
     scrolled: Point<f32>,
+    /// Wheel lines still to scroll, one line at a time (see `ScrollAnim`).
+    scroll_anim: RefCell<ScrollAnim>,
+    scroll_task: Option<Task<()>>,
+    scrollbar_task: Option<Task<()>>,
     /// Search UI and query belong to this terminal view, not the window. Each
     /// terminal in a tab therefore keeps its own query and match position.
     search_open: bool,
@@ -273,6 +279,7 @@ impl TerminalView {
                 buttons_down: Vec::new(),
                 images: HashMap::new(),
                 hover: None,
+                scrolled_at: None,
                 link_spans: Vec::new(),
                 marked: None,
                 cursor_at: None,
@@ -286,6 +293,9 @@ impl TerminalView {
             shown_in: Cell::new(0),
             typed_at: Cell::new(None),
             scrolled: point(0.0, 0.0),
+            scroll_anim: RefCell::new(ScrollAnim::default()),
+            scroll_task: None,
+            scrollbar_task: None,
             search_open: false,
             search_keys: false,
             search_query: String::new(),
@@ -581,6 +591,7 @@ impl TerminalView {
 
     fn send(&self, bytes: &[u8]) {
         self.typed_at.set(Some(Instant::now()));
+        self.scroll_anim.borrow_mut().cancel();
         let mut g = self.grid.borrow_mut();
         if let Some(ch) = g.channel
             && !bytes.is_empty()
@@ -850,6 +861,38 @@ impl TerminalView {
             return;
         }
         let up = steps.y > 0;
+        if matches!(ev.delta, ScrollDelta::Lines(_)) && n > 0 && !g.vt.mouse_tracking() && !g.vt.alt_screen() {
+            drop(g);
+            let idle = !self.scroll_anim.borrow().active();
+            self.scroll_anim.borrow_mut().add(-steps.y, Instant::now());
+            self.touch_scrollbar(cx);
+            if idle {
+                self.scroll_task = Some(cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor().timer(Duration::from_millis(16)).await;
+                        let keep = this.update(cx, |this, cx| {
+                            let mut g = this.grid.borrow_mut();
+                            if g.vt.mouse_tracking() || g.vt.alt_screen() {
+                                this.scroll_anim.borrow_mut().cancel();
+                                return false;
+                            }
+                            let step = this.scroll_anim.borrow_mut().next(Instant::now(), g.vt.rows as i32);
+                            if step != 0 {
+                                g.vt.scroll_viewport(step as isize);
+                                cx.notify();
+                            }
+                            this.scroll_anim.borrow().active()
+                        });
+                        if !keep.unwrap_or(false) {
+                            break;
+                        }
+                    }
+                }));
+            }
+            cx.notify();
+            return;
+        }
+        self.scroll_anim.borrow_mut().cancel();
         if g.vt.mouse_tracking() {
             let ((x, y), size) = mouse_at(&g, ev.position);
             let out = scroll_mouse_bytes(&mut g.vt, steps, x, y, size);
@@ -869,8 +912,19 @@ impl TerminalView {
             }
         } else {
             g.vt.scroll_viewport(if up { -(n as isize) } else { n as isize });
+            drop(g);
+            self.touch_scrollbar(cx);
         }
         cx.notify();
+    }
+
+    /// Marks a scroll: the scrollbar shows plainly for `SCROLLBAR_SHOWN`, then repaints in its resting look.
+    fn touch_scrollbar(&mut self, cx: &mut Context<Self>) {
+        self.grid.borrow_mut().scrolled_at = Some(Instant::now());
+        self.scrollbar_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SCROLLBAR_SHOWN + Duration::from_millis(50)).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        }));
     }
 
     pub fn scroll_history(&mut self, target: ScrollTarget, cx: &mut Context<Self>) {
@@ -883,6 +937,9 @@ impl TerminalView {
             ScrollTarget::Top => g.vt.scroll_to_top(),
             ScrollTarget::Bottom => g.vt.scroll_to_bottom(),
         }
+        drop(g);
+        self.scroll_anim.borrow_mut().cancel();
+        self.touch_scrollbar(cx);
         cx.notify();
     }
 
@@ -1122,6 +1179,70 @@ fn scrollbar_lane(bounds: Bounds<Pixels>, origin: Point<Pixels>, text_width: Pix
     let edge = bounds.origin.x + bounds.size.width;
     let left = (origin.x + text_width).min(edge - px(8.0)).max(bounds.origin.x);
     Bounds::new(point(left, origin.y), size(edge - left, height))
+}
+
+/// The scrollbar is 8 px wide while the pointer is over it, else 4.
+fn scrollbar_width(hovered: bool) -> f32 {
+    if hovered { 8.0 } else { 4.0 }
+}
+
+/// How long the scrollbar keeps its strong look after a scroll.
+const SCROLLBAR_SHOWN: Duration = Duration::from_secs(1);
+
+/// Whether the scrollbar draws strong: under the pointer, or `since_scroll` after a scroll is within `SCROLLBAR_SHOWN`.
+fn scrollbar_strong(hovered: bool, since_scroll: Option<Duration>) -> bool {
+    hovered || since_scroll.is_some_and(|d| d < SCROLLBAR_SHOWN)
+}
+
+/// A click on the rail at `y` pages toward it: -1 up (above the thumb at `thumb_top`), 1 down.
+fn scrollbar_page(thumb_top: f32, y: f32) -> isize {
+    if y < thumb_top { -1 } else { 1 }
+}
+
+/// Wheel lines still to scroll, one line per step over `SCROLL_ANIM`, easing out.
+/// New wheel lines join what is left. `now` is passed in so tests need no clock.
+#[derive(Default)]
+struct ScrollAnim {
+    /// Lines this burst (signed), lines already given, and when it began.
+    total: i32,
+    done: i32,
+    start: Option<Instant>,
+}
+
+const SCROLL_ANIM: Duration = Duration::from_millis(120);
+
+impl ScrollAnim {
+    fn active(&self) -> bool {
+        self.start.is_some()
+    }
+
+    fn cancel(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Adds `lines` to what is left; the curve starts again over the sum.
+    fn add(&mut self, lines: i32, now: Instant) {
+        if lines == 0 {
+            return;
+        }
+        self.total = self.total - self.done + lines;
+        self.done = 0;
+        self.start = if self.total == 0 { None } else { Some(now) };
+    }
+
+    /// The lines to scroll now, at most `cap` (a screen) either way.
+    fn next(&mut self, now: Instant, cap: i32) -> i32 {
+        let Some(start) = self.start else { return 0 };
+        let t = (now.saturating_duration_since(start).as_secs_f32() / SCROLL_ANIM.as_secs_f32()).clamp(0.0, 1.0);
+        let due = if t >= 1.0 { self.total } else { (self.total as f32 * (1.0 - (1.0 - t) * (1.0 - t))).round() as i32 };
+        let cap = cap.max(1);
+        let step = (due - self.done).clamp(-cap, cap);
+        self.done += step;
+        if self.done == self.total {
+            self.cancel();
+        }
+        step
+    }
 }
 
 fn scrollbar_grab_at(top: f32, len: f32, y: f32) -> f32 {
@@ -1945,13 +2066,15 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             && let Some((top, len)) = scrollbar_thumb(sb.total, sb.offset, sb.len, track, f32::from(cell.height))
         {
             let lane = scrollbar_lane(bounds, origin, cell.width * f32::from(g.vt.cols), px(track));
-            let w = px(4.0);
+            let hovered = g.hover.is_some_and(|p| lane.contains(&p));
+            let strong = scrollbar_strong(hovered, g.scrolled_at.map(|t| t.elapsed()));
+            let w = px(scrollbar_width(hovered));
             let x = lane.origin.x + lane.size.width - w - px(2.0);
             let color = crate::settings::color("muted");
             let rail = Bounds::new(point(x + w / 2.0 - px(0.5), origin.y), size(px(1.0), px(track)));
-            window.paint_quad(fill(snap_box(rail), color.opacity(0.35)));
+            window.paint_quad(fill(snap_box(rail), color.opacity(if strong { 0.6 } else { 0.5 })));
             let thumb = Bounds::new(point(x, origin.y + px(top)), size(w, px(len)));
-            window.paint_quad(fill(snap_box(thumb), color).corner_radii(w / 2.0));
+            window.paint_quad(fill(snap_box(thumb), color.opacity(if strong { 1.0 } else { 0.75 })).corner_radii(w / 2.0));
             g.thumb = Some(Bounds::new(point(lane.origin.x, thumb.origin.y), size(lane.size.width, thumb.size.height)));
             g.track = Some(lane);
         }
@@ -2108,9 +2231,7 @@ impl Render for TerminalView {
                 if !hovered {
                     this.grid.borrow_mut().hover = None;
                     this.hide_hint(cx);
-                    if this.link.is_some() {
-                        cx.notify();
-                    }
+                    cx.notify();
                 }
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, cx| {
@@ -2135,14 +2256,17 @@ impl Render for TerminalView {
                     && track.contains(&ev.position)
                 {
                     let grab = scrollbar_grab_at(f32::from(thumb.origin.y), f32::from(thumb.size.height), f32::from(ev.position.y));
-                    this.scrollbar_grab = Some(grab);
-                    if !thumb.contains(&ev.position) {
-                        let sb = g.vt.scrollbar();
-                        let top = f32::from(ev.position.y - track.origin.y) - grab;
-                        let min = f32::from(g.cell.height);
-                        g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, f32::from(track.size.height), min, top));
+                    if thumb.contains(&ev.position) {
+                        this.scrollbar_grab = Some(grab);
+                    } else {
+                        let page = scrollbar_page(f32::from(thumb.origin.y), f32::from(ev.position.y)) * g.vt.rows as isize;
+                        g.vt.scroll_viewport(page);
                     }
                     drop(g);
+                    if this.scrollbar_grab.is_none() {
+                        this.scroll_anim.borrow_mut().cancel();
+                        this.touch_scrollbar(cx);
+                    }
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -2172,7 +2296,15 @@ impl Render for TerminalView {
                 }
             }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
-                this.grid.borrow_mut().hover = Some(ev.position);
+                let (was, now) = {
+                    let mut g = this.grid.borrow_mut();
+                    let was = g.track.zip(g.hover).is_some_and(|(t, h)| t.contains(&h));
+                    g.hover = Some(ev.position);
+                    (was, g.track.is_some_and(|t| t.contains(&ev.position)))
+                };
+                if was != now {
+                    cx.notify();
+                }
                 if link_mods(&ev.modifiers) || this.link.is_some() {
                     cx.notify();
                 }
@@ -3729,6 +3861,81 @@ mod tests {
         assert_eq!(thumb(80, 40, 40, 100.0, 4.0), Some((50.0, 50.0)));
         // A huge scrollback still leaves a grabbable thumb.
         assert_eq!(thumb(10_000, 0, 40, 100.0, 4.0), Some((0.0, 4.0)));
+    }
+
+    #[test]
+    fn scroll_anim_steps_sum_to_the_wheel_lines() {
+        use std::time::{Duration, Instant};
+        for n in [3, -3, 1, -1, 40, -40] {
+            let t0 = Instant::now();
+            let mut a = super::ScrollAnim::default();
+            a.add(n, t0);
+            assert!(a.active());
+            let mut sum = 0;
+            for ms in (0..=200).step_by(16) {
+                let s = a.next(t0 + Duration::from_millis(ms), 1000);
+                assert!(s == 0 || s.signum() == n.signum());
+                sum += s;
+            }
+            assert_eq!(sum, n);
+            assert!(!a.active(), "finished");
+        }
+    }
+
+    #[test]
+    fn scroll_anim_takes_added_lines_and_caps_a_frame() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut a = super::ScrollAnim::default();
+        a.add(3, t0);
+        let first = a.next(t0 + Duration::from_millis(16), 24);
+        a.add(3, t0 + Duration::from_millis(16));
+        let mut sum = first;
+        for ms in 2..30 {
+            sum += a.next(t0 + Duration::from_millis(16 * ms), 24);
+        }
+        assert_eq!(sum, 6, "new lines extend what is left");
+        a.add(100, t0);
+        assert_eq!(a.next(t0 + Duration::from_secs(1), 24), 24, "a frame moves at most a screen");
+        assert!(a.active());
+        a.cancel();
+        a.add(-100, t0);
+        assert_eq!(a.next(t0 + Duration::from_secs(1), 24), -24);
+    }
+
+    #[test]
+    fn scroll_anim_edges() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut a = super::ScrollAnim::default();
+        assert_eq!(a.next(t0, 24), 0);
+        a.add(0, t0);
+        assert!(!a.active());
+        a.add(5, t0);
+        a.add(-5, t0);
+        assert!(!a.active(), "opposite input cancels out");
+        a.add(5, t0);
+        assert_eq!(a.next(t0 + Duration::from_secs(1), 0), 1, "a cap under one still moves a line");
+        a.cancel();
+        assert!(!a.active());
+        assert_eq!(a.next(t0 + Duration::from_secs(1), 24), 0);
+    }
+
+    #[test]
+    fn scrollbar_widens_under_the_pointer_and_stays_strong_for_a_second() {
+        use std::time::Duration;
+        assert_eq!(super::scrollbar_width(false), 4.0);
+        assert_eq!(super::scrollbar_width(true), 8.0);
+        assert!(super::scrollbar_strong(true, None));
+        assert!(!super::scrollbar_strong(false, None));
+        assert!(super::scrollbar_strong(false, Some(Duration::from_millis(900))));
+        assert!(!super::scrollbar_strong(false, Some(Duration::from_millis(1000))));
+    }
+
+    #[test]
+    fn scrollbar_rail_click_pages_toward_the_click() {
+        assert_eq!(super::scrollbar_page(100.0, 20.0), -1);
+        assert_eq!(super::scrollbar_page(100.0, 300.0), 1);
     }
 
     #[test]
