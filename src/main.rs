@@ -1,6 +1,7 @@
 // Windows: a window app, no console of its own (see `attach_console`).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod activity;
 mod agent_install;
 mod agent_usage;
 mod analytics;
@@ -235,6 +236,7 @@ fn main() {
                     }
                 }
                 mods::finish_shared();
+                activity::finish();
                 analytics::event("app_closed", serde_json::json!({ "session_seconds": analytics::session_seconds() }));
                 analytics::flush();
                 update::clean_exit();

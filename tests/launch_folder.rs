@@ -485,7 +485,7 @@ fn a_shell_launch_opens_hyperox_in_its_folder() {
     let saved = env.command(EXE).arg("shot").arg(shots.join("look-themes.png")).stdin(Stdio::null()).output();
     eprintln!("look page: settings {:?}, screenshot {:?}", opened.map(|o| o.status), saved.map(|o| (o.status, String::from_utf8_lossy(&o.stderr).into_owned())));
     let _ = env.command(EXE).args(["do", "overlay.close"]).stdin(Stdio::null()).output();
-    for (theme, appearance) in [("neo-brutalism", "light"), ("amber-minimal", "dark")] {
+    for (theme, appearance) in [("neo-brutalism", "light"), ("amber-minimal", "dark"), ("sodium", "dark"), ("voltage", "dark"), ("phosphor", "dark")] {
         let settings = env.home.join("settings.json");
         let mut person: Value = std::fs::read_to_string(&settings).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(|| serde_json::json!({}));
         if let Some(object) = person.as_object_mut() {

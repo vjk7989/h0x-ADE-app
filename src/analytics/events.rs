@@ -380,6 +380,9 @@ pub fn agents(now: &[Seen], first: bool) {
                     folder: s.folder.clone(),
                 },
             );
+            if !first {
+                crate::activity::session_started();
+            }
             if !first && allow(&format!("agent_started:{kind}"), Duration::from_secs(5)) {
                 event(
                     "agent_started",
@@ -410,6 +413,8 @@ pub fn agents(now: &[Seen], first: bool) {
         };
         let _ = std::thread::Builder::new().name("analytics-tokens".into()).spawn(move || {
             let Some(u) = crate::agent_usage::usage(usage_kind, Path::new(&folder), started, SystemTime::now()) else { return };
+            // Kept on this computer whether or not usage is shared.
+            crate::activity::add_tokens(u.input.saturating_add(u.output));
             let model: Value = u.model.map_or(Value::Null, Value::from);
             event(
                 "agent_tokens",

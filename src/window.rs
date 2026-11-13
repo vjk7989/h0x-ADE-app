@@ -2136,7 +2136,9 @@ impl AppWindow {
         }
         self.written_seen.retain(|a, _| self.live.contains_key(a));
         crate::events::agents(&running, !self.listed_once);
-        crate::update::note_agents(self.live.values().any(|rec| rec["status"] == "working"));
+        let working = self.live.values().any(|rec| rec["status"] == "working");
+        crate::update::note_agents(working);
+        crate::activity::tick(working);
         crate::events::hourly();
         if crate::events::daily_due() {
             crate::events::daily_device(self.workspace_shape(window));

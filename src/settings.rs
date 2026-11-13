@@ -80,7 +80,7 @@ const PAPER: Palette = Palette {
 pub const PRESETS: &[&str] = &["graphite", "ink", "moss", "paper"];
 
 /// The theme a layout without one shows, by appearance.
-pub const DEFAULT_DARK: &str = "graphite";
+pub const DEFAULT_DARK: &str = "darkmatter";
 pub const DEFAULT_LIGHT: &str = "paper";
 
 fn preset(name: &str) -> Option<&'static Palette> {
@@ -103,6 +103,9 @@ const THEMES: &[(&str, &str)] = &[
     ("darkmatter", include_str!("../defaults/themes/darkmatter.json")),
     ("soft-pop", include_str!("../defaults/themes/soft-pop.json")),
     ("neo-brutalism", include_str!("../defaults/themes/neo-brutalism.json")),
+    ("sodium", include_str!("../defaults/themes/sodium.json")),
+    ("voltage", include_str!("../defaults/themes/voltage.json")),
+    ("phosphor", include_str!("../defaults/themes/phosphor.json")),
 ];
 
 /// `themes/<name>.json`: a palette, plus `colors` overrides like settings.json's.
@@ -187,8 +190,13 @@ fn palette(name: &str) -> Result<(Palette, BTreeMap<String, String>), String> {
         return Ok((p.clone(), BTreeMap::new()));
     }
     let path = theme_path(name);
+    // A shipped theme is always there: its file is installed at start, and until then (or if
+    // it was deleted) the copy built into the app stands in.
+    let shipped = || THEMES.iter().find(|(n, _)| *n == name).map(|(_, text)| (*text).to_owned());
     let text = std::fs::read_to_string(&path)
-        .map_err(|_| format!("theme {name:?} is not one of {} and there is no themes/{name}.json", PRESETS.join(", ")))?;
+        .ok()
+        .or_else(shipped)
+        .ok_or_else(|| format!("theme {name:?} is not one of {} and there is no themes/{name}.json", PRESETS.join(", ")))?;
     parse_theme_file(name, &text)
 }
 
@@ -1524,10 +1532,10 @@ mod tests {
             parse_theme_file(name, text).unwrap_or_else(|e| panic!("{e}"));
         }
         let names: Vec<&str> = THEMES.iter().map(|(n, _)| *n).collect();
-        for want in ["atom-one-dark", "win98", "amber-minimal", "candyland", "claymorphism", "darkmatter", "soft-pop", "neo-brutalism"] {
+        for want in ["atom-one-dark", "win98", "amber-minimal", "candyland", "claymorphism", "darkmatter", "soft-pop", "neo-brutalism", "sodium", "voltage", "phosphor"] {
             assert!(names.contains(&want), "{want} is not shipped: {names:?}");
         }
-        assert_eq!(names.len(), 8, "{names:?}");
+        assert_eq!(names.len(), 11, "{names:?}");
         assert_eq!(PRESETS, ["graphite", "ink", "moss", "paper"]);
         for name in PRESETS {
             assert!(preset(name).is_some(), "{name}");
@@ -1587,6 +1595,48 @@ mod tests {
             for i in (1..=7).chain(9..=15) {
                 let ratio = contrast(rgb(&t, &format!("ansi{i}")), bg);
                 assert!(ratio >= 3.0, "{name}: ansi{i} {} on {} is {ratio:.2}:1, under 3:1", t[&format!("ansi{i}")], t["background"]);
+            }
+        }
+    }
+
+    // A deliberate change of the default (0.1.31): the dark theme nobody chose is darkmatter, not graphite.
+    #[test]
+    fn a_fresh_settings_file_shows_darkmatter_in_dark_mode_and_paper_in_light() {
+        let look = crate::layout::Look::default();
+        for (appearance, system_dark) in [(Appearance::System, true), (Appearance::Dark, false), (Appearance::Dark, true)] {
+            let person = Person { appearance, ..Person::default() };
+            let s = Settings::compose(&person, &look, system_dark);
+            assert_eq!((s.dark, s.theme.as_str(), s.theme_dark.as_str()), (true, "darkmatter", "darkmatter"), "{appearance:?}");
+        }
+        let light = Settings::compose(&Person::default(), &look, false);
+        assert_eq!((light.dark, light.theme.as_str(), light.theme_light.as_str()), (false, "paper", "paper"));
+        assert_eq!(Settings::default().theme_dark, "darkmatter");
+        // A theme the person chose is kept.
+        let chosen: Person = serde_json::from_str(r#"{"theme":"ink"}"#).unwrap();
+        assert_eq!(Settings::compose(&chosen, &look, true).theme, "ink");
+        // darkmatter ships, so the default is never a missing file.
+        assert!(THEMES.iter().any(|(n, _)| *n == DEFAULT_DARK));
+    }
+
+    #[test]
+    fn sodium_voltage_and_phosphor_are_dark_with_their_palette_and_readable_text() {
+        fn lum(c: u32) -> f64 {
+            let ch = |s: u32| {
+                let v = ((c >> s) & 255) as f64 / 255.0;
+                if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0)
+        }
+        let contrast = |a: u32, b: u32| (lum(a).max(lum(b)) + 0.05) / (lum(a).min(lum(b)) + 0.05);
+        let rgb = |t: &Theme, k: &str| u32::from_str_radix(t[k].trim_start_matches('#'), 16).unwrap_or_else(|_| panic!("{k} {}", t[k]));
+        for (name, background, cursor, accent) in [("sodium", "#000000", "#ffd60a", "#ffd60a"), ("voltage", "#0d0b14", "#ff2e63", "#00e5ff"), ("phosphor", "#030a05", "#39ff14", "#39d353")] {
+            let (p, t) = shipped(name);
+            assert!(!is_light(p.background), "{name} is dark");
+            assert_eq!((t["background"].as_str(), t["cursor"].as_str(), t["accent"].as_str()), (background, cursor, accent), "{name}");
+            let bg = rgb(&t, "background");
+            assert!(contrast(rgb(&t, "foreground"), bg) >= 7.0, "{name}: foreground");
+            for i in (1..=7).chain(9..=15) {
+                assert!(contrast(rgb(&t, &format!("ansi{i}")), bg) >= 3.0, "{name}: ansi{i}");
             }
         }
     }
