@@ -2956,6 +2956,29 @@ fn welcome_panels_page_changes_the_panels_only_when_one_is_toggled(cx: &mut Test
     assert_eq!(calls.borrow().shared.get("workspace.panels"), Some(&json!(["files", "changes", "sessions"])));
 }
 
+#[gpui::test]
+fn welcome_shows_state_tags_key_hints_and_the_lowercase_beta_tag(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let values = || fixture(true, props(), updates("current", "current"));
+    // Page 3: the panels are one ruled list with [on]/[off] tags and mods/<name> labels; the key hints sit by the dots.
+    let (trees, _) = describe_pressing(cx, &staged, "frame/welcome", values(), Some(r#"{}"#), "this.page = 3; this.press = (_e, cx) => this.togglePanel('files');", 1);
+    let tree = &trees[0];
+    for text in ["text \"beta\"", "text \"Enter\"", "text \"next\"", "text \"Esc\"", "text \"close\"", "mods/files", "mods/changes", "mods/sessions", "mods/todo", "text \"on\"", "w-opencode", "w-panel-files"] {
+        assert!(tree.contains(text), "missing {text}: {tree}");
+    }
+    assert!(!tree.contains("BETA"), "{tree}");
+    // A toggle turns that row's tag to [off]: with files off, "off" shows and "on" still shows for the others.
+    assert!(trees[1].contains("text \"off\"") && trees[1].contains("text \"on\""), "{}", trees[1]);
+    // Page 2 says where the machine is with a [here] tag; page 1 hints the zoom keys and folds "Coming from h0x?".
+    let (trees, _) = describe_pressing(cx, &staged, "frame/welcome", values(), None, "this.page = 2;", 0);
+    assert!(trees[0].contains("text \"here\"") && trees[0].contains("text \"not now\""), "{}", trees[0]);
+    let (trees, _) = describe_pressing(cx, &staged, "frame/welcome", values(), None, "", 0);
+    assert!(trees[0].contains("ctrl +/\u{2212}") && trees[0].contains("w-coming") && !trees[0].contains("w-migrate-copy"), "{}", trees[0]);
+    let (trees, _) = describe_pressing(cx, &staged, "frame/welcome", values(), None, "this.fold = true;", 0);
+    assert!(trees[0].contains("w-migrate-copy"), "{}", trees[0]);
+}
+
 // The welcome's OpenCode card on page 3; `press` runs at the test's press, once the card has been drawn (the
 // press timer can fire before the first page-3 render).
 fn welcome_opencode(press: &str) -> String {
@@ -2977,7 +3000,7 @@ fn welcome_offers_opencode_defaulting_to_no_and_installs_only_after_yes_and_cont
     };
     // Untouched: the card is there with No chosen, and nothing is installed (even on Done).
     let (trees, calls) = run(cx, "this.start();", 1);
-    assert!(trees[0].contains("OpenCode CLI (free)") && trees[0].contains("w-seg-Yes") && trees[0].contains("w-seg-No"), "{}", trees[0]);
+    assert!(trees[0].contains("OpenCode CLI") && trees[0].contains("(free)") && trees[0].contains("w-seg-Yes") && trees[0].contains("w-seg-No"), "{}", trees[0]);
     assert!(!trees[0].contains("Installed"), "{}", trees[0]);
     assert_eq!(installs(&calls), 0, "{:?}", calls.borrow().effects);
     assert_eq!(calls.borrow().shared.get("welcome.opencode"), None);
@@ -3001,7 +3024,7 @@ fn welcome_shows_opencode_as_installed_and_never_installs_it_again(cx: &mut Test
     let values = fixture(true, props(), updates("current", "current"));
     let setup = "this.page = 3; this.openCodeInstalled = true; this.press = (_e, cx) => { this.start(); };";
     let (trees, calls) = describe_pressing(cx, &staged, "frame/welcome", values, None, setup, 1);
-    assert!(trees[0].contains("OpenCode CLI (free)") && trees[0].contains("Installed \u{2713}"), "{}", trees[0]);
+    assert!(trees[0].contains("OpenCode CLI") && trees[0].contains("text \"installed\""), "{}", trees[0]);
     assert!(!trees[0].contains("w-seg-Yes"), "{}", trees[0]);
     assert!(!calls.borrow().effects.iter().any(|(n, _)| n == "installOpenCode"), "{:?}", calls.borrow().effects);
 }
