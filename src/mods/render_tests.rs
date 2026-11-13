@@ -2118,7 +2118,7 @@ fn logo_menu_shows_the_current_account_the_others_and_the_account_actions(cx: &m
     let menu = |account: Value, setup: Option<&str>| {
         let mut values = fixture(true, json!({"menu":"account","overlay":"o1"}), updates("current", "current"));
         values.insert("account".into(), account);
-        describe_with_values(cx, &staged, "mods/workspace-chrome", values, setup).unwrap()
+        describe_with_values(cx, &staged, "frame/account", values, setup).unwrap()
     };
     let tree = menu(account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam")], Some("u1")), None);
     for text in ["account-menu", "vijay", "Google", "account-switch-u2", "sam", "GitHub", "account-add", "Add account", "account-settings", "Account settings", "account-signout", "Sign out"] {
@@ -2145,10 +2145,10 @@ fn logo_menu_choices_close_the_menu_then_switch_or_open_settings_info(cx: &mut T
         let mut values = fixture(true, json!({"menu":"account","overlay":"o1"}), updates("current", "current"));
         values.insert("account".into(), account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam")], Some("u1")));
         let setup = format!(
-            "const real = this.menuRow.bind(this); \
-             this.menuRow = (id, label, hint, action) => {{ if (id === '{id}') this.press = action; return real(id, label, hint, action); }};"
+            "const real = this.row.bind(this); \
+             this.row = (id, label, hint, action) => {{ if (id === '{id}') this.press = action; return real(id, label, hint, action); }};"
         );
-        let (_, calls) = describe_pressing(cx, &staged, "mods/workspace-chrome", values, None, &setup, 1);
+        let (_, calls) = describe_pressing(cx, &staged, "frame/account", values, None, &setup, 1);
         let c = calls.borrow();
         let names: Vec<&str> = c.effects.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"closeOverlay"), "{id}: the menu closes: {:?}", c.effects);
@@ -2164,6 +2164,19 @@ fn logo_menu_is_not_drawn_in_the_bar_and_the_brand_is_clickable(cx: &mut TestApp
     let tree = describe(cx, &staged, "mods/workspace-chrome", true, props(), updates("current", "current"), None).unwrap();
     assert!(tree.contains("\"brand\"") && tree.contains("HyperOx"), "{tree}");
     assert!(!tree.contains("account-menu") && !tree.contains("account-add"), "the menu opens in its own popup: {tree}");
+}
+
+#[gpui::test]
+fn logo_menu_waits_while_an_account_change_runs_and_the_user_mod_only_opens_the_frame(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(true, json!({"overlay":"o1"}), updates("current", "current"));
+    values.insert("account".into(), account_value(&[("u1", "google.com", "vijay")], Some("u1")));
+    let tree = describe_with_values(cx, &staged, "frame/account", values, Some("this.busy = true;")).unwrap();
+    assert!(tree.contains("Waiting") && !tree.contains("account-add") && !tree.contains("account-signout"), "{tree}");
+    // The logo only opens the frame: the mods/ copy (a person's to edit) has no account calls to use.
+    let chrome = include_str!("../../defaults/mods/workspace-chrome/main.js");
+    assert!(chrome.contains("mod: \"frame-account\"") && !chrome.contains("account(") && !chrome.contains("accountSign") && !chrome.contains("accountSwitch"), "{chrome}");
 }
 
 // `entry` with settings.json in `values`' app home holding `settings` (None: missing) and `setup` run after its

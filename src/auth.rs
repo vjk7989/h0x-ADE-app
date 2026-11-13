@@ -12,8 +12,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Firebase public web config of pavii.tech (it ships in the login page; not a secret).
@@ -25,6 +25,9 @@ const SIGN_IN_WAIT: Duration = Duration::from_secs(5 * 60);
 /// Largest callback body accepted.
 const MAX_BODY: usize = 16 * 1024;
 const MAX_HEAD: usize = 8 * 1024;
+/// Most a local client may take to send its request, and how many may be served at once.
+const CONN_DEADLINE: Duration = Duration::from_secs(5);
+const MAX_CONNS: usize = 32;
 /// securetoken answers that mean the session is over for good.
 const REJECTED: [&str; 4] = ["TOKEN_EXPIRED", "USER_DISABLED", "USER_NOT_FOUND", "INVALID_REFRESH_TOKEN"];
 
@@ -46,11 +49,12 @@ struct Entry {
     name: Option<String>,
     email: Option<String>,
     picture: Option<String>,
-    /// Unix seconds of the last successful token check.
+    /// Unix seconds of the last successful token check; missing means 0 (needs sign-in).
+    #[serde(default)]
     last_verified: u64,
 }
 
-#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, PartialEq, Serialize)]
 struct Store {
     current: Option<String>,
     accounts: Vec<Entry>,
@@ -138,8 +142,34 @@ fn secret_name(uid: &str) -> String {
     format!("account.{uid}")
 }
 
+/// The saved accounts. One bad entry (no uid or provider, or a uid unsafe for paths) is dropped
+/// on its own; a file that is not JSON at all is empty. `current` must name a kept account.
 fn load(dir: &Path) -> Store {
-    std::fs::read(dir.join("accounts.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    let json: Option<serde_json::Value> =
+        std::fs::read(dir.join("accounts.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    let Some(json) = json else { return Store::default() };
+    let accounts: Vec<Entry> = json["accounts"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(|e| serde_json::from_value::<Entry>(e.clone()).ok())
+                .filter(|e| valid_uid(&e.uid))
+                .collect()
+        })
+        .unwrap_or_default();
+    let current = json["current"].as_str().filter(|uid| accounts.iter().any(|e| e.uid == *uid)).map(str::to_string);
+    Store { current, accounts }
+}
+
+/// A last check in the future (the clock was wrong) counts as now, so grace runs out 30 days
+/// after the correction. True when anything changed.
+fn clamp_future(store: &mut Store, now: u64) -> bool {
+    let mut changed = false;
+    for e in store.accounts.iter_mut().filter(|e| e.last_verified > now) {
+        e.last_verified = now;
+        changed = true;
+    }
+    changed
 }
 
 fn save(dir: &Path, store: &Store) -> Result<(), String> {
@@ -154,7 +184,10 @@ fn within_grace(last_verified: u64, now: u64) -> bool {
 
 fn current_in(dir: &Path, now: u64) -> Option<Account> {
     locked(|| {
-        let store = load(dir);
+        let mut store = load(dir);
+        if clamp_future(&mut store, now) {
+            let _ = save(dir, &store);
+        }
         let uid = store.current?;
         store.accounts.iter().find(|e| e.uid == uid && within_grace(e.last_verified, now)).map(Entry::account)
     })
@@ -470,19 +503,35 @@ enum Req {
     Bad,
 }
 
-fn read_request(stream: &mut TcpStream) -> Req {
-    let mut buf = Vec::new();
+/// One read into `buf`; false when the connection ended, failed, or `stop` says to give up.
+/// The stream has a short read timeout, so `stop` is looked at often even if the client is silent.
+fn read_more(stream: &mut TcpStream, buf: &mut Vec<u8>, stop: &dyn Fn() -> bool) -> bool {
     let mut chunk = [0u8; 2048];
+    loop {
+        if stop() {
+            return false;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => return false,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                return true;
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+}
+
+fn read_request(stream: &mut TcpStream, stop: &dyn Fn() -> bool) -> Req {
+    let mut buf = Vec::new();
     let head_end = loop {
         if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
             break pos;
         }
-        if buf.len() > MAX_HEAD {
+        if buf.len() > MAX_HEAD || !read_more(stream, &mut buf, stop) {
             return Req::Bad;
-        }
-        match stream.read(&mut chunk) {
-            Ok(0) | Err(_) => return Req::Bad,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
         }
     };
     let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
@@ -499,9 +548,8 @@ fn read_request(stream: &mut TcpStream) -> Req {
     }
     let mut body = buf[head_end + 4..].to_vec();
     while body.len() < length {
-        match stream.read(&mut chunk) {
-            Ok(0) | Err(_) => return Req::Bad,
-            Ok(n) => body.extend_from_slice(&chunk[..n]),
+        if !read_more(stream, &mut body, stop) {
+            return Req::Bad;
         }
     }
     body.truncate(length);
@@ -527,6 +575,8 @@ fn respond(mut stream: TcpStream, status: &str, message: &str) {
 fn wait_for_callback(listener: &TcpListener, state: &str, wait: Duration, cancels: u64) -> Result<(TcpStream, Form), String> {
     listener.set_nonblocking(true).map_err(|e| format!("listener: {e}"))?;
     let deadline = Instant::now() + wait;
+    let (tx, rx) = mpsc::channel();
+    let active = Arc::new(AtomicUsize::new(0));
     loop {
         if CANCELS.load(Ordering::SeqCst) != cancels {
             return Err("cancelled".into());
@@ -534,32 +584,55 @@ fn wait_for_callback(listener: &TcpListener, state: &str, wait: Duration, cancel
         if Instant::now() >= deadline {
             return Err("timeout".into());
         }
-        let mut stream = match listener.accept() {
-            Ok((stream, _)) => stream,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(50));
-                continue;
-            }
-            Err(e) => return Err(format!("listener: {e}")),
-        };
-        let _ = stream.set_nonblocking(false);
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
-        match read_request(&mut stream) {
-            Req::TooBig => respond(stream, "413 Payload Too Large", "Too large."),
-            Req::Bad => respond(stream, "400 Bad Request", "Bad request."),
-            Req::Request { method, path, body } => {
-                if method != "POST" || path != "/callback" {
-                    respond(stream, "404 Not Found", "Not found.");
-                    continue;
+        let mut idle = Duration::from_millis(50);
+        match listener.accept() {
+            Ok((stream, _)) => {
+                idle = Duration::ZERO;
+                if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNS {
+                    active.fetch_sub(1, Ordering::SeqCst);
+                } else {
+                    // Each client is read on its own thread, so a slow one never holds up the
+                    // real callback, a cancel or the timeout.
+                    let (tx, active, state) = (tx.clone(), active.clone(), state.to_string());
+                    std::thread::spawn(move || {
+                        serve(stream, &state, cancels, &tx);
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    });
                 }
-                match parse_form(&body, state) {
-                    Err(_) => respond(stream, "400 Bad Request", "Bad request."),
-                    Ok(Form::Cancelled) => {
-                        respond(stream, "200 OK", "Sign-in cancelled.");
-                        return Err("cancelled".into());
-                    }
-                    Ok(form) => return Ok((stream, form)),
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(format!("listener: {e}")),
+        }
+        match rx.recv_timeout(idle) {
+            Ok((stream, Form::Cancelled)) => {
+                respond(stream, "200 OK", "Sign-in cancelled.");
+                return Err("cancelled".into());
+            }
+            Ok(found) => return Ok(found),
+            Err(_) => {}
+        }
+    }
+}
+
+/// Reads one client (at most [`CONN_DEADLINE`]); answers anything that is not the callback and
+/// hands a valid one to the waiting sign-in with its connection still open.
+fn serve(mut stream: TcpStream, state: &str, cancels: u64, tx: &mpsc::Sender<(TcpStream, Form)>) {
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
+    let give_up = Instant::now() + CONN_DEADLINE;
+    let stop = || CANCELS.load(Ordering::SeqCst) != cancels || Instant::now() >= give_up;
+    match read_request(&mut stream, &stop) {
+        Req::TooBig => respond(stream, "413 Payload Too Large", "Too large."),
+        Req::Bad => respond(stream, "400 Bad Request", "Bad request."),
+        Req::Request { method, path, body } => {
+            if method != "POST" || path != "/callback" {
+                return respond(stream, "404 Not Found", "Not found.");
+            }
+            match parse_form(&body, state) {
+                Err(_) => respond(stream, "400 Bad Request", "Bad request."),
+                Ok(form) => {
+                    let _ = tx.send((stream, form));
                 }
             }
         }
@@ -567,7 +640,8 @@ fn wait_for_callback(listener: &TcpListener, state: &str, wait: Duration, cancel
 }
 
 fn sign_in_in(dir: &Path, open: impl FnOnce(&str), exchange: Exchange, wait: Duration) -> Result<Account, String> {
-    let cancels = CANCELS.load(Ordering::SeqCst);
+    // One sign-in at a time: starting one cancels any pending one.
+    let cancels = CANCELS.fetch_add(1, Ordering::SeqCst) + 1;
     let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("listener: {e}"))?;
     let port = listener.local_addr().map_err(|e| format!("listener: {e}"))?.port();
     if port < 1024 {
@@ -942,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn accounts_json_ignores_unknown_fields_but_an_entry_without_last_verified_drops_the_file() {
+    fn accounts_json_ignores_unknown_fields_and_an_entry_without_last_verified_needs_sign_in() {
         let dir = scratch("json-shape");
         std::fs::create_dir_all(&dir).unwrap();
         let want = Store { current: Some("u1".into()), accounts: vec![entry("u1", 7)] };
@@ -954,8 +1028,50 @@ mod tests {
         assert_eq!(load(&dir), want, "missing name, email and picture are none");
         let no_time = r#"{"current":"u1","accounts":[{"uid":"u1","provider":"google.com","last_verified":7},{"uid":"u2","provider":"github.com"}]}"#;
         std::fs::write(dir.join("accounts.json"), no_time).unwrap();
-        assert_eq!(load(&dir), Store::default(), "one entry without last_verified makes the file unreadable");
-        assert_eq!(current_in(&dir, 7), None);
+        // Spec change (AUTH-A1 fix pass): the entry stays, with last_verified 0, and so do the others.
+        let loaded = load(&dir);
+        let u2 = Entry { provider: "github.com".into(), ..entry("u2", 0) };
+        assert_eq!(loaded.accounts, vec![entry("u1", 7), u2]);
+        assert_eq!(current_in(&dir, 7).map(|a| a.uid), Some("u1".into()));
+        switch_in(&dir, "u2").unwrap();
+        assert_eq!(current_in(&dir, GRACE_SECS + 1), None, "last_verified 0 is long out of grace");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_drops_bad_entries_one_by_one_and_current_must_name_a_kept_account() {
+        let dir = scratch("json-bad");
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = r#"{"current":"../x","accounts":[
+            {"uid":"../x","provider":"p","last_verified":1},
+            {"uid":"","provider":"p","last_verified":1},
+            {"provider":"p","last_verified":1},
+            {"uid":"u1","last_verified":1},
+            {"uid":"u2","provider":"p","last_verified":"soon"},
+            {"uid":"ok_1-A","provider":"p","last_verified":5}]}"#;
+        std::fs::write(dir.join("accounts.json"), text).unwrap();
+        let loaded = load(&dir);
+        assert_eq!(loaded.accounts.iter().map(|e| e.uid.as_str()).collect::<Vec<_>>(), ["ok_1-A"]);
+        assert_eq!(loaded.current, None);
+        let long = "a".repeat(129);
+        let text = format!(r#"{{"current":"{long}","accounts":[{{"uid":"{long}","provider":"p"}}]}}"#);
+        std::fs::write(dir.join("accounts.json"), text).unwrap();
+        assert_eq!(load(&dir), Store::default());
+        for not_json in ["", "[]", "null", "{\"accounts\":3}"] {
+            std::fs::write(dir.join("accounts.json"), not_json).unwrap();
+            assert_eq!(load(&dir), Store::default(), "{not_json:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_last_check_in_the_future_counts_as_now_so_grace_ends_30_days_after_the_correction() {
+        let dir = scratch("future");
+        save(&dir, &Store { current: Some("u1".into()), accounts: vec![entry("u1", 1_000_000_000_000)] }).unwrap();
+        assert!(current_in(&dir, 5000).is_some());
+        assert_eq!(load(&dir).accounts[0].last_verified, 5000, "the clamp is saved");
+        assert!(current_in(&dir, 5000 + GRACE_SECS).is_some());
+        assert!(current_in(&dir, 5001 + GRACE_SECS).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1118,36 +1234,83 @@ mod tests {
     }
 
     #[test]
-    fn two_sign_ins_at_once_get_their_own_port_and_state_and_one_cancel_stops_both() {
+    fn a_second_sign_in_cancels_the_first_and_nothing_is_stored_for_it() {
+        // Spec change (AUTH-A1 fix pass): one sign-in at a time; the newer one wins.
         let _g = SIGN_IN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let (a, b) = (scratch("twice-a"), scratch("twice-b"));
         let (tx, rx) = std::sync::mpsc::channel::<String>();
-        let results: Vec<Result<Account, String>> = std::thread::scope(|s| {
-            let runs: Vec<_> = [&a, &b]
-                .into_iter()
-                .map(|dir| {
-                    let tx = tx.clone();
-                    s.spawn(move || {
-                        let exchange = exchange_ok("u1");
-                        sign_in_in(dir, |url| tx.send(url.to_string()).unwrap(), &exchange, Duration::from_secs(20))
-                    })
-                })
-                .collect();
-            let first = rx.recv_timeout(Duration::from_secs(10)).unwrap();
-            let second = rx.recv_timeout(Duration::from_secs(10)).unwrap();
-            let (port1, state1) = (url_part(&first, "port"), url_part(&first, "state"));
-            let (port2, state2) = (url_part(&second, "port"), url_part(&second, "state"));
-            assert_ne!(port1, port2);
-            assert_ne!(state1, state2);
-            // One attempt's state is no good at the other's port.
-            let crossed = post(port2.parse().unwrap(), "/callback", &format!("state={state1}&refresh_token=rt"));
-            assert!(crossed.contains("400"), "{crossed}");
-            cancel_sign_in();
-            runs.into_iter().map(|h| h.join().unwrap()).collect()
+        let (first, second) = std::thread::scope(|s| {
+            let tx1 = tx.clone();
+            let a = &a;
+            let one = s.spawn(move || {
+                let exchange = exchange_ok("u1");
+                sign_in_in(a, |url| tx1.send(url.to_string()).unwrap(), &exchange, Duration::from_secs(20))
+            });
+            let first_url = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            let b = &b;
+            let two = s.spawn(move || {
+                let exchange = exchange_ok("u2");
+                sign_in_in(b, |url| tx.send(url.to_string()).unwrap(), &exchange, Duration::from_secs(20))
+            });
+            let second_url = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert_ne!(url_part(&first_url, "port"), url_part(&second_url, "port"));
+            assert_ne!(url_part(&first_url, "state"), url_part(&second_url, "state"));
+            // The first is over at once; the second still takes its callback.
+            let first = one.join().unwrap();
+            let (port, state) = (url_part(&second_url, "port").parse().unwrap(), url_part(&second_url, "state"));
+            let ok = post(port, "/callback", &format!("state={state}&refresh_token=rt"));
+            assert!(ok.contains("signed in to HyperOx"), "{ok}");
+            (first, two.join().unwrap())
         });
-        assert_eq!(results, [Err("cancelled".to_string()), Err("cancelled".to_string())]);
-        assert_eq!((load(&a), load(&b)), (Store::default(), Store::default()));
+        assert_eq!(first, Err("cancelled".to_string()));
+        assert_eq!(second.unwrap().uid, "u2");
+        assert_eq!(load(&a), Store::default());
+        assert_eq!(load(&b).accounts.len(), 1);
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn a_slow_client_never_blocks_the_real_callback() {
+        let _g = SIGN_IN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("slowloris");
+        let (result, _) = run_sign_in(&dir, &exchange_ok("u1"), Duration::from_secs(60), |port, state| {
+            // Several clients that start a request and then stall (one drips a byte at a time).
+            let mut stalled: Vec<TcpStream> = (0..4).map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap()).collect();
+            stalled[0].write_all(b"POST /callback HTTP/1.1\r\nContent-Length: 100\r\n\r\nstate=").unwrap();
+            stalled[1].write_all(b"POST /call").unwrap();
+            let start = Instant::now();
+            let ok = post(port, "/callback", &format!("state={state}&refresh_token=rt0"));
+            assert!(ok.contains("signed in to HyperOx"), "{ok}");
+            assert!(start.elapsed() < Duration::from_secs(3), "the real callback waited {:?}", start.elapsed());
+            stalled.clear();
+        });
+        assert_eq!(result.unwrap().uid, "u1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancel_and_timeout_work_while_a_slow_client_holds_a_connection() {
+        let _g = SIGN_IN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("slow-cancel");
+        let start = Instant::now();
+        let (result, _) = run_sign_in(&dir, &exchange_ok("u1"), Duration::from_secs(60), |port, _| {
+            let mut slow = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            slow.write_all(b"POST /callback HTTP/1.1\r\nContent-Length: 100\r\n\r\nstate=").unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            cancel_sign_in();
+        });
+        assert_eq!(result.unwrap_err(), "cancelled");
+        assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+        let start = Instant::now();
+        let (result, _) = run_sign_in(&dir, &exchange_ok("u1"), Duration::from_millis(400), |port, _| {
+            let mut slow = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            slow.write_all(b"POST /callback HTTP/1.1\r\nContent-Length: 100\r\n\r\nstate=").unwrap();
+            std::thread::sleep(Duration::from_millis(600));
+        });
+        assert_eq!(result.unwrap_err(), "timeout");
+        assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+        assert_eq!(load(&dir), Store::default());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

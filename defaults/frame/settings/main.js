@@ -1166,17 +1166,20 @@ export default class Settings extends View {
     this.acctMenu = null;
     this.acctConfirm = null;
     this.acctBusy = true;
+    const mine = (this.acctRun = (this.acctRun ?? 0) + 1);
     cx.notify();
     cx.spawn(async (cx) => {
       try {
         const why = await work();
-        if (why) notify({ title: "Account", body: why, level: "error" });
+        // A sign-in that a newer one replaced ends "cancelled": only the newest says so, and only it frees the buttons.
+        if (mine !== this.acctRun) return;
+        if (why === "cancelled") notify({ title: "Sign-in cancelled", level: "info" });
+        else if (why) notify({ title: "Account", body: why, level: "error" });
       } catch (e) {
-        notify({ title: "Account", body: e.message ?? String(e), level: "error" });
-      } finally {
-        this.acctBusy = false;
-        cx.notify();
+        if (mine === this.acctRun) notify({ title: "Account", body: e.message ?? String(e), level: "error" });
       }
+      if (mine === this.acctRun) this.acctBusy = false;
+      cx.notify();
     });
   }
 
@@ -1196,11 +1199,11 @@ export default class Settings extends View {
     }
     return h_flex().gap(10).items_center()
       .child(this.avatar(t, cur, 38))
-      .child(v_flex().gap(2).min_w(0)
-        .child(h_flex().gap(6).items_center()
-          .child(div().id("st-acct-name").text_size(14).font_semibold().text_color(t.foreground).child(accountName(cur)))
+      .child(v_flex().gap(2).min_w(0).max_w(260)
+        .child(h_flex().gap(6).items_center().min_w(0)
+          .child(div().id("st-acct-name").max_w(170).truncate().text_size(14).font_semibold().text_color(t.foreground).child(accountName(cur)))
           .child(this.providerBadge(t, cur)))
-        .when(Boolean(cur.email), (el) => el.child(div().id("st-acct-email").text_size(12).text_color(t.dim).child(cur.email)))
+        .when(Boolean(cur.email), (el) => el.child(div().id("st-acct-email").max_w(220).truncate().text_size(12).text_color(t.dim).child(cur.email)))
         .child(h_flex().gap(6).pt(3)
           .child(switchButton)
           .child(small("st-acct-signout", "Sign out", (_e, cx) => this.accountDo(() => accountSignOut(cur.uid), cx)))

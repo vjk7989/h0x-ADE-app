@@ -14,7 +14,7 @@ fn secrets_dir(dir: &Path) -> PathBuf {
 }
 
 fn check(name: &str) -> io::Result<()> {
-    let ok = !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+    let ok = name.bytes().any(|b| b != b'.') && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
     if ok { Ok(()) } else { Err(io::Error::other("a secret needs a plain name")) }
 }
 
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn names_that_could_leave_the_secrets_folder_are_refused() {
         let dir = scratch("names");
-        for name in ["", "../x", "a/b", "a\\b", "a b", "x\0y"] {
+        for name in ["", ".", "..", "...", "../x", "a/b", "a\\b", "a b", "x\0y"] {
             assert!(put(&dir, name, "v").is_err(), "{name:?}");
             assert!(get(&dir, name).is_err(), "{name:?}");
             assert!(del(&dir, name).is_err(), "{name:?}");

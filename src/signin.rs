@@ -10,6 +10,9 @@ use std::sync::Arc;
 
 const ICON: &[u8] = include_bytes!("../assets/icons/h0x-ade-icon.png");
 const CANCELLED: &str = "Sign-in was cancelled.";
+const TIMEOUT: &str = "Sign-in took too long. Please try again.";
+const REJECTED: &str = "This account can't sign in right now (it may be disabled). Try another account.";
+const OTHER: &str = "Something went wrong while signing in. Please try again.";
 const UNREACHABLE: &str = "Couldn't reach Pavii \u{2014} check your connection and try again.";
 
 /// Whether the main window must wait for a sign-in. Test and debug builds can skip it with
@@ -29,7 +32,17 @@ fn decide(bypass: bool, signed_in: impl FnOnce() -> bool) -> bool {
 
 /// What to tell the person about a failed sign-in.
 fn friendly(error: &str) -> &'static str {
-    if error.to_ascii_lowercase().contains("cancel") { CANCELLED } else { UNREACHABLE }
+    if error == "cancelled" {
+        CANCELLED
+    } else if error == "timeout" {
+        TIMEOUT
+    } else if error.starts_with("network:") {
+        UNREACHABLE
+    } else if error.starts_with("rejected:") {
+        REJECTED
+    } else {
+        OTHER
+    }
 }
 
 enum State {
@@ -62,6 +75,15 @@ pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver
     cx.activate(true);
 }
 
+impl Drop for SignIn {
+    /// Closing the window while the browser is still being waited for stops the wait.
+    fn drop(&mut self) {
+        if matches!(self.state, State::Waiting) {
+            crate::auth::cancel_sign_in();
+        }
+    }
+}
+
 impl SignIn {
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.attempt += 1;
@@ -81,6 +103,8 @@ impl SignIn {
                     Ok(account) => {
                         crate::analytics::identify(Some(&account));
                         let (Some(core), Some(requests)) = (this.core.take(), this.requests.take()) else { return };
+                        // Done: closing the window must not cancel anything.
+                        this.state = State::Idle;
                         window.remove_window();
                         crate::open_main(core, requests, cx);
                     }
@@ -95,6 +119,7 @@ impl SignIn {
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
+        crate::auth::cancel_sign_in();
         self.attempt += 1;
         self.state = State::Failed(CANCELLED);
         cx.notify();
@@ -167,7 +192,7 @@ impl Render for SignIn {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: that brings in `gpui::test`, which `#[test]` would then expand forever.
-    use super::{CANCELLED, UNREACHABLE, decide, friendly};
+    use super::{CANCELLED, OTHER, REJECTED, TIMEOUT, UNREACHABLE, decide, friendly};
 
     #[test]
     fn signed_out_shows_the_screen_signed_in_opens_main() {
@@ -181,22 +206,15 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_and_unreachable_have_their_own_words() {
-        assert_eq!(friendly("Sign-in was cancelled"), CANCELLED);
-        assert_eq!(friendly("CANCELLED by user"), CANCELLED);
-        assert_eq!(friendly("connection refused"), UNREACHABLE);
-        assert_eq!(friendly(""), UNREACHABLE);
-    }
-
-    #[test]
-    fn each_stable_sign_in_error_gets_plain_words_never_the_raw_error() {
+    fn each_stable_sign_in_error_gets_its_own_plain_words_never_the_raw_error() {
         assert_eq!(friendly("cancelled"), CANCELLED);
+        assert_eq!(friendly("timeout"), TIMEOUT);
         assert_eq!(friendly("network: curl: (6) Could not resolve host: securetoken.googleapis.com"), UNREACHABLE);
         assert_eq!(friendly("network: HTTP 503"), UNREACHABLE);
-        for error in ["timeout", "rejected: USER_DISABLED", "rejected: account mismatch", "listener: unusable port", "secret: access denied"] {
-            let words = friendly(error);
-            assert_ne!(words, CANCELLED, "{error}");
-            assert!(!words.contains(error), "{error}: {words}");
+        assert_eq!(friendly("rejected: USER_DISABLED"), REJECTED);
+        assert_eq!(friendly("rejected: account mismatch"), REJECTED);
+        for error in ["listener: unusable port", "secret: access denied", "", "Sign-in was cancelled", "CANCELLED by user", "cancelled later", "connection refused", "timeout again"] {
+            assert_eq!(friendly(error), OTHER, "{error}");
         }
     }
 }
