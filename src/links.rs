@@ -362,6 +362,12 @@ const TEXT: &[&str] = &[
     "hpp", "cs", "rb", "php", "sh", "bash", "zsh", "fish", "html", "htm", "css", "scss", "xml", "csv", "log", "ini", "cfg", "conf",
 ];
 
+/// Well-known text files without an extension (exact names) that open in HyperOx's editor too.
+const TEXT_NAMES: &[&str] = &[
+    "Makefile", "makefile", "GNUmakefile", "Dockerfile", "Containerfile", "Justfile", "justfile", "Procfile", "Gemfile", "Rakefile", "Vagrantfile",
+    "Brewfile", "Jenkinsfile", "LICENSE", "LICENCE", "README", "CHANGELOG", "NOTICE", "AUTHORS", "CODEOWNERS",
+];
+
 /// Executables, installers and shortcuts: shown in their folder, never opened.
 const PROGRAMS: &[&str] = &[
     "exe", "bat", "cmd", "com", "ps1", "psm1", "vbs", "vbe", "wsf", "msi", "msp", "lnk", "scr", "reg", "app", "dmg", "pkg", "deb", "rpm", "appimage", "jar", "url",
@@ -381,6 +387,9 @@ pub enum Kind {
 
 pub fn kind(path: &Path) -> Kind {
     fn by_extension(path: &Path) -> Kind {
+        if path.extension().is_none() && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| TEXT_NAMES.contains(&n)) {
+            return Kind::Text;
+        }
         // An extension with anything but letters and digits (`a.txt:stream`, `a.`) is not one.
         let Some(ext) = path.extension().and_then(|e| e.to_str()).filter(|e| !e.is_empty() && e.bytes().all(|b| b.is_ascii_alphanumeric())) else {
             return Kind::Reveal;
@@ -1311,7 +1320,14 @@ mod tests {
             assert_eq!(kind(&touch(name)), Kind::System, "{name}");
         }
         // No plain extension: none, an empty one, a dotfile, a stream, a lookalike letter.
-        for name in ["Makefile", ".bashrc", ".txt", "a.txt:stream", "a.txt::$DATA", "a.еxe", "a.tхt", "a.exe ", "a.txt.", "a.exe.", "a."] {
+        // Well-known text files without an extension open in the editor (0.1.29: `Makefile:12` links).
+        for name in TEXT_NAMES {
+            assert_eq!(kind(&touch(name)), Kind::Text, "{name}");
+        }
+        for name in ["makefile.exe", "Makefile.bat", "MAKEFILE", "Makefile2", "build"] {
+            assert_ne!(kind(&touch(name)), Kind::Text, "{name}");
+        }
+        for name in [".bashrc", ".txt", "a.txt:stream", "a.txt::$DATA", "a.еxe", "a.tхt", "a.exe ", "a.txt.", "a.exe.", "a."] {
             let path = dir.join(name);
             let _ = std::fs::write(&path, "");
             assert_eq!(kind(&path), Kind::Reveal, "{name:?}");

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.1.29] - 2026-11-13
+
+Smoother terminals, one-click copy, and OpenCode in onboarding. Bundles h0x-core 0.1.16.
+
+### Added
+- Onboarding can install the free OpenCode CLI in the background; a notice says how to run it when it's done.
+- A copy button on each terminal's header copies your selection, or the whole visible screen. Copy and Paste are now first in the right-click menu, and a "Copied ✓" chip confirms every copy.
+- Hover a command line in a terminal to copy just the command, without its prompt.
+- Ctrl+click opens `file.rs:12` at line 12, Windows paths like `C:\project\main.rs`, paths from the project root, and files like `Makefile` and `Dockerfile`.
+
+### Changed
+- The mouse wheel scrolls terminals smoothly, and the scrollbar is easier to see and grab: it widens under the pointer, and clicking its track jumps a page.
+
+### Fixed
+- A selection no longer stays on screen after the terminal is cleared.
+- Copied text uses Windows line endings on Windows.
+- The welcome no longer comes back after it was closed.
+
 ## [0.1.28] - 2026-11-13
 
 Sign in when you want to. Bundles h0x-core 0.1.16.
