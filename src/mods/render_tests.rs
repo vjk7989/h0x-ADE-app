@@ -6212,6 +6212,8 @@ fn todo_module(values: BTreeMap<String, Value>, host: Rc<RefCell<TodoHost>>) -> 
             Ok(if name == "openOverlay" || name == "notify" { "fixture-overlay".into() } else { HostValue::Null })
         });
     }
+    // The settings frame imports the account calls; this host never signs in.
+    module = module.async_function("accountSignIn", |_| Ok(async { Ok(HostValue::Null) }));
     for name in ["nextCommand", "watchFolder"] {
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     }
