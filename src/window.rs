@@ -3266,11 +3266,12 @@ impl AppWindow {
                 t.view.update(cx, |view, cx| view.open_search(window, cx));
                 return;
             }
-            "terminal.copy" | "terminal.paste" | "terminal.paste_image" => {
+            "terminal.copy" | "terminal.copy_screen" | "terminal.paste" | "terminal.paste_image" => {
                 if let Some(t) = self.focused_terminal(window, cx) {
                     t.view.update(cx, |v, cx| match name {
                         "terminal.paste" => v.paste(cx),
                         "terminal.paste_image" => v.paste_image(cx),
+                        "terminal.copy_screen" => { let _ = v.copy_screen(cx); }
                         // A command, not a key: copy and leave the selection.
                         _ => { let _ = v.copy(cx); }
                     });
@@ -6412,7 +6413,7 @@ export default class SystemToast extends View {
             assert!(!super::needs_model_pane(name, &json!({})), "{name}");
             assert!(!super::needs_model_pane(name, &json!({"place": "tab"})), "{name}");
         }
-        for name in ["pane.focus", "terminal.copy", "terminal.paste", "terminal.paste_image", "terminal.right_click"] {
+        for name in ["pane.focus", "terminal.copy", "terminal.copy_screen", "terminal.paste", "terminal.paste_image", "terminal.right_click"] {
             assert!(!super::needs_model_pane(name, &json!({})), "{name}");
         }
     }

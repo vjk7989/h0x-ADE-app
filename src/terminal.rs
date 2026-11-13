@@ -77,6 +77,8 @@ struct Grid {
     hover: Option<Point<Pixels>>,
     /// When the view last scrolled by wheel, page click or command: the scrollbar shows plainly for a while after.
     scrolled_at: Option<Instant>,
+    /// The copy chip drawn on the hovered command line last paint, and its row.
+    chip: Option<(Bounds<Pixels>, u16)>,
     /// The link under the pointer to underline: (row, first column, last column).
     link_spans: vt::Spans,
     /// Text an input method is still composing ("nihao" before "\u{4f60}\u{597d}"),
@@ -132,6 +134,9 @@ pub struct TerminalView {
     /// Wheel lines still to scroll, one line at a time (see `ScrollAnim`).
     scroll_anim: RefCell<ScrollAnim>,
     scroll_task: Option<Task<()>>,
+    /// When "Copied" last showed (`COPIED_SHOWN`), and the timer that hides it.
+    copied_at: Option<Instant>,
+    copied_task: Option<Task<()>>,
     scrollbar_task: Option<Task<()>>,
     /// Search UI and query belong to this terminal view, not the window. Each
     /// terminal in a tab therefore keeps its own query and match position.
@@ -280,6 +285,7 @@ impl TerminalView {
                 images: HashMap::new(),
                 hover: None,
                 scrolled_at: None,
+                chip: None,
                 link_spans: Vec::new(),
                 marked: None,
                 cursor_at: None,
@@ -295,6 +301,8 @@ impl TerminalView {
             scrolled: point(0.0, 0.0),
             scroll_anim: RefCell::new(ScrollAnim::default()),
             scroll_task: None,
+            copied_at: None,
+            copied_task: None,
             scrollbar_task: None,
             search_open: false,
             search_keys: false,
@@ -709,10 +717,38 @@ impl TerminalView {
         let Some(text) = self.grid.borrow().vt.selection_text() else {
             return false;
         };
+        self.put_on_clipboard(text, cx);
+        true
+    }
+
+    /// `terminal.copy_screen`: the selection if there is one, else the visible screen.
+    /// Returns whether anything was copied.
+    pub fn copy_screen(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.copy(cx) {
+            return true;
+        }
+        let text = {
+            let g = self.grid.borrow();
+            screen_text(&(0..g.vt.rows).filter_map(|row| g.vt.row_text(row)).collect::<Vec<_>>())
+        };
+        if text.is_empty() {
+            return false;
+        }
+        self.put_on_clipboard(text, cx);
+        true
+    }
+
+    /// Writes the clipboard (on Linux the primary selection too) and shows "Copied" for `COPIED_SHOWN`.
+    fn put_on_clipboard(&mut self, text: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
         #[cfg(target_os = "linux")]
         cx.write_to_primary(ClipboardItem::new_string(text));
-        true
+        self.copied_at = Some(Instant::now());
+        self.copied_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_SHOWN + Duration::from_millis(50)).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        }));
+        cx.notify();
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
@@ -1406,6 +1442,91 @@ fn paste_image_bytes(format: ImageFormat, bytes: &[u8]) -> Option<(ImageFormat, 
 
 const HINT_DELAY: Duration = Duration::from_millis(400);
 
+/// How long the "Copied" chip shows.
+const COPIED_SHOWN: Duration = Duration::from_millis(1200);
+
+fn copied_chip_live(since: Duration) -> bool {
+    since < COPIED_SHOWN
+}
+
+/// The text of the visible `rows`: each without trailing blanks, no empty lines at the end, `\n` between.
+fn screen_text(rows: &[String]) -> String {
+    let mut lines: Vec<&str> = rows.iter().map(|r| r.trim_end()).collect();
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// Prompts a bare `> ` counts for only before one of these: elsewhere it is a markdown quote.
+const PROMPT_COMMANDS: &[&str] = &[
+    "git", "npm", "npx", "pnpm", "yarn", "bun", "node", "cargo", "rustup", "rustc", "python", "python3", "pip", "cd", "ls", "dir", "cat", "echo", "make", "docker", "kubectl", "curl", "ssh", "sudo", "mkdir", "rm", "cp", "mv",
+    "go", "dotnet", "winget", "choco", "code", "claude", "gh", "tsc", "deno", "brew", "apt", "cmake",
+];
+
+/// The command on a terminal line, without its prompt and trailing blanks: after a well-known
+/// prompt (`PS C:\x> `, `C:\x>`, `$ `, `% `, `❯ `, `user@host:~$ `, `> ` before a common command)
+/// or inside an agent's `Bash(...)` header. None for anything else, and for a prompt alone.
+fn command_on_line(text: &str) -> Option<String> {
+    let line = text.trim_end();
+    let t = line.trim_start();
+    let indent = line.len() - t.len();
+    let looks_like_command = |c: &str| c.chars().next().is_some_and(|ch| ch.is_alphabetic() || matches!(ch, '.' | '/' | '~' | '_' | '\\'));
+    let found = (|| {
+        // An agent's tool header: `Bash(git status)`, maybe after a bullet.
+        let header = t.trim_start_matches(['●', '⏺', '•', '*', '-']).trim_start();
+        if let Some(inner) = header.strip_prefix("Bash(").and_then(|r| r.strip_suffix(')')) {
+            return Some(inner);
+        }
+        // PowerShell: `PS C:\x> cmd`.
+        if let Some(rest) = t.strip_prefix("PS") {
+            if let Some(cmd) = rest.strip_prefix("> ") {
+                return Some(cmd);
+            }
+            if let Some(path) = rest.strip_prefix(' ')
+                && let Some(i) = path.find("> ")
+                && !path[..i].contains(char::is_whitespace)
+                && path[..i].contains([':', '\\', '/', '~'])
+            {
+                return Some(&path[i + 2..]);
+            }
+        }
+        // cmd.exe: `C:\x>cmd`.
+        let b = t.as_bytes();
+        if b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\'
+            && let Some(i) = t.find('>')
+            && !t[..i].ends_with(' ')
+        {
+            return Some(&t[i + 1..]);
+        }
+        if let Some(cmd) = t.strip_prefix("$ ") {
+            return Some(cmd).filter(|c| looks_like_command(c.trim_start()));
+        }
+        if indent == 0 {
+            if let Some(cmd) = t.strip_prefix("% ").or_else(|| t.strip_prefix("❯ ")) {
+                return Some(cmd).filter(|c| looks_like_command(c.trim_start()));
+            }
+            if let Some(cmd) = t.strip_prefix("> ") {
+                let word = cmd.trim_start().split_whitespace().next().unwrap_or("");
+                return Some(cmd).filter(|_| PROMPT_COMMANDS.contains(&word));
+            }
+            // `user@host:~/x$ cmd` and `[user@host x]$ cmd`.
+            if let Some(i) = t.find("$ ") {
+                let prefix = &t[..i];
+                let plain = !prefix.contains(char::is_whitespace)
+                    && prefix.contains('@')
+                    && prefix.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '@' | ':' | '~' | '/' | '\\' | '-'));
+                let bracketed = prefix.starts_with('[') && prefix.ends_with(']') && prefix.contains('@');
+                if plain || bracketed {
+                    return Some(&t[i + 2..]).filter(|c| looks_like_command(c.trim_start()));
+                }
+            }
+        }
+        None
+    })()?;
+    Some(found.trim().to_owned()).filter(|c| !c.is_empty())
+}
+
 fn hint_text(target: &LinkTarget, mac: bool) -> String {
     let key = if mac { "⌘" } else { "Ctrl" };
     match target {
@@ -2078,6 +2199,26 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             g.thumb = Some(Bounds::new(point(lane.origin.x, thumb.origin.y), size(lane.size.width, thumb.size.height)));
             g.track = Some(lane);
         }
+        // A copy chip at the right end of a hovered command line (not on the alternate screen: its rows aren't stable text).
+        g.chip = None;
+        if !g.vt.alt_screen()
+            && let Some(h) = g.hover.filter(|h| bounds.contains(h) && h.y >= origin.y)
+        {
+            let row = (f32::from(h.y - origin.y) / f32::from(cell.height)) as u16;
+            if g.vt.row_text(row).is_some_and(|t| command_on_line(&t).is_some()) {
+                let font_size = px(crate::settings::font_size());
+                let color = crate::settings::color("muted");
+                let run = TextRun { len: 4, font: cell_font(false, false), color, background_color: None, underline: None, strikethrough: None };
+                let line = window.text_system().shape_line("Copy".into(), font_size, &[run], None);
+                let w = line.width + px(12.0);
+                let right = origin.x + cell.width * f32::from(g.vt.cols) - px(12.0);
+                let chip = Bounds::new(point((right - w).max(origin.x), origin.y + cell.height * row as f32), size(w, cell.height));
+                let hot = chip.contains(&h);
+                window.paint_quad(fill(snap_box(chip), crate::settings::color(if hot { "hover" } else { "popover" })).corner_radii(px(4.0)));
+                let _ = line.paint(chip.origin + point(px(6.0), px(0.0)), cell.height, TextAlign::Left, None, window, cx);
+                g.chip = Some((chip, row));
+            }
+        }
     }
 }
 
@@ -2252,6 +2393,17 @@ impl Render for TerminalView {
                     return;
                 }
                 let mut g = this.grid.borrow_mut();
+                if let Some((chip, row)) = g.chip
+                    && chip.contains(&ev.position)
+                {
+                    let command = g.vt.row_text(row).and_then(|t| command_on_line(&t));
+                    drop(g);
+                    if let Some(command) = command {
+                        this.put_on_clipboard(command, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if let (Some(track), Some(thumb)) = (g.track, g.thumb)
                     && track.contains(&ev.position)
                 {
@@ -2296,13 +2448,16 @@ impl Render for TerminalView {
                 }
             }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
-                let (was, now) = {
+                let changed = {
                     let mut g = this.grid.borrow_mut();
                     let was = g.track.zip(g.hover).is_some_and(|(t, h)| t.contains(&h));
+                    // The command chip follows the hovered row.
+                    let row_of = |g: &Grid, p: Point<Pixels>| (f32::from(p.y - g.origin.y) / f32::from(g.cell.height)).floor() as i32;
+                    let moved = g.hover.is_none_or(|h| row_of(&g, h) != row_of(&g, ev.position));
                     g.hover = Some(ev.position);
-                    (was, g.track.is_some_and(|t| t.contains(&ev.position)))
+                    moved || was != g.track.is_some_and(|t| t.contains(&ev.position))
                 };
-                if was != now {
+                if changed {
                     cx.notify();
                 }
                 if link_mods(&ev.modifiers) || this.link.is_some() {
@@ -2478,6 +2633,23 @@ impl Render for TerminalView {
                         .text_color(crate::settings::color("muted"))
                         .text_xs()
                         .child(hint),
+                )
+            })
+            .when(self.copied_at.is_some_and(|t| copied_chip_live(t.elapsed())), |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_2()
+                        .right_4()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(crate::settings::color("border"))
+                        .bg(crate::settings::color("popover"))
+                        .text_color(crate::settings::color("foreground"))
+                        .text_xs()
+                        .child("Copied ✓"),
                 )
             })
             .when_some(ended, |d, why| {
@@ -3901,6 +4073,82 @@ mod tests {
         a.cancel();
         a.add(-100, t0);
         assert_eq!(a.next(t0 + Duration::from_secs(1), 24), -24);
+    }
+
+    #[test]
+    fn screen_text_trims_rows_and_trailing_empty_lines() {
+        let rows = |r: &[&str]| r.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::screen_text(&rows(&["$ ls   ", "a  b", "", "c", "   ", ""])), "$ ls\na  b\n\nc");
+        assert_eq!(super::screen_text(&rows(&["  indented", ""])), "  indented");
+        assert_eq!(super::screen_text(&rows(&["\u{4f60}\u{597d} x  ", "\u{4e16}\u{754c}"])), "\u{4f60}\u{597d} x\n\u{4e16}\u{754c}");
+        assert_eq!(super::screen_text(&rows(&["", "  ", ""])), "");
+        assert_eq!(super::screen_text(&[]), "");
+    }
+
+    #[test]
+    fn copied_chip_lasts_a_little_over_a_second() {
+        use std::time::Duration;
+        assert!(super::copied_chip_live(Duration::ZERO));
+        assert!(super::copied_chip_live(Duration::from_millis(1199)));
+        assert!(!super::copied_chip_live(Duration::from_millis(1200)));
+    }
+
+    #[test]
+    fn command_on_line_strips_well_known_prompts() {
+        let c = |t: &str| super::command_on_line(t);
+        for (line, want) in [
+            ("PS C:\\Users\\me> git status   ", "git status"),
+            ("PS C:\\Users\\me\\my-proj> npm test", "npm test"),
+            ("PS> dir", "dir"),
+            ("C:\\Users\\me>cargo build", "cargo build"),
+            ("$ cargo test --all", "cargo test --all"),
+            ("    $ npm install", "npm install"),
+            ("% ls -la", "ls -la"),
+            ("\u{276f} git log --oneline", "git log --oneline"),
+            ("user@host:~/x$ make", "make"),
+            ("me@box:/srv/app$ ./run.sh --fast", "./run.sh --fast"),
+            ("[me@box src]$ ls", "ls"),
+            ("> git push", "git push"),
+            ("> npm run build", "npm run build"),
+            ("\u{25cf} Bash(git diff --stat)", "git diff --stat"),
+            ("Bash(cargo fmt)", "cargo fmt"),
+            ("  \u{23fa} Bash(ls -la)  ", "ls -la"),
+        ] {
+            assert_eq!(c(line).as_deref(), Some(want), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn command_on_line_ignores_prose_quotes_numbers_paths_and_bare_prompts() {
+        for line in [
+            "",
+            "   ",
+            "$",
+            "$ ",
+            "\u{276f}",
+            "\u{276f} ",
+            "PS C:\\Users\\me> ",
+            "C:\\Users\\me>",
+            "Bash()",
+            "> this is a quoted sentence",
+            "> Note: install it first",
+            ">",
+            "5 > 3",
+            "if x > 3 then",
+            "The total is $ 5.00 today",
+            "$ 100 total",
+            "50% done",
+            "/usr/local/bin/git",
+            "C:\\Users\\me\\file.txt",
+            "src/terminal.rs:120",
+            "a > b",
+            "hello world",
+            "Reading the Bash( docs",
+            "see user@host.com for $ help",
+            "    > git push",
+        ] {
+            assert_eq!(super::command_on_line(line), None, "{line:?}");
+        }
     }
 
     #[test]
