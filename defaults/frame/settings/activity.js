@@ -123,22 +123,32 @@ export function activityBlock(view, t) {
   const hovered = !empty && hover ? weeks[hover[0]]?.[hover[1]] : null;
   const num = (text) => mono(div()).text_color(t.foreground).child(text);
   const note = (text) => mono(div()).text_color(t.muted).child(text);
+  // A render has a 50 ms budget, and the grid is 371 cells: each is five calls (no closure, no `when`),
+  // and ONE handler on the grid maps the pointer to its cell.
+  const cell = (w, r) => {
+    const d = weeks[w][r];
+    if (!d) return div().id(`st-prof-activity-gap-${w}-${r}`).size(CELL);
+    const c = div().id(`st-prof-activity-cell-${w}-${r}`).size(CELL).rounded(2).bg(colors[levels[w][r]]);
+    return hover?.[0] === w && hover?.[1] === r && !empty ? c.border_1().border_color(t.foreground) : c;
+  };
+  const at = (x, y) => {
+    const w = Math.floor(x / STEP), r = Math.floor(y / STEP);
+    return x >= 0 && y >= 0 && x % STEP < CELL && y % STEP < CELL && weeks[w]?.[r] ? [w, r] : null;
+  };
   const grid = h_flex().id("st-prof-activity-grid").relative().gap(GAP).flex_none()
-    .children(weeks.map((week, w) => v_flex().gap(GAP).children(week.map((d, r) => {
-      if (!d) return div().id(`st-prof-activity-gap-${w}-${r}`).w(CELL).h(CELL).flex_none();
-      const on = hover?.[0] === w && hover?.[1] === r && !empty;
-      return div().id(`st-prof-activity-cell-${w}-${r}`).w(CELL).h(CELL).flex_none().rounded(2)
-        .bg(colors[levels[w][r]])
-        .when(on, (el) => el.border_1().border_color(t.foreground))
-        .on_hover((over, cx) => {
-          if (empty) return;
-          const now = view.activityHover;
-          if (over) view.activityHover = [w, r];
-          else if (now?.[0] === w && now?.[1] === r) view.activityHover = null;
-          else return;
-          cx.notify();
-        });
-    }))))
+    .on_mouse_move((e, cx) => {
+      if (empty) return;
+      const now = view.activityHover, next = at(e.local_position.x, e.local_position.y);
+      if (now?.[0] === next?.[0] && now?.[1] === next?.[1]) return;
+      view.activityHover = next;
+      cx.notify();
+    })
+    .on_hover((over, cx) => {
+      if (over || !view.activityHover) return;
+      view.activityHover = null;
+      cx.notify();
+    })
+    .children(weeks.map((week, w) => v_flex().gap(GAP).children(week.map((_, r) => cell(w, r)))))
     .when(Boolean(hovered), (el) => {
       const [w, r] = hover;
       const parts = tooltip(hovered, days[key(hovered)]);
