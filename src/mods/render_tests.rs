@@ -127,8 +127,10 @@ fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Val
     values
 }
 
-fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostModule {
+fn module(mut values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostModule {
     let mut module = HostModule::new("h0x");
+    // The agents knownAgents() finds: a test puts them under "knownAgentsList".
+    let known_agents = values.remove("knownAgentsList").unwrap_or_else(|| json!([]));
     for (name, value) in values {
         module = module.function(name, move |_| Ok(to_host(&value)));
     }
@@ -174,7 +176,10 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         module = module.function(name, |_| Ok(HostValue::Null));
     }
     module = module.async_function("feedbackPickImages", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
-    module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
+    module = module.async_function("knownAgents", move |_| {
+        let agents = to_host(&known_agents);
+        Ok(async move { Ok(agents) })
+    });
     module = module.async_function("pickFolder", |_| Ok(async { Ok(HostValue::Null) }));
     let signing_in = calls.clone();
     module = module.async_function("accountSignIn", move |_| {
@@ -191,7 +196,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
             let scripted = scripted(&calls, name, &first, a.get(1).map(from_host));
             let reply = match name {
                 _ if scripted.is_some() => scripted,
-                "readTextFile" if first == "/fixture/app/settings.json" || first == "/fixture/.ssh/config" => Some(Value::Null),
+                "readTextFile" if first == "/fixture/app/settings.json" || first == "/fixture/app/programs.json" || first == "/fixture/.ssh/config" => Some(Value::Null),
                 // The to-do panel's first run: no lists yet, so it creates the index and its first list.
                 "readTextFile" if first == "/fixture/app/todo/lists.md" || first == "/fixture/app/todo/tasks.md" => Some(Value::Null),
                 "writeTextFile" if first == "/fixture/app/todo/lists.md" || first == "/fixture/app/todo/tasks.md" => Some(Value::Null),
@@ -1986,6 +1991,176 @@ fn pane_menu_offers_copy_and_paste_that_run_the_terminal_commands(cx: &mut TestA
     }
 }
 
+fn agents_fixture() -> Value {
+    json!([
+        {"key":"claude","name":"Claude Code","icon":"icons/claude.svg","tint":false,"run":["claude"],"slot":1,"custom":false,"installed":true},
+        {"key":"codex","name":"Codex","icon":"icons/codex.svg","tint":false,"run":["codex"],"slot":2,"custom":false,"installed":false},
+        {"key":"aider","name":"Aider","icon":"icons/agent.svg","tint":true,"run":["aider","--model","gpt 5"],"slot":5,"custom":true,"installed":true},
+        {"key":"pi","name":"Pi","icon":"icons/pi.svg","tint":true,"run":["pi"],"slot":null,"custom":false,"installed":true}
+    ])
+}
+
+fn agents_values() -> BTreeMap<String, Value> {
+    let mut p = props();
+    p["section"] = json!("agents");
+    let mut values = fixture(true, p, updates("current", "current"));
+    values.insert("knownAgentsList".into(), agents_fixture());
+    values
+}
+
+#[gpui::test]
+fn new_menu_shows_the_real_slot_keys_the_custom_agents_and_add_agent(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    values.insert("knownAgentsList".into(), agents_fixture());
+    let setup = "const real = this.row.bind(this); this.row = (id, icon, name, action, hint, enabled) => { if (id === 'add-agent') this.press = action; return real(id, icon, name, action, hint, enabled); };";
+    let (trees, calls) = describe_pressing(cx, &staged, "mods/new-menu", values, None, setup, 1);
+    let tree = &trees[0];
+    // The key shown is the one bound to the slot (not the row's place); an agent in no slot shows none.
+    for text in ["Claude Code", "Ctrl+Shift+1", "Codex", "not installed", "Aider", "Ctrl+Shift+5", "Add agent\u{2026}"] {
+        assert!(tree.contains(text), "missing {text}: {tree}");
+    }
+    assert!(!tree.contains("Ctrl+Shift+2"), "an agent that is not installed shows no key: {tree}");
+    let c = calls.borrow();
+    let hit = c.effects.iter().find(|(n, _)| n == "run").unwrap_or_else(|| panic!("no run: {:?}", c.effects));
+    assert_eq!(Value::Array(hit.1.clone()), json!(["app.settings", {"section":"agents"}]), "{:?}", c.effects);
+}
+
+#[gpui::test]
+fn palette_offers_a_new_session_for_each_installed_or_own_agent_with_its_key(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // The agents arrive asynchronously: look after the later presses. Each is searched by name, so
+    // the many "Sessions" commands can't push it below the rows the palette draws.
+    let search = |cx: &mut TestAppContext, query: &str| {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("knownAgentsList".into(), agents_fixture());
+        let (trees, _) = describe_pressing(cx, &staged, "frame/palette", values, None, &format!("this.query = '{query}';"), 2);
+        trees.last().unwrap().clone()
+    };
+    // The title is drawn in pieces around the matched letters ("New\u{a0}", "Claude", "\u{a0}Code\u{a0}session").
+    for (query, name, key) in [("claude", "Claude", "1"), ("aider", "Aider", "5")] {
+        let tree = search(cx, query);
+        for text in ["text \"New\\u{a0}\"".to_owned(), format!("text \"{name}\""), "session".to_owned(), "text \"Agent\"".to_owned(), "text \"ctrl\"".to_owned(), "text \"shift\"".to_owned(), format!("text \"{key}\"")] {
+            assert!(tree.contains(&text), "{query}: missing {text}: {tree}");
+        }
+    }
+    let tree = search(cx, "codex");
+    assert!(!tree.contains("text \"Agent\""), "Codex is not installed, so no agent row: {tree}");
+}
+
+#[test]
+fn the_agents_page_refuses_every_key_of_the_built_in_program_table() {
+    let page = include_str!("../../defaults/frame/settings/agents.js");
+    let table: Value = serde_json::from_str(include_str!("../../defaults/programs.json")).unwrap();
+    for key in table["programs"].as_object().unwrap().keys() {
+        assert!(page.contains(&format!("\"{key}\"")), "{key} is missing from BUILT_IN in agents.js");
+    }
+}
+
+#[gpui::test]
+fn agents_page_lists_the_slots_with_keys_commands_and_who_can_be_edited(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (trees, _) = describe_pressing(cx, &staged, "frame/settings", agents_values(), None, "", 0);
+    let tree = &trees[0];
+    for text in ["Agents", "ctrl+shift+1", "Claude Code", "claude", "ctrl+shift+5", "Aider", "aider --model gpt 5", "installed", "not installed", "built in", "ag-edit-aider", "ag-rm-aider", "ag-add"] {
+        assert!(tree.contains(text), "missing {text}: {tree}");
+    }
+    assert!(!tree.contains("ag-edit-claude") && !tree.contains("ag-rm-claude"), "a built-in agent is not editable: {tree}");
+    assert!(!tree.contains("ag-pi"), "an agent in no slot and not the person's own is not listed: {tree}");
+}
+
+const AGENTS_FILE: &str = "/fixture/app/programs.json";
+
+// Fills the form as a person would and saves, then describes the page.
+fn agents_save(name: &str, command: &str) -> String {
+    format!(
+        "this.press = (_e, cx) => {{ this.ag.open(null, cx); this.ag.name.set_value({}); this.ag.command.set_value({}); this.press = (_e, cx) => this.ag.save(cx); }};",
+        serde_json::to_string(name).unwrap(),
+        serde_json::to_string(command).unwrap()
+    )
+}
+
+#[gpui::test]
+fn agents_page_adds_an_agent_with_its_quoted_command_as_argv_after_the_others_keeping_what_the_file_has(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let before = r#"{"shells":["zz"],"programs":{"old":{"name":"Old","run":["old"],"order":4,"icon":"x.svg","extra":true}}}"#;
+    let (_, calls) = describe_pressing_files(cx, &staged, "frame/settings", agents_values(), None, &[(AGENTS_FILE, before)], &agents_save("My Agent", "aider --model \"gpt 5\" 'a b' C:\\tools\\x"), 2);
+    let c = calls.borrow();
+    assert_eq!(c.writes.len(), 1, "{:?}", c.writes);
+    assert_eq!(c.writes[0].0, AGENTS_FILE);
+    assert_eq!(
+        serde_json::from_str::<Value>(&c.writes[0].1).unwrap(),
+        json!({"shells":["zz"],"programs":{
+            "old":{"name":"Old","run":["old"],"order":4,"icon":"x.svg","extra":true},
+            "my-agent":{"name":"My Agent","run":["aider","--model","gpt 5","a b","C:\\tools\\x"],"order":5}}})
+    );
+    // Created from nothing when the file is missing.
+    drop(c);
+    let (_, calls) = describe_pressing(cx, &staged, "frame/settings", agents_values(), None, &agents_save("Solo", "solo"), 2);
+    let c = calls.borrow();
+    assert_eq!(serde_json::from_str::<Value>(&c.writes[0].1).unwrap(), json!({"programs":{"solo":{"name":"Solo","run":["solo"],"order":1}}}));
+}
+
+#[gpui::test]
+fn agents_page_refuses_bad_names_and_commands_and_writes_nothing(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let long = "w ".repeat(33);
+    let cases: Vec<(String, String, &str)> = vec![
+        ("Mine".into(), "".into(), "Enter the command"),
+        ("Mine".into(), "   ".into(), "Enter the command"),
+        ("".into(), "x".into(), "Enter a name"),
+        ("Claude".into(), "x".into(), "built-in agent"),
+        ("Vim".into(), "x".into(), "built-in agent"),
+        ("Mine".into(), "x \"unclosed".into(), "quote is not closed"),
+        ("Mine".into(), long, "At most 32 words"),
+        ("x".repeat(41), "x".into(), "at most 40"),
+        ("Old".into(), "x".into(), "exists"),
+    ];
+    let before = r#"{"programs":{"old":{"name":"Old","run":["old"]}}}"#;
+    for (name, command, message) in &cases {
+        let (trees, calls) = describe_pressing_files(cx, &staged, "frame/settings", agents_values(), None, &[(AGENTS_FILE, before)], &agents_save(name, command), 2);
+        assert!(trees[2].contains(message), "{name:?} {command:?}: {}", trees[2]);
+        assert!(calls.borrow().writes.is_empty(), "{name:?} {command:?}: {:?}", calls.borrow().writes);
+    }
+    // A line break and a control character, which the one-line field would not take.
+    for text in ["a\nb", "a\u{7}b"] {
+        let setup = format!("{} this.ag.command.value = () => {};", agents_save("Mine", "x"), serde_json::to_string(text).unwrap());
+        let (trees, calls) = describe_pressing_files(cx, &staged, "frame/settings", agents_values(), None, &[(AGENTS_FILE, before)], &setup, 2);
+        assert!(trees[2].contains("one line") || trees[2].contains("control character"), "{text:?}: {}", trees[2]);
+        assert!(calls.borrow().writes.is_empty(), "{text:?}");
+    }
+}
+
+#[gpui::test]
+fn agents_page_never_overwrites_a_damaged_programs_file_and_shows_why(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for damaged in ["{not json", "[]", r#"{"programs":[]}"#] {
+        let (trees, calls) = describe_pressing_files(cx, &staged, "frame/settings", agents_values(), None, &[(AGENTS_FILE, damaged)], &agents_save("Mine", "mine"), 2);
+        assert!(trees[0].contains("can't be read") && trees[2].contains("can't be read"), "{damaged}: {}", trees[2]);
+        assert!(!trees[0].contains("ag-add"), "adding is off: {}", trees[0]);
+        let c = calls.borrow();
+        assert!(c.writes.is_empty(), "{damaged}: {:?}", c.writes);
+        assert_eq!(c.files.get(AGENTS_FILE).map(String::as_str), Some(damaged), "byte-identical");
+    }
+}
+
+#[gpui::test]
+fn agents_page_removes_only_the_chosen_own_agent_and_keeps_the_rest(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let before = r#"{"programs":{"aider":{"name":"Aider","run":["aider"],"order":1},"other":{"name":"Other","run":["o"],"order":2}}}"#;
+    let (_, calls) = describe_pressing_files(cx, &staged, "frame/settings", agents_values(), None, &[(AGENTS_FILE, before)], "this.press = (_e, cx) => this.ag.remove('aider', cx);", 1);
+    let c = calls.borrow();
+    assert_eq!(c.writes.len(), 1, "{:?}", c.writes);
+    assert_eq!(serde_json::from_str::<Value>(&c.writes[0].1).unwrap(), json!({"programs":{"other":{"name":"Other","run":["o"],"order":2}}}));
+}
+
 fn press_button(id: &str) -> String {
     format!("const real = this.button.bind(this); this.button = (t, id, label, onClick) => {{ if (id === '{id}') this.press = onClick; return real(t, id, label, onClick); }};")
 }
@@ -2555,15 +2730,34 @@ fn describe_pressing(
     setup: &str,
     presses: usize,
 ) -> (Vec<String>, Rc<RefCell<Calls>>) {
+    describe_pressing_files(cx, staged, entry, values, settings, &[], setup, presses)
+}
+
+// `describe_pressing` with more files on the disk (path, text).
+#[allow(clippy::too_many_arguments)]
+fn describe_pressing_files(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    entry: &str,
+    values: BTreeMap<String, Value>,
+    settings: Option<&str>,
+    files: &[(&str, &str)],
+    setup: &str,
+    presses: usize,
+) -> (Vec<String>, Rc<RefCell<Calls>>) {
     let calls = Rc::new(RefCell::new(Calls::default()));
+    calls.borrow_mut().files.extend(files.iter().map(|(k, v)| (k.to_string(), v.to_string())));
     // Any scripted reply records the disk; no core or exec call starts with this one.
     calls.borrow_mut().replies.insert("fixture-unused".into(), Value::Null);
     if let Some(text) = settings {
         let home = values["appHome"].as_str().unwrap();
         calls.borrow_mut().files.insert(format!("{home}/settings.json"), text.into());
     }
+    // The palette keeps its recent commands in storage.
+    static NEXT_STORE: AtomicU64 = AtomicU64::new(0);
     let policy = Policy::new()
-        .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+        .with_storage_path(staged.0.join(format!("pressing-{}.json", NEXT_STORE.fetch_add(1, Ordering::Relaxed))))
+        .with_capabilities(Capabilities::new().storage(true).read_roots([staged.0.clone()]))
         .with_host_module(module(values, calls.clone()))
         .unwrap();
     let setup = format!("{setup} cx.timer.every(50, (cx) => {{ const press = this.press; this.press = null; if (press) {{ press(null, cx); cx.notify(); }} }});");
@@ -4232,11 +4426,12 @@ export default class Scenario extends Real {
       for (let c = command(); c !== null; c = command()) {
         const at = c.indexOf(' '), verb = at < 0 ? c : c.slice(0, at), arg = c.slice(at + 1);
         if (verb === 'open') this.show(arg, cx);
-        else if (verb === 'line') { this.line = Number(arg); this.reveal(); }
+        else if (verb === 'line') this.setLine(Number(arg));
         else if (verb === 'openline') { const at2 = arg.indexOf(' '); this.show(arg.slice(at2 + 1), cx); this.line = Number(arg.slice(0, at2)); }
         else if (verb === 'openfile') this.openFile(arg, cx);
         else if (verb === 'click') this.clicks[arg](null, cx);
         else if (verb === 'back') this.show(null, cx);
+        else if (verb === 'rekey') this.context = { ...this.context, key: 'stale' };
         else if (verb === 'keep') this.save(cx, true);
         else if (verb === 'reload') this.reload(cx);
         else if (verb === 'refresh') this.refresh(cx);
@@ -4548,6 +4743,30 @@ fn files_panel_keeps_opening_files_and_going_back_after_a_line_jump(cx: &mut Tes
     assert_eq!((state["file"].clone(), state["value"].clone()), (json!("b.txt"), json!("second
 ")), "{state}");
     files_step(&mut visual, &disk, "back");
+    assert_eq!(files_state(&mut visual, &disk)["file"], Value::Null);
+}
+
+#[gpui::test]
+fn files_panel_keeps_a_linked_file_and_its_line_when_the_folder_context_settles_after_the_click(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let hundred: String = (1..=100).map(|n| format!("line {n}\n")).collect();
+    let disk = files_disk(&[("/fixture/project/a.txt", &hundred)]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "openfile /fixture/project/a.txt");
+    files_step(&mut visual, &disk, "line 30");
+    files_wait(&mut visual, 200);
+    // The context key changes (a fresh profile's first look at the folder): the file stays, at its line.
+    files_step(&mut visual, &disk, "rekey");
+    files_wait(&mut visual, 300);
+    let state = files_state(&mut visual, &disk);
+    assert_eq!(state["file"], json!("a.txt"), "{state}");
+    assert_eq!(state["cursors"].as_array().and_then(|c| c.last()), Some(&json!(29)), "{state}");
+    assert_eq!(state["value"], json!(hundred), "{state}");
+    // Going back is the person's own choice and is kept.
+    files_step(&mut visual, &disk, "back");
+    files_step(&mut visual, &disk, "rekey");
+    files_wait(&mut visual, 300);
     assert_eq!(files_state(&mut visual, &disk)["file"], Value::Null);
 }
 
@@ -6810,6 +7029,7 @@ fn todo_module(values: BTreeMap<String, Value>, host: Rc<RefCell<TodoHost>>) -> 
     }
     // The settings frame imports the account calls; this host never signs in.
     module = module.async_function("accountSignIn", |_| Ok(async { Ok(HostValue::Null) }));
+    module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     for name in ["nextCommand", "watchFolder"] {
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     }

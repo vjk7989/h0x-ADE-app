@@ -2,6 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
+import { agentsInit, loadAgents, agentsPage } from "./agents.js";
 import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, nextCommand, window, account, accountSignIn, accountCancelSignIn, accountSwitch, accountSignOut, accountRemove } from "h0x";
 
 const I = (name) => `frame/settings/${name}.svg`;
@@ -10,6 +11,7 @@ const SECTIONS = [
   { id: "profile", title: "Profile", icon: "user" },
   { id: "look", title: "Look", icon: "palette" },
   ...(window()?.platform === "macos" ? [{ id: "keyboard", title: "Keyboard", icon: "keyboard" }] : []),
+  { id: "agents", title: "Agents", icon: "terminal" },
   { id: "machines", title: "Machines", icon: "server" },
   { id: "remote", title: "Remote", icon: "smartphone" },
   { id: "alerts", title: "Alerts", icon: "bell" },
@@ -112,6 +114,8 @@ export default class Settings extends View {
     this.via = "";
     this.publicHost = InputState.new({ placeholder: "Public host, like vps.example.com" });
     this.tick = 0;
+    agentsInit(this);
+    if (this.section === "agents") loadAgents(this, cx);
     this.handle = cx.focus_handle();
     this.handle.focus();
     // `frame-settings.section:<id>` (app.settings --section while open) switches the section.
@@ -161,6 +165,7 @@ export default class Settings extends View {
     this.handle.focus();
     if (id === "machines") cx.spawn(async (cx) => { await this.loadMachines(); cx.notify(); });
     if (id === "remote") cx.spawn(async (cx) => { await this.loadRemote(); cx.notify(); });
+    if (id === "agents") loadAgents(this, cx);
     cx.notify();
   }
 
@@ -1519,6 +1524,8 @@ export default class Settings extends View {
                       ? this.look(t, cx)
                       : this.section === "keyboard"
                         ? this.keyboard(t)
+                      : this.section === "agents"
+                        ? agentsPage(this, t, cx)
                       : this.section === "machines"
                         ? this.machines(t)
                       : this.section === "remote"

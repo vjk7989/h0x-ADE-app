@@ -32,12 +32,23 @@ pub const DEFAULTS: &str = include_str!("../defaults/keys.json");
 #[cfg(target_os = "macos")]
 pub const DEFAULTS: &str = include_str!("../defaults/keys.macos.json");
 
-// Exact originals from release tags, deduplicated across v0.1.0–v0.1.4.
+// Exact originals from release tags, one per distinct file (named for the first release that
+// shipped it; v0.1.28's keys.json is what 0.1.28 to 0.1.30 shipped).
 // Keep these when defaults change: only untouched shipped files may migrate.
 #[cfg(any(not(target_os = "macos"), test))]
-const SHIPPED_KEYS: &[&str] = &[include_str!("keys/shipped/v0.1.0-keys.json")];
+const SHIPPED_KEYS: &[&str] = &[
+    include_str!("keys/shipped/v0.1.0-keys.json"),
+    include_str!("keys/shipped/v0.1.5-keys.json"),
+    include_str!("keys/shipped/v0.1.8-keys.json"),
+    include_str!("keys/shipped/v0.1.19-keys.json"),
+    include_str!("keys/shipped/v0.1.28-keys.json"),
+];
 #[cfg(any(target_os = "macos", test))]
-const SHIPPED_MACOS_KEYS: &[&str] = &[include_str!("keys/shipped/v0.1.0-keys.macos.json")];
+const SHIPPED_MACOS_KEYS: &[&str] = &[
+    include_str!("keys/shipped/v0.1.0-keys.macos.json"),
+    include_str!("keys/shipped/v0.1.5-keys.macos.json"),
+    include_str!("keys/shipped/v0.1.19-keys.macos.json"),
+];
 
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
@@ -294,6 +305,45 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&path).unwrap(), defaults);
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn every_shipped_keys_file_is_distinct_and_the_one_before_this_release_is_among_them() {
+        for (originals, defaults) in [
+            (super::SHIPPED_KEYS, include_str!("../defaults/keys.json")),
+            (super::SHIPPED_MACOS_KEYS, include_str!("../defaults/keys.macos.json")),
+        ] {
+            let mut seen = std::collections::HashSet::new();
+            assert!(originals.iter().all(|o| seen.insert(*o)), "a snapshot is listed twice");
+            for original in originals {
+                assert!(super::parse(original).is_ok());
+            }
+            // The defaults add the agent slots to what 0.1.30 shipped: that file migrates, the newer one is not its own original.
+            assert!(!originals.contains(&defaults));
+            let last = originals.last().unwrap();
+            assert!(defaults.contains("agent.new:1") && !last.contains("agent.new"));
+        }
+    }
+
+    #[test]
+    fn the_agent_slot_keys_are_bound_to_slots_one_to_nine() {
+        for (keys, shifted) in [
+            (include_str!("../defaults/keys.json"), true),
+            (include_str!("../defaults/keys.macos.json"), false),
+        ] {
+            let sections: serde_json::Value = serde_json::from_str(keys).unwrap();
+            let global = &sections["global"];
+            for n in 1..=9 {
+                assert_eq!(global[format!("ctrl-shift-{n}")], format!("agent.new:{n}"), "{n}");
+            }
+            // A US layout may report Shift+1 as `!`: the shifted forms are bound where the help keys are.
+            for (n, symbol) in "!@#$%^&*(".chars().enumerate() {
+                assert_eq!(global.get(format!("ctrl-{symbol}")).is_some(), shifted, "{symbol}");
+                if shifted {
+                    assert_eq!(global[format!("ctrl-{symbol}")], format!("agent.new:{}", n + 1));
+                }
+            }
+        }
     }
 
     #[test]
