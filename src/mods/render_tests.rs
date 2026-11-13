@@ -4404,11 +4404,12 @@ fn files_panel_scrolls_to_the_line_of_a_link_once_the_file_is_loaded_and_clamps_
     files_step(&mut visual, &disk, "line 5000");
     assert_eq!(files_state(&mut visual, &disk)["cursors"], json!([29, 100]));
 
-    // Opening a file again (or another) drops a line that was never shown.
+    // The file already open: a new line shows at once; opening it again without a line moves nothing.
     files_step(&mut visual, &disk, "openline 7 a.txt");
     files_step(&mut visual, &disk, "open a.txt");
     files_wait(&mut visual, 200);
-    assert_eq!(files_state(&mut visual, &disk)["cursors"], json!([29, 100]));
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["cursors"].clone(), state["pending"].clone()), (json!([29, 100, 6]), Value::Null), "{state}");
 }
 
 #[gpui::test]
@@ -6226,7 +6227,9 @@ fn terminal_menu_offers_pane_items_only_for_a_pane_in_a_tab_and_never_on_a_sessi
         for label in pane_items.iter().chain(["Send right-clicks to pane"].iter()) {
             assert!(tree.contains(label), "{pane}: {label}: {tree}");
         }
-        assert_eq!(items(&tree), 5, "{pane}: {tree}");
+        // Copy and Paste (0.1.29) come first on every terminal.
+        assert!(tree.contains("Copy") && tree.contains("Paste"), "{pane}: {tree}");
+        assert_eq!(items(&tree), 7, "{pane}: {tree}");
     }
 
     // A terminal block in a layout or a window: its pane is the block's id, in no tab.
@@ -6235,12 +6238,12 @@ fn terminal_menu_offers_pane_items_only_for_a_pane_in_a_tab_and_never_on_a_sessi
         assert!(!tree.contains(label), "{label}: {tree}");
     }
     assert!(tree.contains("Send right-clicks to pane"), "the terminal's own item stays: {tree}");
-    assert_eq!(items(&tree), 1, "{tree}");
+    assert_eq!(items(&tree), 3, "{tree}");
 
     // A kept sub-agent in a window still goes back under its parent.
     let tree = menu(cx, true, json!({"pane":"w1:term", "terminal":"t3"}), true);
     assert!(tree.contains("Send back to Build") && !tree.contains("Close pane") && !tree.contains("Zoom"), "{tree}");
-    assert_eq!(items(&tree), 2, "{tree}");
+    assert_eq!(items(&tree), 4, "{tree}");
 
     // No panes at all, no terminal, no pane id: nothing to offer, and it still renders.
     for target in [json!({"pane":"p1", "terminal":"missing"}), json!({})] {

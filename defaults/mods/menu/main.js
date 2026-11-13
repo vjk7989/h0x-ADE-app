@@ -36,6 +36,12 @@ function items(p, git) {
       // no pane to split, zoom or close: its pane is the block's id.
       const inTab = panes().some((pane) => pane.pane === tg.pane);
       return [
+        ...(term
+          ? [
+              ["Copy", "terminal.copy_screen", {}],
+              ["Paste", "terminal.paste", {}],
+            ]
+          : []),
         ...(inTab
           ? [
               ["Split right", "pane.split", { direction: "right", pane: tg.pane }],
@@ -45,8 +51,6 @@ function items(p, git) {
           : []),
         ...(term
           ? [
-              ["Copy", "terminal.copy_screen", {}],
-              ["Paste", "terminal.paste", {}],
               toProgram
                 ? ["Use HyperOx right-click menu", "terminal.right_click", { terminal: term.address, to: "menu" }]
                 : ["Send right-clicks to pane", "terminal.right_click", { terminal: term.address, to: "program" }],
