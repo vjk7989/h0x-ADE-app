@@ -361,7 +361,12 @@ ${doc.path}`, now = Date.now(), edit = this.edits.get(id);
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted).on_click((_e, cx) => { this.show(null, cx); cx.notify(); }).child("←")))
         .child(div().font_semibold().child("Files"))
-        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ? (doc?.dirty ? "● " : "") + this.file : this.root?.split(/[\\/]/).pop() ?? "")))
+        .child(this.file
+          // The folder shrinks (and is cut) before the file name does.
+          ? h_flex().flex_1().min_w(0).justify_end().text_size(12)
+            .child(div().min_w(0).truncate().text_color(t.dim).child(this.file.slice(0, this.file.lastIndexOf("/") + 1)))
+            .child(div().flex_none().text_color(t.foreground).child((doc?.dirty ? "● " : "") + this.file.slice(this.file.lastIndexOf("/") + 1)))
+          : div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.root?.split(/[\\/]/).pop() ?? "")))
       .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
