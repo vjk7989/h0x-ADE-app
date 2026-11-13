@@ -473,7 +473,7 @@ No arguments.
 
 ## `app.settings`
 
-Open the settings (section: look, alerts, updates).
+Open the settings (section: profile, look, alerts, updates).
 
 | Argument | Required |
 |---|---|
