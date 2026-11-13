@@ -1308,6 +1308,11 @@ fn module(inst: Instance, copy: u64) -> HostModule {
                 })
             })
         })
+        .function("accountCancelSignIn", move |_| {
+            if !account_ok { return Err(HostError::new(ACCOUNT_REFUSED)); }
+            crate::auth::cancel_sign_in();
+            Ok(HostValue::Null)
+        })
         .function("accountSwitch", move |a| {
             if !account_ok { return Err(HostError::new(ACCOUNT_REFUSED)); }
             Ok(account_change(crate::auth::switch(a.string(0)?), true))
@@ -1933,13 +1938,28 @@ mod tests {
                 r"my-mod\workspace-chrome",
             ] {
                 let host = module(Instance { name: name.into(), props: Value::Null }, 1);
-                for function in ["account", "accountSwitch", "accountSignOut", "accountRemove"] {
+                for function in ["account", "accountCancelSignIn", "accountSwitch", "accountSignOut", "accountRemove"] {
                     let err = host.call(function, &uid()).expect_err(name);
                     assert_eq!(err.message(), REFUSED, "{name:?} {function}");
                     assert!(host.call(function, &HostArguments::default()).is_err(), "{name:?} {function}");
                 }
                 let started = host.begin("accountSignIn", &HostArguments::default()).err().map(|e| e.message().to_string());
                 assert_eq!(started.as_deref(), Some(REFUSED), "{name:?}: no sign-in is started");
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn cancelling_a_sign_in_is_allowed_to_the_settings_and_account_frames() {
+        std::thread::spawn(|| {
+            // cancel_sign_in bumps a shared counter that the auth tests watch.
+            let _g = crate::auth::tests::SIGN_IN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+            for name in ["frame-settings", "frame-account"] {
+                let host = module(Instance { name: name.into(), props: Value::Null }, 1);
+                let got = host.call("accountCancelSignIn", &gpui_shell::HostArguments::default());
+                assert!(matches!(got, Ok(HostValue::Null)), "{name}");
             }
         })
         .join()

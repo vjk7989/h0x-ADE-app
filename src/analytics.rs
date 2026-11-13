@@ -107,10 +107,10 @@ pub fn event(name: &str, props: Value) {
 }
 
 /// Events belong to this account from now on (`None`: signed out, back to the install id).
-/// Signing in also links the install id to the account.
+/// Signing in also links the install id to the account, but only while sharing is on.
 pub fn identify(account: Option<&crate::auth::Account>) {
     if let Some(a) = GLOBAL.get() {
-        a.identify(account.map(|x| (x.uid.as_str(), x.provider.as_str())));
+        a.identify(account.map(|x| (x.uid.as_str(), x.provider.as_str())), SHARING.load(Ordering::Relaxed));
     }
 }
 
@@ -233,10 +233,11 @@ impl Analytics {
     }
 
     /// Switches the distinct id. Signing in (`Some((uid, provider))`) also links the install id
-    /// to the account with PostHog's `$identify`; only the provider is sent as a person property.
-    fn identify(&self, who: Option<(&str, &str)>) {
+    /// to the account with PostHog's `$identify` (only when `share` is on); only the provider is
+    /// sent as a person property. The distinct id switches either way.
+    fn identify(&self, who: Option<(&str, &str)>, share: bool) {
         *self.account.lock().unwrap_or_else(|e| e.into_inner()) = who.map(|(uid, _)| account_id(uid));
-        if let Some((_, provider)) = who {
+        if let (true, Some((_, provider))) = (share, who) {
             self.record(false, "$identify", json!({ "$anon_distinct_id": self.id, "$set": { "provider": provider } }));
         }
     }
@@ -489,9 +490,9 @@ mod tests {
         let a = make(&dir, Some("phc_test"));
         let install = "ab".repeat(16);
         a.record(false, "before", json!({}));
-        a.identify(Some(("u_123", "github")));
+        a.identify(Some(("u_123", "github")), true);
         a.record(false, "after", json!({}));
-        a.identify(None);
+        a.identify(None, true);
         a.record(false, "signed_out", json!({}));
         let sent = sent_batches(&a, true);
         let batch = sent[0]["body"]["batch"].as_array().unwrap();
@@ -507,11 +508,51 @@ mod tests {
     }
 
     #[test]
+    fn identify_with_sharing_off_switches_the_ids_but_queues_no_identify() {
+        let dir = home_dir("identify-off");
+        let a = make(&dir, Some("phc_test"));
+        a.identify(Some(("u_123", "github")), false);
+        assert_eq!(a.distinct_id(), "account:u_123");
+        a.record(false, "after", json!({}));
+        let sent = sent_batches(&a, true);
+        let batch = sent[0]["body"]["batch"].as_array().unwrap();
+        let names: Vec<&str> = batch.iter().map(|e| e["event"].as_str().unwrap()).collect();
+        assert_eq!(names, ["after"]);
+        a.identify(None, false);
+        assert_eq!(a.distinct_id(), "ab".repeat(16));
+    }
+
+    #[test]
     fn signing_out_sends_no_identify() {
         let dir = home_dir("identify-out");
         let a = make(&dir, Some("phc_test"));
-        a.identify(None);
+        a.identify(None, true);
         assert!(sent_batches(&a, true).is_empty());
+    }
+
+    #[test]
+    fn signing_out_with_sharing_off_queues_nothing_and_keeps_the_install_id() {
+        let dir = home_dir("identify-none-off");
+        let a = make(&dir, Some("phc_test"));
+        a.identify(None, false);
+        a.identify(None, false);
+        assert_eq!(a.distinct_id(), "ab".repeat(16));
+        assert!(sent_batches(&a, true).is_empty());
+    }
+
+    #[test]
+    fn a_sign_in_while_sharing_was_off_is_not_linked_later_but_the_next_one_with_sharing_on_is() {
+        let dir = home_dir("identify-off-then-on");
+        let a = make(&dir, Some("phc_test"));
+        a.identify(Some(("u_1", "google.com")), false);
+        a.identify(None, false);
+        a.identify(Some(("u_2", "github.com")), true);
+        assert_eq!(a.distinct_id(), "account:u_2");
+        let sent = sent_batches(&a, true);
+        let batch = sent[0]["body"]["batch"].as_array().unwrap();
+        let ids: Vec<(&str, &str)> = batch.iter().map(|e| (e["event"].as_str().unwrap(), e["distinct_id"].as_str().unwrap())).collect();
+        assert_eq!(ids, [("$identify", "account:u_2")]);
+        assert!(!sent[0]["body"].to_string().contains("u_1"), "the account signed in with sharing off is never linked");
     }
 
     #[test]

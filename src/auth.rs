@@ -298,6 +298,8 @@ struct Exchanged {
     id_token: String,
     refresh_token: String,
     user_id: String,
+    /// From `accounts:lookup`, only when the id token has no email claim.
+    email: Option<String>,
 }
 
 enum Failure {
@@ -327,7 +329,7 @@ fn parse_exchange(out: &str) -> Result<Exchanged, Failure> {
     if (200..300).contains(&code) {
         let field = |k: &str| json[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
         return match (field("id_token"), field("refresh_token"), field("user_id")) {
-            (Some(id_token), Some(refresh_token), Some(user_id)) => Ok(Exchanged { id_token, refresh_token, user_id }),
+            (Some(id_token), Some(refresh_token), Some(user_id)) => Ok(Exchanged { id_token, refresh_token, user_id, email: None }),
             _ => Err(net("incomplete answer")),
         };
     }
@@ -382,7 +384,47 @@ fn securetoken(refresh_token: &str) -> Result<Exchanged, Failure> {
     if !out.status.success() {
         return Err(net(String::from_utf8_lossy(&out.stderr).trim().to_string()));
     }
-    parse_exchange(&String::from_utf8_lossy(&out.stdout))
+    let mut got = parse_exchange(&String::from_utf8_lossy(&out.stdout))?;
+    // The project keeps one account per identity provider, so federated tokens carry no email.
+    if let Ok(c) = decode_claims(&got.id_token)
+        && c.email.is_none()
+    {
+        got.email = lookup_email(&got.id_token, &c.provider);
+    }
+    Ok(got)
+}
+
+/// The account email from Identity Toolkit `accounts:lookup`; any failure is just `None`.
+/// The id token goes on stdin, never into argv or the log.
+fn lookup_email(id_token: &str, provider: &str) -> Option<String> {
+    let url = format!("https://identitytoolkit.googleapis.com/v1/accounts:lookup?key={API_KEY}");
+    let mut curl = crate::spawn::command(crate::update::system("curl"));
+    curl.args(["-sS", "--max-time", "5", "-H", "Content-Type: application/json", "--data-binary", "@-"])
+        .args(crate::update::CURL_HTTPS)
+        .arg(&url);
+    let mut child = curl.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let body = serde_json::json!({ "idToken": id_token }).to_string();
+    child.stdin.take()?.write_all(body.as_bytes()).ok()?;
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_lookup(&String::from_utf8_lossy(&out.stdout), provider)
+}
+
+/// The email in an `accounts:lookup` answer: the entry of the sign-in provider, else the user's
+/// own, else the first non-empty provider entry.
+fn parse_lookup(body: &str, provider: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    let user = json["users"].get(0)?;
+    let text = |v: &serde_json::Value| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let infos = user["providerUserInfo"].as_array().map(Vec::as_slice).unwrap_or_default();
+    infos
+        .iter()
+        .find(|i| i["providerId"].as_str() == Some(provider))
+        .and_then(|i| text(&i["email"]))
+        .or_else(|| text(&user["email"]))
+        .or_else(|| infos.iter().find_map(|i| text(&i["email"])))
 }
 
 #[derive(Debug, PartialEq)]
@@ -415,7 +457,8 @@ fn decode_claims(id_token: &str) -> Result<Claims, String> {
 /// Checks the refresh token with securetoken; the uid must be the one in the id token.
 fn verify(refresh_token: &str, exchange: Exchange) -> Result<(Claims, String), String> {
     let got = exchange(refresh_token).map_err(Failure::message)?;
-    let claims = decode_claims(&got.id_token).map_err(|e| format!("rejected: {e}"))?;
+    let mut claims = decode_claims(&got.id_token).map_err(|e| format!("rejected: {e}"))?;
+    claims.email = claims.email.or(got.email);
     if claims.uid != got.user_id || !valid_uid(&claims.uid) {
         return Err("rejected: account mismatch".into());
     }
@@ -445,6 +488,7 @@ fn refresh_all_in(dir: &Path, exchange: Exchange, now: u64) {
             Err(Failure::Network(detail)) => tracing::info!("account not re-checked (kept): {detail}"),
             Ok(got) => {
                 let claims = decode_claims(&got.id_token).ok().filter(|c| c.uid == uid && got.user_id == uid);
+                let looked_up = got.email.clone();
                 let Some(claims) = claims else {
                     tracing::warn!("account re-check gave an unusable token (kept)");
                     continue;
@@ -460,7 +504,7 @@ fn refresh_all_in(dir: &Path, exchange: Exchange, now: u64) {
                             uid: uid.clone(),
                             provider: claims.provider,
                             name: claims.name,
-                            email: claims.email,
+                            email: claims.email.or(looked_up).or_else(|| slot.email.clone()),
                             picture: claims.picture,
                             last_verified: now,
                         };
@@ -703,10 +747,10 @@ fn sign_in_in(dir: &Path, open: impl FnOnce(&str), exchange: Exchange, wait: Dur
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    static SIGN_IN_TESTS: Mutex<()> = Mutex::new(());
+    pub(crate) static SIGN_IN_TESTS: Mutex<()> = Mutex::new(());
 
     fn scratch(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("h0x-auth-{tag}-{}", std::process::id()));
@@ -727,7 +771,7 @@ mod tests {
 
     fn exchange_ok(uid: &'static str) -> impl Fn(&str) -> Result<Exchanged, Failure> {
         move |rt| {
-            Ok(Exchanged { id_token: jwt(&good_payload(uid)), refresh_token: format!("{rt}-new"), user_id: uid.into() })
+            Ok(Exchanged { id_token: jwt(&good_payload(uid)), refresh_token: format!("{rt}-new"), user_id: uid.into(), email: None })
         }
     }
 
@@ -1038,7 +1082,7 @@ mod tests {
         assert_eq!(r.unwrap_err(), "timeout");
         // A uid that differs from securetoken's user_id is refused.
         let mismatch = |rt: &str| {
-            Ok::<_, Failure>(Exchanged { id_token: jwt(&good_payload("u1")), refresh_token: rt.into(), user_id: "u2".into() })
+            Ok::<_, Failure>(Exchanged { id_token: jwt(&good_payload("u1")), refresh_token: rt.into(), user_id: "u2".into(), email: None })
         };
         let (r, _) = run_sign_in(&dir, &mismatch, wait, session);
         assert_eq!(r.unwrap_err(), "rejected: account mismatch");
@@ -1078,7 +1122,7 @@ mod tests {
     fn verify_refuses_another_project_another_user_and_a_uid_unsafe_for_paths() {
         fn answer(payload: serde_json::Value, user_id: String) -> impl Fn(&str) -> Result<Exchanged, Failure> {
             let id_token = jwt(&payload);
-            move |rt: &str| Ok(Exchanged { id_token: id_token.clone(), refresh_token: rt.to_string(), user_id: user_id.clone() })
+            move |rt: &str| Ok(Exchanged { id_token: id_token.clone(), refresh_token: rt.to_string(), user_id: user_id.clone(), email: None })
         }
         let mut other_project = good_payload("u1");
         other_project["aud"] = "pavii-ai2".into();
@@ -1404,6 +1448,360 @@ mod tests {
         assert_eq!(result.unwrap_err(), "timeout");
         assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
         assert_eq!(load(&dir), Store::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_marker_path_that_is_a_directory_counts_as_done_and_nothing_panics() {
+        let dir = scratch("marker-is-dir");
+        std::fs::create_dir_all(dir.join(MARKER)).unwrap();
+        std::fs::write(dir.join(MARKER).join("keep"), "x").unwrap();
+        assert!(!screen_needed_in(&dir), "a directory at the marker path counts as done");
+        // Skipping again, healing and signing in all leave it alone without a panic.
+        let _ = write_marker(&dir);
+        heal_marker_in(&dir);
+        save(&dir, &Store { current: None, accounts: vec![entry("old", 1)] }).unwrap();
+        heal_marker_in(&dir);
+        let claims = decode_claims(&jwt(&good_payload("u1"))).unwrap();
+        let account = store_session(&dir, &claims, "t1", 100).expect("a marker that cannot be written never fails the sign-in");
+        assert_eq!(account.uid, "u1");
+        assert_eq!(current_in(&dir, 100).map(|a| a.uid).as_deref(), Some("u1"));
+        assert!(!screen_needed_in(&dir));
+        assert!(dir.join(MARKER).is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_or_garbage_marker_file_counts_as_done_and_is_left_as_it_is() {
+        let contents: [&[u8]; 5] = [b"", b"0", b"false", b"\0\xff\xfe not utf-8 \x80", b"{\"done\": false}"];
+        for (i, body) in contents.into_iter().enumerate() {
+            let dir = scratch(&format!("marker-garbage-{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(MARKER), body).unwrap();
+            assert!(!screen_needed_in(&dir), "{body:?}");
+            // An upgrader's heal does not rewrite a marker that is already there.
+            save(&dir, &Store { current: Some("u1".into()), accounts: vec![entry("u1", 1)] }).unwrap();
+            heal_marker_in(&dir);
+            assert_eq!(std::fs::read(dir.join(MARKER)).unwrap(), body, "{body:?}");
+            assert!(!screen_needed_in(&dir), "{body:?}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn skipping_twice_keeps_one_marker_and_leaves_no_temporary_files() {
+        let dir = scratch("marker-twice");
+        assert!(screen_needed_in(&dir));
+        write_marker(&dir).unwrap();
+        write_marker(&dir).unwrap();
+        assert!(!screen_needed_in(&dir));
+        assert_eq!(std::fs::read_to_string(dir.join(MARKER)).unwrap(), "1");
+        let names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, [MARKER], "{names:?}");
+        // Skipping after a sign-in is fine too.
+        let claims = decode_claims(&jwt(&good_payload("u1"))).unwrap();
+        store_session(&dir, &claims, "t1", 100).unwrap();
+        write_marker(&dir).unwrap();
+        assert!(!screen_needed_in(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn heal_with_a_damaged_or_empty_accounts_file_writes_no_marker_and_does_not_panic() {
+        let bodies = [
+            "",
+            "{not json",
+            "null",
+            "[]",
+            "\"accounts\"",
+            r#"{"accounts":"u1"}"#,
+            r#"{"accounts":{"0":{"uid":"u1","provider":"google.com"}}}"#,
+            r#"{"current":"u1","accounts":[]}"#,
+            r#"{"current":"u1","accounts":[{"uid":"../evil","provider":"google.com"},{"uid":"u1"},{"provider":"google.com"},null,7]}"#,
+        ];
+        for (i, body) in bodies.iter().enumerate() {
+            let dir = scratch(&format!("heal-damaged-{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("accounts.json"), body).unwrap();
+            heal_marker_in(&dir);
+            assert!(screen_needed_in(&dir), "{body}");
+            assert!(!dir.join(MARKER).exists(), "{body}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        // accounts.json is a folder: unreadable, so nothing to heal.
+        let dir = scratch("heal-damaged-dir");
+        std::fs::create_dir_all(dir.join("accounts.json")).unwrap();
+        heal_marker_in(&dir);
+        assert!(screen_needed_in(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        // One good entry among bad ones is a saved account: healed.
+        let dir = scratch("heal-damaged-mixed");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("accounts.json"), r#"{"current":"nobody","accounts":[{"uid":"../evil","provider":"x"},{"uid":"u1","provider":"google.com"}]}"#).unwrap();
+        heal_marker_in(&dir);
+        assert!(!screen_needed_in(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn heal_leaves_a_marker_that_is_already_there_even_with_a_damaged_accounts_file() {
+        let dir = scratch("heal-present");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(MARKER), "skipped").unwrap();
+        for body in ["{not json", r#"{"current":null,"accounts":[{"uid":"u1","provider":"google.com"}]}"#] {
+            std::fs::write(dir.join("accounts.json"), body).unwrap();
+            heal_marker_in(&dir);
+            assert!(!screen_needed_in(&dir), "{body}");
+            assert_eq!(std::fs::read_to_string(dir.join(MARKER)).unwrap(), "skipped", "{body}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_screen_check_racing_refresh_all_never_panics_and_keeps_the_marker() {
+        let dir = scratch("marker-race");
+        let claims = decode_claims(&jwt(&good_payload("u1"))).unwrap();
+        store_session(&dir, &claims, "t1", 100).unwrap();
+        let claims = decode_claims(&jwt(&good_payload("u2"))).unwrap();
+        store_session(&dir, &claims, "t2", 100).unwrap();
+        let dir = &dir;
+        std::thread::scope(|s| {
+            let checks = s.spawn(move || {
+                for _ in 0..300 {
+                    assert!(!screen_needed_in(dir));
+                    heal_marker_in(dir);
+                }
+            });
+            let refresh = s.spawn(move || {
+                for round in 0..20u64 {
+                    refresh_all_in(dir, &|_| Err(Failure::Network("offline".into())), 200 + round);
+                    refresh_all_in(dir, &exchange_ok("u1"), 300 + round);
+                }
+                // A definitive rejection drops every account.
+                refresh_all_in(dir, &|_| Err(Failure::Rejected("USER_DISABLED".into())), 999);
+            });
+            checks.join().unwrap();
+            refresh.join().unwrap();
+        });
+        assert!(load(dir).accounts.is_empty());
+        assert!(!screen_needed_in(dir), "losing every account never brings the screen back");
+        assert_eq!(std::fs::read_to_string(dir.join(MARKER)).unwrap(), "1");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_marker_works_under_a_windows_style_roaming_app_home_with_a_space_and_an_accent() {
+        let base = scratch("winhome");
+        // Like C:\Users\Ana López\AppData\Roaming\h0x-ade (a drive colon cannot be a folder name).
+        let home = base.join("C").join("Users").join("Ana López").join("AppData").join("Roaming").join("h0x-ade");
+        assert!(screen_needed_in(&home));
+        heal_marker_in(&home); // nothing saved, and the folder does not even exist yet
+        assert!(screen_needed_in(&home) && !home.exists());
+        // Skip creates the whole path.
+        write_marker(&home).unwrap();
+        assert!(!screen_needed_in(&home));
+        assert_eq!(std::fs::read_to_string(home.join(MARKER)).unwrap(), "1");
+        assert!(home.join(MARKER).to_string_lossy().contains("Ana López"));
+        // A sign-in then sign-out there keeps it; an upgrader there gets healed.
+        let other = base.join("C").join("Users").join("Ana López").join("AppData").join("Roaming").join("h0x-ade upgrade");
+        save(&other, &Store { current: Some("u1".into()), accounts: vec![entry("u1", 1)] }).unwrap();
+        heal_marker_in(&other);
+        assert!(!screen_needed_in(&other));
+        let claims = decode_claims(&jwt(&good_payload("u1"))).unwrap();
+        store_session(&home, &claims, "t1", 100).unwrap();
+        sign_out_in(&home, "u1").unwrap();
+        assert!(!screen_needed_in(&home));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_sign_in_that_lands_after_cancel_then_skip_stores_nothing_and_the_skip_holds() {
+        let _g = SIGN_IN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("late-landing");
+        let (result, url) = run_sign_in(&dir, &exchange_ok("u1"), Duration::from_secs(20), |_, _| {
+            std::thread::sleep(Duration::from_millis(200));
+            cancel_sign_in();
+        });
+        assert_eq!(result.unwrap_err(), "cancelled");
+        // The person then skips.
+        write_marker(&dir).unwrap();
+        // The browser finishes late: the listener is gone, or it refuses; nothing is stored.
+        let (port, state): (u16, String) = (url_part(&url, "port").parse().unwrap(), url_part(&url, "state"));
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        if let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let body = format!("state={state}&refresh_token=late");
+            let req = format!("POST /callback HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            let _ = s.write_all(req.as_bytes());
+            let mut page = String::new();
+            let _ = s.read_to_string(&mut page);
+            assert!(!page.contains("signed in to HyperOx"), "{page}");
+        }
+        assert_eq!(load(&dir), Store::default());
+        assert_eq!(current_in(&dir, now()), None);
+        assert!(!dir.join("secrets").exists());
+        assert!(!screen_needed_in(&dir), "the skip still holds");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+
+    fn jwt(email: Option<&str>) -> String {
+        let mut p = serde_json::json!({"aud": PROJECT_ID, "user_id": "u1", "firebase": {"sign_in_provider": "google.com"}});
+        if let Some(e) = email {
+            p["email"] = e.into();
+        }
+        format!("e30.{}.sig", URL_SAFE_NO_PAD.encode(p.to_string()))
+    }
+
+    #[test]
+    fn lookup_reads_the_email_from_provider_info_or_the_user() {
+        let only_info = r#"{"users":[{"localId":"u1","providerUserInfo":[{"providerId":"google.com","email":"a@x.test"}]}]}"#;
+        assert_eq!(parse_lookup(only_info, "google.com").as_deref(), Some("a@x.test"));
+        let top = r#"{"users":[{"email":"top@x.test","providerUserInfo":[{"providerId":"google.com","email":"a@x.test"}]}]}"#;
+        assert_eq!(parse_lookup(top, "github.com").as_deref(), Some("top@x.test"));
+        let multi = r#"{"users":[{"providerUserInfo":[{"providerId":"github.com","email":"g@x.test"},{"providerId":"google.com","email":"a@x.test"}]}]}"#;
+        assert_eq!(parse_lookup(multi, "google.com").as_deref(), Some("a@x.test"));
+        assert_eq!(parse_lookup(multi, "password").as_deref(), Some("g@x.test"));
+    }
+
+    #[test]
+    fn lookup_without_an_email_or_with_bad_answers_is_none() {
+        for body in [
+            r#"{"users":[{"localId":"u1","providerUserInfo":[{"providerId":"google.com"}]}]}"#,
+            r#"{"users":[]}"#,
+            r#"{}"#,
+            r#"{"users":[{"email":"","providerUserInfo":[{"providerId":"google.com","email":""}]}]}"#,
+            r#"{"error":{"message":"INVALID_ID_TOKEN"}}"#,
+            "not json",
+            "",
+        ] {
+            assert_eq!(parse_lookup(body, "google.com"), None, "{body}");
+        }
+    }
+
+    fn exchange(email: Option<&'static str>, token_email: Option<&'static str>) -> impl Fn(&str) -> Result<Exchanged, Failure> {
+        move |rt| {
+            Ok(Exchanged {
+                id_token: jwt(token_email),
+                refresh_token: rt.into(),
+                user_id: "u1".into(),
+                email: email.map(str::to_string),
+            })
+        }
+    }
+
+    #[test]
+    fn refresh_fills_the_email_from_the_lookup_and_keeps_the_stored_one_when_it_fails() {
+        let dir = std::env::temp_dir().join(format!("h0x-auth-lookup-refresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let claims = decode_claims(&jwt(None)).unwrap();
+        store_session(&dir, &claims, "t1", 100).unwrap();
+        assert_eq!(load(&dir).accounts[0].email, None);
+        refresh_all_in(&dir, &exchange(Some("found@x.test"), None), 200);
+        assert_eq!(load(&dir).accounts[0].email.as_deref(), Some("found@x.test"));
+        // The lookup failed this time: the stored email stays.
+        refresh_all_in(&dir, &exchange(None, None), 300);
+        assert_eq!(load(&dir).accounts[0].email.as_deref(), Some("found@x.test"));
+        // A claim in the token wins over the lookup.
+        refresh_all_in(&dir, &exchange(Some("found@x.test"), Some("claim@x.test")), 400);
+        assert_eq!(load(&dir).accounts[0].email.as_deref(), Some("claim@x.test"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_takes_the_lookup_email_only_when_the_token_has_none() {
+        let (claims, _) = verify("rt", &exchange(Some("found@x.test"), None)).unwrap();
+        assert_eq!(claims.email.as_deref(), Some("found@x.test"));
+        let (claims, _) = verify("rt", &exchange(Some("found@x.test"), Some("claim@x.test"))).unwrap();
+        assert_eq!(claims.email.as_deref(), Some("claim@x.test"));
+        let (claims, _) = verify("rt", &exchange(None, None)).unwrap();
+        assert_eq!(claims.email, None);
+    }
+
+    #[test]
+    fn lookup_keeps_a_unicode_or_very_long_email_whole() {
+        for email in ["\u{e1}na.l\u{f3}pez@ex\u{e4}mple.test", "\u{7528}\u{6237}@\u{4f8b}\u{5b50}.\u{6d4b}\u{8bd5}", "ana+tag@x.test"] {
+            let body = serde_json::json!({"users":[{"providerUserInfo":[{"providerId":"google.com","email":email}]}]}).to_string();
+            assert_eq!(parse_lookup(&body, "google.com").as_deref(), Some(email), "{body}");
+            // The same text sent with JSON escapes.
+            let escaped = format!(r#"{{"users":[{{"email":"{}"}}]}}"#, email.chars().map(|c| format!("\\u{:04x}", c as u32)).collect::<String>());
+            assert_eq!(parse_lookup(&escaped, "github.com").as_deref(), Some(email), "{escaped}");
+        }
+        let long = format!("{}@{}.test", "a".repeat(10_000), "b".repeat(5_000));
+        let body = serde_json::json!({"users":[{"email":long}]}).to_string();
+        assert_eq!(parse_lookup(&body, "google.com"), Some(long));
+    }
+
+    #[test]
+    fn lookup_with_odd_shapes_falls_back_or_is_none_and_never_panics() {
+        let some = |body: &str, provider: &str, want: &str| assert_eq!(parse_lookup(body, provider).as_deref(), Some(want), "{body}");
+        // providerUserInfo is not an array: only the user's own email counts.
+        some(r#"{"users":[{"email":"top@x.test","providerUserInfo":{"providerId":"google.com","email":"a@x.test"}}]}"#, "google.com", "top@x.test");
+        some(r#"{"users":[{"email":"top@x.test","providerUserInfo":"google.com"}]}"#, "google.com", "top@x.test");
+        some(r#"{"users":[{"email":"top@x.test","providerUserInfo":null}]}"#, "google.com", "top@x.test");
+        // Odd entries are passed over; a number email is no email.
+        some(
+            r#"{"users":[{"email":7,"providerUserInfo":[null,1,"x",[],{"providerId":"google.com","email":5},{"providerId":7,"email":"late@x.test"}]}]}"#,
+            "google.com",
+            "late@x.test",
+        );
+        for body in [
+            r#"{"users":[{"providerUserInfo":{"providerId":"google.com","email":"a@x.test"}}]}"#,
+            r#"{"users":[{"providerUserInfo":"a@x.test"}]}"#,
+            r#"{"users":{"0":{"email":"a@x.test"}}}"#,
+            r#"{"users":"a@x.test"}"#,
+            r#"{"users":null}"#,
+            r#"{"users":[null]}"#,
+            r#"{"users":[42]}"#,
+            r#"{"users":["a@x.test"]}"#,
+            r#"{"users":[{"email":null}]}"#,
+            r#"{"users":[{"email":["a@x.test"]}]}"#,
+            r#"{"users":[{}, {"email":"second@x.test"}]}"#,
+            r#"[{"users":[{"email":"a@x.test"}]}]"#,
+            "null",
+            "42",
+            "\"a@x.test\"",
+            "{\"users\":[{\"email\":\"a@x.test\"}",
+        ] {
+            assert_eq!(parse_lookup(body, "google.com"), None, "{body}");
+        }
+        assert_eq!(parse_lookup(r#"{"users":[{"email":"a@x.test"}]}"#, ""), Some("a@x.test".into()));
+    }
+
+    #[test]
+    fn refresh_keeps_the_stored_email_when_the_lookup_errors_and_a_token_email_wins_later() {
+        let dir = std::env::temp_dir().join(format!("h0x-auth-lookup-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let claims = decode_claims(&jwt(Some("first@x.test"))).unwrap();
+        store_session(&dir, &claims, "t1", 100).unwrap();
+        let email = || load(&dir).accounts[0].email.clone();
+        assert_eq!(email().as_deref(), Some("first@x.test"));
+        // Offline: nothing changes.
+        refresh_all_in(&dir, &|_| Err(Failure::Network("offline".into())), 200);
+        assert_eq!(email().as_deref(), Some("first@x.test"));
+        // No claim and the lookup failed: the stored email stays.
+        refresh_all_in(&dir, &exchange(None, None), 300);
+        assert_eq!(email().as_deref(), Some("first@x.test"));
+        assert_eq!(load(&dir).accounts[0].last_verified, 300);
+        // A lookup that works replaces it.
+        refresh_all_in(&dir, &exchange(Some("looked@x.test"), None), 400);
+        assert_eq!(email().as_deref(), Some("looked@x.test"));
+        // The token gains an email: it wins over the lookup, and is kept after a failed lookup.
+        refresh_all_in(&dir, &exchange(Some("looked@x.test"), Some("claim@x.test")), 500);
+        assert_eq!(email().as_deref(), Some("claim@x.test"));
+        refresh_all_in(&dir, &exchange(None, None), 600);
+        assert_eq!(email().as_deref(), Some("claim@x.test"));
+        refresh_all_in(&dir, &exchange(None, Some("new-claim@x.test")), 700);
+        assert_eq!(email().as_deref(), Some("new-claim@x.test"));
+        // An unusable token (another user) changes nothing.
+        let other = |rt: &str| Ok::<_, Failure>(Exchanged { id_token: jwt(Some("evil@x.test")), refresh_token: rt.into(), user_id: "u9".into(), email: Some("evil@x.test".into()) });
+        refresh_all_in(&dir, &other, 800);
+        assert_eq!(email().as_deref(), Some("new-claim@x.test"));
+        assert_eq!(load(&dir).accounts[0].last_verified, 700);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

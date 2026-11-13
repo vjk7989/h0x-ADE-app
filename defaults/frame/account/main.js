@@ -3,7 +3,7 @@
 
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { theme, run, props, closeOverlay, notify, account, accountSignIn, accountSwitch, accountSignOut } from "h0x";
+import { theme, run, props, closeOverlay, notify, account, accountSwitch, accountSignOut } from "h0x";
 
 const PROVIDERS = { "google.com": "Google", "github.com": "GitHub", password: "Email" };
 const accountName = (a) => a.name || a.email || "Account";
@@ -13,15 +13,14 @@ export default class AccountMenu extends View {
     this.busy = false;
   }
 
-  // Runs one account change, shows a refusal (a sign-in another window replaced is only "cancelled"), then closes the menu.
+  // Runs one account change, shows a refusal, then closes the menu.
   change(work, cx) {
     this.busy = true;
     cx.notify();
     cx.spawn(async (cx) => {
       try {
         const why = await work();
-        if (why === "cancelled") notify({ title: "Sign-in cancelled", level: "info" });
-        else if (why) notify({ title: "Account", body: why, level: "error" });
+        if (why) notify({ title: "Account", body: why, level: "error" });
       } catch (e) {
         notify({ title: "Account", body: e.message ?? String(e), level: "error" });
       }
@@ -46,8 +45,8 @@ export default class AccountMenu extends View {
         .when(Boolean(current), (el) => el.child(div().text_size(11).text_color(t.dim).child(PROVIDERS[current.provider] ?? current.provider))))
       .children(accounts.filter((a) => a.uid !== current?.uid).map((a) => this.row(`account-switch-${a.uid}`, accountName(a), PROVIDERS[a.provider] ?? a.provider, (_e, cx) => this.change(() => accountSwitch(a.uid), cx))))
       .child(div().h(1).mx(4).my(4).bg(t.border))
-      .child(this.row("account-add", "+ Add account", "", (_e, cx) => this.change(() => accountSignIn(), cx)))
-      .child(this.row("account-settings", "Account settings", "", () => { closeOverlay(props().overlay); run("app.settings", { section: "info" }); }))
+      // Signing in, adding an account and the rest of the account's page are all in Settings > Profile.
+      .child(this.row("account-settings", current ? "Account settings" : "Sign in", "", () => { closeOverlay(props().overlay); run("app.settings", { section: "profile" }); }))
       .when(Boolean(current), (el) => el.child(this.row("account-signout", "Sign out", "", (_e, cx) => this.change(() => accountSignOut(current.uid), cx))));
   }
 }
