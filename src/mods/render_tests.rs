@@ -2747,6 +2747,21 @@ fn welcome_asks_only_while_found_via_was_never_set_and_only_on_the_last_page(cx:
     }
 }
 
+#[gpui::test]
+fn welcome_panels_page_changes_the_panels_only_when_one_is_toggled(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let values = || fixture(true, props(), updates("current", "current"));
+    // Only viewing page 3: nothing is written, so the tab bar keeps its own default list.
+    let (trees, calls) = describe_pressing(cx, &staged, "frame/welcome", values(), None, "this.page = 3;", 1);
+    assert!(trees[1].contains("w-panel-files"), "{}", trees[1]);
+    assert_eq!(calls.borrow().shared.get("workspace.panels"), None);
+    assert_eq!(calls.borrow().shared.get("workspace.panels.added"), None);
+    // A toggle starts from all four and turns one off.
+    let (_, calls) = describe_pressing(cx, &staged, "frame/welcome", values(), None, "this.page = 3; this.press = (_e, cx) => this.togglePanel('todo');", 1);
+    assert_eq!(calls.borrow().shared.get("workspace.panels"), Some(&json!(["files", "changes", "sessions"])));
+}
+
 // The welcome's OpenCode card on page 3; `press` runs at the test's press, once the card has been drawn (the
 // press timer can fire before the first page-3 render).
 fn welcome_opencode(press: &str) -> String {
@@ -6592,11 +6607,11 @@ fn tab_bar_adds_sessions_to_a_stored_panel_list_once(cx: &mut TestAppContext) {
     let tree = describe_sessions(cx, &staged, "frame/welcome", fixture(true, props(), updates("current", "current")), &host, "this.page = 3;");
     assert!(tree.contains("Choose your panels") && tree.contains("Sessions") && tree.contains("To-do"), "{tree}");
     let welcome = host.borrow().shared.clone();
-    assert_eq!(welcome.get("workspace.panels"), Some(&json!([])));
-    assert_eq!(welcome.get("workspace.panels.added"), Some(&added));
-    // What the welcome stored, with only Files picked: the tab bar shows just Files.
-    let stored = welcome.get("workspace.panels.added").cloned().unwrap_or(Value::Null);
-    let picked: Vec<(&str, Value)> = vec![("workspace.panels", json!(["files"])), ("workspace.panels.added", stored)];
+    // 0.1.30: only viewing the page changes nothing (it used to store an empty list and hide every panel).
+    assert_eq!(welcome.get("workspace.panels"), None);
+    assert_eq!(welcome.get("workspace.panels.added"), None);
+    // What a toggle stores, with only Files kept: the tab bar shows just Files.
+    let picked: Vec<(&str, Value)> = vec![("workspace.panels", json!(["files"])), ("workspace.panels.added", added.clone())];
     let (tree, shared) = tabs(cx, &staged, &picked);
     assert_eq!(shared["workspace.panels"], json!(["files"]));
     assert!(!tree.contains("panel-sessions") && !tree.contains("panel-todo"), "{tree}");

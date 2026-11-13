@@ -438,9 +438,10 @@ export function setApp(name, state) {
 
 export function dosPath(path, home) {
   if (!path) return "C:\\";
-  let p = path;
-  if (home && (p === home || p.startsWith(home + "/"))) p = "C:\\My Documents" + p.slice(home.length);
-  else p = "C:" + p;
+  let p = path.replaceAll("\\", "/");
+  const h = home?.replaceAll("\\", "/").replace(/\/$/, "");
+  if (h && (p === h || p.startsWith(h + "/"))) p = "C:/My Documents" + p.slice(h.length);
+  else if (!/^[A-Za-z]:/.test(p)) p = "C:" + p;
   return p.replaceAll("/", "\\").replace(/\\$/, "") || "C:\\";
 }
 

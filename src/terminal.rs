@@ -732,7 +732,8 @@ impl TerminalView {
         }
         let text = {
             let g = self.grid.borrow();
-            screen_text(&(0..g.vt.rows).filter_map(|row| g.vt.row_text(row)).collect::<Vec<_>>())
+            let rows: Vec<(String, bool)> = (0..g.vt.rows).filter_map(|row| Some((g.vt.row_text(row)?, g.vt.row_wraps(row)))).collect();
+            screen_text(&join_wrapped(&rows))
         };
         if text.is_empty() {
             return false;
@@ -1028,6 +1029,11 @@ impl TerminalView {
         let remote = self.address.contains('/');
         let hit = g.vt.link_at(col as u16, row as u16, |text, at, joined| {
             if !remote && let Some((range, link, l)) = links::drive_file(text, at, self.cwd.as_deref()) {
+                target = Some(LinkTarget::External(link));
+                line = l;
+                return Some(range);
+            }
+            if !remote && let Some((range, link, l)) = links::quoted_file(text, at, self.cwd.as_deref()) {
                 target = Some(LinkTarget::External(link));
                 line = l;
                 return Some(range);
@@ -1468,6 +1474,20 @@ const COPIED_SHOWN: Duration = Duration::from_millis(1200);
 
 fn copied_chip_live(since: Duration) -> bool {
     since < COPIED_SHOWN
+}
+
+/// Rows with the soft-wrapped ones joined to the row after them: a line the terminal broke is one line.
+fn join_wrapped(rows: &[(String, bool)]) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut open = false;
+    for (text, wraps) in rows {
+        match lines.last_mut() {
+            Some(last) if open => last.push_str(text),
+            _ => lines.push(text.clone()),
+        }
+        open = *wraps;
+    }
+    lines
 }
 
 /// The text of the visible `rows`: each without trailing blanks, no empty lines at the end, `\n` between.
@@ -2226,8 +2246,9 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         if !g.vt.alt_screen()
             && let Some(h) = g.hover.filter(|h| bounds.contains(h) && h.y >= origin.y)
         {
-            let row = (f32::from(h.y - origin.y) / f32::from(cell.height)) as u16;
-            if g.vt.row_text(row).is_some_and(|t| command_on_line(&t).is_some()) {
+            let hovered = (f32::from(h.y - origin.y) / f32::from(cell.height)) as u16;
+            // A command the terminal wrapped is one line: any of its rows shows the chip, on the last.
+            if let Some((_, row)) = g.vt.logical_line(hovered).filter(|(t, _)| command_on_line(t).is_some()) {
                 let font_size = px(crate::settings::font_size());
                 let color = crate::settings::color("muted");
                 let run = TextRun { len: 4, font: cell_font(false, false), color, background_color: None, underline: None, strikethrough: None };
@@ -2236,7 +2257,10 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                 let right = origin.x + cell.width * f32::from(g.vt.cols) - px(12.0);
                 let chip = Bounds::new(point((right - w).max(origin.x), origin.y + cell.height * row as f32), size(w, cell.height));
                 let hot = chip.contains(&h);
-                window.paint_quad(fill(snap_box(chip), crate::settings::color(if hot { "hover" } else { "popover" })).corner_radii(px(4.0)));
+                // Opaque at once: nothing of the line under it may show through.
+                let mut back = crate::settings::color(if hot { "hover" } else { "popover" });
+                back.a = 1.0;
+                window.paint_quad(fill(snap_box(chip), back).corner_radii(px(4.0)));
                 let _ = line.paint(chip.origin + point(px(6.0), px(0.0)), cell.height, TextAlign::Left, None, window, cx);
                 g.chip = Some((chip, row));
             }
@@ -2418,7 +2442,7 @@ impl Render for TerminalView {
                 if let Some((chip, row)) = g.chip
                     && chip.contains(&ev.position)
                 {
-                    let command = g.vt.row_text(row).and_then(|t| command_on_line(&t));
+                    let command = g.vt.logical_line(row).and_then(|(t, _)| command_on_line(&t));
                     drop(g);
                     if let Some(command) = command {
                         this.put_on_clipboard(command, cx);
@@ -4105,6 +4129,19 @@ mod tests {
         assert_eq!(super::screen_text(&rows(&["\u{4f60}\u{597d} x  ", "\u{4e16}\u{754c}"])), "\u{4f60}\u{597d} x\n\u{4e16}\u{754c}");
         assert_eq!(super::screen_text(&rows(&["", "  ", ""])), "");
         assert_eq!(super::screen_text(&[]), "");
+    }
+
+    #[test]
+    fn screen_text_joins_soft_wrapped_rows_and_keeps_hard_breaks() {
+        let rows = |r: &[(&str, bool)]| r.iter().map(|(s, w)| (s.to_string(), *w)).collect::<Vec<_>>();
+        let joined = super::join_wrapped(&rows(&[("abcdef", true), ("ghi   ", false), ("next  ", false), ("", false)]));
+        assert_eq!(joined, ["abcdefghi   ", "next  ", ""]);
+        assert_eq!(super::screen_text(&joined), "abcdefghi\nnext");
+        // A wrapped row keeps its trailing blanks (they are in the text), a chain of three joins.
+        assert_eq!(super::screen_text(&super::join_wrapped(&rows(&[("a b ", true), ("c d ", true), ("e", false), ("z", false)]))), "a b c d e\nz");
+        assert_eq!(super::screen_text(&super::join_wrapped(&rows(&[("x", false), ("y", false)]))), "x\ny");
+        assert_eq!(super::screen_text(&super::join_wrapped(&rows(&[("tail", true)]))), "tail", "a last row that wraps joins nothing");
+        assert!(super::join_wrapped(&[]).is_empty());
     }
 
     #[test]

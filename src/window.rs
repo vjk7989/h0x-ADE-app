@@ -4010,6 +4010,11 @@ impl AppWindow {
             let spec = json!({"kind":"toast", "notification":{"title":"Updates","body":notice.text,"level":notice.level}});
             self.open_overlay(mods::new_overlay_id(), spec, window, cx);
         }
+        // A sign-in just finished: the to-do mod's confetti (the one its "Celebrate" button plays).
+        if crate::auth::take_celebration() {
+            let spec = json!({"mod":"todo", "kind":"dialog", "frame":"none", "modal":true, "width":1, "height":1, "props":{"confetti":true}});
+            self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+        }
         for notification in crate::agent_install::take_toasts() {
             self.open_overlay(mods::new_overlay_id(), json!({"kind":"toast", "notification":notification}), window, cx);
         }
