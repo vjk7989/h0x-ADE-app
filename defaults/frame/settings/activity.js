@@ -16,7 +16,9 @@ const SHARE = [0, 0.4, 0.62, 0.82, 1];
 const pad = (n) => String(n).padStart(2, "0");
 const key = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const nth = (from, n) => new Date(from.getFullYear(), from.getMonth(), from.getDate() + n);
-const count = (n, one, many) => `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
+// 8,692 (the runtime has no Intl, so no toLocaleString grouping).
+const grouped = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+const count = (n, one, many) => `${grouped(n)} ${n === 1 ? one : many}`;
 
 export const minutesOf = (day) => (day && day.seconds > 0 ? Math.max(1, Math.round(day.seconds / 60)) : 0);
 export const levelOf = (minutes) => (minutes < LEVELS[1] ? 0 : minutes < LEVELS[2] ? 1 : minutes < LEVELS[3] ? 2 : minutes < LEVELS[4] ? 3 : 4);

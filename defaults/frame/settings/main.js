@@ -1299,8 +1299,8 @@ export default class Settings extends View {
   }
 
   // An outlined circle with the initial in mono.
-  avatar(t, a, size) {
-    return div().w(size).h(size).rounded_full().flex_none().flex().items_center().justify_center()
+  avatar(t, a, size, id) {
+    return div().when(Boolean(id), (e) => e.id(id)).w(size).h(size).rounded_full().flex_none().flex().items_center().justify_center()
       .bg(t.raised).border_1().border_color(t.input).font_family(DEFAULT_FONT).text_size(Math.round(size * 0.42)).font_semibold().text_color(t.accent)
       .child((Array.from(accountName(a))[0] ?? "A").toUpperCase());
   }
@@ -1389,7 +1389,7 @@ export default class Settings extends View {
     }
     return menu(v_flex().w_full()
       .child(h_flex().w_full().gap(14).items_start().pb(18).border_b(1).border_color(t.border)
-        .child(this.avatar(t, cur, 44))
+        .child(this.avatar(t, cur, 44, "st-acct-avatar"))
         .child(v_flex().flex_1().min_w(0)
           .child(div().id("st-acct-name").truncate().text_size(18).line_height("24px").font_semibold().text_color(t.foreground).child(accountName(cur)))
           .when(Boolean(cur.email), (el) => el.child(div().id("st-acct-email").truncate().mt(2).font_family(DEFAULT_FONT).text_size(12).line_height("18px").text_color(t.muted).child(cur.email)))

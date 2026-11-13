@@ -2681,12 +2681,12 @@ fn settings_profile_ids_carry_an_odd_uid_whole(cx: &mut TestAppContext) {
     }
 }
 
-// The letter in the 48px avatar of the Profile header.
+// The letter in the avatar of the Profile header (`st-acct-avatar`).
 fn profile_initial(tree: &str) -> String {
     let lines: Vec<&str> = tree.lines().collect();
     let at = lines
         .iter()
-        .position(|l| l.contains(".rounded_full") && l.contains(".text_size[Number(20.0)]"))
+        .position(|l| l.contains(r#":id[Str("st-acct-avatar")]"#))
         .unwrap_or_else(|| panic!("no avatar: {tree}"));
     lines.get(at + 1).map(|l| l.trim().to_string()).unwrap_or_default()
 }
@@ -9844,7 +9844,7 @@ fn files_panel_reveals_a_linked_program_and_open_again_never_forces_a_reveal(cx:
 }
 
 // Settings > Profile's agent activity graph: the real mod, with the record on a faked disk.
-fn describe_activity(cx: &mut TestAppContext, staged: &Staged, values: BTreeMap<String, Value>, record: Option<&str>, entry: Option<&str>, setup: Option<&str>) -> String {
+fn describe_activity(cx: &mut TestAppContext, staged: &Staged, values: BTreeMap<String, Value>, record: Option<&str>, scenario: Option<&str>, setup: Option<&str>) -> String {
     let calls = Rc::new(RefCell::new(Calls::default()));
     if let Some(text) = record {
         // Scripted replies are on, so a file put on the fake disk reads back.
@@ -9855,8 +9855,12 @@ fn describe_activity(cx: &mut TestAppContext, staged: &Staged, values: BTreeMap<
         .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
         .with_host_module(module(values, calls.clone()))
         .unwrap();
-    let root = match (entry, setup) {
-        (Some(file), _) => staged.0.join(file),
+    let root = match (scenario, setup) {
+        // A scenario of the test's own: the staged app's main.js.
+        (Some(scenario), _) => {
+            std::fs::write(staged.0.join("main.js"), scenario).unwrap();
+            staged.0.clone()
+        }
         (None, Some(s)) => staged.wrapper("frame/settings", s),
         (None, None) => staged.0.join("frame/settings"),
     };
@@ -9997,12 +10001,11 @@ export default class Scenario extends Real {
 fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    std::fs::write(staged.0.join("activity-probe.js"), ACTIVITY_PROBE).unwrap();
     let mut p = props();
     p["section"] = json!("profile");
     let values = fixture(true, p, updates("current", "current"));
     let colors = values["theme"].clone();
-    let tree = describe_activity(cx, &staged, values, None, Some("activity-probe.js"), None);
+    let tree = describe_activity(cx, &staged, values, None, Some(ACTIVITY_PROBE), None);
     let probe = tree.split("PROBE ").nth(1).and_then(|t| t.split(" END").next()).unwrap_or_else(|| panic!("{tree}"));
     let probe: Value = serde_json::from_str(probe).unwrap_or_else(|e| panic!("{e}: {probe}"));
     assert_eq!(probe["tip"], json!(["Tue 3 Nov 2026", "42 min", "3 sessions", "18.2k tokens"]));
