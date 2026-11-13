@@ -2,12 +2,16 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar } from "gpui-base";
-import { spaces, run, theme, props, closeOverlay, setShared, shared, core, appHome, readTextFile, writeTextFile, settings, layout, keys, knownAgents, installOpenCode } from "h0x";
+import { spaces, run, theme, props, closeOverlay, setShared, shared, core, appHome, home, readTextFile, writeTextFile, settings, layout, keys, knownAgents, installOpenCode } from "h0x";
 
 const I = (name) => `frame/welcome/${name}.svg`;
 const W = (name) => `mods/workspace-chrome/${name}.svg`;
 const PAGES = 4;
-const ASK = "Read ~/.config/h0x-ade/AGENTS.md, then tell me what you can change in HyperOx.";
+// The guide sits in the app's own folder (HYPEROX_HOME may move it): shown with ~ when it is under the home folder.
+function askText() {
+  const dir = appHome().replaceAll("\\", "/"), h = home().replaceAll("\\", "/").replace(/\/$/, "");
+  return `Read ${h && dir.startsWith(h + "/") ? "~" + dir.slice(h.length) : dir}/AGENTS.md, then tell me what you can change in HyperOx.`;
+}
 const MIGRATE = "Read `h0x-ade --skill`, then migrate my keybinds and settings from ~/.config/h0x/config.toml";
 const APPEARANCES = [
   [null, "System"],
@@ -531,7 +535,7 @@ export default class Welcome extends View {
         ),
       )
       .child(this.title(t, "Make it yours", "Every part of this window is a layout or a mod: plain files your agent can change or add to. Give it this line to start:"))
-      .child(this.copyLine(t, ASK))
+      .child(this.copyLine(t, askText()))
       .child(this.para(t, "Then ask for anything: \u201cmove the sidebar to the right\u201d, \u201ca panel with my pull requests\u201d."))
       .child(
         v_flex()
