@@ -3293,6 +3293,35 @@ impl AppWindow {
                 }
                 self.focus_agent(&t);
             }
+            "agent.new" => {
+                let slot = match crate::programs::slot_number(a.get("index")) {
+                    Ok(n) => n,
+                    Err(error) => return self.fail(error),
+                };
+                let Some(agent) = crate::programs::slots().into_iter().nth(slot - 1) else {
+                    return self.fail(format!("no agent in slot {slot}"));
+                };
+                let Some(space) = self.model.active_space().map(|s| (s.id.clone(), s.machine.clone())) else {
+                    return self.fail("no space yet: make one first (space.new)");
+                };
+                let (space, on) = space;
+                let list = crate::programs::startable();
+                let key = agent["key"].as_str().unwrap_or_default().to_owned();
+                let name = agent["name"].as_str().unwrap_or_default().to_owned();
+                let (run, place) = (agent["run"].clone(), on.clone().unwrap_or_else(|| "this computer".into()));
+                // The check runs a shell: off the window thread, then the tab opens (or a toast says why not).
+                cx.spawn_in(window, async move |this, cx| {
+                    let found = cx.background_executor().spawn(async move { mods::agent_installed(on, list, &key) }).await;
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if found {
+                            this.run("tab.new", json!({ "name": name, "space": space, "argv": run }), window, cx);
+                        } else {
+                            this.command_error("agent.new", &format!("{name} is not installed on {place}"), window, cx);
+                        }
+                    });
+                })
+                .detach();
+            }
             "agent.next" | "agent.prev" => {
                 let order = self.agent_order();
                 if order.is_empty() {

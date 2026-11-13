@@ -331,6 +331,14 @@ Show an agent (sub-agents too).
 |---|---|
 | `terminal` | yes |
 
+## `agent.new`
+
+Start the agent in a number slot (1 Claude Code, 2 Codex, 3 OpenCode, 4 Gemini, then your own from programs.json) in a new tab of the current space, on its machine. A toast says so when the slot is empty or the agent is not installed.
+
+| Argument | Required |
+|---|---|
+| `index` | yes |
+
 ## `agent.next`
 
 Show the next agent, in the order the agents list shows them.
