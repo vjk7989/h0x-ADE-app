@@ -45,7 +45,7 @@ enum LinkTarget {
 pub enum TerminalEvent {
     Peek(String),
     /// A text file clicked: HyperOx's editor shows it.
-    OpenFile(std::path::PathBuf),
+    OpenFile(std::path::PathBuf, Option<u32>),
     TitleChanged,
     /// The program ended.
     Ended,
@@ -115,6 +115,8 @@ pub struct TerminalView {
     pub quoting: Quoting,
     /// The link under the pointer while the link modifier is held.
     link: Option<LinkTarget>,
+    /// The line the link `link_at` last found names in its file (`file.rs:12`).
+    link_line: Cell<Option<u32>>,
     /// The "Ctrl+click to open" hint, while the pointer rests on a link without the modifier.
     link_hint: Option<String>,
     /// The cell the hint was last armed for: it resolves again only when the pointer enters another.
@@ -266,6 +268,7 @@ impl TerminalView {
             cwd: None,
             quoting: Quoting::default(),
             link: None,
+            link_line: Cell::new(None),
             link_hint: None,
             hint_cell: None,
             hint_task: None,
@@ -1020,16 +1023,23 @@ impl TerminalView {
         let (x, y) = local(&g, pos);
         let (col, row) = (x / f32::from(g.cell.width), y / f32::from(g.cell.height));
         let mut target = None;
+        let mut line = None;
         // A remote pane's files are not on this machine: no link, and never a stat here.
         let remote = self.address.contains('/');
         let hit = g.vt.link_at(col as u16, row as u16, |text, at, joined| {
+            if !remote && let Some((range, link, l)) = links::drive_file(text, at, self.cwd.as_deref()) {
+                target = Some(LinkTarget::External(link));
+                line = l;
+                return Some(range);
+            }
             // In lines joined back together only a file that exists proves the join right.
             if let Some(range) = links::find(text, at)
-                && let Some(link) = links::resolve(&text[range.clone()], self.cwd.as_deref())
+                && let Some((link, l)) = links::resolve_with_line(&text[range.clone()], self.cwd.as_deref())
                 && !(remote && matches!(link, links::Target::File(_)))
                 && (!joined || matches!(link, links::Target::File(_)))
             {
                 target = Some(LinkTarget::External(link));
+                line = l;
                 return Some(range);
             }
             if joined {
@@ -1047,10 +1057,15 @@ impl TerminalView {
             Some(range)
         })?;
         // OSC 8 links bypass text detection.
-        let target = target.or_else(|| links::resolve(&hit.target, self.cwd.as_deref()).map(LinkTarget::External))?;
+        let target = target.or_else(|| {
+            let (link, l) = links::resolve_with_line(&hit.target, self.cwd.as_deref())?;
+            line = l;
+            Some(LinkTarget::External(link))
+        })?;
         if remote && matches!(target, LinkTarget::External(links::Target::File(_))) {
             return None;
         }
+        self.link_line.set(line);
         Some((target, hit.spans))
     }
 
@@ -2383,7 +2398,7 @@ impl Render for TerminalView {
                     match target {
                         // A file on another machine is not ours to open: it is shown in its folder as before.
                         LinkTarget::External(links::Target::File(path)) if !this.address.contains('/') => match links::kind(&path) {
-                            links::Kind::Text => cx.emit(TerminalEvent::OpenFile(path)),
+                            links::Kind::Text => cx.emit(TerminalEvent::OpenFile(path, this.link_line.get())),
                             links::Kind::System => links::open_default(&path),
                             links::Kind::Reveal => links::open(&links::Target::File(path)),
                         },
@@ -3699,7 +3714,7 @@ mod tests {
         let seen = opened.clone();
         cx.update(|_, app| {
             app.subscribe(&terminal, move |_, event: &super::TerminalEvent, _| {
-                if let super::TerminalEvent::OpenFile(path) = event {
+                if let super::TerminalEvent::OpenFile(path, _) = event {
                     seen.borrow_mut().push(path.clone());
                 }
             })
