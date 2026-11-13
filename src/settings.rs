@@ -193,10 +193,14 @@ fn palette(name: &str) -> Result<(Palette, BTreeMap<String, String>), String> {
     // A shipped theme is always there: its file is installed at start, and until then (or if
     // it was deleted) the copy built into the app stands in.
     let shipped = || THEMES.iter().find(|(n, _)| *n == name).map(|(_, text)| (*text).to_owned());
-    let text = std::fs::read_to_string(&path)
-        .ok()
-        .or_else(shipped)
-        .ok_or_else(|| format!("theme {name:?} is not one of {} and there is no themes/{name}.json", PRESETS.join(", ")))?;
+    // Only a missing file falls back to that copy: one that can't be read (or isn't text) is a problem to report.
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            shipped().ok_or_else(|| format!("theme {name:?} is not one of {} and there is no themes/{name}.json", PRESETS.join(", ")))?
+        }
+        Err(e) => return Err(format!("themes/{name}.json: cannot read it: {e}")),
+    };
     parse_theme_file(name, &text)
 }
 
@@ -1675,5 +1679,139 @@ mod tests {
         assert!(broken(&|f| f["radius"] = 0.into()).contains("radius"), "unknown keys are refused, not ignored");
         assert!(parse_theme_file("neo-brutalism", "").is_err());
         assert!(parse_theme_file("neo-brutalism", "null").is_err());
+    }
+
+    // ---- 0.1.31 edge tests (A31.5) ----
+
+    fn hex_rgb(v: &str) -> u32 {
+        let h = v.trim_start_matches('#');
+        u32::from_str_radix(&h[..6], 16).unwrap_or_else(|_| panic!("{v}"))
+    }
+
+    fn contrast_ratio(a: u32, b: u32) -> f64 {
+        fn lum(c: u32) -> f64 {
+            let ch = |s: u32| {
+                let v = ((c >> s) & 255) as f64 / 255.0;
+                if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0)
+        }
+        (lum(a).max(lum(b)) + 0.05) / (lum(a).min(lum(b)) + 0.05)
+    }
+
+    #[test]
+    fn sodium_voltage_and_phosphor_set_every_colour_darkmatter_sets_each_as_valid_hex() {
+        let keys = |name: &str| -> Vec<String> {
+            let v: serde_json::Value = serde_json::from_str(THEMES.iter().find(|(n, _)| *n == name).unwrap().1).unwrap();
+            v["colors"].as_object().unwrap().keys().cloned().collect()
+        };
+        let want = keys("darkmatter");
+        for name in ["sodium", "voltage", "phosphor"] {
+            assert_eq!(keys(name), want, "{name}: the same colours as darkmatter");
+            let v: serde_json::Value = serde_json::from_str(THEMES.iter().find(|(n, _)| *n == name).unwrap().1).unwrap();
+            assert!(v["cursor"].is_string(), "{name}: a cursor colour");
+            let hex6 = |s: &str| s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit());
+            for k in ["background", "foreground", "selection", "cursor"] {
+                assert!(hex6(v[k].as_str().unwrap()), "{name}.{k}");
+            }
+            let ansi = v["ansi"].as_array().unwrap();
+            assert_eq!(ansi.len(), 16, "{name}");
+            assert!(ansi.iter().all(|c| hex6(c.as_str().unwrap())), "{name}: ansi");
+            for (k, c) in v["colors"].as_object().unwrap() {
+                let s = c.as_str().unwrap();
+                assert!(hex6(s) || (s.len() == 9 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit())), "{name}.colors.{k} = {s}");
+                assert!(parse_hex(s).is_some(), "{name}.colors.{k}");
+            }
+            // A theme name never shadows a preset, and is not taken twice.
+            assert!(preset(name).is_none(), "{name}");
+            assert_eq!(THEMES.iter().filter(|(n, _)| *n == name).count(), 1, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_new_themes_keep_muted_and_dim_text_readable_on_every_panel_and_buttons_readable() {
+        for name in ["sodium", "voltage", "phosphor"] {
+            let (_, t) = shipped(name);
+            let c = |k: &str| hex_rgb(t.get(k).unwrap_or_else(|| panic!("{name}: no {k}")));
+            for panel in ["background", "raised", "popover", "chrome", "input"] {
+                assert!(contrast_ratio(c("foreground"), c(panel)) >= 7.0, "{name}: foreground on {panel}");
+                assert!(contrast_ratio(c("muted"), c(panel)) >= 4.5, "{name}: muted on {panel}");
+                assert!(contrast_ratio(c("dim"), c(panel)) >= 4.5, "{name}: dim on {panel}");
+            }
+            // A hovered row still reads.
+            assert!(contrast_ratio(c("muted"), c("hover")) >= 4.5, "{name}: muted on hover");
+            assert!(contrast_ratio(c("dim"), c("hover")) >= 3.0, "{name}: dim on hover");
+            assert!(contrast_ratio(c("accent_foreground"), c("accent")) >= 4.5, "{name}: accent button text");
+            assert!(contrast_ratio(c("solid_foreground"), c("solid")) >= 4.5, "{name}: solid button text");
+            assert!(contrast_ratio(c("blocked"), c("background")) >= 3.0, "{name}: blocked");
+            // The cursor shows on the background; selected text still reads.
+            let (p, _) = shipped(name);
+            assert!(contrast_ratio(p.cursor.unwrap(), p.background) >= 3.0, "{name}: cursor");
+            assert!(contrast_ratio(p.foreground, p.selection) >= 4.5, "{name}: text on the selection");
+            assert_ne!(p.selection, p.background, "{name}: a selection shows");
+        }
+    }
+
+    /// Runs the unit test `name` again in a child process with its own app home (`H0X_ADE_HOME`):
+    /// `palette()` reads `<home>/themes`. True in the child; false in the parent once the child passed.
+    fn in_own_theme_home(name: &str) -> bool {
+        const CHILD: &str = "H0X_TEST_SETTINGS_OWN_HOME";
+        if std::env::var_os(CHILD).is_some() {
+            return true;
+        }
+        let home = std::env::temp_dir().join(format!("h0x-ade-settings-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let test = format!("settings::tests::{name}");
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test.as_str(), "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("H0X_ADE_HOME", &home)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && log.contains("1 passed"), "{log}");
+        false
+    }
+
+    // A shipped theme whose file is missing shows the built-in copy. A file that is there is the person's: if it is
+    // damaged the problem is reported (Settings::problems) instead of quietly showing the built-in copy, which would
+    // hide their edit and look as if it had worked.
+    #[test]
+    fn a_missing_shipped_theme_file_falls_back_but_a_damaged_one_is_reported() {
+        if !in_own_theme_home("a_missing_shipped_theme_file_falls_back_but_a_damaged_one_is_reported") {
+            return;
+        }
+        let home = crate::mods::app_dir();
+        let themes = home.join("themes");
+        let _ = std::fs::remove_dir_all(&themes);
+        // Missing (no themes folder at all): every shipped theme still resolves to its built-in palette.
+        for (name, text) in THEMES {
+            let (p, o) = palette(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let (want_p, want_o) = parse_theme_file(name, text).unwrap();
+            assert_eq!(resolve(&p, &o), resolve(&want_p, &want_o), "{name}");
+        }
+        assert!(palette("no-such-theme").is_err());
+        assert!(palette("").is_err());
+        assert!(palette("../sodium").is_err(), "a path is not a theme name");
+        // Damaged files of shipped themes: reported, not replaced by the built-in copy.
+        std::fs::create_dir_all(&themes).unwrap();
+        for (name, text) in [("sodium", "{not json"), ("voltage", ""), ("phosphor", r##"{"background":"#zzzzzz","foreground":"#ffffff","selection":"#000000","ansi":[]}"##)] {
+            std::fs::write(themes.join(format!("{name}.json")), text).unwrap();
+            let err = palette(name).err().unwrap_or_else(|| panic!("{name}: a damaged file is reported"));
+            assert!(err.contains(name), "{name}: {err}");
+        }
+        // A file that can't be read as text is just as damaged as one that doesn't parse.
+        std::fs::write(themes.join("darkmatter.json"), [0xff_u8, 0xfe, 0x7b, 0x00]).unwrap();
+        assert!(palette("darkmatter").is_err(), "an unreadable darkmatter.json is reported, not silently replaced");
+        // A person's valid edit wins over the built-in copy.
+        let mine = THEMES.iter().find(|(n, _)| *n == "sodium").unwrap().1.replacen("\"#000000\"", "\"#010203\"", 1);
+        std::fs::write(themes.join("sodium.json"), &mine).unwrap();
+        assert_eq!(palette("sodium").unwrap().0.background, 0x010203);
+        // The problem reaches the settings' problem list when the theme is chosen.
+        let person: Person = serde_json::from_str(r#"{"theme":"voltage"}"#).unwrap();
+        let s = Settings::compose(&person, &crate::layout::Look::default(), true);
+        assert!(s.problems().iter().any(|p| p.contains("voltage")), "{:?}", s.problems());
     }
 }

@@ -145,8 +145,9 @@ export default class Files extends View {
       this.loading = false;
       if (!kept) this.show(null, cx);
       if (kept) {
-        if (!this.code && !this.fileError) { this.openFile(kept.full, cx); this.setLine(kept.line); }
-      } else if (saved?.file) this.show(saved.file, cx);
+        // A card ("opened in its default app") is already the answer: that app is never started a second time.
+        if (!this.code && !this.fileError && !this.opened) { this.openFile(kept.full, cx); this.setLine(kept.line); }
+      } else if (saved?.file) this.show(saved.file, cx, false, true);
     }
     this.check(cx);
     this.flush(cx);
@@ -223,7 +224,9 @@ export default class Files extends View {
     try { this.code.set_cursor_line(Math.min(n, this.code.value().split("\n").length) - 1); } catch (_e) {}
   }
 
-  show(path, cx, local) {
+  // `restoring`: the folder's last file comes back by itself, not by a click. The system hands a file to its app
+  // only for a click, a link or "Open again" (the card's buttons call the host themselves): a restored one shows its card.
+  show(path, cx, local, restoring) {
     this.line = null;
     if (!local) this.link = null;
     const prev = this.doc;
@@ -240,6 +243,7 @@ export default class Files extends View {
       try {
         // A video or a program is never read as text: the system opens it (or shows it in its folder).
         if (!on && nonText(path)) {
+          if (restoring) { this.opened = { full, how: "opened" }; cx.notify(); return; }
           const how = openFile(full);
           if (this.file !== path || !this.current(context)) return;
           if (how !== "text") { this.opened = { full, how }; cx.notify(); return; }
