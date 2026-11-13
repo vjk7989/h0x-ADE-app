@@ -76,8 +76,11 @@ export default class Files extends View {
       let opened = false;
       for (;;) {
         const c = await nextCommand();
-        if (c.startsWith("open:")) { this.openFile(c.slice(5), cx); opened = true; continue; }
-        if (opened && /^line:\d+$/.test(c)) { this.line = Number(c.slice(5)); this.reveal(); }
+        // One bad command never ends the loop: the panel keeps opening files.
+        try {
+          if (c.startsWith("open:")) { this.openFile(c.slice(5), cx); opened = true; continue; }
+          if (opened && /^line:\d+$/.test(c)) { this.line = Number(c.slice(5)); this.reveal(); }
+        } catch (_e) { this.line = null; }
         opened = false;
       }
     });
@@ -189,9 +192,10 @@ export default class Files extends View {
   // Once the opened file is loaded: the pending line (clamped to the last one) is scrolled to.
   reveal() {
     if (!this.line || !this.code) return;
-    const last = this.code.value().split("\n").length;
-    this.code.set_cursor_line(Math.min(this.line, last) - 1);
+    const n = this.line;
     this.line = null;
+    // Scrolling is a nicety: a failure never costs the file its display.
+    try { this.code.set_cursor_line(Math.min(n, this.code.value().split("\n").length) - 1); } catch (_e) {}
   }
 
   show(path, cx, local) {

@@ -743,7 +743,7 @@ impl TerminalView {
 
     /// Writes the clipboard (on Linux the primary selection too) and shows "Copied" for `COPIED_SHOWN`.
     fn put_on_clipboard(&mut self, text: String, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+        cx.write_to_clipboard(ClipboardItem::new_string(clipboard_text(&text, cfg!(windows))));
         #[cfg(target_os = "linux")]
         cx.write_to_primary(ClipboardItem::new_string(text));
         self.copied_at = Some(Instant::now());
@@ -1046,9 +1046,10 @@ impl TerminalView {
                 return None;
             }
             if !remote
-                && let Some((range, link)) = links::bare_file(text, at, self.cwd.as_deref())
+                && let Some((range, link, l)) = links::bare_file_line(text, at, self.cwd.as_deref())
             {
                 target = Some(LinkTarget::External(link));
+                line = l;
                 return Some(range);
             }
             let range = links::word(text, at)?;
@@ -1456,6 +1457,11 @@ fn paste_image_bytes(format: ImageFormat, bytes: &[u8]) -> Option<(ImageFormat, 
 }
 
 const HINT_DELAY: Duration = Duration::from_millis(400);
+
+/// Text for the clipboard: Windows apps expect CRLF line ends.
+fn clipboard_text(text: &str, windows: bool) -> String {
+    if windows { text.replace("\r\n", "\n").replace('\n', "\r\n") } else { text.to_owned() }
+}
 
 /// How long the "Copied" chip shows.
 const COPIED_SHOWN: Duration = Duration::from_millis(1200);
@@ -4099,6 +4105,14 @@ mod tests {
         assert_eq!(super::screen_text(&rows(&["\u{4f60}\u{597d} x  ", "\u{4e16}\u{754c}"])), "\u{4f60}\u{597d} x\n\u{4e16}\u{754c}");
         assert_eq!(super::screen_text(&rows(&["", "  ", ""])), "");
         assert_eq!(super::screen_text(&[]), "");
+    }
+
+    #[test]
+    fn clipboard_text_uses_crlf_on_windows_only() {
+        assert_eq!(super::clipboard_text("a\nb\r\nc", true), "a\r\nb\r\nc");
+        assert_eq!(super::clipboard_text("a\nb", false), "a\nb");
+        assert_eq!(super::clipboard_text("one line", true), "one line");
+        assert_eq!(super::clipboard_text("", true), "");
     }
 
     #[test]
