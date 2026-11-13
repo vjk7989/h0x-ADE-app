@@ -1958,6 +1958,34 @@ fn profile_tree(cx: &mut TestAppContext, staged: &Staged, account: Value, setup:
 }
 
 // Setup that leaves the click handler of the page's `this.button(.., id, ..)` in `this.press`.
+#[gpui::test]
+fn pane_header_copy_button_focuses_the_pane_then_copies_the_screen_or_selection(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let values = fixture(true, props(), updates("current", "current"));
+    let setup = "this.hovered = true; const real = this.copyButton.bind(this); this.copyButton = (t, pane) => { this.press = () => this.copy(pane); return real(t, pane); };";
+    let (trees, calls) = describe_pressing(cx, &staged, "mods/pane", values, None, setup, 1);
+    assert!(trees[0].contains("ph-c-p1") && trees[0].contains("mods/pane/copy.svg"), "{}", trees[0]);
+    let c = calls.borrow();
+    let runs: Vec<&Vec<Value>> = c.effects.iter().filter(|(n, _)| n == "run").map(|(_, a)| a).collect();
+    assert_eq!(runs, [&vec![json!("pane.focus"), json!({"pane":"p1"})], &vec![json!("terminal.copy_screen"), json!({})]], "{:?}", c.effects);
+}
+
+#[gpui::test]
+fn pane_menu_offers_copy_and_paste_that_run_the_terminal_commands(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (index, label, command) in [(0, "Copy", "terminal.copy_screen"), (1, "Paste", "terminal.paste")] {
+        let values = fixture(true, props(), updates("current", "current"));
+        let setup = format!("this.press = (_e, cx) => this.choose({index}, cx);");
+        let (trees, calls) = describe_pressing(cx, &staged, "mods/menu", values, None, &setup, 1);
+        assert!(trees[0].contains(label), "{label}: {}", trees[0]);
+        let c = calls.borrow();
+        let hit = c.effects.iter().find(|(n, _)| n == "run").unwrap_or_else(|| panic!("{label}: no run: {:?}", c.effects));
+        assert_eq!(Value::Array(hit.1.clone()), json!([command, {}]), "{label}: {:?}", c.effects);
+    }
+}
+
 fn press_button(id: &str) -> String {
     format!("const real = this.button.bind(this); this.button = (t, id, label, onClick) => {{ if (id === '{id}') this.press = onClick; return real(t, id, label, onClick); }};")
 }
@@ -4146,13 +4174,23 @@ struct FilesDisk {
 const FILES_SCENARIO: &str = r#"
 import Real from './mods/files/main.js';
 import { command, note } from 'fixture';
+import { EditorState } from 'gpui-base';
 export default class Scenario extends Real {
   init(props, cx) {
     super.init(props, cx);
+    // Records the lines the panel scrolls its editor to (0-based), then does it.
+    const make = EditorState.new;
+    EditorState.new = (o) => {
+      const s = make(o), real = s.set_cursor_line;
+      s.set_cursor_line = (l) => { (this.cursors ??= []).push(l); return real(l); };
+      return s;
+    };
     cx.timer.every(50, cx => {
       for (let c = command(); c !== null; c = command()) {
         const at = c.indexOf(' '), verb = at < 0 ? c : c.slice(0, at), arg = c.slice(at + 1);
         if (verb === 'open') this.show(arg, cx);
+        else if (verb === 'line') { this.line = Number(arg); this.reveal(); }
+        else if (verb === 'openline') { const at2 = arg.indexOf(' '); this.show(arg.slice(at2 + 1), cx); this.line = Number(arg.slice(0, at2)); }
         else if (verb === 'openfile') this.openFile(arg, cx);
         else if (verb === 'back') this.show(null, cx);
         else if (verb === 'keep') this.save(cx, true);
@@ -4161,7 +4199,7 @@ export default class Scenario extends Real {
         else if (verb === 'state') {
           const d = this.doc;
           note(JSON.stringify({ file: this.file ?? null, value: this.code ? this.code.value() : null, editable: Boolean(d?.editable),
-            dirty: Boolean(d?.dirty), conflict: Boolean(d?.conflict), error: d?.error ?? null, hint: d?.hint ?? null }));
+            cursors: this.cursors ?? [], pending: this.line ?? null, dirty: Boolean(d?.dirty), conflict: Boolean(d?.conflict), error: d?.error ?? null, hint: d?.hint ?? null }));
         }
         cx.notify();
       }
@@ -4341,6 +4379,37 @@ fn describe_files(
     let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
     tree
+}
+
+#[gpui::test]
+fn files_panel_scrolls_to_the_line_of_a_link_once_the_file_is_loaded_and_clamps_it(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let hundred: String = (1..=100).map(|n| format!("line {n}
+")).collect();
+    let disk = files_disk(&[("/fixture/project/a.txt", &hundred)]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+
+    // No file opened: a line is ignored.
+    files_step(&mut visual, &disk, "line 30");
+    assert_eq!(files_state(&mut visual, &disk)["cursors"], json!([]));
+
+    // The line is held until the file is loaded, then shown (the view's line numbers are 0-based).
+    files_step(&mut visual, &disk, "openline 30 a.txt");
+    files_wait(&mut visual, 200);
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["cursors"].clone(), state["pending"].clone()), (json!([29]), Value::Null), "{state}");
+
+    // Past the end: the last line (the file's trailing newline makes line 101 empty).
+    files_step(&mut visual, &disk, "line 5000");
+    assert_eq!(files_state(&mut visual, &disk)["cursors"], json!([29, 100]));
+
+    // The file already open: a new line shows at once; opening it again without a line moves nothing.
+    files_step(&mut visual, &disk, "openline 7 a.txt");
+    files_step(&mut visual, &disk, "open a.txt");
+    files_wait(&mut visual, 200);
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["cursors"].clone(), state["pending"].clone()), (json!([29, 100, 6]), Value::Null), "{state}");
 }
 
 #[gpui::test]
@@ -6158,7 +6227,9 @@ fn terminal_menu_offers_pane_items_only_for_a_pane_in_a_tab_and_never_on_a_sessi
         for label in pane_items.iter().chain(["Send right-clicks to pane"].iter()) {
             assert!(tree.contains(label), "{pane}: {label}: {tree}");
         }
-        assert_eq!(items(&tree), 5, "{pane}: {tree}");
+        // Copy and Paste (0.1.29) come first on every terminal.
+        assert!(tree.contains("Copy") && tree.contains("Paste"), "{pane}: {tree}");
+        assert_eq!(items(&tree), 7, "{pane}: {tree}");
     }
 
     // A terminal block in a layout or a window: its pane is the block's id, in no tab.
@@ -6167,12 +6238,12 @@ fn terminal_menu_offers_pane_items_only_for_a_pane_in_a_tab_and_never_on_a_sessi
         assert!(!tree.contains(label), "{label}: {tree}");
     }
     assert!(tree.contains("Send right-clicks to pane"), "the terminal's own item stays: {tree}");
-    assert_eq!(items(&tree), 1, "{tree}");
+    assert_eq!(items(&tree), 3, "{tree}");
 
     // A kept sub-agent in a window still goes back under its parent.
     let tree = menu(cx, true, json!({"pane":"w1:term", "terminal":"t3"}), true);
     assert!(tree.contains("Send back to Build") && !tree.contains("Close pane") && !tree.contains("Zoom"), "{tree}");
-    assert_eq!(items(&tree), 2, "{tree}");
+    assert_eq!(items(&tree), 4, "{tree}");
 
     // No panes at all, no terminal, no pane id: nothing to offer, and it still renders.
     for target in [json!({"pane":"p1", "terminal":"missing"}), json!({})] {
