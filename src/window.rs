@@ -1461,7 +1461,7 @@ impl AppWindow {
         }
         self.publish_shown_copies();
         if let Some((path, line)) = self.pending_open.take() {
-            self.open_in_files_now(&path, line);
+            self.deliver_open(path, line, cx);
         }
 
         // Keyboard to the focused pane when it changes (never steal it from an open dialog).
@@ -3788,10 +3788,27 @@ impl AppWindow {
         }
     }
 
-    fn open_in_files_now(&self, path: &std::path::Path, line: Option<u32>) {
-        if !send_open("files", path, line) {
-            crate::links::open(&crate::links::Target::File(path.to_path_buf()));
-        }
+    /// Hands a file to the Files panel that has only just been shown: its mod may not be listening
+    /// yet, so a failed send is retried for a few seconds (then the system opens the file), and
+    /// once it went through it is sent once more, in case the mod's copy started after it.
+    fn deliver_open(&self, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
+        cx.spawn(async move |_, cx| {
+            let mut sent = false;
+            for wait in [0u64, 300, 600, 1200, 2400] {
+                if wait > 0 {
+                    cx.background_executor().timer(Duration::from_millis(wait)).await;
+                }
+                match (send_open("files", &path, line), sent) {
+                    (true, true) | (false, true) => return,
+                    (true, false) => sent = true,
+                    (false, false) => {}
+                }
+            }
+            if !sent {
+                crate::links::open(&crate::links::Target::File(path));
+            }
+        })
+        .detach();
     }
 
     fn peek_terminal(&mut self, address: &str, window: &mut Window, cx: &mut Context<Self>) {

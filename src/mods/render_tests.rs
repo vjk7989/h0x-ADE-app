@@ -4438,6 +4438,26 @@ fn files_panel_scrolls_to_the_line_of_a_link_once_the_file_is_loaded_and_clamps_
 }
 
 #[gpui::test]
+fn files_panel_keeps_opening_files_and_going_back_after_a_line_jump(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let hundred: String = (1..=100).map(|n| format!("line {n}
+")).collect();
+    let disk = files_disk(&[("/fixture/project/a.txt", &hundred), ("/fixture/project/b.txt", "second
+")]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "openline 7 a.txt");
+    files_wait(&mut visual, 200);
+    files_step(&mut visual, &disk, "open b.txt");
+    files_wait(&mut visual, 200);
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["file"].clone(), state["value"].clone()), (json!("b.txt"), json!("second
+")), "{state}");
+    files_step(&mut visual, &disk, "back");
+    assert_eq!(files_state(&mut visual, &disk)["file"], Value::Null);
+}
+
+#[gpui::test]
 fn files_panel_marks_remote_and_oversized_files_read_only_and_shows_unsaved_state(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();

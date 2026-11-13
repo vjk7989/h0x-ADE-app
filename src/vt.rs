@@ -72,6 +72,29 @@ pub fn theme() -> Theme {
     Theme { fg: get("terminal_foreground"), bg: get("background"), cursor: get("cursor"), selection_bg: get("selection"), palette16, minimum_contrast: crate::settings::get().minimum_contrast }
 }
 
+/// Whether output wipes or swaps the screen: erase display (`ESC[2J`, `ESC[3J`: `cls`, `clear`),
+/// a full reset (`ESC c`), or the alternate screen on or off (`ESC[?1049h`, `?1047`, `?47`).
+pub fn erases_screen(bytes: &[u8]) -> bool {
+    let mut from = 0;
+    while let Some(at) = bytes[from..].iter().position(|b| *b == 0x1b).map(|p| from + p) {
+        match bytes.get(at + 1) {
+            Some(b'c') => return true,
+            Some(b'[') => {
+                let body = &bytes[at + 2..];
+                if let Some(end) = body.iter().position(|b| (0x40..=0x7e).contains(b)) {
+                    match (&body[..end], body[end]) {
+                        (b"2" | b"3", b'J') | (b"?1049" | b"?1047" | b"?47", b'h' | b'l') => return true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        from = at + 1;
+    }
+    false
+}
+
 #[derive(Clone, Default, PartialEq)]
 pub struct Cell {
     /// Empty for blank cells and for the tail half of a wide character.
@@ -1232,6 +1255,10 @@ impl Vt {
         self.placements_cache.get_mut().take();
         self.win32.watch(bytes);
         unsafe { ghostty_terminal_vt_write(self.term, bytes.as_ptr(), bytes.len()) };
+        // The highlight would stay on the same rows over what replaced the text.
+        if erases_screen(bytes) {
+            self.clear_selection();
+        }
         self.feed_search();
     }
 
@@ -1819,6 +1846,16 @@ impl Drop for Vt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn erases_screen_sees_clears_resets_and_alternate_screen_switches() {
+        for yes in ["\x1b[2J", "\x1b[3J", "abc\x1b[H\x1b[2Jdef", "\x1bc", "\x1b[?1049h", "\x1b[?1049l", "\x1b[?47h", "\x1b[?1047l", "x\x1b[0m\x1b[3J"] {
+            assert!(erases_screen(yes.as_bytes()), "{yes:?}");
+        }
+        for no in ["", "plain", "\x1b[J", "\x1b[0J", "\x1b[1J", "\x1b[2K", "\x1b[?25l", "\x1b[?2004h", "\x1b[12;3H", "\x1b", "\x1b[2", "\x1b[1;2J"] {
+            assert!(!erases_screen(no.as_bytes()), "{no:?}");
+        }
+    }
 
     fn finish_search(vt: &mut Vt) {
         for _ in 0..100_000 {
