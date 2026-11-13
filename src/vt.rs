@@ -2875,4 +2875,41 @@ mod tests {
         assert!(vt.take_replies().is_empty());
         assert_eq!(vt.take_title(), None);
     }
+
+    #[test]
+    fn row_text_reads_the_viewport_rows_and_nothing_past_them() {
+        let mut vt = Vt::new(10, 3);
+        assert_eq!(vt.row_text(0).as_deref(), Some(" ".repeat(10).as_str()), "a blank row is spaces");
+        for row in [3, 4, u16::MAX] {
+            assert_eq!(vt.row_text(row), None, "{row}");
+        }
+        vt.write("ab\r\n\u{4f60}x\r\ne\u{301}\tz".as_bytes());
+        assert_eq!(vt.row_text(0).as_deref(), Some("ab        "));
+        let wide = vt.row_text(1).unwrap();
+        assert!(wide.starts_with("\u{4f60}x"), "a wide character is one character: {wide:?}");
+        assert_eq!(wide.chars().count(), 9, "its spacer cell adds nothing: {wide:?}");
+        let marks = vt.row_text(2).unwrap();
+        assert!(marks.starts_with("e\u{301}"), "{marks:?}");
+        assert!(marks.trim_end().ends_with('z') && !marks.contains('\t'), "a tab is blank cells: {marks:?}");
+    }
+
+    #[test]
+    fn row_text_follows_the_viewport_through_the_scrollback() {
+        let mut vt = Vt::new(20, 5);
+        for line in 1..=50 {
+            vt.write(format!("{line:04}\r\n").as_bytes());
+        }
+        let rows = |vt: &Vt| (0..vt.rows).filter_map(|r| vt.row_text(r)).collect::<Vec<_>>();
+        assert!(rows(&vt).iter().any(|r| r.starts_with("0050")), "{:?}", rows(&vt));
+        vt.scroll_to_top();
+        assert!(vt.row_text(0).unwrap().starts_with("0001"), "{:?}", rows(&vt));
+        assert!(vt.row_text(4).unwrap().starts_with("0005"), "{:?}", rows(&vt));
+        vt.scroll_viewport(1);
+        assert!(vt.row_text(0).unwrap().starts_with("0002"), "{:?}", rows(&vt));
+        vt.scroll_viewport(-100);
+        assert!(vt.row_text(0).unwrap().starts_with("0001"), "never above the oldest line");
+        vt.scroll_to_bottom();
+        assert!(rows(&vt).iter().any(|r| r.starts_with("0050")), "{:?}", rows(&vt));
+        assert_eq!(rows(&vt).len(), 5);
+    }
 }

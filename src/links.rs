@@ -129,7 +129,15 @@ pub fn resolve_with_line(link: &str, cwd: Option<&Path>) -> Option<(Target, Opti
             && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
             && (!s.contains('.') || rest.starts_with("//"))
     });
-    if scheme {
+    // `Makefile:12` is a scheme by its look, but a file by its place: when the rest is only a
+    // line (and column) and a file of that name is here, it is a path (`localhost:8080` is not).
+    let file_and_line = scheme
+        && link.split_once(':').is_some_and(|(name, rest)| {
+            rest.split(':').count() <= 2
+                && rest.split(':').all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                && cwd.is_some_and(|c| c.join(name).is_file() || git_root(c).is_some_and(|r| r.join(name).is_file()))
+        });
+    if scheme && !file_and_line {
         return Some((Target::Url(link.to_owned()), None));
     }
     let home = std::env::home_dir();
@@ -178,7 +186,7 @@ fn existing(full: &Path) -> Option<(PathBuf, Option<u32>)> {
         match bare.rsplit_once(':') {
             Some((head, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
                 bare = head;
-                line = n.parse().ok();
+                line = n.parse().ok().filter(|l| *l != 0);
             }
             _ => break,
         }
@@ -591,6 +599,152 @@ mod tests {
         let slashes = format!("{}", file.display()).replace('\\', "/");
         assert_eq!(drive_file(&slashes, 3, None).map(|(_, t, _)| t), Some(Target::File(file.clone())));
         assert_eq!(drive_file(r"C:\no\such\file.rs", 3, None), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn line_suffix_edges_overflow_dotfiles_and_schemes() {
+        let dir = std::env::temp_dir().join(format!("h0x-links-edges-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("file.rs");
+        std::fs::write(&file, "x\n").unwrap();
+        std::fs::write(dir.join(".env"), "x\n").unwrap();
+        let line = |link: &str| resolve_with_line(link, Some(&dir));
+        let at = |n: Option<u32>| Some((Target::File(file.clone()), n));
+        assert_eq!(line("file.rs:99999999999"), at(None), "a line past u32 still opens the file");
+        assert_eq!(line("file.rs:4294967295"), at(Some(u32::MAX)));
+        assert_eq!(line("file.rs:4294967296"), at(None));
+        assert_eq!(line("file.rs:007"), at(Some(7)));
+        assert_eq!(line("file.rs:12:5."), at(Some(12)));
+        assert_eq!(line("file.rs:12:5:3"), None, "two numbers at most");
+        assert_eq!(line("file.rs:-1"), None);
+        assert_eq!(line("file.rs:1e3"), None);
+        assert_eq!(line("file.rs:\u{661}\u{662}"), None, "only ASCII digits name a line");
+        assert_eq!(line(".env:3"), Some((Target::File(dir.join(".env")), Some(3))), "a dot file is no scheme");
+        // Dotted names are paths unless `//` follows; missing ones resolve to nothing, not a URL.
+        for missing in ["v1.2:3", "a.b:c", "node.js:", "example.com:8080", "none.rs:12"] {
+            assert!(!matches!(line(missing), Some((Target::Url(_), _))), "{missing:?}");
+            assert_eq!(line(missing), None, "{missing:?}");
+        }
+        for url in ["com.example.app://x", "x+y.z://a", "mailto:me@x.y", "https://x.y:8443/p", "HTTPS://x.y:8443/p:12", "localhost:8080"] {
+            assert_eq!(line(url), Some((Target::Url(url.to_owned()), None)), "{url:?}");
+        }
+        assert_eq!(resolve_with_line("file.rs:12", None), None, "a relative path needs a folder");
+        // A `file:` URI keeps its line too.
+        let shown = file.to_string_lossy().replace('\\', "/").replace(' ', "%20");
+        let uri = if cfg!(windows) { format!("file:///{shown}:12") } else { format!("file://{shown}:12") };
+        assert_eq!(resolve_with_line(&uri, None), at(Some(12)), "{uri}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Line numbers count from 1: `file.rs:0` opens the file, at no line.
+    #[test]
+    fn line_zero_names_no_line() {
+        let dir = std::env::temp_dir().join(format!("h0x-links-zero-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("file.rs"), "x\n").unwrap();
+        assert_eq!(resolve_with_line("file.rs:0", Some(&dir)), Some((Target::File(dir.join("file.rs")), None)));
+        assert_eq!(resolve_with_line("file.rs:0:0", Some(&dir)), Some((Target::File(dir.join("file.rs")), None)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `Makefile:12`, `Dockerfile:3`: a file with no extension and a line is a file, not a
+    /// `Makefile:` scheme, when that file exists.
+    #[test]
+    fn an_existing_file_without_an_extension_takes_a_line() {
+        let dir = std::env::temp_dir().join(format!("h0x-links-noext-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["Makefile", "Dockerfile"] {
+            std::fs::write(dir.join(name), "x\n").unwrap();
+            assert_eq!(resolve_with_line(&format!("{name}:12"), Some(&dir)), Some((Target::File(dir.join(name)), Some(12))), "{name}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn git_root_takes_the_nearest_repo_and_a_file_as_the_folder_never_a_share() {
+        let dir = std::env::temp_dir().join(format!("h0x-links-roots-{}", std::process::id()));
+        let inner = dir.join("vendor").join("lib");
+        let deep = inner.join("src").join("deep");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(inner.join(".git"), "gitdir: elsewhere\n").unwrap();
+        std::fs::write(dir.join("top.rs"), "x\n").unwrap();
+        std::fs::write(inner.join("lib.rs"), "x\n").unwrap();
+        assert_eq!(git_root(&deep), Some(inner.clone()), "the nearest .git wins");
+        assert_eq!(git_root(&dir), Some(dir.clone()), "the folder itself");
+        assert_eq!(git_root(&inner.join("lib.rs")), Some(inner.clone()), "a file as the folder: its own folder's repo");
+        assert_eq!(resolve_with_line("lib.rs:4", Some(&deep)), Some((Target::File(inner.join("lib.rs")), Some(4))));
+        assert_eq!(resolve("./lib.rs", Some(&deep)), Some(Target::File(inner.join("lib.rs"))));
+        assert_eq!(resolve("top.rs", Some(&deep)), None, "only the nearest root is tried");
+        assert_eq!(resolve(&deep.join("lib.rs").to_string_lossy(), Some(&deep)), None, "an absolute path is never moved to the root");
+        assert_eq!(resolve("lib.rs", None), None);
+        for share in [r"\\host\share\x", "//host/share/x", r"\\?\UNC\host\share\x"] {
+            assert_eq!(git_root(Path::new(share)), None, "{share}");
+        }
+        let _ = git_root(Path::new(if cfg!(windows) { "C:\\" } else { "/" }));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn drive_path_ends_at_text_edges_quotes_and_neighbours() {
+        let ends = |t: &str, at: usize| drive_path_ends(t, at);
+        let words = |t: &str, at: usize| ends(t, at).map(|(s, e)| e.iter().map(|&e| t[s..e].to_owned()).collect::<Vec<_>>());
+        assert!(ends("C:\\", 0).is_none_or(|(_, e)| e.is_empty()), "a bare drive is no file");
+        assert!(ends("C:/", 2).is_none_or(|(_, e)| e.is_empty()));
+        assert_eq!(words("C:\\x\\y.rs is here", 0).unwrap()[0..2], ["C:\\x\\y.rs is here".to_owned(), "C:\\x\\y.rs is".to_owned()]);
+        assert_eq!(words("C:\\x\\y.rs is here", 0).unwrap().last().map(String::as_str), Some("C:\\x\\y.rs"));
+        let t = "see C:\\x\\y.rs";
+        assert_eq!(ends(t, t.len() - 1), Some((4, vec![t.len()])), "at the end of the text");
+        assert_eq!(ends("see C:\\x\\y.rs   ", 6), Some((4, vec![13])), "trailing blanks are no end");
+        assert_eq!(ends("open \"C:\\a b\\c.rs\" now", 8).unwrap().0, 6);
+        assert_eq!(ends("x='c:/a/b.rs'", 5).unwrap().0, 3);
+        assert_eq!(ends("\u{9519}\u{8bef} C:\\x\\y.rs", 9).unwrap().0, 7, "after a multi-byte word");
+        assert_eq!(ends("\u{9519}C:\\x\\y.rs", 4), None, "glued to a word");
+        assert_eq!(ends("1C:\\x", 1), None);
+        assert_eq!(ends("C:\\a D:\\b", 8).unwrap().0, 5, "the drive nearest left of the pointer");
+        assert_eq!(ends("C:\\a D:\\b", 2).unwrap().0, 0);
+        assert!(ends("C:\\x\\y.rs", 999).is_none_or(|(_, e)| e.is_empty()), "a pointer past the text");
+        assert!(ends("C:\\a b c d e f g h i j k l", 0).unwrap().1.len() <= 9, "a few words at most");
+        assert_eq!(ends("ab", 0), None);
+        assert_eq!(ends("", 0), None);
+        // A pointer inside a multi-byte character never panics.
+        let t = "\u{e9}\u{e9} C:\\\u{e9}\u{e9}\\x.rs \u{e9}";
+        for at in 0..t.len() + 2 {
+            let _ = ends(t, at);
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn drive_paths_are_a_windows_thing() {
+        assert_eq!(drive_file("C:\\x\\y.rs", 3, None), None);
+        assert_eq!(drive_file("/tmp/x C:/y.rs", 9, None), None);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_drive_path_in_brackets_quotes_or_at_the_text_edges_is_found() {
+        let dir = std::env::temp_dir().join(format!("h0x-links-edge-drive-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("b.rs");
+        std::fs::write(&file, "x\n").unwrap();
+        let shown = file.display().to_string();
+        let found = |text: &str| {
+            let at = text.find(&shown[..3]).unwrap() + 4;
+            drive_file(text, at, None).map(|(r, t, l)| (text[r].to_owned(), t, l))
+        };
+        let want = |text: &str, line: Option<u32>| Some((text.to_owned(), Target::File(file.clone()), line));
+        assert_eq!(found(&format!("({shown}:12)")), want(&format!("{shown}:12"), Some(12)));
+        assert_eq!(found(&format!("\"{shown}\"")), want(&shown, None));
+        assert_eq!(found(&format!("'{shown}:3:9',")), want(&format!("{shown}:3:9"), Some(3)));
+        assert_eq!(found(&shown), want(&shown, None), "the whole text");
+        assert_eq!(found(&format!("{shown}:7 then more")), want(&format!("{shown}:7"), Some(7)), "at the start");
+        assert_eq!(found(&format!("error at {shown}:99999999999")), want(&format!("{shown}:99999999999"), None), "at the end, a line past u32");
+        assert_eq!(drive_file("C:\\", 0, None), None);
+        assert_eq!(drive_file("see C:\\ now", 5, None), None);
+        let unc = format!(r"\\localhost\{}", shown.replacen(':', "$", 1));
+        assert_eq!(drive_file(&unc, 14, None), None, "never a share");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

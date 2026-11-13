@@ -1979,6 +1979,46 @@ mod tests {
         .unwrap();
     }
 
+    /// Look-alike names (spacing, case, separators, invisible and homoglyph characters, paths)
+    /// and arguments or props that claim the frame never unlock the install.
+    #[test]
+    fn installing_opencode_is_refused_to_look_alike_names_and_claimed_props() {
+        std::thread::spawn(|| {
+            for name in [
+                " frame-welcome",
+                "\tframe-welcome",
+                "frame-welcome\n",
+                "FRAME-WELCOME",
+                "frame_welcome",
+                "frame welcome",
+                "framewelcome",
+                "frame-welcom",
+                "frame-welcome\u{200b}",
+                "\u{feff}frame-welcome",
+                "fr\u{430}me-welcome",
+                "frame\u{2010}welcome",
+                "frame-welcome\0",
+                "frame/welcome",
+                "frame\\welcome",
+                "mods/frame-welcome",
+                "../frame-welcome",
+                "frame-welcome.js",
+                "frame-welcome/main.js",
+            ] {
+                let host = module(Instance { name: name.into(), props: Value::Null }, 1);
+                let err = host.call("installOpenCode", &gpui_shell::HostArguments::default()).expect_err(name);
+                assert_eq!(err.message(), INSTALL_REFUSED, "{name:?}");
+            }
+            for props in [json!({ "name": "frame-welcome" }), json!({ "from": "frame-welcome", "frame": "welcome" }), json!({ "overlay": "frame-welcome" })] {
+                let host = module(Instance { name: "my-mod".into(), props: props.clone() }, 1);
+                let err = host.call("installOpenCode", &gpui_shell::HostArguments::default()).expect_err("props");
+                assert_eq!(err.message(), INSTALL_REFUSED, "{props}");
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
     #[test]
     fn cancelling_a_sign_in_is_allowed_to_the_settings_and_account_frames() {
         std::thread::spawn(|| {

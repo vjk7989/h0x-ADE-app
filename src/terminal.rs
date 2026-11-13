@@ -1511,6 +1511,7 @@ fn command_on_line(text: &str) -> Option<String> {
         if b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\'
             && let Some(i) = t.find('>')
             && !t[..i].ends_with(' ')
+            && !t[3..i].contains([':', '<', '|', '"', '?', '*'])
         {
             return Some(&t[i + 1..]);
         }
@@ -4199,6 +4200,201 @@ mod tests {
     fn scrollbar_rail_click_pages_toward_the_click() {
         assert_eq!(super::scrollbar_page(100.0, 20.0), -1);
         assert_eq!(super::scrollbar_page(100.0, 300.0), 1);
+    }
+
+    #[test]
+    fn scroll_anim_moves_ten_thousand_lines_a_screen_a_frame_and_lands_exactly() {
+        use std::time::{Duration, Instant};
+        for n in [10_000, -10_000] {
+            let t0 = Instant::now();
+            let mut a = super::ScrollAnim::default();
+            a.add(n, t0);
+            let (mut sum, mut frames) = (0i64, 0u32);
+            while a.active() {
+                frames += 1;
+                assert!(frames < 2_000, "never finishes ({sum} of {n})");
+                let s = a.next(t0 + Duration::from_millis(16 * frames as u64), 24);
+                assert!(s.abs() <= 24, "{s}");
+                assert!(s == 0 || s.signum() == n.signum(), "{s} against {n}");
+                sum += s as i64;
+            }
+            assert_eq!(sum, n as i64);
+            assert_eq!(a.next(t0 + Duration::from_secs(3600), 24), 0, "nothing after the end");
+        }
+    }
+
+    #[test]
+    fn scroll_anim_alternating_wheel_input_nets_out_and_never_overshoots() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut a = super::ScrollAnim::default();
+        let (mut given, mut asked) = (0i32, 0i32);
+        let mut ms = 0u64;
+        for (i, lines) in [3, -3, 5, -1, -7, 2, 1, -3, 3, -3].into_iter().enumerate() {
+            a.add(lines, t0 + Duration::from_millis(ms));
+            asked += lines;
+            // One or two frames between wheel notches, as a quick flick gives.
+            for _ in 0..(i % 2 + 1) {
+                ms += 16;
+                given += a.next(t0 + Duration::from_millis(ms), 24);
+            }
+        }
+        for _ in 0..100 {
+            ms += 16;
+            given += a.next(t0 + Duration::from_millis(ms), 24);
+        }
+        assert_eq!(given, asked, "every line asked for is scrolled, none more");
+        assert!(!a.active());
+        // Up then down by the same amount before any frame: nothing moves.
+        a.add(4, t0);
+        a.add(-4, t0);
+        assert_eq!(a.next(t0 + Duration::from_secs(1), 24), 0);
+        assert!(!a.active());
+    }
+
+    #[test]
+    fn scroll_anim_zero_length_frames_and_a_clock_before_the_start_move_nothing() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut a = super::ScrollAnim::default();
+        a.add(5, t0);
+        for _ in 0..10 {
+            assert_eq!(a.next(t0, 24), 0, "no time passed");
+        }
+        assert!(a.active(), "still waiting to move");
+        assert_eq!(a.next(t0 + super::SCROLL_ANIM, 24), 5, "all of it once the time is up");
+        assert!(!a.active());
+        // A frame stamped before the burst began (saturates to no time).
+        a.add(-5, t0 + Duration::from_millis(50));
+        assert_eq!(a.next(t0, 24), 0);
+        assert!(a.active());
+        assert_eq!(a.next(t0 + Duration::from_secs(1), 24), -5);
+        // A cap under one, however far under, still moves one line toward the rest.
+        a.add(3, t0);
+        assert_eq!(a.next(t0 + Duration::from_secs(1), -7), 1);
+        assert_eq!(a.next(t0 + Duration::from_secs(1), i32::MIN), 1);
+        assert_eq!(a.next(t0 + Duration::from_secs(1), i32::MAX), 1);
+        assert!(!a.active());
+        // A finished burst starts afresh.
+        a.add(1, t0 + Duration::from_secs(2));
+        assert!(a.active());
+        assert_eq!(a.next(t0 + Duration::from_secs(3), 24), 1);
+    }
+
+    #[test]
+    fn scrollbar_and_chip_timers_at_their_boundaries() {
+        use std::time::Duration;
+        let shown = super::SCROLLBAR_SHOWN;
+        assert!(super::scrollbar_strong(false, Some(Duration::ZERO)));
+        assert!(super::scrollbar_strong(false, Some(shown - Duration::from_nanos(1))));
+        assert!(!super::scrollbar_strong(false, Some(shown)));
+        assert!(!super::scrollbar_strong(false, Some(Duration::MAX)));
+        assert!(super::scrollbar_strong(true, Some(Duration::MAX)), "the pointer keeps it strong");
+        assert!(super::copied_chip_live(super::COPIED_SHOWN - Duration::from_nanos(1)));
+        assert!(!super::copied_chip_live(Duration::MAX));
+        // A click level with the thumb's top pages down; anything above, up.
+        assert_eq!(super::scrollbar_page(100.0, 100.0), 1);
+        assert_eq!(super::scrollbar_page(100.0, 99.9), -1);
+        assert_eq!(super::scrollbar_page(0.0, -5.0), -1);
+    }
+
+    #[test]
+    fn screen_text_handles_blank_tabbed_combining_and_very_long_rows() {
+        let rows = |r: &[&str]| r.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::screen_text(&rows(&["    ", "        "])), "", "a screen of spaces copies nothing");
+        assert_eq!(super::screen_text(&rows(&["a\t\t", "b \t "])), "a\nb", "trailing tabs go");
+        assert_eq!(super::screen_text(&rows(&["a\tb", "\tc"])), "a\tb\n\tc", "inner and leading tabs stay");
+        assert_eq!(super::screen_text(&rows(&["", "  ", "x"])), "\n\nx", "blank rows above the text stay");
+        assert_eq!(super::screen_text(&rows(&["e\u{301}  ", "n\u{303}a\u{308}"])), "e\u{301}\nn\u{303}a\u{308}", "combining marks stay on their letter");
+        assert_eq!(super::screen_text(&rows(&["\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} "])), "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}");
+        let long = "x".repeat(100_000);
+        assert_eq!(super::screen_text(&[format!("{long}   ")]), long);
+        let many: Vec<String> = (0..10_000).map(|i| format!("{i}  ")).collect();
+        let text = super::screen_text(&many);
+        assert_eq!(text.lines().count(), 10_000);
+        assert!(!text.ends_with('\n') && !text.contains(" \n"));
+    }
+
+    #[test]
+    fn command_on_line_finds_unicode_nested_and_spaced_commands() {
+        let c = |t: &str| super::command_on_line(t);
+        for (line, want) in [
+            ("Bash(echo \"(x)\")", "echo \"(x)\""),
+            ("\u{25cf} Bash(echo (a) (b))", "echo (a) (b)"),
+            ("\u{276f}     ls", "ls"),
+            ("$ \u{fc}n\u{ef}code --flag", "\u{fc}n\u{ef}code --flag"),
+            ("$ \u{65e5}\u{672c}", "\u{65e5}\u{672c}"),
+            ("user@h\u{f6}st:~$ ls", "ls"),
+            ("\t$ ls -la", "ls -la"),
+            ("PS C:\\Users\\Zo\u{eb}> git status", "git status"),
+            ("C:\\Users\\me>  dir  ", "dir"),
+            (">    git push", "git push"),
+        ] {
+            assert_eq!(c(line).as_deref(), Some(want), "{line:?}");
+        }
+        let long = format!("$ echo {}", "a".repeat(100_000));
+        assert_eq!(c(&long).map(|s| s.len()), Some(100_005));
+    }
+
+    #[test]
+    fn command_on_line_ignores_log_lines_bare_prompts_quotes_and_escape_remnants() {
+        for line in [
+            "[INFO] $ price",
+            "[INFO] $ ",
+            "2024-01-01 12:00 $ total",
+            "Total: $ 5",
+            "C:\\>",
+            "C:\\> ",
+            "C:\\Program Files\\x>",
+            "PS>",
+            "PS> ",
+            "PS>   ",
+            "PS",
+            "PS: the > sign",
+            "$",
+            "$   ",
+            "\u{276f}",
+            "\u{276f}      ",
+            "\u{276f} 1. Yes",
+            "% 50",
+            "user@host:~$ ",
+            "user@host:~$",
+            "[me@box src]$ ",
+            "echo \"$ ls\"",
+            "'user@host:~$ ls'",
+            "\"$ ls\"",
+            "\u{1b}[32m$ ls",
+            "$ \u{1b}[0mls",
+            "$ 'quoted'",
+            "$ -v",
+            "Bash(",
+            "Bash)",
+            "Bash(ls",
+            "\u{25cf} Bash()",
+            "\u{25cf} Bash(   )",
+            "> ",
+            "> \u{276f} git",
+            "  % Total    % Received % Xferd  Average Speed",
+        ] {
+            assert_eq!(super::command_on_line(line), None, "{line:?}");
+        }
+        // Odd bytes around the prompt shapes never panic.
+        for line in ["\u{e9}:\\x>ls", "C:\u{e9}>ls", "PS \u{1f600}> x", "$\u{301} ls", "\u{276f}\u{301} ls", "C:", "C:\\", "PS C:\\> ", "[@]$ ls", "@$ x"] {
+            let _ = super::command_on_line(line);
+        }
+    }
+
+    /// cmd.exe paths hold no `:` past the drive: a compiler or log line that starts with a
+    /// path and has a `>` later (`->`, `=>`) is not a prompt.
+    #[test]
+    fn command_on_line_does_not_take_a_drive_path_diagnostic_for_a_cmd_prompt() {
+        for line in [
+            "C:\\proj\\src\\main.rs:12:5: note: fn f() -> u8",
+            "C:\\logs\\app.log:3 [WARN] retry -> ok",
+            "C:\\a\\b.ts(4,2): error TS2322: Type 'A' is not assignable => B",
+        ] {
+            assert_eq!(super::command_on_line(line), None, "{line:?}");
+        }
     }
 
     #[test]
