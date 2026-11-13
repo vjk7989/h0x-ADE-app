@@ -269,6 +269,9 @@ jobs:
             ${{ runner.temp }}/look-themes.png
             ${{ runner.temp }}/theme-neo-brutalism.png
             ${{ runner.temp }}/theme-amber-minimal.png
+            ${{ runner.temp }}/theme-sodium.png
+            ${{ runner.temp }}/theme-voltage.png
+            ${{ runner.temp }}/theme-phosphor.png
           if-no-files-found: warn
 
   # Security advisories (RustSec) in the dependencies: deny.toml.

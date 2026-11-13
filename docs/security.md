@@ -50,6 +50,7 @@ Do not assume every download is notarized or signed.
 Release builds send two kinds of anonymous data to PostHog (EU), and only these:
 
 - Usage events (app started and closed, which features are used): sent unless you turn off "Share usage analytics" in Settings > Info. Turning it off sends what is already queued, then stops.
+- Your own activity record (`usage/activity.json` in the app home: per day, how long agents worked, how many ran and how many tokens they used) stays on this computer and is never sent, whatever the analytics setting says. Delete the file to clear it.
 - Failure reports (a crash or an update failure, with a short fixed code): sent whatever that setting says, so bugs can be fixed.
 - Update events: `update_checked`, `update_downloaded`, `update_applied`, `update_rolled_back` (each names the part, `app`, `core` or `runtime`, and the versions involved; no paths). They are usage events, so the same switch governs them.
 - If a new app version does not start within 60 seconds (it crashes, hangs or exits), HyperOx goes back to the version that worked and sends a failure report, `app_update_failed` (step `rollback`), whatever the setting says. The old version is kept next to the new one until the new one has started fine 3 times. If one version fails twice in a row, HyperOx stays on the old one until a newer release is out.
