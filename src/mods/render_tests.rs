@@ -2719,12 +2719,13 @@ fn welcome_asks_only_while_found_via_was_never_set_and_only_on_the_last_page(cx:
     }
 }
 
-// The welcome's OpenCode card on page 3; `press` runs when the test's one press happens.
+// The welcome's OpenCode card on page 3; `press` runs at the test's press, once the card has been drawn (the
+// press timer can fire before the first page-3 render).
 fn welcome_opencode(press: &str) -> String {
     format!(
         "this.page = 3; const segment = this.segment.bind(this); \
         this.segment = (t, items, now, onPick) => {{ if (items[0][1] === 'No') this.pick = onPick; return segment(t, items, now, onPick); }}; \
-        this.press = (_e, cx) => {{ const pick = this.pick; {press} }};"
+        const go = (_e, cx) => {{ if (!this.pick) {{ this.press = go; return; }} const pick = this.pick; {press} }}; this.press = go;"
     )
 }
 
