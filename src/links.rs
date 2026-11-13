@@ -50,6 +50,34 @@ pub fn word(text: &str, at: usize) -> Option<Range<usize>> {
 /// A bare file name under the pointer (`plan.md`, `docs\plan.md` on Windows) that
 /// is a file in the terminal's folder; the text detector only sees names with a slash.
 pub fn bare_file(text: &str, at: usize, cwd: Option<&Path>) -> Option<(Range<usize>, Target)> {
+    bare_file_inner(text, at, cwd).map(|(range, target, _)| (range, target))
+}
+
+/// `bare_file`, and a `:12` / `:12:5` right after the name: the range then covers it, and the
+/// line comes with it. With such a suffix a name needs no extension (`Makefile:12`), if that file exists.
+pub fn bare_file_line(text: &str, at: usize, cwd: Option<&Path>) -> Option<(Range<usize>, Target, Option<u32>)> {
+    bare_file_inner(text, at, cwd).map(|(range, target, suffix)| match suffix {
+        Some((line, end)) => (range.start..end, target, line),
+        None => (range, target, None),
+    })
+}
+
+/// The `:12` or `:12:5` at the start of `rest`: the line (None for 0 or a huge number) and the length of the suffix.
+fn line_suffix(rest: &str) -> Option<(Option<u32>, usize)> {
+    let digits = |s: &str| s.bytes().take_while(u8::is_ascii_digit).count();
+    let first = digits(rest.strip_prefix(':')?);
+    if first == 0 {
+        return None;
+    }
+    let mut len = 1 + first;
+    let line = rest[1..len].parse().ok().filter(|l| *l != 0);
+    if let Some(col) = rest[len..].strip_prefix(':').map(digits).filter(|n| *n > 0) {
+        len += 1 + col;
+    }
+    Some((line, len))
+}
+
+fn bare_file_inner(text: &str, at: usize, cwd: Option<&Path>) -> Option<(Range<usize>, Target, Option<(Option<u32>, usize)>)> {
     // A backslash is always part of the word: a separator on Windows, an ordinary
     // character in a file name elsewhere (so `x\note.md` is never read as `note.md`).
     let mut range = word_in(text, at, true)?;
@@ -70,12 +98,15 @@ pub fn bare_file(text: &str, at: usize, cwd: Option<&Path>) -> Option<(Range<usi
         }
     }
     let name = text[range.clone()].rsplit(['/', '\\']).next()?;
-    let (stem, ext) = name.rsplit_once('.')?;
-    if stem.is_empty() || !(1..=10).contains(&ext.len()) || !ext.bytes().all(|b| b.is_ascii_alphanumeric()) {
+    let suffix = line_suffix(&text[range.end..]).map(|(line, len)| (line, range.end + len));
+    let extension = name
+        .rsplit_once('.')
+        .is_some_and(|(stem, ext)| !stem.is_empty() && (1..=10).contains(&ext.len()) && ext.bytes().all(|b| b.is_ascii_alphanumeric()));
+    if !extension && (suffix.is_none() || name.is_empty() || name.starts_with('.')) {
         return None;
     }
     match resolve(&text[range.clone()], cwd)? {
-        target @ Target::File(_) if matches!(&target, Target::File(path) if path.is_file()) => Some((range, target)),
+        target @ Target::File(_) if matches!(&target, Target::File(path) if path.is_file()) => Some((range, target, suffix)),
         _ => None,
     }
 }
@@ -745,6 +776,34 @@ mod tests {
         assert_eq!(drive_file("see C:\\ now", 5, None), None);
         let unc = format!(r"\\localhost\{}", shown.replacen(':', "$", 1));
         assert_eq!(drive_file(&unc, 14, None), None, "never a share");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_bare_name_keeps_its_line_and_an_extensionless_one_needs_it() {
+        let dir = std::env::temp_dir().join(format!("h0x-links-bareline-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("deep")).unwrap();
+        std::fs::write(dir.join("plan-test.md"), "x\n").unwrap();
+        std::fs::write(dir.join("Makefile"), "x\n").unwrap();
+        std::fs::write(dir.join("deep").join("x.rs"), "x\n").unwrap();
+        let hit = |text: &str, at: usize| bare_file_line(text, at, Some(&dir)).map(|(r, t, l)| (text[r].to_owned(), t, l));
+        assert_eq!(hit("see plan-test.md:12 now", 6), Some(("plan-test.md:12".into(), Target::File(dir.join("plan-test.md")), Some(12))));
+        assert_eq!(hit("plan-test.md:12:5: x", 2), Some(("plan-test.md:12:5".into(), Target::File(dir.join("plan-test.md")), Some(12))));
+        assert_eq!(hit("plan-test.md", 2), Some(("plan-test.md".into(), Target::File(dir.join("plan-test.md")), None)));
+        assert_eq!(hit("plan-test.md: x", 2), Some(("plan-test.md".into(), Target::File(dir.join("plan-test.md")), None)), "a colon alone is no line");
+        assert_eq!(hit("plan-test.md:0", 2).map(|h| h.2), Some(None));
+        assert_eq!(hit("Makefile:12", 3), Some(("Makefile:12".into(), Target::File(dir.join("Makefile")), Some(12))));
+        assert_eq!(hit("Makefile", 3), None, "no extension and no line: not a link");
+        assert_eq!(hit("Makefile:", 3), None);
+        assert_eq!(hit("Nothere:12", 3), None, "the file must exist");
+        assert_eq!(hit("deep:12", 1), None, "a folder is no file");
+        assert_eq!(hit(".env:3", 1), None);
+        if cfg!(windows) {
+            assert_eq!(hit(r"see deep\x.rs:20", 6).map(|h| h.2), Some(Some(20)));
+        }
+        // `bare_file` itself is unchanged: the name alone.
+        assert_eq!(bare_file("plan-test.md:12", 2, Some(&dir)).map(|(r, _)| &"plan-test.md:12"[r]), Some("plan-test.md"));
+        assert_eq!(bare_file("Makefile:12", 2, Some(&dir)).map(|(r, _)| &"Makefile:12"[r]), Some("Makefile"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
