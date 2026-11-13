@@ -62,6 +62,10 @@
     "f2": "tab.rename",
     "shift-f2": "space.rename"
   },
+  "mod:todo": {
+    "alt-down": "terminal",
+    "alt-up": "terminal"
+  },
   "terminal": {
     "ctrl-backspace": "send:\u0017",
     "ctrl-left": "send:\u001bb",

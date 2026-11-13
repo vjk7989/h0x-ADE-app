@@ -8,7 +8,7 @@ import { h_flex, v_flex } from "gpui-base";
 import { spaces, panes, agents, run, shared, setShared, nextCommand, exec, layouts, home, settings, openOverlay, closeOverlay } from "h0x";
 import {
   C, ASSETS, unit, root, bevel, button, etch, grip, icon, programIcon, sfx, apps, setApp, label, own,
-  fitLayout, openMenu, openDialog, dither, perform,
+  fitLayout, openMenu, openDialog, dither, perform, boldWeight,
 } from "./kit.js";
 
 // Agents the Start menu offers when installed: [command, name, icon].
@@ -306,7 +306,7 @@ export default class Taskbar {
             ),
           ),
       )
-      .child(div().relative().flex_1().min_w(0).truncate().text_color(fg).when(pressed, (el) => el.font_weight(700)).child(t.name));
+      .child(div().relative().flex_1().min_w(0).truncate().text_color(fg).when(pressed, (el) => el.font_weight(boldWeight(t.name))).child(t.name));
     return button(
       u,
       `tb-${t.id}`,
@@ -349,7 +349,7 @@ export default class Taskbar {
       .gap(u(3))
       .when(open, (el) => el.child(dither(u)))
       .child(div().relative().child(icon(u, ico, 16)))
-      .child(div().relative().flex_1().min_w(0).truncate().when(open, (el) => el.font_weight(700)).child(name));
+      .child(div().relative().flex_1().min_w(0).truncate().when(open, (el) => el.font_weight(boldWeight(name))).child(name));
     return button(u, `tg-${key}`, face, () => setApp(key, open ? "min" : "open"), {
       toggled: open,
       pad: [0, 3],
