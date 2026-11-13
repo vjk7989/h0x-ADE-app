@@ -3145,6 +3145,8 @@ const BASE: &str = r#"  /** A row. */
     value(): string;
     /** Programmatic replacement works even in readonly mode. */
     set_value(value: string): void;
+    /** HyperOx: move the cursor to a 0-based line, scrolling it into view and focusing the editor. */
+    set_cursor_line(line: number): void;
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
     release(): boolean;
   }
