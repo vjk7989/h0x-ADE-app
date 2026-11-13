@@ -9,9 +9,16 @@ import { appHome, readTextFile, writeTextFile, knownAgents, keys, settings } fro
 
 // The keys of defaults/programs.json: a custom agent may not take one (it would change the built-in).
 const BUILT_IN = [
-  "claude", "codex", "pi", "pig", "opencode", "cursor", "copilot", "amp", "grok", "dsh-tui", "antigravity", "kimi", "kiro",
-  "hermes", "mastracode", "qoder", "muse", "crush", "command-code", "prime-agent", "gemini", "ollama", "agent", "shell",
-  "program", "vim", "nvim", "hx", "emacs", "nano", "less", "lazygit", "git", "gh", "glab", "htop",
+  "claude", "codex", "pi", "pig", "opencode", "cursor", "copilot", "amp", "grok", "dsh-tui", "antigravity", "kimi",
+  "kiro", "hermes", "mastracode", "qoder", "muse", "crush", "command-code", "prime-agent", "gemini", "ollama",
+  "agent", "shell", "program", "vim", "nvim", "hx", "emacs", "nano", "less", "lazygit", "git", "gh", "glab", "htop",
+  "ssh", "tmux", "rg", "curl", "ffmpeg", "make", "cmake", "jupyter", "node", "bun", "deno", "python", "uv", "poetry",
+  "ruby", "go", "cargo", "java", "gradle", "mvn", "dotnet", "php", "composer", "iex", "erl", "ghci", "ocaml", "zig",
+  "swift", "kotlin", "scala", "lua", "perl", "R", "julia", "dart", "flutter", "tsc", "npm", "pnpm", "yarn", "vite",
+  "next", "astro", "nuxt", "turbo", "webpack", "esbuild", "vitest", "jest", "pytest", "eslint", "prettier", "biome",
+  "ruff", "expo", "tauri", "electron", "prisma", "supabase", "django-admin", "flask", "fastapi", "psql", "mysql",
+  "sqlite3", "redis-cli", "mongosh", "docker", "podman", "kubectl", "helm", "terraform", "ansible", "gcloud",
+  "vercel", "netlify", "wrangler", "fly", "caddy", "nginx", "nix", "brew", "apt", "dnf", "pacman",
 ];
 const MAX_WORDS = 32;
 const MAX_NAME = 40;

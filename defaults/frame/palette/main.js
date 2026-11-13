@@ -147,9 +147,9 @@ export default class Palette extends View {
     this.scroll = 0;
     this.recent = JSON.parse(localStorage.getItem("recent") ?? "[]");
     this.handle = cx.focus_handle();
-    // The agents (the new-menu's last answer first), for "New <name> session".
+    // The agents, for "New <name> session" (knownAgents() answers from its own short cache).
     const machine = spaces().find((s) => s.active)?.machine;
-    this.agents = shared("new-menu.agents")?.[machine ?? ""] ?? [];
+    this.agents = [];
     cx.spawn(async (cx) => {
       try { this.agents = await knownAgents({ on: machine }); } catch {}
       cx.notify();

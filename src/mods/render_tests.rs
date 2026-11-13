@@ -2743,8 +2743,11 @@ fn describe_pressing_files(
         let home = values["appHome"].as_str().unwrap();
         calls.borrow_mut().files.insert(format!("{home}/settings.json"), text.into());
     }
+    // The palette keeps its recent commands in storage.
+    static NEXT_STORE: AtomicU64 = AtomicU64::new(0);
     let policy = Policy::new()
-        .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+        .with_storage_path(staged.0.join(format!("pressing-{}.json", NEXT_STORE.fetch_add(1, Ordering::Relaxed))))
+        .with_capabilities(Capabilities::new().storage(true).read_roots([staged.0.clone()]))
         .with_host_module(module(values, calls.clone()))
         .unwrap();
     let setup = format!("{setup} cx.timer.every(50, (cx) => {{ const press = this.press; this.press = null; if (press) {{ press(null, cx); cx.notify(); }} }});");
@@ -4413,11 +4416,12 @@ export default class Scenario extends Real {
       for (let c = command(); c !== null; c = command()) {
         const at = c.indexOf(' '), verb = at < 0 ? c : c.slice(0, at), arg = c.slice(at + 1);
         if (verb === 'open') this.show(arg, cx);
-        else if (verb === 'line') { this.line = Number(arg); this.reveal(); }
+        else if (verb === 'line') this.setLine(Number(arg));
         else if (verb === 'openline') { const at2 = arg.indexOf(' '); this.show(arg.slice(at2 + 1), cx); this.line = Number(arg.slice(0, at2)); }
         else if (verb === 'openfile') this.openFile(arg, cx);
         else if (verb === 'click') this.clicks[arg](null, cx);
         else if (verb === 'back') this.show(null, cx);
+        else if (verb === 'rekey') this.context = { ...this.context, key: 'stale' };
         else if (verb === 'keep') this.save(cx, true);
         else if (verb === 'reload') this.reload(cx);
         else if (verb === 'refresh') this.refresh(cx);
@@ -4729,6 +4733,28 @@ fn files_panel_keeps_opening_files_and_going_back_after_a_line_jump(cx: &mut Tes
     assert_eq!((state["file"].clone(), state["value"].clone()), (json!("b.txt"), json!("second
 ")), "{state}");
     files_step(&mut visual, &disk, "back");
+    assert_eq!(files_state(&mut visual, &disk)["file"], Value::Null);
+}
+
+#[gpui::test]
+fn files_panel_keeps_a_linked_file_and_its_line_when_the_folder_context_settles_after_the_click(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let hundred: String = (1..=100).map(|n| format!("line {n}\n")).collect();
+    let disk = files_disk(&[("/fixture/project/a.txt", &hundred)]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "openfile /fixture/project/a.txt");
+    files_step(&mut visual, &disk, "line 30");
+    files_wait(&mut visual, 200);
+    // The context key changes (a fresh profile's first look at the folder): the file stays and is shown at its line again.
+    files_step(&mut visual, &disk, "rekey");
+    files_wait(&mut visual, 300);
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["file"].clone(), state["cursors"].clone()), (json!("a.txt"), json!([29, 29])), "{state}");
+    // Going back is the person's own choice and is kept.
+    files_step(&mut visual, &disk, "back");
+    files_step(&mut visual, &disk, "rekey");
+    files_wait(&mut visual, 300);
     assert_eq!(files_state(&mut visual, &disk)["file"], Value::Null);
 }
 
@@ -6991,6 +7017,7 @@ fn todo_module(values: BTreeMap<String, Value>, host: Rc<RefCell<TodoHost>>) -> 
     }
     // The settings frame imports the account calls; this host never signs in.
     module = module.async_function("accountSignIn", |_| Ok(async { Ok(HostValue::Null) }));
+    module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     for name in ["nextCommand", "watchFolder"] {
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     }
