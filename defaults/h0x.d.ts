@@ -37,6 +37,10 @@ export function removeAppFile(path: string): Promise<null>;
  *  Start one with its `run` as `argv`. */
 export function knownAgents(options?: { on?: string | null }): Promise<(Program & { run: string[]; installed: boolean })[]>;
 
+/** Starts installing the free OpenCode CLI in the background (frame-welcome only; it posts its
+ *  own toasts): "started", or "running" when an install is already going. */
+export function installOpenCode(): "started" | "running";
+
 /** Opens the system's folder picker (this machine). Resolves with the chosen folder, or null
  *  when the person cancels. `prompt`: the confirm button's text (default "Open"). */
 export function pickFolder(options?: { prompt?: string }): Promise<string | null>;

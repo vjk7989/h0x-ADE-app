@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar } from "gpui-base";
-import { spaces, run, theme, props, closeOverlay, setShared, shared, core, appHome, readTextFile, writeTextFile, settings, layout, keys } from "h0x";
+import { spaces, run, theme, props, closeOverlay, setShared, shared, core, appHome, readTextFile, writeTextFile, settings, layout, keys, knownAgents, installOpenCode } from "h0x";
 
 const I = (name) => `frame/welcome/${name}.svg`;
 const W = (name) => `mods/workspace-chrome/${name}.svg`;
@@ -45,6 +45,8 @@ export default class Welcome extends View {
     this.copied = null;
     this.appearance = null;
     this.foundVia = true; // settings.json found_via; null (not yet asked) shows the question
+    this.openCodeInstalled = false;
+    this.openCodeStarted = false;
     this.handle = cx.focus_handle();
     this.handle.focus();
     // It opens while the window is still starting, which takes the keyboard
@@ -57,6 +59,10 @@ export default class Welcome extends View {
         this.foundVia = saved.found_via ?? null;
       } catch {}
       await this.loadMachines();
+      cx.notify();
+      try {
+        if ((await knownAgents()).some((a) => a.run?.[0] === "opencode" && a.installed)) this.openCodeInstalled = true;
+      } catch {}
       cx.notify();
     });
     // Machines added meanwhile (the Add a machine dialog) appear.
@@ -83,7 +89,18 @@ export default class Welcome extends View {
     closeOverlay(props().overlay);
   }
 
+  // The OpenCode card's "Yes" starts the install once the person moves on: it runs in the
+  // app, never holds up this screen, and says how it went in a toast.
+  installOpenCodeIfWanted() {
+    if (shared("welcome.opencode") !== true || this.openCodeStarted || this.openCodeInstalled) return;
+    this.openCodeStarted = true;
+    try {
+      installOpenCode();
+    } catch {}
+  }
+
   start() {
+    this.installOpenCodeIfWanted();
     this.done("finished");
     if (spaces().length === 0) run("space.new");
   }
@@ -409,6 +426,42 @@ export default class Welcome extends View {
       );
   }
 
+  openCodeCard(t) {
+    const yes = shared("welcome.opencode") === true;
+    return v_flex()
+      .id("w-opencode")
+      .p(12)
+      .gap(8)
+      .rounded(12)
+      .border_1()
+      .border_color(yes ? t.accent : t.input)
+      .when(yes, (el) => el.bg(t.accent + "10"))
+      .child(
+        h_flex()
+          .gap(8)
+          .items_center()
+          .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("OpenCode CLI (free)"))
+          .when(this.openCodeInstalled, (el) => el.child(div().text_size(12).text_color(t.muted).child("Installed ✓"))),
+      )
+      .child(this.para(t, "A free coding agent for your terminal: pick one of its free models, or bring your own keys. HyperOx installs it in the background."))
+      .when(!this.openCodeInstalled, (el) =>
+        el.child(
+          this.segment(
+            t,
+            [
+              [false, "No"],
+              [true, "Yes"],
+            ],
+            yes,
+            (v, cx) => {
+              setShared("welcome.opencode", v);
+              cx.notify();
+            },
+          ),
+        ),
+      );
+  }
+
   pageThree(t) {
     // The first look at this page asks: nothing is picked yet (skipping the
     // welcome leaves both on).
@@ -421,6 +474,7 @@ export default class Welcome extends View {
       .gap(14)
       .child(this.title(t, "Choose your panels", "HyperOx comes with a couple of panels. Turn one on and it appears beside your terminals. Drag this window aside to see it. Later, the buttons in the tab bar open and close them."))
       .children(PANELS.map((p) => this.panelCard(t, p)))
+      .child(this.openCodeCard(t))
       .child(
         h_flex()
           .gap(10)
@@ -597,7 +651,10 @@ export default class Welcome extends View {
           .when(this.page > 1, (el) => el.child(this.button(t, "w-back", "Back", false, (_e, cx) => go(this.page - 1, cx))))
           .child(
             this.page < PAGES
-              ? this.button(t, "w-next", this.page === 2 && !this.machines.length ? "Not now" : "Next", true, (_e, cx) => go(this.page + 1, cx), "arrow-right")
+              ? this.button(t, "w-next", this.page === 2 && !this.machines.length ? "Not now" : "Next", true, (_e, cx) => {
+                if (this.page === 3) this.installOpenCodeIfWanted();
+                go(this.page + 1, cx);
+              }, "arrow-right")
               : this.button(t, "w-start", spaces().length ? "Done" : "Open a space", true, () => this.start(), "arrow-right"),
           ),
       );
