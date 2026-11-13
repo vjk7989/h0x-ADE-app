@@ -80,7 +80,7 @@ const PAPER: Palette = Palette {
 pub const PRESETS: &[&str] = &["graphite", "ink", "moss", "paper"];
 
 /// The theme a layout without one shows, by appearance.
-pub const DEFAULT_DARK: &str = "graphite";
+pub const DEFAULT_DARK: &str = "darkmatter";
 pub const DEFAULT_LIGHT: &str = "paper";
 
 fn preset(name: &str) -> Option<&'static Palette> {
@@ -1592,6 +1592,25 @@ mod tests {
                 assert!(ratio >= 3.0, "{name}: ansi{i} {} on {} is {ratio:.2}:1, under 3:1", t[&format!("ansi{i}")], t["background"]);
             }
         }
+    }
+
+    // A deliberate change of the default (0.1.31): the dark theme nobody chose is darkmatter, not graphite.
+    #[test]
+    fn a_fresh_settings_file_shows_darkmatter_in_dark_mode_and_paper_in_light() {
+        let look = crate::layout::Look::default();
+        for (appearance, system_dark) in [(Appearance::System, true), (Appearance::Dark, false), (Appearance::Dark, true)] {
+            let person = Person { appearance, ..Person::default() };
+            let s = Settings::compose(&person, &look, system_dark);
+            assert_eq!((s.dark, s.theme.as_str(), s.theme_dark.as_str()), (true, "darkmatter", "darkmatter"), "{appearance:?}");
+        }
+        let light = Settings::compose(&Person::default(), &look, false);
+        assert_eq!((light.dark, light.theme.as_str(), light.theme_light.as_str()), (false, "paper", "paper"));
+        assert_eq!(Settings::default().theme_dark, "darkmatter");
+        // A theme the person chose is kept.
+        let chosen: Person = serde_json::from_str(r#"{"theme":"ink"}"#).unwrap();
+        assert_eq!(Settings::compose(&chosen, &look, true).theme, "ink");
+        // darkmatter ships, so the default is never a missing file.
+        assert!(THEMES.iter().any(|(n, _)| *n == DEFAULT_DARK));
     }
 
     #[test]
