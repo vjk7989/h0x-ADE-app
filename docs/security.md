@@ -59,4 +59,6 @@ Each event carries a random install ID (made on this computer, not linked to you
 Besides this, nothing leaves your computer unless you ask for it: update checks (above), network requests made by mods you install, and feedback you choose to send.
 Feedback is drafted for you to review; sending opens a prefilled issue on the HyperOx GitHub repository in your browser, and nothing is posted by the app itself.
 
+When you sign in, the desktop app also sends the id token to Google Identity Toolkit (`accounts:lookup`) to read the account email.
+
 [Back to HyperOx](../README.md)
