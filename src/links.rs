@@ -50,7 +50,9 @@ pub fn word(text: &str, at: usize) -> Option<Range<usize>> {
 /// A bare file name under the pointer (`plan.md`, `docs\plan.md` on Windows) that
 /// is a file in the terminal's folder; the text detector only sees names with a slash.
 pub fn bare_file(text: &str, at: usize, cwd: Option<&Path>) -> Option<(Range<usize>, Target)> {
-    let mut range = word_in(text, at, cfg!(windows))?;
+    // A backslash is always part of the word: a separator on Windows, an ordinary
+    // character in a file name elsewhere (so `x\note.md` is never read as `note.md`).
+    let mut range = word_in(text, at, true)?;
     if cfg!(windows) {
         // The word loses what it trims or cannot hold: `.\` and `..\` name folders, and
         // `C:` names the drive. A rooted path with no drive would mean the pane's own.
