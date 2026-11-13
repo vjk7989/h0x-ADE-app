@@ -19,6 +19,22 @@ const SECTIONS = [
 ];
 
 const LOOKS = { main: "HyperOx", terminals: "Terminals", win98: "HyperOx 98" };
+// Relative luminance of a "#rrggbb" colour (null for any other form).
+function luminance(hex) {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(hex ?? "");
+  if (!m) return null;
+  const [r, g, b] = [m[1], m[2], m[3]].map((x) => { const c = parseInt(x, 16) / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+// The muted colour on a background, unless a theme makes it hard to read (HyperOx 98's dark gray on black):
+// then plain white or black, whichever the background calls for.
+function readable(muted, bg) {
+  const a = luminance(muted), b = luminance(bg);
+  if (a === null || b === null) return muted;
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) >= 4.5 ? muted : b < 0.18 ? "#ffffff" : "#000000";
+}
+
 const APPEARANCES = [
   [null, "System"],
   ["light", "Light"],
@@ -441,7 +457,7 @@ export default class Settings extends View {
             .text_size(13)
             .cursor_pointer()
             .when(now === value, (el) => el.bg(t.raised).text_color(t.foreground).border_1().border_color(t.border))
-            .when(now !== value, (el) => el.text_color(t.muted).hover((s) => s.text_color(t.foreground)))
+            .when(now !== value, (el) => el.text_color(readable(t.muted, t.background)).hover((s) => s.text_color(readable(t.foreground, t.background))))
             .on_click((_e, cx) =>
               this.change((p) => {
                 if (value === null) delete p.appearance;

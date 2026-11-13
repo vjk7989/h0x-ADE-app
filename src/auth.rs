@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -108,7 +108,18 @@ pub fn remove(uid: &str) -> Result<(), String> {
 /// Blocks (up to 5 minutes) until the browser sign-in finishes. `open` gets the URL to show the
 /// user. Errors: "cancelled", "timeout", "network: <detail>", "rejected: <reason>", or other text.
 pub fn sign_in(open: impl FnOnce(&str)) -> Result<Account, String> {
-    sign_in_in(&crate::mods::app_dir(), open, &securetoken, SIGN_IN_WAIT)
+    let done = sign_in_in(&crate::mods::app_dir(), open, &securetoken, SIGN_IN_WAIT);
+    if done.is_ok() {
+        CELEBRATE.store(true, Ordering::SeqCst);
+    }
+    done
+}
+
+/// Set by a completed sign-in; the window takes it to play the confetti.
+static CELEBRATE: AtomicBool = AtomicBool::new(false);
+
+pub fn take_celebration() -> bool {
+    CELEBRATE.swap(false, Ordering::SeqCst)
 }
 
 /// Makes a pending [`sign_in`] stop at once with `Err("cancelled")`; nothing is stored.
@@ -638,6 +649,29 @@ fn read_request(stream: &mut TcpStream, stop: &dyn Fn() -> bool) -> Req {
     Req::Request { method: method.to_string(), path: path.to_string(), body: String::from_utf8_lossy(&body).into_owned() }
 }
 
+/// Where the browser ends up after a valid callback: pavii.tech's page for how it went.
+const DONE_URL: &str = "https://www.pavii.tech/login/?client=hyperox-desktop&result=";
+
+/// The 303 that sends the browser on to [`DONE_URL`]: `result` is "ok", "cancelled" or "error".
+fn redirect_reply(result: &str) -> String {
+    format!("HTTP/1.1 303 See Other\r\nLocation: {DONE_URL}{result}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")
+}
+
+/// How a finished sign-in reads in the redirect.
+fn result_word(done: &Result<Account, String>) -> &'static str {
+    match done {
+        Ok(_) => "ok",
+        Err(e) if e == "cancelled" => "cancelled",
+        Err(_) => "error",
+    }
+}
+
+fn redirect(mut stream: TcpStream, result: &str) {
+    let _ = stream.write_all(redirect_reply(result).as_bytes());
+    let _ = stream.flush();
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+}
+
 fn respond(mut stream: TcpStream, status: &str, message: &str) {
     let html = format!(
         "<!doctype html><meta charset=\"utf-8\"><title>HyperOx</title>\
@@ -687,7 +721,7 @@ fn wait_for_callback(listener: &TcpListener, state: &str, wait: Duration, cancel
         }
         match rx.recv_timeout(idle) {
             Ok((stream, Form::Cancelled)) => {
-                respond(stream, "200 OK", "Sign-in cancelled.");
+                redirect(stream, "cancelled");
                 return Err("cancelled".into());
             }
             Ok(found) => return Ok(found),
@@ -739,10 +773,7 @@ fn sign_in_in(dir: &Path, open: impl FnOnce(&str), exchange: Exchange, wait: Dur
         }
         store_session(dir, &claims, &refresh, now())
     });
-    match &done {
-        Ok(_) => respond(stream, "200 OK", "You're signed in to HyperOx \u{2014} you can close this tab."),
-        Err(_) => respond(stream, "200 OK", "Sign-in failed \u{2014} go back to HyperOx and try again."),
-    }
+    redirect(stream, result_word(&done));
     done
 }
 
@@ -1048,7 +1079,7 @@ pub(crate) mod tests {
             assert!(post(port, "/other", "x=1").contains("404"));
             assert!(post_declaring(port, "/callback", "", MAX_BODY + 1).contains("413"));
             let ok = post(port, "/callback", &format!("state={state}&id_token=a.b.c&refresh_token=rt0&provider=github.com"));
-            assert!(ok.contains("200") && ok.contains("signed in to HyperOx"), "{ok}");
+            assert!(ok.starts_with("HTTP/1.1 303") && ok.contains("result=ok"), "{ok}");
         });
         assert!(url.starts_with("https://www.pavii.tech/login/?client=hyperox-desktop&port="), "{url}");
         assert_eq!(url_part(&url, "state").len(), 43);
@@ -1059,6 +1090,24 @@ pub(crate) mod tests {
         assert_eq!(crate::secret::get(&dir, "account.u1").unwrap().as_deref(), Some("rt0-new"));
         assert!(!std::fs::read_to_string(dir.join("accounts.json")).unwrap().contains("rt0"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_redirect_is_a_bodyless_303_to_pavii_tech_with_the_outcome() {
+        for result in ["ok", "cancelled", "error"] {
+            assert_eq!(
+                redirect_reply(result),
+                format!("HTTP/1.1 303 See Other\r\nLocation: https://www.pavii.tech/login/?client=hyperox-desktop&result={result}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")
+            );
+        }
+    }
+
+    #[test]
+    fn the_outcome_word_is_ok_cancelled_or_error() {
+        assert_eq!(result_word(&Err("cancelled".into())), "cancelled");
+        for e in ["timeout", "network: offline", "rejected: USER_DISABLED", "secret: x"] {
+            assert_eq!(result_word(&Err(e.into())), "error", "{e}");
+        }
     }
 
     #[test]
@@ -1075,7 +1124,7 @@ pub(crate) mod tests {
         assert_eq!(r.unwrap_err(), "rejected: USER_DISABLED");
         let (r, _) = run_sign_in(&dir, &exchange_ok("u1"), wait, |port, state| {
             let page = post(port, "/callback", &format!("state={state}&error=cancelled"));
-            assert!(page.contains("Sign-in cancelled"));
+            assert!(page.contains("303") && page.contains("result=cancelled\r\nContent-Length: 0\r\n"), "{page}");
         });
         assert_eq!(r.unwrap_err(), "cancelled");
         let (r, _) = run_sign_in(&dir, &exchange_ok("u1"), Duration::from_millis(200), |_, _| {});
@@ -1285,7 +1334,7 @@ pub(crate) mod tests {
         std::fs::write(dir.join("secrets"), "not a folder").unwrap();
         let (result, _) = run_sign_in(&dir, &exchange_ok("u1"), Duration::from_secs(20), |port, state| {
             let page = post(port, "/callback", &format!("state={state}&refresh_token=rt0"));
-            assert!(page.contains("Sign-in failed") && !page.contains("signed in to HyperOx"), "{page}");
+            assert!(page.contains("303") && page.contains("result=error") && !page.contains("result=ok"), "{page}");
         });
         let err = result.unwrap_err();
         assert!(err.starts_with("secret: "), "{err}");
@@ -1364,7 +1413,7 @@ pub(crate) mod tests {
             short.write_all(b"POST /callback HTTP/1.1\r\nContent-Length: 100\r\n\r\nstate=").unwrap();
             assert!(answered_soon(short).contains("400"));
             let ok = post(port, "/callback", &format!("state={state}&refresh_token=rt0"));
-            assert!(ok.contains("signed in to HyperOx"), "{ok}");
+            assert!(ok.contains("303") && ok.contains("result=ok"), "{ok}");
         });
         assert_eq!(result.unwrap().uid, "u1");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1396,7 +1445,7 @@ pub(crate) mod tests {
             let first = one.join().unwrap();
             let (port, state) = (url_part(&second_url, "port").parse().unwrap(), url_part(&second_url, "state"));
             let ok = post(port, "/callback", &format!("state={state}&refresh_token=rt"));
-            assert!(ok.contains("signed in to HyperOx"), "{ok}");
+            assert!(ok.contains("303") && ok.contains("result=ok"), "{ok}");
             (first, two.join().unwrap())
         });
         assert_eq!(first, Err("cancelled".to_string()));
@@ -1418,7 +1467,7 @@ pub(crate) mod tests {
             stalled[1].write_all(b"POST /call").unwrap();
             let start = Instant::now();
             let ok = post(port, "/callback", &format!("state={state}&refresh_token=rt0"));
-            assert!(ok.contains("signed in to HyperOx"), "{ok}");
+            assert!(ok.contains("303") && ok.contains("result=ok"), "{ok}");
             assert!(start.elapsed() < Duration::from_secs(3), "the real callback waited {:?}", start.elapsed());
             stalled.clear();
         });
@@ -1635,7 +1684,7 @@ pub(crate) mod tests {
             let _ = s.write_all(req.as_bytes());
             let mut page = String::new();
             let _ = s.read_to_string(&mut page);
-            assert!(!page.contains("signed in to HyperOx"), "{page}");
+            assert!(!page.contains("result=ok"), "{page}");
         }
         assert_eq!(load(&dir), Store::default());
         assert_eq!(current_in(&dir, now()), None);

@@ -1084,6 +1084,38 @@ impl Vt {
         self.link_row(self.viewport_top()? + row as u32).map(|r| r.text)
     }
 
+    /// Whether viewport row `row` is soft-wrapped onto the next one.
+    pub fn row_wraps(&self, row: u16) -> bool {
+        row < self.rows && self.viewport_top().is_some_and(|top| self.wraps(top + row as u32))
+    }
+
+    /// The whole line (rows the terminal wrapped, joined, the last one without trailing blanks)
+    /// that viewport row `row` belongs to, and the viewport row it ends on.
+    pub fn logical_line(&self, row: u16) -> Option<(String, u16)> {
+        if row >= self.rows {
+            return None;
+        }
+        let top = self.viewport_top()?;
+        let y = top + row as u32;
+        // A line longer than this many rows isn't one worth following.
+        const REACH: u32 = 32;
+        let mut first = y;
+        while first > 0 && y - first < REACH && self.wraps(first - 1) {
+            first -= 1;
+        }
+        let bottom = top + self.rows as u32 - 1;
+        let mut last = y;
+        while last < bottom && last - y < REACH && self.wraps(last) {
+            last += 1;
+        }
+        let mut text = String::new();
+        for r in first..=last {
+            let part = self.link_row(r)?.text;
+            text.push_str(if r < last { &part } else { part.trim_end() });
+        }
+        Some((text, (last - top) as u16))
+    }
+
     /// The link at a viewport cell: a link the program marked (OSC 8), or a
     /// URL or path in the text. Follows lines the terminal wrapped, also into
     /// rows scrolled out of view. Then tries the lines around joined, their
@@ -2911,6 +2943,19 @@ mod tests {
         assert_eq!(first.trim_end(), "abcdef");
         assert!(vt.take_replies().is_empty());
         assert_eq!(vt.take_title(), None);
+    }
+
+    #[test]
+    fn logical_line_joins_soft_wrapped_rows_and_names_the_last_row() {
+        let mut vt = Vt::new(10, 4);
+        vt.write(b"abcdefghijklmnopqrstuvw\r\nnext");
+        assert_eq!(vt.logical_line(0), Some(("abcdefghijklmnopqrstuvw".to_owned(), 2)));
+        assert_eq!(vt.logical_line(1), Some(("abcdefghijklmnopqrstuvw".to_owned(), 2)), "any row of the line");
+        assert_eq!(vt.logical_line(2), Some(("abcdefghijklmnopqrstuvw".to_owned(), 2)));
+        assert_eq!(vt.logical_line(3), Some(("next".to_owned(), 3)));
+        assert!(vt.row_wraps(0) && vt.row_wraps(1) && !vt.row_wraps(2) && !vt.row_wraps(3));
+        assert_eq!(vt.logical_line(4), None);
+        assert!(!vt.row_wraps(9));
     }
 
     #[test]

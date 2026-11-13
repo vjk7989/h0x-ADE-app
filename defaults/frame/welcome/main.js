@@ -146,13 +146,16 @@ export default class Welcome extends View {
 
   // The panels picked: the tab bar shows a button for each.
   panels() {
-    return shared("workspace.panels") ?? PANELS.map((p) => p.id);
+    const stored = shared("workspace.panels");
+    return Array.isArray(stored) ? stored : PANELS.map((p) => p.id);
   }
 
   togglePanel(id) {
     const on = this.panels().includes(id);
     const next = on ? this.panels().filter((x) => x !== id) : [...this.panels(), id];
     setShared("workspace.panels", next);
+    // The ids the tab bar migration knows (defaults/mods/tabs/main.js enabledPanels): a panel turned off stays off.
+    setShared("workspace.panels.added", ["sessions", "todo"]);
     const L = layout();
     if (!find(L, "panel")) return;
     if (on) {
@@ -463,13 +466,6 @@ export default class Welcome extends View {
   }
 
   pageThree(t) {
-    // The first look at this page asks: nothing is picked yet (skipping the
-    // welcome leaves both on).
-    // The list it makes already offers Sessions: the tab bar adds it to no one's choice.
-    if (shared("workspace.panels") === undefined || shared("workspace.panels") === null) {
-      setShared("workspace.panels", []);
-      setShared("workspace.panels.added", ["sessions", "todo"]); // the ids the tab bar migration knows (defaults/mods/tabs/main.js enabledPanels)
-    }
     return v_flex()
       .gap(14)
       .child(this.title(t, "Choose your panels", "HyperOx comes with a couple of panels. Turn one on and it appears beside your terminals. Drag this window aside to see it. Later, the buttons in the tab bar open and close them."))

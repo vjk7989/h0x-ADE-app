@@ -259,6 +259,30 @@ fn drive_path_ends(text: &str, at: usize) -> Option<(usize, Vec<usize>)> {
     Some((start, ends))
 }
 
+/// A file named in quotes around byte `at` (`"b space\\c d.md"`), spaces and all: the text between a
+/// matching pair of `"`, `'` or backticks, as a path from the folder or its git root. Only text
+/// with a blank in it (the rest is found elsewhere) and only a file that exists.
+pub fn quoted_file(text: &str, at: usize, cwd: Option<&Path>) -> Option<(Range<usize>, Target, Option<u32>)> {
+    for quote in ['"', '\'', '`'] {
+        let marks: Vec<usize> = text.match_indices(quote).map(|(i, _)| i).collect();
+        for pair in marks.chunks_exact(2) {
+            let (start, end) = (pair[0] + quote.len_utf8(), pair[1]);
+            if !(start <= at && at < end) {
+                continue;
+            }
+            let inner = &text[start..end];
+            if !inner.contains(' ') || inner.trim() != inner {
+                return None;
+            }
+            return match resolve_with_line(inner, cwd)? {
+                (target @ Target::File(_), line) => Some((start..end, target, line)),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
 /// A Windows drive path under byte `at` that exists: the longest of the words after the drive
 /// that names a file (a trailing `,` `)` and the like dropped, a `:12` line kept apart).
 pub fn drive_file(text: &str, at: usize, cwd: Option<&Path>) -> Option<(Range<usize>, Target, Option<u32>)> {
@@ -813,6 +837,33 @@ mod tests {
         // `bare_file` itself is unchanged: the name alone.
         assert_eq!(bare_file("plan-test.md:12", 2, Some(&dir)).map(|(r, _)| &"plan-test.md:12"[r]), Some("plan-test.md"));
         assert_eq!(bare_file("Makefile:12", 2, Some(&dir)).map(|(r, _)| &"Makefile:12"[r]), Some("Makefile"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_quoted_relative_path_with_spaces_is_a_link_when_the_file_exists() {
+        let dir = std::env::temp_dir().join(format!("h0x-links-quoted-{}", std::process::id()));
+        let sub = dir.join("pkg");
+        std::fs::create_dir_all(dir.join("b space")).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(dir.join(".git"), "gitdir: x\n").unwrap();
+        std::fs::write(dir.join("b space").join("c d.md"), "x\n").unwrap();
+        let want = dir.join("b space").join("c d.md");
+        let hit = |text: &str, at: usize, cwd: &Path| quoted_file(text, at, Some(cwd)).map(|(r, t, l)| (text[r].to_owned(), t, l));
+        let text = "open \"b space/c d.md\" now";
+        assert_eq!(hit(text, 8, &dir), Some(("b space/c d.md".into(), Target::File(want.clone()), None)));
+        assert_eq!(hit(text, 18, &dir).map(|h| h.1), Some(Target::File(want.clone())), "any word of it");
+        assert_eq!(hit("open 'b space/c d.md:7' now", 8, &dir).map(|h| h.2), Some(Some(7)));
+        assert_eq!(hit(text, 8, &sub).map(|h| h.1), Some(Target::File(want.clone())), "from the git root");
+        assert_eq!(hit(text, 1, &dir), None, "outside the quotes");
+        assert_eq!(hit(text, 24, &dir), None, "outside the quotes");
+        assert_eq!(hit("open \"b space/none.md\" now", 8, &dir), None, "the file must exist");
+        assert_eq!(hit("open \"b space/c d.md now", 8, &dir), None, "no closing quote");
+        assert_eq!(hit("open \"c.md\" now", 8, &dir), None, "no blank: not this rule's");
+        assert_eq!(hit("open \" b space/c d.md\" now", 8, &dir), None, "padded quotes");
+        assert_eq!(hit("say \"https://x.y/a b\" now", 8, &dir), None, "a URL is no file");
+        assert_eq!(hit("open \"b space/c d.md\" now", 8, Path::new("")), None);
+        assert_eq!(quoted_file(text, 8, None), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
