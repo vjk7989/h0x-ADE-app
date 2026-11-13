@@ -1,6 +1,6 @@
 // App-owned settings mod. Writes changes immediately; no Save step.
 
-import { View, div, svg, image, Background } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
 import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, window, account, accountSignIn, accountSwitch, accountSignOut, accountRemove } from "h0x";
 
@@ -1212,7 +1212,7 @@ export default class Settings extends View {
 
   avatar(t, a, size) {
     return div().w(size).h(size).rounded_full().flex_none().flex().items_center().justify_center()
-      .bg(Background.linear_gradient(135, t.accent, t.ansi4)).text_size(Math.round(size * 0.42)).font_semibold().text_color(t.accent_foreground)
+      .bg(t.accent).text_size(Math.round(size * 0.42)).font_semibold().text_color(t.accent_foreground)
       .child(accountName(a).slice(0, 1).toUpperCase());
   }
 
@@ -1269,7 +1269,7 @@ export default class Settings extends View {
       .w_full()
       .gap(12)
       .child(h_flex().w_full().gap(16).p(18).items_center().rounded(12).border_1().border_color(t.border)
-        .bg(Background.linear_gradient(120, t.accent, t.raised).opacity(0.16))
+        .bg(t.raised)
         .child(image("frame/welcome/hyperox.png").w(52).h(52).rounded(10).flex_none())
         .child(v_flex().flex_1().min_w(0).gap(3)
           .child(h_flex().gap(8).items_center()
