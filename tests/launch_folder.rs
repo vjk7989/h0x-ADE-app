@@ -37,6 +37,7 @@ impl Isolated {
     fn apply(&self, cmd: &mut Command) {
         cmd.env("H0X_ADE_HOME", &self.home)
             .env("H0X_CORE_SESSION", &self.session)
+            .env("H0X_ADE_SKIP_SIGNIN", "1")
             .env("H0X_CORE_DIRS", &self.core_dir)
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("XDG_STATE_HOME", self.root.join("state"))

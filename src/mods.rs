@@ -1136,6 +1136,34 @@ fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Opti
     }
 }
 
+const ACCOUNT_REFUSED: &str = "accounts are for the settings and account frames";
+
+/// Pairing a phone or Telegram, and starting the web panel, need a signed-in account: the core's
+/// `bridge pair` and `bridge web`, run directly or after `--` of `run`. Listing, stopping, locking and unpairing stay open.
+fn pairing_gate(args: &[String], signed_in: bool) -> Result<(), HostError> {
+    let bridge = |a: &[String]| a.first().map(String::as_str) == Some("bridge") && matches!(a.get(1).map(String::as_str), Some("pair" | "web"));
+    let after_run = args.iter().position(|a| a == "--").is_some_and(|i| args.get(i + 1).map(String::as_str) == Some("h0x-core") && bridge(&args[i + 2..]));
+    if (bridge(args) || after_run) && !signed_in {
+        return Err(HostError::new("Sign in to pair a phone or Telegram."));
+    }
+    Ok(())
+}
+
+fn account_json(a: &crate::auth::Account) -> Value {
+    json!({ "uid": a.uid, "provider": a.provider, "name": a.name, "email": a.email, "picture": a.picture })
+}
+
+/// null on success (re-identifying analytics when the current account changed), else the reason.
+fn account_change(done: Result<(), String>, identity_changed: bool) -> HostValue {
+    match done {
+        Ok(()) => {
+            if identity_changed { crate::analytics::identify(crate::auth::current().as_ref()); }
+            HostValue::Null
+        }
+        Err(why) => HostValue::Str(why),
+    }
+}
+
 fn module(inst: Instance, copy: u64) -> HostModule {
     let reads = Rc::new(RefCell::new(LiveReads::default()));
     LIVE_READS.with_borrow_mut(|copies| {
@@ -1145,6 +1173,8 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     let props = inst.props.clone();
     let feedback_frame = inst.name == "frame-feedback";
     let settings_frame = inst.name == "frame-settings";
+    // Accounts are for two app frames alone (a person can't install a mod with a frame- name; mods/ is theirs to edit).
+    let account_ok = settings_frame || inst.name == "frame-account";
     let feedback_from = inst.props.get("from").and_then(Value::as_str).unwrap_or("person").to_owned();
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
     let (cmd_tx, commands) = async_channel::unbounded::<String>();
@@ -1172,7 +1202,11 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             Ok(crate::mod_files::write_text(a.string(0)?.to_owned(), a.string(1)?.to_owned(), expected))
         })
         .async_function("removeAppFile", |a| Ok(crate::mod_files::remove_app_file(a.string(0)?.to_owned())))
-        .async_function("core", |a| Ok(exec_future("h0x-core".into(), strings(a.get(0)), None, None, EXEC_LIMIT)))
+        .async_function("core", |a| {
+            let args = strings(a.get(0));
+            pairing_gate(&args, crate::auth::signed_in())?;
+            Ok(exec_future("h0x-core".into(), args, None, None, EXEC_LIMIT))
+        })
         .function("busyVerb", busy_verb_call)
         .function("home", |_| Ok(home().to_string_lossy().into_owned().into()))
         .function("appHome", |_| Ok(app_dir().to_string_lossy().into_owned().into()))
@@ -1251,6 +1285,44 @@ fn module(inst: Instance, copy: u64) -> HostModule {
                     Err(why) => HostValue::Str(why),
                 })
             })
+        })
+        .function("account", move |_| {
+            if !account_ok { return Err(HostError::new(ACCOUNT_REFUSED)); }
+            let accounts: Vec<Value> = crate::auth::accounts().iter().map(account_json).collect();
+            Ok(to_host(&json!({ "current": crate::auth::current().as_ref().map(account_json), "accounts": accounts })))
+        })
+        .async_function("accountSignIn", move |_| {
+            if !account_ok { return Err(HostError::new(ACCOUNT_REFUSED)); }
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let _ = tx.send_blocking(crate::auth::sign_in(|url| crate::links::open(&crate::links::Target::Url(url.to_owned()))));
+            });
+            Ok(async move {
+                Ok(match rx.recv().await {
+                    Ok(Ok(_)) => {
+                        crate::analytics::identify(crate::auth::current().as_ref());
+                        HostValue::Null
+                    }
+                    Ok(Err(why)) => HostValue::Str(why),
+                    Err(_) => HostValue::Str("sign-in was interrupted".into()),
+                })
+            })
+        })
+        .function("accountSwitch", move |a| {
+            if !account_ok { return Err(HostError::new(ACCOUNT_REFUSED)); }
+            Ok(account_change(crate::auth::switch(a.string(0)?), true))
+        })
+        .function("accountSignOut", move |a| {
+            if !account_ok { return Err(HostError::new(ACCOUNT_REFUSED)); }
+            let uid = a.string(0)?;
+            let was_current = crate::auth::current().is_some_and(|c| c.uid == uid);
+            Ok(account_change(crate::auth::sign_out(uid), was_current))
+        })
+        .function("accountRemove", move |a| {
+            if !account_ok { return Err(HostError::new(ACCOUNT_REFUSED)); }
+            let uid = a.string(0)?;
+            let was_current = crate::auth::current().is_some_and(|c| c.uid == uid);
+            Ok(account_change(crate::auth::remove(uid), was_current))
         })
         .function("openLink", move |a| {
             if !settings_frame { return Err(HostError::new("opening links is frame-only")); }
@@ -1833,6 +1905,77 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    #[test]
+    fn account_calls_are_refused_to_every_mod_but_the_settings_and_account_frames() {
+        std::thread::spawn(|| {
+            use gpui_shell::HostArguments;
+            const REFUSED: &str = ACCOUNT_REFUSED;
+            let uid = || HostArguments::new([HostValue::Str("u1".into())]);
+            for name in [
+                "",
+                "test",
+                "settings",
+                "frame-feedback",
+                "frame-settings-x",
+                "Frame-Settings",
+                "workspace-chrome",
+                "workspace-chrome-x",
+                "Workspace-Chrome",
+                "frame-account-x",
+                "Frame-Account",
+                "frame-account ",
+                "my-mod/frame-account",
+                "workspace-chrome ",
+                "frame-workspace-chrome",
+                "my-mod/workspace-chrome",
+                r"my-mod\workspace-chrome",
+            ] {
+                let host = module(Instance { name: name.into(), props: Value::Null }, 1);
+                for function in ["account", "accountSwitch", "accountSignOut", "accountRemove"] {
+                    let err = host.call(function, &uid()).expect_err(name);
+                    assert_eq!(err.message(), REFUSED, "{name:?} {function}");
+                    assert!(host.call(function, &HostArguments::default()).is_err(), "{name:?} {function}");
+                }
+                let started = host.begin("accountSignIn", &HostArguments::default()).err().map(|e| e.message().to_string());
+                assert_eq!(started.as_deref(), Some(REFUSED), "{name:?}: no sign-in is started");
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn pairing_and_the_web_panel_start_need_an_account_but_listing_and_stopping_do_not() {
+        let a = |s: &str| s.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        let run = |tail: &str| a(&format!("run --bg --keep --no-parent --outlive-parent --name h0x-bridge-web --label h0x-bridge=web -- h0x-core {tail}"));
+        for args in [
+            a("bridge pair --transport telegram --json"),
+            a("bridge web --json --lan"),
+            run("bridge web --json --tunnel --yes"),
+            run("bridge pair"),
+        ] {
+            let why = pairing_gate(&args, false).expect_err(&args.join(" "));
+            assert_eq!(why.message(), "Sign in to pair a phone or Telegram.", "{args:?}");
+            assert!(pairing_gate(&args, true).is_ok(), "{args:?}: signed in");
+        }
+        for args in [
+            Vec::new(),
+            a("bridge ls --json"),
+            a("bridge unpair i1"),
+            a("bridge lock"),
+            a("bridge unlock"),
+            a("bridge log"),
+            a("bridge telegram token --file x"),
+            a("kill h0x-bridge-web"),
+            a("machine ls --json"),
+            a("session ls pair web"),
+            run("bridge telegram"),
+            a("run --name bridge -- sh -c bridge web"),
+        ] {
+            assert!(pairing_gate(&args, false).is_ok(), "{args:?}");
+        }
     }
 
     #[test]
