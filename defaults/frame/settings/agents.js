@@ -46,7 +46,8 @@ export function splitCommand(text) {
   }
   if (quote) return { error: "A quote is not closed." };
   if (word !== null) argv.push(word);
-  if (argv.length === 0) return { error: "Enter the command that starts the agent." };
+  // The program is the first word: it cannot be empty (`""`); a later argument can be.
+  if (argv.length === 0 || argv[0] === "") return { error: "Enter the command that starts the agent." };
   if (argv.length > MAX_WORDS) return { error: `At most ${MAX_WORDS} words.` };
   return { argv };
 }

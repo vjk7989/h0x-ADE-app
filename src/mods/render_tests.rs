@@ -9524,3 +9524,246 @@ fn todo_key_is_a_shipped_mod_command_on_every_platform() {
     assert!(crate::commands::find("tabs.todo").is_none());
     assert!(include_str!("../../defaults/mods/tabs/main.js").contains("=== \"todo\") this.toggleTodo()"));
 }
+
+// ---- 0.1.31 edge tests (A31.3, A31.4, #113) ----
+
+// Saves the form with `command` as the command field's value (a tab or a control character the one-line field would not take).
+fn agents_save_raw(name: &str, command: &str) -> String {
+    format!("{} this.ag.command.value = () => {};", agents_save(name, "x"), serde_json::to_string(command).unwrap())
+}
+
+#[gpui::test]
+fn agents_page_splits_windows_paths_escapes_mixed_quotes_tabs_and_unicode_into_argv(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let w = |n: usize| vec!["w"; n];
+    let long_name = format!("A{}", "\u{1f680}".repeat(39));
+    let cases: Vec<(&str, String, &str, Vec<&str>)> = vec![
+        // A quoted Windows program path: backslashes stay, the spaces inside the quotes stay.
+        ("Win", r#""C:\Program Files\x\a.exe" --f "a b""#.into(), "win", vec![r"C:\Program Files\x\a.exe", "--f", "a b"]),
+        // Unquoted, a space separates words even in a path (it is never a shell).
+        ("Win Two", r#"C:\Program Files\x\a.exe --f "a b""#.into(), "win-two", vec![r"C:\Program", r"Files\x\a.exe", "--f", "a b"]),
+        // \" and \\ inside double quotes; single quotes are literal; adjacent quoted parts join one word.
+        ("Esc", r#"say "he said \"hi\"" 'it''s' "back\\slash" 'a\b'"#.into(), "esc", vec!["say", "he said \"hi\"", "its", r"back\slash", r"a\b"]),
+        // A trailing backslash outside quotes is a character, not an escape.
+        ("Trail", r"tool C:\dir\".into(), "trail", vec!["tool", r"C:\dir\"]),
+        ("Mixed", r#"a"b c"d 'x"y' "it's""#.into(), "mixed", vec!["ab cd", "x\"y", "it's"]),
+        ("Uni", "\u{f1}and\u{fa} --emoji \u{1f680} '\u{65e5}\u{672c} \u{8a9e}'".into(), "uni", vec!["\u{f1}and\u{fa}", "--emoji", "\u{1f680}", "\u{65e5}\u{672c} \u{8a9e}"]),
+        ("Spaces", "   lead   and   trail   ".into(), "spaces", vec!["lead", "and", "trail"]),
+        // Thirty-two words is the most taken.
+        ("Long", "w ".repeat(32), "long", w(32)),
+        // Forty characters (an emoji is one) is the longest name; the key is its letters.
+        (long_name.as_str(), "x".into(), "a", vec!["x"]),
+    ];
+    for (name, command, key, run) in &cases {
+        assert!(name.chars().count() <= 40, "{name}");
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", agents_values(), None, &agents_save(name, command), 2);
+        let c = calls.borrow();
+        assert_eq!(c.writes.len(), 1, "{name:?} {command:?}: {}", trees[2]);
+        let mut programs = serde_json::Map::new();
+        programs.insert(key.to_string(), json!({"name": name, "run": run, "order": 1}));
+        assert_eq!(serde_json::from_str::<Value>(&c.writes[0].1).unwrap(), json!({ "programs": Value::Object(programs) }), "{command:?}");
+    }
+    // Tabs separate words like spaces, and stay inside quotes.
+    let (_, calls) = describe_pressing(cx, &staged, "frame/settings", agents_values(), None, &agents_save_raw("Tabs", "a\tb\t\"c\td\"\t"), 2);
+    let c = calls.borrow();
+    assert_eq!(serde_json::from_str::<Value>(&c.writes[0].1).unwrap()["programs"]["tabs"]["run"], json!(["a", "b", "c\td"]));
+}
+
+#[gpui::test]
+fn agents_page_refuses_names_that_slug_to_nothing_or_to_a_built_in_and_commands_with_no_program(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let before = r#"{"programs":{"my-old":{"name":"My Old","run":["old"]}}}"#;
+    let cases: Vec<(String, String, &str)> = vec![
+        ("Claude!".into(), "x".into(), "built-in agent"),
+        ("  Vim  ".into(), "x".into(), "built-in agent"),
+        ("--codex--".into(), "x".into(), "built-in agent"),
+        ("!!!".into(), "x".into(), "needs a letter or a digit"),
+        ("\u{65e5}\u{672c}\u{8a9e}".into(), "x".into(), "needs a letter or a digit"),
+        ("My Old!".into(), "x".into(), "exists"),
+        (format!("A{}", "\u{1f680}".repeat(40)), "x".into(), "at most 40"),
+        ("Mine".into(), r#"x "a\""#.into(), "quote is not closed"),
+        ("Mine".into(), "x 'a".into(), "quote is not closed"),
+    ];
+    for (name, command, message) in &cases {
+        let (trees, calls) = describe_pressing_files(cx, &staged, "frame/settings", agents_values(), None, &[(AGENTS_FILE, before)], &agents_save(name, command), 2);
+        let written = calls.borrow().writes.clone();
+        assert!(trees[2].contains(message), "{name:?} {command:?}: {}", trees[2]);
+        assert!(written.is_empty(), "{name:?} {command:?}: {written:?}");
+    }
+    for (command, message) in [("x\u{b}y", "control character"), ("x\u{7f}", "control character"), ("x\u{1b}[31m", "control character"), ("\t \t", "Enter the command"), ("a\rb", "one line")] {
+        let (trees, calls) = describe_pressing_files(cx, &staged, "frame/settings", agents_values(), None, &[(AGENTS_FILE, before)], &agents_save_raw("Mine", command), 2);
+        assert!(trees[2].contains(message), "{command:?}: {}", trees[2]);
+        assert!(calls.borrow().writes.is_empty(), "{command:?}");
+    }
+}
+
+// An empty quoted word as the program (`""`, `'' --flag`) leaves nothing to start: refused like an empty command.
+#[gpui::test]
+fn agents_page_refuses_a_command_whose_program_is_an_empty_quoted_word(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for command in [r#""""#, "''", r#""" --flag"#, "'' x"] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", agents_values(), None, &agents_save("Mine", command), 2);
+        assert!(calls.borrow().writes.is_empty(), "{command:?} was saved: {:?}", calls.borrow().writes);
+        assert!(trees[2].contains("Enter the command"), "{command:?}: {}", trees[2]);
+    }
+}
+
+#[gpui::test]
+fn agents_page_reads_a_programs_file_with_a_bom_and_crlf_and_orders_after_numeric_orders_only(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let before = "\u{feff}{\r\n  \"programs\": {\r\n    \"old\": { \"name\": \"Old\", \"run\": [\"old\"], \"order\": 2 },\r\n    \"str\": { \"run\": [\"s\"], \"order\": \"9\" },\r\n    \"neg\": { \"run\": [\"n\"], \"order\": -5 },\r\n    \"codex\": { \"order\": 1 }\r\n  }\r\n}\r\n";
+    let (_, calls) = describe_pressing_files(cx, &staged, "frame/settings", agents_values(), None, &[(AGENTS_FILE, before)], &agents_save("New One", "n"), 2);
+    let c = calls.borrow();
+    assert_eq!(c.writes.len(), 1, "{:?}", c.writes);
+    assert!(!c.writes[0].1.starts_with('\u{feff}'), "written back as plain UTF-8");
+    assert_eq!(
+        serde_json::from_str::<Value>(&c.writes[0].1).unwrap(),
+        json!({"programs":{
+            "old":{"name":"Old","run":["old"],"order":2},
+            "str":{"run":["s"],"order":"9"},
+            "neg":{"run":["n"],"order":-5},
+            "codex":{"order":1},
+            "new-one":{"name":"New One","run":["n"],"order":3}}})
+    );
+    drop(c);
+    // Only negative orders: the next one still follows them.
+    let before = r#"{"programs":{"neg":{"run":["n"],"order":-5}}}"#;
+    let (_, calls) = describe_pressing_files(cx, &staged, "frame/settings", agents_values(), None, &[(AGENTS_FILE, before)], &agents_save("After", "a"), 2);
+    assert_eq!(serde_json::from_str::<Value>(&calls.borrow().writes[0].1).unwrap()["programs"]["after"]["order"], json!(-4));
+}
+
+#[gpui::test]
+fn agents_page_never_writes_over_a_programs_file_that_is_null_empty_or_has_programs_of_the_wrong_kind(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for damaged in ["null", "", "\u{feff}", "42", "\"text\"", r#"{"programs":null}"#, r#"{"programs":"x"}"#, r#"{"programs":7}"#, "{\"programs\":{}} trailing"] {
+        let (trees, calls) = describe_pressing_files(cx, &staged, "frame/settings", agents_values(), None, &[(AGENTS_FILE, damaged)], &agents_save("Mine", "mine"), 2);
+        assert!(trees[2].contains("can't be read"), "{damaged:?}: {}", trees[2]);
+        let c = calls.borrow();
+        assert!(c.writes.is_empty(), "{damaged:?}: {:?}", c.writes);
+        assert_eq!(c.files.get(AGENTS_FILE).map(String::as_str), Some(damaged), "byte-identical");
+    }
+}
+
+// Editing shows the stored argv as a command line; saving it unchanged gives back exactly the same argv.
+#[gpui::test]
+fn agents_page_edit_round_trips_tricky_argv_and_keeps_the_entrys_other_fields(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let run = json!(["my tool", "it's", r"C:\x\", "say \"hi\"", "", r"dir with space\", "\u{65e5}\u{672c} \u{1f680}"]);
+    let before = json!({"programs":{"tricky":{"name":"Tricky","run":run,"order":3,"icon":"t.svg","extra":{"keep":true}}}}).to_string();
+    let agent = json!({"key":"tricky","name":"Tricky","run":run,"slot":5,"custom":true,"installed":true});
+    let setup = format!("this.press = (_e, cx) => {{ this.ag.open({agent}, cx); this.press = (_e, cx) => this.ag.save(cx); }};");
+    let (trees, calls) = describe_pressing_files(cx, &staged, "frame/settings", agents_values(), None, &[(AGENTS_FILE, before.as_str())], &setup, 2);
+    let c = calls.borrow();
+    assert_eq!(c.writes.len(), 1, "{}", trees[2]);
+    assert_eq!(
+        serde_json::from_str::<Value>(&c.writes[0].1).unwrap(),
+        json!({"programs":{"tricky":{"name":"Tricky","run":run,"order":3,"icon":"t.svg","extra":{"keep":true}}}})
+    );
+}
+
+// Editing an agent someone removed from programs.json meanwhile says so and writes nothing back.
+#[gpui::test]
+fn agents_page_edit_of_an_agent_gone_from_the_file_is_refused(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let before = r#"{"programs":{"other":{"name":"Other","run":["o"]}}}"#;
+    let setup = "this.press = (_e, cx) => { this.ag.open({key:'aider',name:'Aider',run:['aider']}, cx); this.press = (_e, cx) => this.ag.save(cx); };";
+    let (trees, calls) = describe_pressing_files(cx, &staged, "frame/settings", agents_values(), None, &[(AGENTS_FILE, before)], setup, 2);
+    assert!(trees[2].contains("gone from programs.json"), "{}", trees[2]);
+    assert!(calls.borrow().writes.is_empty());
+}
+
+#[gpui::test]
+fn help_lists_every_agent_slot_with_both_of_its_keys_under_agents(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (trees, _) = describe_pressing(cx, &staged, "mods/help", fixture(true, props(), updates("current", "current")), None, "this.filter = 'new session';", 1);
+    let tree = trees.last().unwrap();
+    for n in 1..=9 {
+        assert!(tree.contains(&format!("new session of agent {n}")), "slot {n}: {tree}");
+        assert!(tree.contains(&format!("ctrl-shift-{n}")), "slot {n}: {tree}");
+    }
+    for symbol in ["ctrl-!", "ctrl-(", "ctrl-%"] {
+        assert!(tree.contains(symbol), "{symbol}: {tree}");
+    }
+    assert!(!tree.contains("agent.new"), "the raw command never shows: {tree}");
+}
+
+// A file the editor does not read goes to openFile by its extension whatever its case; a dotfile, an extensionless
+// file and the editor's own extensions in capitals are read as text.
+#[gpui::test]
+fn files_panel_decides_by_extension_whatever_its_case_and_never_hands_dotfiles_or_extensionless_files_over(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[
+        ("/fixture/project/MOVIE.MP4", "\0\0\0 ftyp"),
+        ("/fixture/project/archive.tar.gz", "\x1f\u{8b}\0"),
+        ("/fixture/project/My Clip \u{e9}t\u{e9}.mov", "\0\0"),
+        ("/fixture/project/README.MD", "# hi\n"),
+        ("/fixture/project/.mp4", "dot\n"),
+        ("/fixture/project/.env", "A=1\n"),
+        ("/fixture/project/Makefile", "all:\n"),
+        ("/fixture/project/blob", "a\0b"),
+        ("/fixture/project/odd.t-x", "text\n"),
+    ]);
+    let opens = |disk: &Rc<RefCell<FilesDisk>>| disk.borrow().opens.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>();
+    for name in ["MOVIE.MP4", "archive.tar.gz", "My Clip \u{e9}t\u{e9}.mov"] {
+        let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, &format!("this.show({}, cx);", serde_json::to_string(name).unwrap()));
+        assert_eq!(opens(&disk).last(), Some(&format!("/fixture/project/{name}")), "{name}: {tree}");
+        assert!(tree.contains("Opened in its default app"), "{name}: {tree}");
+    }
+    let handed = opens(&disk).len();
+    for name in ["README.MD", ".mp4", ".env", "Makefile", "odd.t-x"] {
+        let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, &format!("this.show({}, cx);", serde_json::to_string(name).unwrap()));
+        assert_eq!(opens(&disk).len(), handed, "{name} is read, not handed over: {tree}");
+        assert!(!tree.contains("Opened in its default app"), "{name}: {tree}");
+    }
+    // An extensionless binary: the card with its buttons, nothing opened until one is pressed.
+    let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, "this.show('blob', cx);");
+    assert!(tree.contains("Binary file") && tree.contains("Show in folder"), "{tree}");
+    assert_eq!(opens(&disk).len(), handed);
+}
+
+// A video opened from a terminal link is handed to the system once. When the folder context settles a moment later
+// (`rekey`), the card stays: the system app is not started a second time without a click.
+#[gpui::test]
+fn files_panel_never_reopens_a_linked_video_in_the_system_app_when_the_folder_context_settles(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[("/fixture/project/video.mp4", "\0\0\0 ftyp")]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "openfile /fixture/project/video.mp4");
+    files_wait(&mut visual, 200);
+    assert_eq!(disk.borrow().opens.len(), 1);
+    assert_eq!(files_state(&mut visual, &disk)["opened"]["how"], json!("opened"));
+    files_step(&mut visual, &disk, "rekey");
+    files_wait(&mut visual, 300);
+    assert_eq!(disk.borrow().opens.len(), 1, "started again without a click: {:?}", disk.borrow().opens);
+    let state = files_state(&mut visual, &disk);
+    assert_eq!(state["file"], json!("video.mp4"), "{state}");
+    assert_eq!(state["opened"]["how"], json!("opened"), "the card stays: {state}");
+}
+
+// A program from a link is only shown in its folder, and the card's buttons keep their options.
+#[gpui::test]
+fn files_panel_reveals_a_linked_program_and_open_again_never_forces_a_reveal(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[("/fixture/project/tools/setup.exe", "MZ\0\0")]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "openfile /fixture/project/tools/setup.exe");
+    files_wait(&mut visual, 200);
+    assert_eq!(files_state(&mut visual, &disk)["opened"], json!({"full": "/fixture/project/tools/setup.exe", "how": "revealed"}));
+    files_step(&mut visual, &disk, "click files-open-again");
+    let log = disk.borrow().opens.clone();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert_eq!(log[0], ("/fixture/project/tools/setup.exe".to_owned(), Value::Null));
+    assert_eq!(log[1].1, Value::Null, "Open again asks the host, which decides; it never forces a reveal");
+    assert!(disk.borrow().reads.is_empty(), "a program is never read: {:?}", disk.borrow().reads);
+}

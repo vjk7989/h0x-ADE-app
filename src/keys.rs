@@ -500,4 +500,128 @@ mod tests {
             assert_eq!(super::parse(keys).err(), None);
         }
     }
+
+    // ---- 0.1.31 edge tests (A31.2) ----
+
+    // An editor that re-saved a shipped file (CRLF line ends, a BOM, a trimmed or extra newline) made it the
+    // person's: it is not byte-identical, so it never migrates and is never rewritten.
+    #[test]
+    fn a_shipped_keys_file_re_saved_by_an_editor_is_personal_and_stays() {
+        let dir = std::env::temp_dir().join(format!("h0x-ade-keys-resaved-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        for (defaults, originals) in [
+            (include_str!("../defaults/keys.json"), super::SHIPPED_KEYS),
+            (include_str!("../defaults/keys.macos.json"), super::SHIPPED_MACOS_KEYS),
+        ] {
+            for original in originals {
+                // The other line ending than the checkout's (CRLF for an LF snapshot, LF for a CRLF one).
+                let other_ends = if original.contains("\r\n") { original.replace("\r\n", "\n") } else { original.replace('\n', "\r\n") };
+                let variants = [
+                    other_ends,
+                    format!("\u{feff}{original}"),
+                    original.trim_end().to_owned(),
+                    format!("{original}\n\n"),
+                    original.replacen("  ", "\t", 1),
+                ];
+                for edited in variants {
+                    assert_ne!(edited.as_str(), *original);
+                    std::fs::write(&path, &edited).unwrap();
+                    assert_eq!(super::load_text(&path, defaults, originals).unwrap(), edited);
+                    assert_eq!(std::fs::read_to_string(&path).unwrap(), edited, "never rewritten");
+                }
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_empty_object_or_an_empty_file_is_the_persons_and_is_never_replaced() {
+        let dir = std::env::temp_dir().join(format!("h0x-ade-keys-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        let defaults = include_str!("../defaults/keys.json");
+        for text in ["{}", "{\"global\":{}}", "", "   \n"] {
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(super::load_text(&path, defaults, super::SHIPPED_KEYS).unwrap(), text, "{text:?}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        }
+        // `{}` binds nothing (the reserved keys are added at install); an empty file says why it can't load.
+        assert!(super::parse("{}").unwrap().is_empty());
+        assert!(super::parse("{\"global\":{}}").unwrap().is_empty());
+        assert!(super::parse("").is_err());
+        assert!(super::parse("   \n").is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_keys_json_that_is_a_folder_reports_an_error_and_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("h0x-ade-keys-folder-{}", std::process::id()));
+        let path = dir.join("keys.json");
+        std::fs::create_dir_all(path.join("inside")).unwrap();
+        assert!(super::load_text(&path, include_str!("../defaults/keys.json"), super::SHIPPED_KEYS).is_err());
+        assert!(path.join("inside").is_dir());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // serde keeps only the last of two equal keys in a section: a duplicate in the defaults would silently drop a binding.
+    #[test]
+    fn no_key_is_bound_twice_in_a_section_of_the_defaults() {
+        for text in [include_str!("../defaults/keys.json"), include_str!("../defaults/keys.macos.json")] {
+            let mut section = String::new();
+            let mut seen = std::collections::HashSet::new();
+            for line in text.lines() {
+                let line = line.trim();
+                if line.ends_with('{') {
+                    section = line.to_owned();
+                    seen.clear();
+                } else if let Some(rest) = line.strip_prefix('"') {
+                    let key = rest.split('"').next().unwrap().to_owned();
+                    assert!(seen.insert(key.clone()), "{section} binds {key:?} twice");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_agent_slot_key_runs_agent_new_with_its_number_and_no_section_shadows_it() {
+        for text in [include_str!("../defaults/keys.json"), include_str!("../defaults/keys.macos.json")] {
+            let sections: serde_json::Value = serde_json::from_str(text).unwrap();
+            let command = crate::commands::find("agent.new").unwrap();
+            let mut slots = std::collections::BTreeSet::new();
+            for (key, action) in sections["global"].as_object().unwrap() {
+                let Some(n) = action.as_str().and_then(|a| a.strip_prefix("agent.new:")) else { continue };
+                let index = crate::commands::shorthand(command, n);
+                let slot = crate::programs::slot_number(index.get("index")).unwrap_or_else(|e| panic!("{key}: {e}"));
+                assert_eq!(index["index"], serde_json::json!(slot), "{key}: the shorthand gives a number");
+                slots.insert(slot);
+            }
+            assert_eq!(slots.into_iter().collect::<Vec<_>>(), (1..=9).collect::<Vec<_>>());
+            // The terminal and mod sections rank above global: none of them may take a slot key.
+            for (name, keys) in sections.as_object().unwrap().iter().filter(|(n, _)| n.as_str() != "global") {
+                for n in 1..=9 {
+                    assert!(keys.get(format!("ctrl-shift-{n}")).is_none(), "{name} shadows ctrl-shift-{n}");
+                }
+                for symbol in "!@#$%^&*(".chars() {
+                    assert!(keys.get(format!("ctrl-{symbol}")).is_none(), "{name} shadows ctrl-{symbol}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_0_1_30_file_with_one_personal_binding_added_keeps_it_and_gets_no_slot_keys() {
+        let dir = std::env::temp_dir().join(format!("h0x-ade-keys-0130-edited-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        let last = super::SHIPPED_KEYS.last().unwrap();
+        let edited = last.replacen("\"global\": {", "\"global\": {\n    \"ctrl-shift-1\": \"pane.zoom\",", 1);
+        assert_ne!(edited.as_str(), *last);
+        std::fs::write(&path, &edited).unwrap();
+        let kept = super::load_text(&path, include_str!("../defaults/keys.json"), super::SHIPPED_KEYS).unwrap();
+        assert_eq!(kept, edited);
+        assert!(!kept.contains("agent.new"), "their own binding of ctrl-shift-1 wins");
+        assert!(super::parse(&kept).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

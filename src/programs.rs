@@ -731,4 +731,106 @@ mod tests {
             assert!(DEFAULT_ICONS.iter().any(|(n, _)| *n == file), "{k}: {icon} not shipped");
         }
     }
+
+    // ---- 0.1.31 edge tests (A31.1) ----
+
+    #[test]
+    fn past_nine_slots_the_extra_own_agents_list_with_no_slot() {
+        let many: Vec<String> = (0..12).map(|i| format!(r#""own{i:02}": {{ "run": ["own{i}"], "order": {} }}"#, 100 - i)).collect();
+        let table = with_mine(&format!(r#"{{ "programs": {{ {} }} }}"#, many.join(",")));
+        let keys = slot_keys(&table);
+        // Highest order last: own11 (order 89) is first among the person's own.
+        assert_eq!(&keys[4..], ["own11", "own10", "own09", "own08", "own07"]);
+        assert_eq!(startable_entry(&table, "own07")["slot"], json!(9));
+        for left_out in ["own06", "own00"] {
+            let e = startable_entry(&table, left_out);
+            assert_eq!(e["slot"], Value::Null, "{left_out}");
+            assert_eq!(e["custom"], json!(true), "{left_out}");
+        }
+    }
+
+    #[test]
+    fn extreme_and_missing_orders_sort_without_overflow_and_ties_fall_back_to_the_key() {
+        let table = with_mine(&format!(
+            r#"{{ "programs": {{
+                "max": {{ "run": ["m"], "order": {} }}, "none": {{ "run": ["n"] }}, "min": {{ "run": ["i"], "order": {} }},
+                "zero": {{ "run": ["z"], "order": 0 }}, "alpha": {{ "run": ["a"] }}
+            }} }}"#,
+            i64::MAX,
+            i64::MIN
+        ));
+        // An explicit i64::MAX ties with "no order": the key decides between them.
+        assert_eq!(slot_keys(&table), ["claude", "codex", "opencode", "gemini", "min", "zero", "alpha", "max", "none"]);
+    }
+
+    #[test]
+    fn an_order_that_is_not_a_whole_number_is_a_programs_json_error_not_a_silent_default() {
+        for bad in [r#"{ "programs": { "x": { "run": ["x"], "order": 1.5 } } }"#, r#"{ "programs": { "x": { "run": ["x"], "order": "1" } } }"#, r#"{ "programs": { "x": { "run": ["x"], "order": 1e30 } } }"#] {
+            assert!(serde_json::from_str::<Table>(bad).is_err(), "{bad}");
+        }
+        // null is the same as leaving it out.
+        let table = with_mine(r#"{ "programs": { "x": { "run": ["x"], "order": null } } }"#);
+        assert_eq!(slot_keys(&table).last().map(String::as_str), Some("x"));
+    }
+
+    #[test]
+    fn a_persons_entry_for_a_built_in_outside_the_four_gets_no_slot_and_is_not_their_own() {
+        // pi is in the built-in table: giving it an order does not make it one of the person's agents.
+        let table = with_mine(r#"{ "programs": { "pi": { "run": ["pi", "--fast"], "order": -100 }, "mine": { "run": ["mine"] } } }"#);
+        assert_eq!(slot_keys(&table), ["claude", "codex", "opencode", "gemini", "mine"]);
+        let pi = startable_entry(&table, "pi");
+        assert_eq!((pi["slot"].clone(), pi["custom"].clone(), pi["run"].clone()), (Value::Null, json!(false), json!(["pi", "--fast"])));
+    }
+
+    #[test]
+    fn a_built_in_cannot_lose_its_slot_by_an_empty_run_and_a_key_differing_in_case_is_its_own() {
+        let table = with_mine(r#"{ "programs": { "gemini": { "run": [] }, "Claude": { "name": "My Claude", "run": ["claude", "--mine"] } } }"#);
+        assert_eq!(slot_keys(&table), ["claude", "codex", "opencode", "gemini", "Claude"]);
+        assert_eq!(startable_entry(&table, "gemini")["slot"], json!(4));
+        assert!(!startable_entry(&table, "gemini")["run"].as_array().unwrap().is_empty(), "the built-in command stays");
+        let mine = startable_entry(&table, "Claude");
+        assert_eq!((mine["slot"].clone(), mine["custom"].clone()), (json!(5), json!(true)));
+        assert_eq!(startable_entry(&table, "claude")["custom"], json!(false));
+    }
+
+    #[test]
+    fn own_agents_with_unicode_keys_or_no_run_are_handled_and_never_panic() {
+        let table = with_mine(r#"{ "programs": {
+            "éclair": { "run": ["eclair"] }, "zebra": { "run": ["z"] }, "日本": { "run": ["nihon"] },
+            "empty": { "run": [] }, "nameonly": { "name": "N" }
+        } }"#);
+        // By key, as bytes: ASCII first, then the accented and the CJK keys.
+        assert_eq!(slot_keys(&table), ["claude", "codex", "opencode", "gemini", "zebra", "\u{e9}clair", "\u{65e5}\u{672c}"]);
+        for k in ["empty", "nameonly"] {
+            assert!(!slot_keys(&table).contains(&k.to_string()), "{k} has nothing to start");
+        }
+    }
+
+    #[test]
+    fn a_table_with_no_programs_at_all_still_has_the_four_slots() {
+        for mine in ["{}", r#"{ "programs": {} }"#, r#"{ "shells": [], "interpreters": [] }"#] {
+            assert_eq!(slot_keys(&with_mine(mine)), ["claude", "codex", "opencode", "gemini"], "{mine}");
+        }
+    }
+
+    #[test]
+    fn key_shorthands_for_agent_new_reach_only_slots_one_to_nine() {
+        // `agent.new:<n>` in keys.json goes through the shorthand, then the slot check.
+        let command = crate::commands::find("agent.new").expect("agent.new is a command");
+        let slot = |text: &str| slot_number(crate::commands::shorthand(command, text).get("index"));
+        for (text, want) in [("1", 1), ("9", 9), ("5", 5), ("03", 3)] {
+            assert_eq!(slot(text), Ok(want), "{text:?}");
+        }
+        for bad in ["0", "10", "-1", "1.5", "abc", "", " ", "99999999999999999999999", "\u{0661}", "\u{ff11}"] {
+            let got = slot(bad);
+            assert!(got.is_err(), "{bad:?}: {got:?}");
+            assert!(got.unwrap_err().contains("1 to 9"), "{bad:?}: the message names the range");
+        }
+        // A mod's run("agent.new", { index: 3 }) arrives as a whole JS number.
+        assert_eq!(slot_number(Some(&crate::mods::from_host(&gpui_shell::HostValue::Number(3.0)))), Ok(3));
+        assert!(slot_number(Some(&crate::mods::from_host(&gpui_shell::HostValue::Number(3.5)))).is_err());
+        assert!(slot_number(Some(&crate::mods::from_host(&gpui_shell::HostValue::Number(f64::NAN)))).is_err());
+        assert!(slot_number(Some(&json!(u64::MAX))).is_err());
+        assert!(slot_number(Some(&json!({ "index": 1 }))).is_err());
+    }
 }

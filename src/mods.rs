@@ -2006,6 +2006,115 @@ mod tests {
         assert_eq!(open_file(share, false), "network paths are not opened");
     }
 
+    // ---- 0.1.31 edge tests (#113 openFile) ----
+
+    fn open_scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("h0x-open-file-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // A text file is answered "text" with nothing started, so these paths can be checked end to end.
+    #[test]
+    fn open_file_takes_full_paths_with_spaces_unicode_and_dot_dot_segments() {
+        let dir = open_scratch("names");
+        let sub = dir.join("sub folder");
+        std::fs::create_dir_all(&sub).unwrap();
+        for name in ["notes with spaces.txt", "\u{e9}t\u{e9} \u{65e5}\u{672c} \u{1f680}.md", "UPPER.TXT", "Makefile"] {
+            let path = sub.join(name);
+            std::fs::write(&path, "hi").unwrap();
+            assert_eq!(open_file(path.to_str().unwrap(), false), "text", "{name}");
+        }
+        // `..` after a full path is still a full local path.
+        let dotted = sub.join("..").join("sub folder").join("notes with spaces.txt");
+        assert_eq!(open_file(dotted.to_str().unwrap(), false), "text");
+        let gone = sub.join("..").join("nowhere").join("..").join("missing.mp4");
+        assert_eq!(open_file(gone.to_str().unwrap(), false), "the file is not there");
+        // Forward slashes on Windows, too.
+        let forward = sub.join("UPPER.TXT").to_str().unwrap().replace('\\', "/");
+        assert_eq!(open_file(&forward, false), "text");
+        // `reveal` is only `true` itself; the host function reads it that way (a string "true" is not it).
+        std::thread::spawn({
+            let path = sub.join("UPPER.TXT");
+            move || {
+                use gpui_shell::HostArguments;
+                let host = module(Instance { name: "files".into(), props: Value::Null }, 3);
+                let text = HostValue::Str(path.to_str().unwrap().into());
+                for options in [json!({"reveal": "true"}), json!({"reveal": 1}), json!({"reveal": null}), json!({}), json!(null), json!("reveal")] {
+                    let args = HostArguments::new([text.clone(), crate::mods::to_host(&options)]);
+                    assert_eq!(host.call("openFile", &args), Ok(HostValue::Str("text".into())), "{options}");
+                }
+                // A path that is not a string is refused before anything is looked at.
+                assert!(host.call("openFile", &HostArguments::new([HostValue::Number(1.0)])).is_err());
+                assert!(host.call("openFile", &HostArguments::new([HostValue::Null])).is_err());
+            }
+        })
+        .join()
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_file_refuses_relative_drive_relative_device_and_nul_paths_and_handles_very_long_ones() {
+        for bad in ["~/clip.mp4", "clip.mp4", "../clip.mp4", " ", "\0", "/tmp/a\0.mp4", "C:\\a\0.mp4"] {
+            let why = open_file(bad, false);
+            assert!(why == "needs a full path" || why == "network paths are not opened", "{bad:?}: {why}");
+        }
+        #[cfg(windows)]
+        {
+            // Drive-relative and root-relative paths depend on the current folder: not full.
+            for bad in [r"C:clip.mp4", r"\clip.mp4", "/clip.mp4"] {
+                assert_eq!(open_file(bad, false), "needs a full path", "{bad}");
+            }
+            // Verbatim, device and UNC forms are never opened, even for a local drive.
+            for bad in [r"\\?\C:\clip.mp4", r"\\.\C:\clip.mp4", r"\\?\UNC\server\share\clip.mp4", r"\\localhost\c$\clip.mp4", "//server/share/clip.mp4"] {
+                assert_eq!(open_file(bad, false), "network paths are not opened", "{bad}");
+            }
+        }
+        // Far past MAX_PATH and PATH_MAX: an answer, never a panic.
+        let root = if cfg!(windows) { "C:\\" } else { "/" };
+        let long = format!("{root}{}", vec!["a".repeat(200); 40].join(if cfg!(windows) { "\\" } else { "/" })) + ".mp4";
+        assert_eq!(open_file(&long, false), "the file is not there");
+        let long_name = format!("{root}{}.mp4", "\u{e9}".repeat(5000));
+        assert_eq!(open_file(&long_name, false), "the file is not there");
+    }
+
+    #[test]
+    fn open_file_never_opens_a_folder_a_program_behind_a_video_name_or_a_trailing_dot() {
+        use crate::links::{Kind, kind};
+        let dir = open_scratch("plans");
+        let folder = dir.join("clips.mp4");
+        std::fs::create_dir_all(&folder).unwrap();
+        assert_eq!(open_plan(kind(&folder), false), OpenPlan::Reveal, "a folder named like a video is shown, not opened");
+        std::fs::write(dir.join("clip.mp4"), "\0\0\0 ftyp").unwrap();
+        std::fs::write(dir.join("setup.exe"), "MZ").unwrap();
+        std::fs::write(dir.join("SETUP.EXE"), "MZ").ok();
+        std::fs::write(dir.join("noext"), "\x7fELF").unwrap();
+        assert_eq!(open_plan(kind(&dir.join("clip.mp4")), false), OpenPlan::Open);
+        assert_eq!(open_plan(kind(&dir.join("clip.mp4")), true), OpenPlan::Reveal);
+        for name in ["setup.exe", "SETUP.EXE", "noext", "clip.mp4.", "clip.mp4 ", "a.txt:stream"] {
+            assert_eq!(open_plan(kind(&dir.join(name)), false), OpenPlan::Reveal, "{name}");
+        }
+        // A link named like a video that leads to a program (needs Developer Mode on Windows: skipped without).
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(dir.join("setup.exe"), dir.join("movie.mp4")).is_ok();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(dir.join("setup.exe"), dir.join("movie.mp4")).is_ok();
+        if linked {
+            assert_eq!(kind(&dir.join("movie.mp4")), Kind::Reveal);
+            assert_eq!(open_plan(kind(&dir.join("movie.mp4")), false), OpenPlan::Reveal, "the link's target decides");
+        }
+        // A dangling link is not there to open.
+        #[cfg(unix)]
+        {
+            if std::os::unix::fs::symlink(dir.join("gone.exe"), dir.join("dangling.mp4")).is_ok() {
+                assert_eq!(open_file(dir.join("dangling.mp4").to_str().unwrap(), false), "the file is not there");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn open_link_is_settings_frame_only_and_refuses_everything_else_without_opening() {
         std::thread::spawn(|| {
