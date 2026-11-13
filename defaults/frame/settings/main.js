@@ -2,11 +2,12 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, window, account, accountSignIn, accountSwitch, accountSignOut, accountRemove } from "h0x";
+import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, window, account, accountSignIn, accountCancelSignIn, accountSwitch, accountSignOut, accountRemove } from "h0x";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
 const SECTIONS = [
+  { id: "profile", title: "Profile", icon: "user" },
   { id: "look", title: "Look", icon: "palette" },
   ...(window()?.platform === "macos" ? [{ id: "keyboard", title: "Keyboard", icon: "keyboard" }] : []),
   { id: "machines", title: "Machines", icon: "server" },
@@ -32,6 +33,13 @@ const DEFAULT_UI_FONT = "Geist";
 const PROVIDERS = { "google.com": "Google", "github.com": "GitHub", password: "Email" };
 const accountName = (a) => a.name || a.email || "Account";
 
+// What signing in turns on: [row id, title, what it is for]. The wording says what each is for, not that it already works.
+const FEATURES = [
+  ["st-prof-tokens", "Token saving", "For helping your agents spend fewer tokens on each task."],
+  ["st-prof-observe", "Observability engine", "For seeing what your agents and machines did, and when."],
+  ["st-prof-pii", "Blockchain security for PII masking", "For masking personal data before it leaves this computer."],
+];
+
 export default class Settings extends View {
   init(_props, cx) {
     const asked = props()?.section;
@@ -50,9 +58,10 @@ export default class Settings extends View {
     });
     this.person = {};
     this.analyticsAbout = false;
-    this.acctMenu = null; // "switch" | "more" while its list is open
+    this.acctMenu = null; // "switch" while its list is open
     this.acctConfirm = null; // uid whose removal awaits a yes
-    this.acctBusy = false;
+    this.acctBusy = false; // a switch or sign-out is running
+    this.signingIn = false; // a browser sign-in is waiting
     this.raw = null;
     this.unreadable = false;
     this.error = null;
@@ -116,6 +125,19 @@ export default class Settings extends View {
         cx.notify();
       });
     });
+  }
+
+  // Shows a section, as the nav does.
+  openSection(id, cx) {
+    this.section = id;
+    this.picking = null;
+    this.machineEdit = null;
+    this.acctMenu = null;
+    this.acctConfirm = null;
+    this.handle.focus();
+    if (id === "machines") cx.spawn(async (cx) => { await this.loadMachines(); cx.notify(); });
+    if (id === "remote") cx.spawn(async (cx) => { await this.loadRemote(); cx.notify(); });
+    cx.notify();
   }
 
   // After "Check now": follow the look (the answer comes from the app), then
@@ -193,6 +215,7 @@ export default class Settings extends View {
   }
 
   close() {
+    if (this.signingIn) accountCancelSignIn();
     closeOverlay(props().overlay);
   }
 
@@ -1028,7 +1051,7 @@ export default class Settings extends View {
       .child(div().pb(8).text_size(12.5).line_height("18px").text_color(t.dim).child("Control your terminals from your phone, through Telegram or a web panel."))
       .when(this.remote !== null && !account().current, (el) => el.child(h_flex().id("st-r-signin-note").w_full().py(10).gap(12).items_center()
         .child(div().flex_1().text_size(12.5).text_color(t.muted).child("Sign in to pair a phone or Telegram."))
-        .child(this.button(t, "st-r-signin", "Sign in", (_e, cx) => this.accountDo(() => accountSignIn(), cx)))))
+        .child(this.button(t, "st-r-signin", "Sign in", (_e, cx) => this.openSection("profile", cx)))))
       .when(Boolean(this.remoteError), (el) => el.child(div().py(10).text_size(12.5).text_color(t.blocked).child(this.remoteError)))
       .when(Boolean(this.remoteProblem), (el) => el.child(div().py(10).text_size(12.5).text_color(t.blocked).child(this.remoteProblem)))
       .when(Boolean(this.remoteNotice), (el) => el.child(div().py(10).text_size(12.5).text_color(t.ansi2).child(this.remoteNotice)))
@@ -1161,53 +1184,41 @@ export default class Settings extends View {
       .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("HyperOx looks for both every hour (unless automatic checks are off) and tells you in the corner. h0x-core runs your terminals, so they keep running through its updates."));
   }
 
-  // Runs one account change: the menus close, the buttons wait, and a refusal is shown.
-  accountDo(work, cx) {
+  // Runs one account change: the menus close, the controls wait, and a refusal is shown. `flag` is the state it
+  // sets while it runs: "acctBusy" (switch, sign out, remove) or "signingIn" (the browser sign-in).
+  accountDo(work, cx, flag = "acctBusy") {
     this.acctMenu = null;
     this.acctConfirm = null;
-    this.acctBusy = true;
-    const mine = (this.acctRun = (this.acctRun ?? 0) + 1);
+    this[flag] = true;
+    this.acctRuns = this.acctRuns ?? {};
+    const mine = (this.acctRuns[flag] = (this.acctRuns[flag] ?? 0) + 1);
     cx.notify();
     cx.spawn(async (cx) => {
       try {
         const why = await work();
-        // A sign-in that a newer one replaced ends "cancelled": only the newest says so, and only it frees the buttons.
-        if (mine !== this.acctRun) return;
+        // A sign-in that a newer one replaced ends "cancelled": only the newest says so, and only it frees the controls.
+        if (mine !== this.acctRuns[flag]) return;
         if (why === "cancelled") notify({ title: "Sign-in cancelled", level: "info" });
         else if (why) notify({ title: "Account", body: why, level: "error" });
       } catch (e) {
-        if (mine === this.acctRun) notify({ title: "Account", body: e.message ?? String(e), level: "error" });
+        if (mine === this.acctRuns[flag]) notify({ title: "Account", body: e.message ?? String(e), level: "error" });
       }
-      if (mine === this.acctRun) this.acctBusy = false;
+      if (mine === this.acctRuns[flag]) this[flag] = false;
       cx.notify();
     });
   }
 
-  // The account on the banner's right: who is signed in and what can be done to it.
-  accountCard(t, acct) {
-    const cur = acct.current;
-    const small = (id, label, onClick) => div().id(id).px(10).py(4).rounded(7).border_1().border_color(t.border).bg(t.raised).cursor_pointer()
-      .text_size(12.5).text_color(t.foreground).hover((s) => s.bg(t.hover)).on_click(onClick).child(label);
-    const switchButton = small("st-acct-switch", "Switch ▾", (_e, cx) => { this.acctMenu = this.acctMenu === "switch" ? null : "switch"; this.acctConfirm = null; cx.notify(); });
-    if (this.acctBusy) return div().text_size(12.5).text_color(t.muted).child("Waiting…");
-    if (!cur) {
-      return v_flex().gap(6).items_end()
-        .child(div().text_size(13).text_color(t.muted).child("Not signed in"))
-        .child(h_flex().gap(6)
-          .when(acct.accounts.length > 0, (el) => el.child(switchButton))
-          .child(small("st-acct-signin", "Sign in", (_e, cx) => this.accountDo(() => accountSignIn(), cx))));
-    }
-    return h_flex().gap(10).items_center()
-      .child(this.avatar(t, cur, 38))
-      .child(v_flex().gap(2).min_w(0).max_w(260)
-        .child(h_flex().gap(6).items_center().min_w(0)
-          .child(div().id("st-acct-name").max_w(170).truncate().text_size(14).font_semibold().text_color(t.foreground).child(accountName(cur)))
-          .child(this.providerBadge(t, cur)))
-        .when(Boolean(cur.email), (el) => el.child(div().id("st-acct-email").max_w(220).truncate().text_size(12).text_color(t.dim).child(cur.email)))
-        .child(h_flex().gap(6).pt(3)
-          .child(switchButton)
-          .child(small("st-acct-signout", "Sign out", (_e, cx) => this.accountDo(() => accountSignOut(cur.uid), cx)))
-          .child(small("st-acct-more", "⋯", (_e, cx) => { this.acctMenu = this.acctMenu === "more" ? null : "more"; this.acctConfirm = null; cx.notify(); }))));
+  signIn(cx) {
+    this.accountDo(() => accountSignIn(), cx, "signingIn");
+  }
+
+  // Esc on the Profile page: the account menu, then the remove question, then a waiting sign-in. False: none was open.
+  escapeAccount() {
+    if (this.acctMenu) this.acctMenu = null;
+    else if (this.acctConfirm) this.acctConfirm = null;
+    else if (this.signingIn) accountCancelSignIn();
+    else return false;
+    return true;
   }
 
   avatar(t, a, size) {
@@ -1216,41 +1227,121 @@ export default class Settings extends View {
       .child(accountName(a).slice(0, 1).toUpperCase());
   }
 
-  providerBadge(t, a) {
-    return div().px(6).rounded(5).bg(t.hover).text_size(11).text_color(t.muted).child(PROVIDERS[a.provider] ?? a.provider);
+  // A sentence-case heading inside a page (heading() is the tracked-caps one).
+  subheading(t, text) {
+    return div().pt(20).pb(4).text_size(13).line_height("18px").font_semibold().text_color(t.foreground).child(text);
   }
 
-  // The Switch and ⋯ menus, and the remove confirmation, open under the banner.
-  accountPanel(t, acct) {
+  // A Profile row: the title and what it is for on the left, the control on the right.
+  profileRow(t, id, title, about, control) {
+    return h_flex().id(id).w_full().gap(16).py(12).items_center().border_b(1).border_color(t.border)
+      .child(v_flex().flex_1().min_w(0).gap(3)
+        .child(div().text_size(14).line_height("20px").text_color(t.foreground).child(title))
+        .child(div().text_size(12.5).line_height("18px").text_color(t.muted).child(about)))
+      .child(div().flex_none().child(control));
+  }
+
+  // "Off" with a lock, or "Included" with a check: a state, not a switch.
+  stateTag(t, on, label) {
+    return h_flex().gap(6).items_center().text_size(12.5).line_height("18px")
+      .child(svg(I(on ? "check" : "lock")).size(14).text_color(on ? t.accent : t.muted))
+      .child(div().text_color(on ? t.foreground : t.muted).child(label));
+  }
+
+  // "Switch account" with its chevron; it opens or closes the menu.
+  switchButton(t) {
+    return h_flex().id("st-acct-switch").px(12).py(5).gap(6).items_center().rounded(7).border_1().border_color(t.border).bg(t.raised)
+      .cursor_pointer().text_size(13).text_color(t.foreground).hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => { this.acctMenu = this.acctMenu ? null : "switch"; this.acctConfirm = null; cx.notify(); })
+      .child("Switch account")
+      .child(svg(I("chevron-down")).size(14).text_color(t.muted));
+  }
+
+  // What to do while the browser sign-in is open, and Cancel.
+  waitingLine(t) {
+    return h_flex().gap(12).items_center()
+      .child(h_flex().gap(8).items_center()
+        .child(svg(I("refresh")).size(16).text_color(t.accent))
+        .child(div().text_size(13).font_medium().text_color(t.foreground).child("Finish signing in using your browser")))
+      .child(this.button(t, "st-prof-cancel", "Cancel", (_e, cx) => { accountCancelSignIn(); cx.notify(); }));
+  }
+
+  // The Switch menu, open under the page header.
+  accountMenu(t, acct) {
     const cur = acct.current;
-    const row = (id, onClick, ...kids) => h_flex().id(id).h(30).px(10).gap(8).items_center().rounded(7).cursor_pointer().hover((s) => s.bg(t.hover)).on_click(onClick).children(kids);
-    const panel = (...kids) => h_flex().w_full().justify_end().child(v_flex().w(280).p(5).rounded(9).border_1().border_color(t.border).bg(t.popover).text_size(12.8).children(kids));
-    if (this.acctMenu === "switch") {
-      return panel(
-        ...acct.accounts.map((a) => row(`st-acct-pick-${a.uid}`, (_e, cx) => { if (!cur || a.uid !== cur.uid) this.accountDo(() => accountSwitch(a.uid), cx); },
-          div().w(14).text_color(t.accent).child(cur && a.uid === cur.uid ? "✓" : ""),
-          div().flex_1().min_w(0).text_color(t.foreground).child(accountName(a)),
-          this.providerBadge(t, a))),
-        row("st-acct-add", (_e, cx) => this.accountDo(() => accountSignIn(), cx), div().w(14).text_color(t.muted).child("+"), div().text_color(t.foreground).child("Add account")),
-      );
+    const row = (id, onClick, ...kids) => h_flex().id(id).h(40).px(10).gap(8).items_center().rounded(7).cursor_pointer().hover((s) => s.bg(t.hover)).on_click(onClick).children(kids);
+    return h_flex().w_full().pt(10).justify_end().child(v_flex().id("st-acct-menu").w(280).p(5).rounded(9).border_1().border_color(t.border).bg(t.popover).text_size(13)
+      .children(acct.accounts.map((a) => row(`st-acct-pick-${a.uid}`, (_e, cx) => { if (!cur || a.uid !== cur.uid) this.accountDo(() => accountSwitch(a.uid), cx); },
+        cur && a.uid === cur.uid ? div().id(`st-acct-current-${a.uid}`).w(14).flex_none().child(svg(I("check")).size(14).text_color(t.accent)) : div().w(14).flex_none(),
+        this.avatar(t, a, 24),
+        v_flex().flex_1().min_w(0)
+          .child(div().truncate().font_medium().text_color(t.foreground).child(accountName(a)))
+          .child(div().text_size(12).text_color(t.muted).child(PROVIDERS[a.provider] ?? a.provider)))))
+      .child(div().h(1).mx(4).my(4).bg(t.border))
+      .child(row("st-acct-add", (_e, cx) => this.signIn(cx),
+        div().w(14).flex_none().child(svg(I("plus")).size(14).text_color(t.muted)),
+        div().text_color(t.foreground).child("Add account"))));
+  }
+
+  // Settings > Profile: who is signed in (or that nobody is), and what signing in turns on.
+  profile(t) {
+    const acct = account();
+    const cur = acct.current;
+    const busy = div().text_size(12.5).text_color(t.muted).child("Waiting…");
+    const pairing = (control) => this.profileRow(t, "st-prof-pairing", "Phone and Telegram pairing", "For following and answering your agents from your phone or Telegram.", control);
+    if (!cur) {
+      return v_flex().w_full()
+        .child(h_flex().w_full().gap(16).items_start().pb(18).border_b(1).border_color(t.border)
+          .child(div().w(48).h(48).flex_none().rounded_full().flex().items_center().justify_center().bg(t.raised).border_1().border_color(t.border)
+            .child(svg(I("user")).size(22).text_color(t.muted)))
+          .child(v_flex().flex_1().min_w(0).gap(2)
+            .child(div().id("st-prof-title").text_size(18).line_height("24px").font_semibold().text_color(t.foreground).child("You're using HyperOx without an account"))
+            .child(div().text_size(13).line_height("19px").text_color(t.muted).child("Your spaces, terminals and agents work as usual. Sign in to turn on the features below."))
+            .child(h_flex().gap(8).pt(12).items_center()
+              .children(this.signingIn
+                ? [this.waitingLine(t)]
+                : [
+                  div().id("st-prof-signin").px(12).py(5).rounded(7).border_1().border_color(t.accent).bg(t.accent).cursor_pointer()
+                    .text_size(13).font_medium().text_color(t.accent_foreground).on_click((_e, cx) => this.signIn(cx)).child("Sign in with your browser"),
+                  div().text_size(13).line_height("19px").text_color(t.muted).child("Opens pavii.tech. Use Google, GitHub or email."),
+                ]))
+            // Accounts are saved but none is current: they can still be switched to.
+            .when(acct.accounts.length > 0 && !this.signingIn, (el) => el.child(h_flex().pt(6).child(this.acctBusy ? busy : this.switchButton(t))))))
+        .when(this.acctMenu === "switch", (el) => el.child(this.accountMenu(t, acct)))
+        .child(this.subheading(t, "Turned on when you sign in"))
+        .children(FEATURES.map(([id, title, about]) => this.profileRow(t, id, title, about, this.stateTag(t, false, "Off"))))
+        .child(pairing(this.stateTag(t, false, "Needs sign-in")));
     }
-    if (this.acctMenu === "more" && cur) {
-      if (this.acctConfirm === cur.uid) {
-        const choice = (id, label, color, onClick) => div().id(id).px(12).py(5).rounded(7).border_1().border_color(color).cursor_pointer().text_size(12.5).text_color(color).hover((s) => s.bg(t.hover)).on_click(onClick).child(label);
-        return h_flex().w_full().justify_end().child(v_flex().id("st-acct-confirm").w(340).gap(10).p(12).rounded(9).border_1().border_color(t.border).bg(t.popover)
+    return v_flex().w_full()
+      .child(h_flex().w_full().gap(16).items_start().pb(18).border_b(1).border_color(t.border)
+        .child(this.avatar(t, cur, 48))
+        .child(v_flex().flex_1().min_w(0).gap(2)
+          .child(div().id("st-acct-name").truncate().text_size(18).line_height("24px").font_semibold().text_color(t.foreground).child(accountName(cur)))
+          .when(Boolean(cur.email), (el) => el.child(div().id("st-acct-email").truncate().text_size(13).line_height("19px").text_color(t.muted).child(cur.email)))
+          .child(div().id("st-acct-provider").text_size(13).line_height("19px").text_color(t.muted).child(`Signed in with ${PROVIDERS[cur.provider] ?? cur.provider}`)))
+        .child(this.acctBusy ? busy : h_flex().gap(8).flex_none()
+          .child(this.switchButton(t))
+          .child(this.button(t, "st-acct-signout", "Sign out", (_e, cx) => this.accountDo(() => accountSignOut(cur.uid), cx)))))
+      .when(this.signingIn, (el) => el.child(h_flex().w_full().pt(12).child(this.waitingLine(t))))
+      .when(this.acctMenu === "switch", (el) => el.child(this.accountMenu(t, acct)))
+      .child(this.subheading(t, "Included with your account"))
+      .children(FEATURES.map(([id, title, about]) => this.profileRow(t, id, title, about, this.stateTag(t, true, "Included"))))
+      .child(pairing(this.button(t, "st-prof-remote", "Set up in Remote", (_e, cx) => this.openSection("remote", cx))))
+      .child(this.subheading(t, "This computer"))
+      .child(this.acctConfirm === cur.uid
+        ? v_flex().id("st-acct-confirm").w_full().mt(12).gap(10).p(12).rounded(9).border_1().border_color(t.blocked).bg(t.popover)
           .child(div().text_size(13).line_height("19px").text_color(t.foreground).child(`Remove ${accountName(cur)} from this computer? Your local profile data for this account is deleted; your online account stays.`))
           .child(h_flex().gap(8).justify_end()
-            .child(choice("st-acct-remove-no", "Cancel", t.muted, (_e, cx) => { this.acctConfirm = null; this.acctMenu = null; cx.notify(); }))
-            .child(choice("st-acct-remove-yes", "Remove", t.blocked, (_e, cx) => this.accountDo(() => accountRemove(cur.uid), cx)))));
-      }
-      return panel(row("st-acct-remove", (_e, cx) => { this.acctConfirm = cur.uid; cx.notify(); }, div().text_color(t.blocked).child("Remove from this computer")));
-    }
-    return null;
+            .child(this.button(t, "st-acct-remove-no", "Cancel", (_e, cx) => { this.acctConfirm = null; cx.notify(); }))
+            .child(div().id("st-acct-remove-yes").px(12).py(5).rounded(7).border_1().border_color(t.blocked).bg(t.blocked).cursor_pointer()
+              .text_size(13).text_color(t.accent_foreground).on_click((_e, cx) => this.accountDo(() => accountRemove(cur.uid), cx)).child("Remove")))
+        : this.profileRow(t, "st-acct-remove-row", "Remove from this computer", "Deletes this account's local profile data. Your online account stays.",
+          div().id("st-acct-remove").px(12).py(5).rounded(7).border_1().border_color(t.border).bg(t.raised).cursor_pointer()
+            .text_size(13).text_color(t.blocked).hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.acctConfirm = cur.uid; this.acctMenu = null; cx.notify(); }).child("Remove…")));
   }
 
   info(t) {
     const u = updates();
-    const acct = account();
     const open = (url) => () => {
       const why = openLink(url);
       if (why) notify({ title: "Can't open the link", body: why, level: "error" });
@@ -1264,7 +1355,6 @@ export default class Settings extends View {
         .child(div().text_size(12.5).text_color(t.dim).child(name))
         .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child(who)))
       .child(div().flex_none().text_size(13).child(link(id, url, site)));
-    const panel = this.accountPanel(t, acct);
     return v_flex()
       .w_full()
       .gap(12)
@@ -1275,9 +1365,7 @@ export default class Settings extends View {
           .child(h_flex().gap(8).items_center()
             .child(div().text_size(24).font_semibold().text_color(t.foreground).child("HyperOx"))
             .child(div().id("st-info-version").px(7).rounded(5).bg(t.hover).text_size(11).text_color(t.muted).child(`v${u.app.version}`)))
-          .child(div().text_size(13).text_color(t.muted).child("Agentic development environment")))
-        .child(div().flex_none().child(this.accountCard(t, acct))))
-      .when(Boolean(panel), (el) => el.child(panel))
+          .child(div().text_size(13).text_color(t.muted).child("Agentic development environment"))))
       .child(h_flex().w_full().gap(12).items_stretch()
         .child(card("About",
           div().text_size(13.5).font_semibold().text_color(t.foreground).child("The desktop workspace for AI coding agents."),
@@ -1348,15 +1436,7 @@ export default class Settings extends View {
             .cursor_pointer()
             .bg(on ? t.raised : "#00000000")
             .hover((st) => st.bg(t.raised))
-            .on_click((_e, cx) => {
-              this.section = s.id;
-              this.picking = null;
-              this.machineEdit = null;
-              this.handle.focus();
-              if (s.id === "machines") cx.spawn(async (cx) => { await this.loadMachines(); cx.notify(); });
-              if (s.id === "remote") cx.spawn(async (cx) => { await this.loadRemote(); cx.notify(); });
-              cx.notify();
-            })
+            .on_click((_e, cx) => this.openSection(s.id, cx))
             .child(svg(I(s.icon)).size(15).text_color(on ? t.accent : t.dim))
             .child(div().flex_1().text_size(13.5).text_color(on ? t.foreground : t.muted).child(s.title))
             .when(s.id === "updates" && waiting, (el) => el.child(div().w(7).h(7).rounded(4).bg(t.accent)));
@@ -1381,7 +1461,7 @@ export default class Settings extends View {
         }
         if (k === "escape") {
           if (this.picking) this.picking = null;
-          else return this.close();
+          else if (!this.escapeAccount()) return this.close();
           this.handle.focus();
         } else return;
         cx.stop_propagation();
@@ -1409,7 +1489,9 @@ export default class Settings extends View {
                   .py(22)
                   .when(Boolean(this.error), (el) => el.child(div().pb(12).text_size(12.5).text_color(t.blocked).child(this.error)))
                   .child(
-                    this.section === "look"
+                    this.section === "profile"
+                      ? this.profile(t)
+                      : this.section === "look"
                       ? this.look(t, cx)
                       : this.section === "keyboard"
                         ? this.keyboard(t)

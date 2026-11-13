@@ -147,7 +147,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         shared.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "playSound", "setAgentOrder", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes", "openLink", "copyText", "accountSwitch", "accountSignOut", "accountRemove"] {
+    for name in ["run", "playSound", "setAgentOrder", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes", "openLink", "copyText", "accountSwitch", "accountSignOut", "accountRemove", "accountCancelSignIn"] {
         let calls = calls.clone();
         module = module.function(name, move |a| {
             if name == "run" {
@@ -1945,72 +1945,222 @@ fn info_account_tree(cx: &mut TestAppContext, staged: &Staged, account: Value, s
     describe_with_values(cx, staged, "frame/settings", values, setup).unwrap()
 }
 
+fn profile_values(account: Value) -> BTreeMap<String, Value> {
+    let mut p = props();
+    p["section"] = json!("profile");
+    let mut values = fixture(true, p, updates("current", "current"));
+    values.insert("account".into(), account);
+    values
+}
+
+fn profile_tree(cx: &mut TestAppContext, staged: &Staged, account: Value, setup: Option<&str>) -> String {
+    describe_with_values(cx, staged, "frame/settings", profile_values(account), setup).unwrap()
+}
+
+// Setup that leaves the click handler of the page's `this.button(.., id, ..)` in `this.press`.
+fn press_button(id: &str) -> String {
+    format!("const real = this.button.bind(this); this.button = (t, id, label, onClick) => {{ if (id === '{id}') this.press = onClick; return real(t, id, label, onClick); }};")
+}
+
 #[gpui::test]
-fn settings_info_is_layout_c_a_banner_with_the_account_and_four_cards(cx: &mut TestAppContext) {
+fn settings_info_is_layout_c_a_banner_and_four_cards_and_no_account(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let two = account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam")], Some("u1"));
     let tree = info_account_tree(cx, &staged, two, None);
     for text in [
         "HyperOx", "st-info-version", "v0.1.0", "Agentic development environment",
-        "vijay", "vijay@example.com", "Google", "st-acct-switch", "Switch", "st-acct-signout", "Sign out", "st-acct-more",
         "ABOUT", "RESOURCES", "PARTNERS", "PRIVACY", "st-analytics", "st-analytics-info",
         "Currently closed source (open source soon)", "Version 0.1.0", "Open-source notices",
     ] {
         assert!(tree.contains(text), "{text:?}: {tree}");
     }
-    // The menus and the confirmation are closed until asked; the account's tokens are never shown.
-    for text in ["st-acct-pick-", "st-acct-add", "st-acct-remove", "st-acct-signin", "Not signed in"] {
-        assert!(!tree.contains(text), "{text:?} is not shown at first: {tree}");
-    }
-    assert!(!tree.contains("GitHub"), "the other account is only in the Switch menu: {tree}");
     assert!(tree.find("HyperOx").unwrap() < tree.find("ABOUT").unwrap(), "the banner is above the cards: {tree}");
 }
 
 #[gpui::test]
-fn settings_info_without_an_account_offers_sign_in_and_nothing_to_sign_out(cx: &mut TestAppContext) {
+fn settings_info_has_no_account_card_signed_in_or_out_and_keeps_its_cards(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     for (label, account) in [
         ("none", account_value(&[], None)),
         ("accounts but none current", account_value(&[("u1", "password", "ann")], None)),
+        ("signed in", account_value(&[("u1", "google.com", "vijay")], Some("u1"))),
     ] {
         let tree = info_account_tree(cx, &staged, account, None);
-        assert!(tree.contains("Not signed in") && tree.contains("st-acct-signin") && tree.contains("Sign in"), "{label}: {tree}");
-        assert!(!tree.contains("st-acct-signout") && !tree.contains("st-acct-more"), "{label}: {tree}");
+        for text in ["st-acct-", "Not signed in", "Switch", "Sign in", "Sign out", "vijay"] {
+            assert!(!tree.contains(text), "{label}: {text:?} moved to Profile: {tree}");
+        }
         assert!(tree.contains("st-info-install") && tree.contains("st-analytics"), "{label}: the cards stay: {tree}");
     }
 }
 
 #[gpui::test]
-fn settings_info_switch_menu_lists_accounts_with_a_check_on_the_current_and_add_account(cx: &mut TestAppContext) {
+fn settings_profile_is_the_first_nav_item_and_look_stays_the_default(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    let accounts = account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam"), ("u3", "password", "ann")], Some("u2"));
-    let tree = info_account_tree(cx, &staged, accounts, Some("this.acctMenu = 'switch';"));
-    for text in ["st-acct-pick-u1", "st-acct-pick-u2", "st-acct-pick-u3", "\u{2713}", "st-acct-add", "Add account", "GitHub", "Email", "Google"] {
-        assert!(tree.contains(text), "{text:?}: {tree}");
-    }
-    assert_eq!(tree.matches('\u{2713}').count(), 1, "one check, on the current account: {tree}");
-    assert!(!tree.contains("st-acct-remove"), "{tree}");
+    let mut p = props();
+    p.as_object_mut().unwrap().remove("section");
+    let tree = describe(cx, &staged, "frame/settings", true, p, updates("current", "current"), None).unwrap();
+    assert!(tree.contains("st-s-profile") && tree.contains("Profile"), "{tree}");
+    assert!(tree.find("st-s-profile").unwrap() < tree.find("st-s-look").unwrap(), "Profile is above Look: {tree}");
+    assert!(!tree.contains("st-prof-") && !tree.contains("st-acct-"), "Settings still opens on Look: {tree}");
+    let tree = profile_tree(cx, &staged, account_value(&[], None), None);
+    assert!(tree.contains("st-prof-title"), "section profile opens the Profile page: {tree}");
 }
 
 #[gpui::test]
-fn settings_info_remove_asks_first_and_says_what_is_deleted(cx: &mut TestAppContext) {
+fn settings_profile_signed_in_shows_the_account_the_included_features_and_the_remove_row(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let two = account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam")], Some("u1"));
+    let tree = profile_tree(cx, &staged, two, None);
+    for text in [
+        "vijay", "vijay@example.com", "Google", "Signed in with Google", "st-acct-name", "st-acct-email", "st-acct-provider",
+        "st-acct-switch", "Switch", "st-acct-signout", "Sign out",
+        "Included with your account", "st-prof-tokens", "Token saving", "st-prof-observe", "Observability engine",
+        "st-prof-pii", "Blockchain security for PII masking", "Included", "st-prof-pairing", "Phone and Telegram pairing",
+        "st-prof-remote", "Set up in Remote", "This computer", "st-acct-remove", "Remove from this computer",
+    ] {
+        assert!(tree.contains(text), "{text:?}: {tree}");
+    }
+    // The menu and the confirmation are closed until asked; the account's tokens are never shown.
+    for text in ["st-acct-pick-", "st-acct-add", "st-acct-confirm", "st-acct-remove-yes", "Not signed in", "st-prof-signin", "Turned on when you sign in", "Needs sign-in", "Your local profile data"] {
+        assert!(!tree.contains(text), "{text:?} is not shown at first: {tree}");
+    }
+    assert!(!tree.contains("GitHub"), "the other account is only in the Switch menu: {tree}");
+    assert!(tree.find("st-acct-name").unwrap() < tree.find("Included with your account").unwrap(), "who is above the features: {tree}");
+}
+
+#[gpui::test]
+fn settings_profile_without_an_account_says_so_offers_sign_in_and_shows_the_features_off(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (label, account, switch) in [
+        ("none", account_value(&[], None), false),
+        ("accounts but none current", account_value(&[("u1", "password", "ann")], None), true),
+    ] {
+        let tree = profile_tree(cx, &staged, account, None);
+        for text in [
+            "st-prof-title", "You're using HyperOx without an account", "Your spaces, terminals and agents work as usual. Sign in to turn on the features below.",
+            "st-prof-signin", "Sign in with your browser", "Opens pavii.tech. Use Google, GitHub or email.",
+            "Turned on when you sign in", "st-prof-tokens", "Token saving", "st-prof-observe", "Observability engine", "st-prof-pii",
+            "Blockchain security for PII masking", "Off", "st-prof-pairing", "Phone and Telegram pairing", "Needs sign-in",
+        ] {
+            assert!(tree.contains(text), "{label}: {text:?}: {tree}");
+        }
+        assert!(tree.lines().find(|l| l.contains("\"st-prof-signin\"")).is_some_and(|l| l.contains(":on_click(fn)")), "{label}: {tree}");
+        for text in ["Not signed in", "Included", "Set up in Remote", "st-acct-signout", "st-acct-remove", "st-prof-cancel"] {
+            assert!(!tree.contains(text), "{label}: {text:?}: {tree}");
+        }
+        assert_eq!(tree.contains("st-acct-switch"), switch, "{label}: saved accounts can be switched to: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_profile_sign_in_starts_the_browser_sign_in_and_waiting_shows_only_cancel(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let signed_out = || profile_values(account_value(&[], None));
+    // The sign-in button's handler is `this.signIn`.
+    let (_, calls) = describe_pressing(cx, &staged, "frame/settings", signed_out(), None, "this.press = (_e, cx) => this.signIn(cx);", 1);
+    let names: Vec<String> = calls.borrow().effects.iter().map(|(n, _)| n.clone()).collect();
+    assert_eq!(names, ["accountSignIn"], "{:?}", calls.borrow().effects);
+    // While it waits: the line, Cancel, and no second way to start another.
+    let (trees, _) = describe_pressing(cx, &staged, "frame/settings", signed_out(), None, "this.signingIn = true;", 0);
+    for text in ["Finish signing in using your browser", "st-prof-cancel", "Cancel", "st-prof-title"] {
+        assert!(trees[0].contains(text), "{text:?}: {}", trees[0]);
+    }
+    for text in ["st-prof-signin", "Sign in with your browser", "st-acct-switch"] {
+        assert!(!trees[0].contains(text), "{text:?} while waiting: {}", trees[0]);
+    }
+    // Signed in, adding an account waits under the header; the account stays.
+    let signed_in = profile_values(account_value(&[("u1", "google.com", "vijay")], Some("u1")));
+    let (trees, _) = describe_pressing(cx, &staged, "frame/settings", signed_in, None, "this.signingIn = true;", 0);
+    for text in ["Finish signing in using your browser", "st-prof-cancel", "st-acct-name", "vijay", "Included with your account"] {
+        assert!(trees[0].contains(text), "{text:?}: {}", trees[0]);
+    }
+}
+
+#[gpui::test]
+fn settings_profile_cancel_calls_account_cancel_sign_in_and_starts_nothing(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let setup = format!("this.signingIn = true; {}", press_button("st-prof-cancel"));
+    let (_, calls) = describe_pressing(cx, &staged, "frame/settings", profile_values(account_value(&[], None)), None, &setup, 1);
+    let names: Vec<String> = calls.borrow().effects.iter().map(|(n, _)| n.clone()).collect();
+    assert_eq!(names, ["accountCancelSignIn"], "{:?}", calls.borrow().effects);
+}
+
+#[gpui::test]
+fn settings_profile_set_up_in_remote_goes_to_the_remote_page(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let signed_in = profile_values(account_value(&[("u1", "google.com", "vijay")], Some("u1")));
+    let (trees, _) = describe_pressing(cx, &staged, "frame/settings", signed_in, None, &press_button("st-prof-remote"), 1);
+    assert!(trees[0].contains("st-prof-remote"), "{}", trees[0]);
+    assert!(trees[1].contains("Control your terminals from your phone") && !trees[1].contains("Included with your account"), "{}", trees[1]);
+}
+
+#[gpui::test]
+fn settings_profile_esc_closes_the_menu_then_the_confirm_then_cancels_the_sign_in_then_closes_settings(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let signed_in = || profile_values(account_value(&[("u1", "google.com", "vijay")], Some("u1")));
+    // Everything open at once; each Esc undoes one, in that order. `escapeAccount` is what the key handler calls.
+    let esc = |n: usize| {
+        format!(
+            "this.acctMenu = 'switch'; this.acctConfirm = 'u1'; this.signingIn = true; this.left = {n}; \
+             const go = (_e, cx) => {{ this.escapeAccount(); if (--this.left > 0) this.press = go; }}; if (this.left > 0) this.press = go;"
+        )
+    };
+    for (n, menu, confirm, waiting, cancels) in [(0, true, true, true, 0), (1, false, true, true, 0), (2, false, false, true, 0), (3, false, false, true, 1)] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", signed_in(), None, &esc(n), 3);
+        let tree = trees.last().unwrap();
+        assert_eq!(tree.contains("st-acct-menu"), menu, "{n} Esc: {tree}");
+        assert_eq!(tree.contains("st-acct-confirm"), confirm, "{n} Esc: {tree}");
+        assert_eq!(tree.contains("Finish signing in using your browser"), waiting, "{n} Esc: {tree}");
+        let cancelled = calls.borrow().effects.iter().filter(|(name, _)| name == "accountCancelSignIn").count();
+        assert_eq!(cancelled, cancels, "{n} Esc: {:?}", calls.borrow().effects);
+        assert!(!calls.borrow().effects.iter().any(|(name, _)| name == "closeOverlay"), "{n} Esc: Settings stays open: {:?}", calls.borrow().effects);
+    }
+    // With nothing open Esc falls through to closing Settings, and the key handler tries the account first.
+    let main = include_str!("../../defaults/frame/settings/main.js");
+    assert!(main.contains("else if (!this.escapeAccount()) return this.close();"), "the Esc order is in the key handler");
+    let (_, calls) = describe_pressing(cx, &staged, "frame/settings", signed_in(), None, "this.press = (_e, cx) => { if (!this.escapeAccount()) this.close(); };", 1);
+    assert!(calls.borrow().effects.iter().any(|(name, _)| name == "closeOverlay"), "{:?}", calls.borrow().effects);
+}
+
+#[gpui::test]
+fn settings_profile_switch_menu_lists_accounts_with_a_check_on_the_current_and_add_account(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let accounts = account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam"), ("u3", "password", "ann")], Some("u2"));
+    let tree = profile_tree(cx, &staged, accounts, Some("this.acctMenu = 'switch';"));
+    for text in ["st-acct-menu", "st-acct-pick-u1", "st-acct-pick-u2", "st-acct-pick-u3", "st-acct-current-u2", "st-acct-add", "Add account", "GitHub", "Email", "Google"] {
+        assert!(tree.contains(text), "{text:?}: {tree}");
+    }
+    assert_eq!(tree.matches("st-acct-current-").count(), 1, "one check, on the current account: {tree}");
+    assert!(!tree.contains("st-acct-current-u1") && !tree.contains("st-acct-current-u3"), "{tree}");
+    assert!(!tree.contains("st-acct-confirm") && !tree.contains("st-acct-remove-yes"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_profile_remove_asks_first_and_says_what_is_deleted(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let accounts = || account_value(&[("u1", "google.com", "vijay")], Some("u1"));
-    let tree = info_account_tree(cx, &staged, accounts(), Some("this.acctMenu = 'more';"));
+    let tree = profile_tree(cx, &staged, accounts(), None);
     assert!(tree.contains("st-acct-remove") && tree.contains("Remove from this computer"), "{tree}");
     assert!(!tree.contains("st-acct-confirm") && !tree.contains("Your local profile data"), "no remove without the confirm step: {tree}");
-    let tree = info_account_tree(cx, &staged, accounts(), Some("this.acctMenu = 'more'; this.acctConfirm = 'u1';"));
+    let tree = profile_tree(cx, &staged, accounts(), Some("this.acctConfirm = 'u1';"));
     assert!(
         tree.contains("Remove vijay from this computer? Your local profile data for this account is deleted; your online account stays."),
         "{tree}"
     );
-    assert!(tree.contains("st-acct-remove-yes") && tree.contains("st-acct-remove-no"), "{tree}");
+    assert!(tree.contains("st-acct-confirm") && tree.contains("st-acct-remove-yes") && tree.contains("st-acct-remove-no"), "{tree}");
     // A confirmation left for another account is not shown for this one.
-    let tree = info_account_tree(cx, &staged, accounts(), Some("this.acctMenu = 'more'; this.acctConfirm = 'someone-else';"));
+    let tree = profile_tree(cx, &staged, accounts(), Some("this.acctConfirm = 'someone-else';"));
     assert!(!tree.contains("st-acct-confirm"), "{tree}");
 }
 
@@ -2025,37 +2175,42 @@ fn settings_info_privacy_text_names_the_account_id_and_keeps_the_rest_word_for_w
 }
 
 #[gpui::test]
-fn settings_info_account_card_shows_a_very_long_name_and_email_whole_and_keeps_its_buttons(cx: &mut TestAppContext) {
+fn settings_profile_shows_a_very_long_name_and_email_whole_and_keeps_its_buttons(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let name = format!("Ana Mar\u{ed}a {}", "L\u{f3}pez-Garc\u{ed}a ".repeat(30)).trim_end().to_string();
     let email = format!("{name}@example.com");
-    let tree = info_account_tree(cx, &staged, account_value(&[("u1", "google.com", name.as_str())], Some("u1")), None);
-    for text in [name.as_str(), email.as_str(), "st-acct-name", "st-acct-email", "st-acct-switch", "st-acct-signout", "st-acct-more", "Google", "ABOUT", "PRIVACY"] {
+    let account = account_value(&[("u1", "google.com", name.as_str())], Some("u1"));
+    let tree = profile_tree(cx, &staged, account.clone(), None);
+    for text in [name.as_str(), email.as_str(), "st-acct-name", "st-acct-email", "st-acct-switch", "st-acct-signout", "Google", "st-acct-remove"] {
+        assert!(tree.contains(text), "{text:?}: {tree}");
+    }
+    let tree = info_account_tree(cx, &staged, account, None);
+    for text in ["ABOUT", "PRIVACY"] {
         assert!(tree.contains(text), "{text:?}: {tree}");
     }
 }
 
 #[gpui::test]
-fn settings_info_account_card_without_a_name_shows_the_email_and_without_either_says_account(cx: &mut TestAppContext) {
+fn settings_profile_without_a_name_shows_the_email_and_without_either_says_account(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let only = |email: Value, provider: &str| {
         let a = json!({"uid":"u1","provider":provider,"name":null,"email":email,"picture":null});
         json!({"current": a.clone(), "accounts": [a]})
     };
-    // The card between the name and the buttons.
+    // The header between the name and the buttons.
     let card = |tree: &str| {
         let (start, end) = (tree.find("st-acct-name").unwrap_or_else(|| panic!("{tree}")), tree.find("st-acct-switch").unwrap_or_else(|| panic!("{tree}")));
         assert!(start < end, "the name is above the buttons: {tree}");
         tree[start..end].to_string()
     };
-    let tree = info_account_tree(cx, &staged, only(json!("ann@example.com"), "password"), None);
+    let tree = profile_tree(cx, &staged, only(json!("ann@example.com"), "password"), None);
     let shown = card(&tree);
     assert!(shown.contains("ann@example.com") && shown.contains("st-acct-email") && shown.contains("Email"), "{shown}");
     assert!(!tree.contains("Not signed in") && tree.contains("st-acct-signout"), "{tree}");
     for email in [Value::Null, json!("")] {
-        let tree = info_account_tree(cx, &staged, only(email.clone(), "github.com"), None);
+        let tree = profile_tree(cx, &staged, only(email.clone(), "github.com"), None);
         let shown = card(&tree);
         assert!(shown.contains("Account") && shown.contains("GitHub"), "{email}: {shown}");
         assert!(!tree.contains("st-acct-email") && !tree.contains("Not signed in"), "{email}: {tree}");
@@ -2112,6 +2267,22 @@ fn settings_remote_pairing_is_gated_on_signing_in_but_existing_pairings_stay(cx:
 }
 
 #[gpui::test]
+fn settings_remote_sign_in_note_opens_profile_and_starts_no_sign_in(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["section"] = json!("remote");
+    let mut values = fixture(true, p, updates("current", "current"));
+    values.insert("account".into(), account_value(&[], None));
+    // The page is shown once the bridge has answered; the fixture's core does not, so it is given.
+    let setup = format!("this.remote = {{identities: [], locked: false, telegram_token: 'set'}}; {}", press_button("st-r-signin"));
+    let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", values, None, &setup, 1);
+    assert!(trees[0].contains("Sign in to pair a phone or Telegram.") && trees[0].contains("st-r-signin"), "{}", trees[0]);
+    assert!(trees[1].contains("st-prof-title") && trees[1].contains("st-prof-signin") && !trees[1].contains("st-r-signin"), "{}", trees[1]);
+    assert!(!calls.borrow().effects.iter().any(|(name, _)| name.starts_with("account")), "no sign-in starts: {:?}", calls.borrow().effects);
+}
+
+#[gpui::test]
 fn logo_menu_shows_the_current_account_the_others_and_the_account_actions(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
@@ -2121,26 +2292,25 @@ fn logo_menu_shows_the_current_account_the_others_and_the_account_actions(cx: &m
         describe_with_values(cx, &staged, "frame/account", values, setup).unwrap()
     };
     let tree = menu(account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam")], Some("u1")), None);
-    for text in ["account-menu", "vijay", "Google", "account-switch-u2", "sam", "GitHub", "account-add", "Add account", "account-settings", "Account settings", "account-signout", "Sign out"] {
+    for text in ["account-menu", "vijay", "Google", "account-switch-u2", "sam", "GitHub", "account-settings", "Account settings", "account-signout", "Sign out"] {
         assert!(tree.contains(text), "{text:?}: {tree}");
     }
-    assert!(!tree.contains("account-switch-u1"), "the current account is not offered as a switch: {tree}");
+    assert!(!tree.contains("account-switch-u1") && !tree.contains("account-add"), "the current account is not offered as a switch, and adding is in Profile: {tree}");
     assert!(!tree.contains("st-info") && !tree.contains("search"), "it is the menu, not the bar: {tree}");
-    // Signed out: no name, no Sign out; adding an account is there.
+    // Signed out: no name, no Sign out; the one item is "Sign in".
     let tree = menu(account_value(&[], None), None);
-    assert!(tree.contains("Not signed in") && tree.contains("account-add") && tree.contains("account-settings"), "{tree}");
+    assert!(tree.contains("Not signed in") && tree.contains("account-settings") && tree.contains("Sign in") && !tree.contains("Account settings"), "{tree}");
     assert!(!tree.contains("account-signout") && !tree.contains("account-switch-"), "{tree}");
 }
 
 #[gpui::test]
-fn logo_menu_choices_close_the_menu_then_switch_or_open_settings_info(cx: &mut TestAppContext) {
+fn logo_menu_choices_close_the_menu_then_switch_or_open_settings_profile(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     for (id, effect, args) in [
         ("account-switch-u2", "accountSwitch", json!(["u2"])),
         ("account-signout", "accountSignOut", json!(["u1"])),
-        ("account-add", "accountSignIn", json!([])),
-        ("account-settings", "run", json!(["app.settings", {"section":"info"}])),
+        ("account-settings", "run", json!(["app.settings", {"section":"profile"}])),
     ] {
         let mut values = fixture(true, json!({"menu":"account","overlay":"o1"}), updates("current", "current"));
         values.insert("account".into(), account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam")], Some("u1")));
@@ -2154,6 +2324,7 @@ fn logo_menu_choices_close_the_menu_then_switch_or_open_settings_info(cx: &mut T
         assert!(names.contains(&"closeOverlay"), "{id}: the menu closes: {:?}", c.effects);
         let hit = c.effects.iter().find(|(n, _)| n == effect).unwrap_or_else(|| panic!("{id}: no {effect}: {:?}", c.effects));
         assert_eq!(Value::Array(hit.1.clone()), args, "{id}: {:?}", c.effects);
+        assert!(!names.contains(&"accountSignIn"), "{id}: signing in is only on the Profile page: {:?}", c.effects);
     }
 }
 
@@ -6192,7 +6363,7 @@ fn todo_module(values: BTreeMap<String, Value>, host: Rc<RefCell<TodoHost>>) -> 
         h.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "openOverlay", "closeOverlay", "notify", "playSound", "openLink", "copyText", "accountSwitch", "accountSignOut", "accountRemove"] {
+    for name in ["run", "openOverlay", "closeOverlay", "notify", "playSound", "openLink", "copyText", "accountSwitch", "accountSignOut", "accountRemove", "accountCancelSignIn"] {
         let h = host.clone();
         module = module.function(name, move |a| {
             let args: Vec<Value> = (0..2).filter_map(|i| a.get(i).map(from_host)).collect();
