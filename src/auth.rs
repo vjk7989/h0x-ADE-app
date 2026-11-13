@@ -116,6 +116,23 @@ pub fn cancel_sign_in() {
     CANCELS.fetch_add(1, Ordering::SeqCst);
 }
 
+/// True until this computer has signed in or skipped once (the marker `<app home>/signin-done`).
+/// The sign-in screen never comes back after that: signing out or removing accounts keeps the marker.
+pub fn screen_needed() -> bool {
+    screen_needed_in(&crate::mods::app_dir())
+}
+
+/// Records that the person chose to skip the sign-in screen.
+pub fn skip_screen() -> Result<(), String> {
+    write_marker(&crate::mods::app_dir())
+}
+
+/// Once at start (before `refresh_all`): a home that already has a saved account (0.1.27)
+/// gets the marker, so the screen does not appear after a later sign-out or lapsed grace.
+pub fn heal_marker() {
+    heal_marker_in(&crate::mods::app_dir());
+}
+
 /// Re-checks every session's token. A network failure keeps the session (grace); a definitive
 /// rejection removes it. Safe to call from a background thread.
 pub fn refresh_all() {
@@ -196,6 +213,23 @@ fn current_in(dir: &Path, now: u64) -> Option<Account> {
     })
 }
 
+const MARKER: &str = "signin-done";
+
+fn screen_needed_in(dir: &Path) -> bool {
+    !dir.join(MARKER).exists()
+}
+
+fn write_marker(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("signin marker: {e}"))?;
+    crate::persist::write_atomic(&dir.join(MARKER), "1").map_err(|e| format!("signin marker: {e}"))
+}
+
+fn heal_marker_in(dir: &Path) {
+    if screen_needed_in(dir) && !locked(|| load(dir)).accounts.is_empty() {
+        let _ = write_marker(dir);
+    }
+}
+
 fn switch_in(dir: &Path, uid: &str) -> Result<(), String> {
     locked(|| {
         let mut store = load(dir);
@@ -253,6 +287,7 @@ fn store_session(dir: &Path, claims: &Claims, refresh_token: &str, now: u64) -> 
         }
         store.current = Some(account.uid.clone());
         save(dir, &store)?;
+        let _ = write_marker(dir); // a marker failure never fails the sign-in
         Ok(account)
     })
 }
@@ -837,6 +872,61 @@ mod tests {
         for bad in ["", "..", "../u2", "a/b", "a\\b"] {
             assert!(remove_in(&dir, bad).is_err(), "{bad:?}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_sign_in_screen_is_needed_only_until_a_skip_or_a_sign_in() {
+        let dir = scratch("marker-skip");
+        assert!(screen_needed_in(&dir));
+        write_marker(&dir).unwrap();
+        assert!(!screen_needed_in(&dir));
+        write_marker(&dir).unwrap(); // twice is fine
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn signing_out_or_removing_the_last_account_keeps_the_screen_away() {
+        let dir = scratch("marker-out");
+        let claims = decode_claims(&jwt(&good_payload("u1"))).unwrap();
+        store_session(&dir, &claims, "t1", 100).unwrap();
+        assert!(!screen_needed_in(&dir));
+        sign_out_in(&dir, "u1").unwrap();
+        assert!(!screen_needed_in(&dir));
+        remove_in(&dir, "u1").unwrap();
+        assert!(!screen_needed_in(&dir));
+        assert_eq!(load(&dir), Store::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_upgrader_with_any_saved_account_gets_the_marker_even_with_lapsed_grace_or_no_token() {
+        let dir = scratch("marker-heal");
+        heal_marker_in(&dir); // fresh home: nothing to heal
+        assert!(screen_needed_in(&dir));
+        // Lapsed grace, no current account, no secret stored.
+        save(&dir, &Store { current: None, accounts: vec![entry("old", 1)] }).unwrap();
+        assert!(screen_needed_in(&dir));
+        heal_marker_in(&dir);
+        assert!(!screen_needed_in(&dir));
+        assert!(dir.join(MARKER).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_marker_that_cannot_be_written_is_an_error_and_the_screen_stays_needed() {
+        let dir = scratch("marker-file");
+        std::fs::write(&dir, "i am a file").unwrap();
+        assert!(write_marker(&dir).is_err());
+        assert!(screen_needed_in(&dir));
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn the_marker_works_in_a_path_with_spaces_and_non_ascii_characters() {
+        let dir = scratch("marker Ana López ü");
+        write_marker(&dir).unwrap();
+        assert!(!screen_needed_in(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

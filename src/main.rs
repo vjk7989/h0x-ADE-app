@@ -254,6 +254,8 @@ fn main() {
             if let Some(tx) = mods::request_sender() {
                 control::listen(tx);
             }
+            // Before refresh_all, which may drop a rejected account.
+            auth::heal_marker();
             // Never blocks start-up; offline keeps the grace period.
             std::thread::spawn(auth::refresh_all);
             match core {

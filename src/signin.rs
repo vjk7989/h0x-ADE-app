@@ -1,6 +1,6 @@
-//! The sign-in screen: shown instead of the main window until a Pavii account is signed in.
-//! The browser does the signing in (auth.rs); this window only waits for it. Then the main
-//! window opens.
+//! The sign-in screen: shown instead of the main window until this computer has signed in or
+//! skipped once (auth.rs keeps the marker). The browser does the signing in; this window only
+//! waits for it. Then the main window opens.
 
 use crate::mods::Request;
 use gpui::prelude::FluentBuilder as _;
@@ -12,6 +12,9 @@ use std::time::Duration;
 const MARK: &[u8] = include_bytes!("../defaults/mods/workspace-chrome/hyperox-mark.svg");
 const OPEN_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg>"##;
 const ERROR_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5"/><path d="M12 16.5v.01"/></svg>"##;
+const TOKEN_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>"##;
+const OBSERVE_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>"##;
+const SHIELD_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg>"##;
 const SPIN_TRACK: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.5"><circle cx="12" cy="12" r="9"/></svg>"##;
 const SPIN_ARC: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round"><path d="M12 3a9 9 0 0 1 9 9"/></svg>"##;
 
@@ -35,6 +38,11 @@ const CAST: u32 = 0x3f8fa6;
 const TAGLINE: &str = "Your one-stop ADE for development, security and observability.";
 const SIGN_IN: &str = "Sign in with your browser";
 const TRY_AGAIN: &str = "Try again";
+const PERKS_LEAD: &str = "Signing in turns on";
+const PERKS: [(&[u8], &str); 3] =
+    [(TOKEN_ICON, "Token saving"), (OBSERVE_ICON, "Observability engine"), (SHIELD_ICON, "Blockchain security for PII masking")];
+const SKIP: &str = "Skip sign-in";
+const SKIP_NOTE: [&str; 2] = ["Skipping turns these off.", "Sign in later in Settings \u{2192} Profile."];
 const SIGN_IN_NOTE: &str = "Opens pavii.tech. Use Google, GitHub or email.";
 const WAITING_TITLE: &str = "Finish signing in using your browser";
 const WAITING_BODY: &str = "Then come back to this window.";
@@ -45,21 +53,22 @@ const CANCELLED: &str = "Sign-in was cancelled.";
 const TIMEOUT: &str = "Sign-in took too long. Please try again.";
 const REJECTED: &str = "This account can't sign in right now (it may be disabled). Try another account.";
 const OTHER: &str = "Something went wrong while signing in. Please try again.";
-const UNREACHABLE: &str = "Couldn't reach Pavii \u{2014} check your connection and try again.";
+const UNREACHABLE: &str = "Couldn't reach Pavii. Check your connection and try again.";
 
-/// Whether the main window must wait for a sign-in. Test and debug builds can skip it with
-/// `H0X_ADE_SKIP_SIGNIN=1` (the e2e tests run headless); release builds never can.
+/// Whether the sign-in screen comes first: only on a computer that has never signed in and
+/// never skipped. Test and debug builds can also skip it with `H0X_ADE_SKIP_SIGNIN=1`; that
+/// bypass is kept by user decision, although the e2e tests now write the marker instead.
 pub fn required() -> bool {
-    decide(bypass(), crate::auth::signed_in)
+    decide(bypass(), || !crate::auth::screen_needed())
 }
 
 fn bypass() -> bool {
     cfg!(any(test, debug_assertions)) && std::env::var_os("H0X_ADE_SKIP_SIGNIN").is_some_and(|v| v == "1")
 }
 
-/// The account is only looked up when there is no bypass.
-fn decide(bypass: bool, signed_in: impl FnOnce() -> bool) -> bool {
-    !bypass && !signed_in()
+/// The marker is only looked up when there is no bypass; `done` is "signed in or skipped".
+fn decide(bypass: bool, done: impl FnOnce() -> bool) -> bool {
+    !bypass && !done()
 }
 
 /// What to tell the person about a failed sign-in.
@@ -91,11 +100,18 @@ pub struct SignIn {
     core: Option<Arc<crate::core_link::Core>>,
     requests: Option<async_channel::Receiver<Request>>,
     focus: FocusHandle,
+    skip_focus: FocusHandle,
+}
+
+/// The window height: 640, or less on a short screen (visible height minus 80, never below 460).
+fn window_height(visible: Option<f32>) -> f32 {
+    visible.map_or(640.0, |h| (h - 80.0).clamp(460.0, 640.0))
 }
 
 pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver<Request>, cx: &mut App) {
+    let height = window_height(cx.primary_display().map(|d| f32::from(d.visible_bounds().size.height)));
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(760.0), px(520.0)), cx))),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(760.0), px(height)), cx))),
         window_min_size: Some(size(px(620.0), px(460.0))),
         titlebar: Some(TitlebarOptions { title: Some("HyperOx".into()), ..Default::default() }),
         app_id: Some("h0x-ade".into()),
@@ -104,7 +120,8 @@ pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver
     cx.open_window(options, |window, cx| {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        cx.new(|_| SignIn { state: State::Idle, attempt: 0, core: Some(core), requests: Some(requests), focus })
+        let skip_focus = cx.focus_handle().tab_stop(true);
+        cx.new(|_| SignIn { state: State::Idle, attempt: 0, core: Some(core), requests: Some(requests), focus, skip_focus })
     })
     .expect("cannot open the HyperOx window");
     cx.activate(true);
@@ -122,7 +139,7 @@ impl Drop for SignIn {
 impl SignIn {
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Enter and a click can arrive together: one attempt at a time.
-        if matches!(self.state, State::Waiting) {
+        if matches!(self.state, State::Waiting) || self.core.is_none() {
             return;
         }
         self.attempt += 1;
@@ -157,6 +174,21 @@ impl SignIn {
         .detach();
     }
 
+    /// Opens the main window signed out, the way a successful sign-in does (minus `identify`).
+    fn skip(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A browser sign-in in flight must finish or be cancelled first.
+        if matches!(self.state, State::Waiting) {
+            return;
+        }
+        let (Some(core), Some(requests)) = (self.core.take(), self.requests.take()) else { return };
+        if let Err(e) = crate::auth::skip_screen() {
+            tracing::warn!("sign-in skip not remembered: {e}");
+        }
+        crate::analytics::event("signin_skipped", serde_json::json!({}));
+        window.remove_window();
+        crate::open_main(core, requests, cx);
+    }
+
     fn cancel(&mut self, cx: &mut Context<Self>) {
         // Only a wait can be cancelled (Esc is also pressed in the other states).
         if !matches!(self.state, State::Waiting) {
@@ -170,12 +202,33 @@ impl SignIn {
 
     fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match ev.keystroke.key.as_str() {
-            "enter" => self.start(window, cx),
+            "enter" => match enter_action(self.state, self.skip_focus.is_focused(window)) {
+                Action::Skip => self.skip(window, cx),
+                // A focused button or link activates itself; only the bare root signs in.
+                Action::Start if self.focus.is_focused(window) => self.start(window, cx),
+                Action::Start | Action::None => {}
+            },
             "escape" => self.cancel(cx),
             "tab" if ev.keystroke.modifiers.shift => window.focus_prev(cx),
             "tab" => window.focus_next(cx),
             _ => {}
         }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Action {
+    Start,
+    Skip,
+    None,
+}
+
+/// What Enter does: nothing while waiting, Skip when Skip has focus, else sign in.
+fn enter_action(state: State, skip_focused: bool) -> Action {
+    match state {
+        State::Waiting => Action::None,
+        _ if skip_focused => Action::Skip,
+        _ => Action::Start,
     }
 }
 
@@ -186,6 +239,7 @@ struct Content {
     primary: Option<&'static str>,
     secondary: Option<&'static str>,
     note: Option<&'static str>,
+    skip: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -196,9 +250,9 @@ enum Status {
 
 fn content(state: State) -> Content {
     match state {
-        State::Idle => Content { status: None, primary: Some(SIGN_IN), secondary: None, note: Some(SIGN_IN_NOTE) },
-        State::Waiting => Content { status: Some(Status::Waiting), primary: None, secondary: Some("Cancel"), note: None },
-        State::Failed(e) => Content { status: Some(Status::Error(e)), primary: Some(TRY_AGAIN), secondary: None, note: None },
+        State::Idle => Content { status: None, primary: Some(SIGN_IN), secondary: None, note: Some(SIGN_IN_NOTE), skip: true },
+        State::Waiting => Content { status: Some(Status::Waiting), primary: None, secondary: Some("Cancel"), note: None, skip: false },
+        State::Failed(e) => Content { status: Some(Status::Error(e)), primary: Some(TRY_AGAIN), secondary: None, note: None, skip: true },
     }
 }
 
@@ -206,17 +260,23 @@ fn hex(v: u32) -> Hsla {
     rgb(v).into()
 }
 
-/// A fully rounded 44px button with a 2px focus ring when reached by keyboard.
-fn pill(id: &'static str, label: &'static str, primary: bool, icon: Option<&'static [u8]>) -> Stateful<Div> {
-    let ring = vec![
+fn ring() -> Vec<BoxShadow> {
+    vec![
         BoxShadow::new(px(0.0), px(0.0), hex(PANEL)).spread_radius(px(2.0)),
         BoxShadow::new(px(0.0), px(0.0), hex(FOCUS)).spread_radius(px(4.0)),
-    ];
+    ]
+}
+
+/// A fully rounded button with a 2px focus ring when reached by keyboard: 44px, or the quieter
+/// 40px Skip pill.
+fn pill(id: &'static str, label: &'static str, primary: bool, icon: Option<&'static [u8]>) -> Stateful<Div> {
+    let ring = ring();
+    let quiet = id == "signin-skip";
     div()
         .id(id)
         .tab_index(0)
-        .h(px(44.0))
-        .px(px(24.0))
+        .h(px(if quiet { 40.0 } else { 44.0 }))
+        .px(px(if quiet { 20.0 } else { 24.0 }))
         .flex()
         .flex_none()
         .items_center()
@@ -224,7 +284,7 @@ fn pill(id: &'static str, label: &'static str, primary: bool, icon: Option<&'sta
         .rounded(px(999.0))
         .border_1()
         .cursor_pointer()
-        .text_size(px(15.0))
+        .text_size(px(if quiet { 14.0 } else { 15.0 }))
         .font_weight(FontWeight::MEDIUM)
         .when(primary, |d| d.bg(hex(ACCENT)).border_color(hex(ACCENT)).text_color(hex(ACCENT_INK)).hover(|s| s.bg(hex(ACCENT_HI))))
         .when(!primary, |d| d.bg(hex(PANEL)).border_color(hex(RULE_2)).text_color(hex(INK)).hover(|s| s.bg(hex(PAPER_2))))
@@ -239,8 +299,13 @@ fn pill(id: &'static str, label: &'static str, primary: bool, icon: Option<&'sta
 fn link(id: &'static str, label: &'static str, url: &'static str) -> Stateful<Div> {
     div()
         .id(id)
+        .tab_index(0)
         .cursor_pointer()
         .underline()
+        .focus_visible(|mut s| {
+            s.box_shadow = Some(ring());
+            s
+        })
         .on_click(move |_, _, _| crate::links::open(&crate::links::Target::Url(url.to_string())))
         .child(label)
 }
@@ -287,6 +352,8 @@ impl Render for SignIn {
             )
         });
         let mut card = div()
+            .id("signin-card")
+            .overflow_y_scroll()
             .absolute()
             .left(px(40.0))
             .top(px(40.0))
@@ -311,12 +378,28 @@ impl Render for SignIn {
                     .child(div().text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(hex(INK)).child("HyperOx")),
             )
             // Gives way first when the window is short.
-            .child(div().flex_1().min_h(px(12.0)).max_h(px(56.0)))
+            .child(div().flex_1().min_h(px(12.0)).max_h(px(40.0)))
             .child(div().text_size(px(34.0)).line_height(px(36.0)).font_weight(FontWeight::NORMAL).text_color(hex(INK)).child("Welcome to HyperOx"))
             .child(div().mt(px(12.0)).max_w(px(300.0)).text_size(px(16.0)).line_height(px(25.0)).text_color(hex(INK_2)).child(TAGLINE))
             .child(
                 div()
-                    .mt(px(32.0))
+                    .id("signin-perks")
+                    .mt(px(20.0))
+                    .flex()
+                    .flex_col()
+                    .child(div().text_size(px(14.0)).line_height(px(20.0)).text_color(hex(INK_2)).child(PERKS_LEAD))
+                    .child(div().mt(px(6.0)).flex().flex_col().gap(px(6.0)).children(PERKS.map(|(icon, label)| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(svg().data(icon).size(px(16.0)).flex_none().text_color(hex(ACCENT)))
+                            .child(div().text_size(px(14.0)).line_height(px(20.0)).font_weight(FontWeight::MEDIUM).text_color(hex(INK)).child(label))
+                    }))),
+            )
+            .child(
+                div()
+                    .mt(px(24.0))
                     .flex()
                     .flex_col()
                     .items_start()
@@ -329,11 +412,29 @@ impl Render for SignIn {
                     .when_some(view.secondary, |d, label| d.child(pill("cancel", label, false, None).on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))))
                     .when_some(view.note, |d, note| d.child(div().text_size(px(13.0)).line_height(px(20.0)).text_color(hex(MUTED)).child(note))),
             )
+            .when(view.skip, |d| {
+                d.child(
+                    div()
+                        .mt(px(16.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(12.0))
+                        .child(pill("signin-skip", SKIP, false, None).track_focus(&self.skip_focus).on_click(cx.listener(|this, _, w, cx| this.skip(w, cx))))
+                        .child(
+                            div()
+                                .id("signin-skip-note")
+                                .text_size(px(13.0))
+                                .line_height(px(18.0))
+                                .text_color(hex(MUTED))
+                                .children(SKIP_NOTE.map(|line| div().child(line))),
+                        ),
+                )
+            })
             .child(div().flex_1().min_h(px(8.0)))
             .child(
                 div()
                     .flex()
-                    .flex_col()
+                    .justify_between()
                     .text_size(px(13.0))
                     .line_height(px(21.0))
                     .text_color(hex(MUTED))
@@ -359,13 +460,17 @@ impl Render for SignIn {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: that brings in `gpui::test`, which `#[test]` would then expand forever.
-    use super::{CANCELLED, OTHER, REJECTED, SIGN_IN, SIGN_IN_NOTE, State, Status, TIMEOUT, TRY_AGAIN, UNREACHABLE, content, decide, friendly};
+    use super::{
+        Action, CANCELLED, OTHER, PERKS, PERKS_LEAD, REJECTED, SIGN_IN, SIGN_IN_NOTE, SKIP_NOTE, State, Status, TIMEOUT, TRY_AGAIN, UNREACHABLE, content, decide,
+        enter_action, friendly, window_height,
+    };
 
     #[test]
     fn idle_offers_sign_in_with_a_note_and_nothing_else() {
         let c = content(State::Idle);
         assert_eq!((c.primary, c.secondary, c.note), (Some(SIGN_IN), None, Some(SIGN_IN_NOTE)));
         assert_eq!(c.status, None);
+        assert!(c.skip);
     }
 
     #[test]
@@ -373,6 +478,7 @@ mod tests {
         let c = content(State::Waiting);
         assert_eq!((c.primary, c.secondary, c.note), (None, Some("Cancel"), None));
         assert_eq!(c.status, Some(Status::Waiting));
+        assert!(!c.skip, "a browser sign-in is in flight: no Skip");
     }
 
     #[test]
@@ -381,7 +487,51 @@ mod tests {
             let c = content(State::Failed(friendly(error)));
             assert_eq!(c.status, Some(Status::Error(friendly(error))));
             assert_eq!((c.primary, c.secondary), (Some(TRY_AGAIN), None));
+            assert!(c.skip);
         }
+    }
+
+    #[test]
+    fn the_perks_come_in_the_owners_words_and_order() {
+        assert_eq!(PERKS_LEAD, "Signing in turns on");
+        let labels: Vec<&str> = PERKS.iter().map(|(_, l)| *l).collect();
+        assert_eq!(labels, ["Token saving", "Observability engine", "Blockchain security for PII masking"]);
+    }
+
+    #[test]
+    fn the_skip_note_points_to_settings_profile() {
+        assert_eq!(SKIP_NOTE[0], "Skipping turns these off.");
+        assert!(SKIP_NOTE[1].starts_with("Sign in later in Settings") && SKIP_NOTE[1].ends_with("Profile."));
+    }
+
+    #[test]
+    fn no_em_dash_on_the_screen() {
+        let mut texts = vec![PERKS_LEAD, SIGN_IN, SIGN_IN_NOTE, TRY_AGAIN, CANCELLED, TIMEOUT, REJECTED, OTHER, UNREACHABLE, SKIP_NOTE[0], SKIP_NOTE[1]];
+        texts.extend(PERKS.iter().map(|(_, l)| *l));
+        for t in texts {
+            assert!(!t.contains('\u{2014}'), "{t}");
+        }
+        assert_eq!(UNREACHABLE, "Couldn't reach Pavii. Check your connection and try again.");
+    }
+
+    #[test]
+    fn enter_signs_in_at_the_root_skips_on_skip_and_does_nothing_while_waiting() {
+        assert_eq!(enter_action(State::Waiting, false), Action::None);
+        assert_eq!(enter_action(State::Waiting, true), Action::None);
+        assert_eq!(enter_action(State::Idle, false), Action::Start);
+        assert_eq!(enter_action(State::Idle, true), Action::Skip);
+        assert_eq!(enter_action(State::Failed(CANCELLED), false), Action::Start);
+        assert_eq!(enter_action(State::Failed(CANCELLED), true), Action::Skip);
+    }
+
+    #[test]
+    fn the_window_is_640_high_and_shrinks_on_a_short_screen_but_never_below_460() {
+        assert_eq!(window_height(None), 640.0);
+        assert_eq!(window_height(Some(1040.0)), 640.0);
+        assert_eq!(window_height(Some(728.0)), 640.0);
+        assert_eq!(window_height(Some(700.0)), 620.0);
+        assert_eq!(window_height(Some(500.0)), 460.0);
+        assert_eq!(window_height(Some(0.0)), 460.0);
     }
 
     #[test]
