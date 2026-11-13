@@ -939,6 +939,13 @@ impl TerminalView {
             if joined {
                 return None;
             }
+            // A remote pane's folder is not on this machine: never stat it here.
+            if !self.address.contains('/')
+                && let Some((range, link)) = links::bare_file(text, at, self.cwd.as_deref())
+            {
+                target = Some(LinkTarget::External(link));
+                return Some(range);
+            }
             let range = links::word(text, at)?;
             let address = crate::mods::terminal_address(&text[range.clone()], &self.address)?;
             target = Some(LinkTarget::Terminal(address));

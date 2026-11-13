@@ -44,7 +44,26 @@ pub fn find(text: &str, at: usize) -> Option<Range<usize>> {
 
 /// The address-shaped word under the pointer, excluding surrounding punctuation.
 pub fn word(text: &str, at: usize) -> Option<Range<usize>> {
-    let allowed = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '.');
+    word_in(text, at, false)
+}
+
+/// A bare file name under the pointer (`plan.md`, `docs\plan.md` on Windows) that
+/// exists in the terminal's folder; the text detector only sees names with a slash.
+pub fn bare_file(text: &str, at: usize, cwd: Option<&Path>) -> Option<(Range<usize>, Target)> {
+    let range = word_in(text, at, cfg!(windows))?;
+    let name = text[range.clone()].rsplit(['/', '\\']).next()?;
+    let (stem, ext) = name.rsplit_once('.')?;
+    if stem.is_empty() || !(1..=10).contains(&ext.len()) || !ext.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    match resolve(&text[range.clone()], cwd)? {
+        target @ Target::File(_) => Some((range, target)),
+        Target::Url(_) => None,
+    }
+}
+
+fn word_in(text: &str, at: usize, backslash: bool) -> Option<Range<usize>> {
+    let allowed = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '.') || (backslash && c == '\\');
     if !text.get(at..)?.chars().next().is_some_and(allowed) {
         return None;
     }
@@ -981,5 +1000,34 @@ mod tests {
         for path in [r"\\server\share\a.bat", r"\\?\C:\x.exe", r"\\.\C:\x", r"\\.\COM1", r"\??\C:\x", r"\\?\GLOBALROOT\Device\x"] {
             assert!(opener(&Target::File(PathBuf::from(path))).is_none(), "{path}");
         }
+    }
+
+    #[test]
+    fn bare_file_names_link_when_they_exist_in_the_folder() {
+        let dir = std::env::temp_dir().join(format!("h0x-bare-file-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("plan.md"), "").unwrap();
+        std::fs::write(dir.join("docs").join("plan2.md"), "").unwrap();
+        std::fs::write(dir.join("my plan.md"), "").unwrap();
+        std::fs::write(dir.join("t3"), "").unwrap();
+        let hit = |text: &str, at: usize| bare_file(text, at, Some(&dir)).map(|(r, t)| (text[r].to_owned(), t));
+        let plan = Target::File(dir.join("plan.md"));
+        assert_eq!(hit("see plan.md now", 6), Some(("plan.md".into(), plan.clone())));
+        assert_eq!(hit("plan.md,", 2), Some(("plan.md".into(), plan.clone())));
+        assert_eq!(hit("(plan.md)", 3), Some(("plan.md".into(), plan)));
+        assert_eq!(hit("see missing.md now", 6), None);
+        assert_eq!(hit("t3", 0), None, "no extension");
+        assert_eq!(hit(".md", 1), None, "leading dot only");
+        assert_eq!(hit("plan.verylongext1", 2), None);
+        assert_eq!(hit("see plan.md now", 0), None);
+        assert_eq!(bare_file("plan.md", 0, None), None);
+        // A name with spaces is not joined: only the word under the pointer counts.
+        assert_eq!(hit("my plan.md", 0), None);
+        assert_eq!(hit("my plan.md", 5), Some(("plan.md".into(), Target::File(dir.join("plan.md")))));
+        if cfg!(windows) {
+            let text = r"open docs\plan2.md.";
+            assert_eq!(hit(text, 8), Some((r"docs\plan2.md".into(), Target::File(dir.join(r"docs\plan2.md")))));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
