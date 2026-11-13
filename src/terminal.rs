@@ -2391,6 +2391,75 @@ mod tests {
         assert_eq!(hint_text(&LinkTarget::Terminal("t1".into()), true), "⌘+click to peek");
     }
 
+    /// "see plan.md gone.md ./plan.md" on the first row: `plan.md` exists in the pane's folder, `gone.md` not.
+    #[gpui::test]
+    fn a_bare_file_link_and_its_hint_need_an_existing_local_file(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        let dir = std::env::temp_dir().join(format!("h0x-hint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plan.md"), "").unwrap();
+        let pane = |address: &str, cx: &mut TestAppContext| {
+            let view = cx.new(|cx| super::TerminalView::attach(crate::core_link::offline(), address.into(), (40, 4), cx));
+            view.update(cx, |view, _| {
+                view.cwd = Some(dir.clone());
+                view.grid.borrow_mut().vt.write(b"see plan.md gone.md ./plan.md");
+            });
+            view
+        };
+        // The cell's middle; cells are 9 by 18 until the first paint.
+        let at = |col: f32| point(px(col * 9.0 + 4.0), px(9.0));
+        let local = pane("t1", cx);
+        let remote = pane("remote/t1", cx);
+        local.read_with(cx, |view, _| {
+            assert_eq!(view.link_at(at(5.0)).map(|(t, _)| t), Some(LinkTarget::External(crate::links::Target::File(dir.join("plan.md")))));
+            assert!(view.link_at(at(14.0)).is_none(), "a name that is not there");
+            assert!(view.link_at(at(1.0)).is_none(), "a word without an extension");
+            assert!(view.link_at(at(35.0)).is_none(), "an empty cell");
+            assert!(matches!(view.link_at(at(22.0)), Some((LinkTarget::External(crate::links::Target::File(_)), _))), "a path with a slash");
+        });
+        remote.read_with(cx, |view, _| {
+            assert!(view.link_at(at(5.0)).is_none(), "a remote pane's bare name is not a file here");
+            assert!(view.link_at(at(22.0)).is_none(), "nor is its path with a slash");
+        });
+
+        let hint = |view: &Entity<super::TerminalView>, cx: &mut TestAppContext| view.read_with(cx, |view, _| view.link_hint.clone());
+        let wait = |ms: u64, cx: &mut TestAppContext| {
+            cx.executor().advance_clock(std::time::Duration::from_millis(ms));
+            cx.run_until_parked();
+        };
+        let want = hint_text(&LinkTarget::External(crate::links::Target::File(dir.join("plan.md"))), cfg!(target_os = "macos"));
+        local.update(cx, |view, cx| view.arm_hint(at(5.0), cx));
+        wait(399, cx);
+        assert_eq!(hint(&local, cx), None, "not before 400 ms");
+        wait(1, cx);
+        assert_eq!(hint(&local, cx), Some(want.clone()));
+        local.update(cx, |view, cx| view.hide_hint(cx));
+        assert_eq!(hint(&local, cx), None, "a key, a scroll or leaving hides it");
+
+        // Moving within the cell keeps the wait; moving to another cell starts over.
+        local.update(cx, |view, cx| view.arm_hint(at(5.0), cx));
+        wait(300, cx);
+        local.update(cx, |view, cx| view.arm_hint(point(px(5.0 * 9.0 + 8.0), px(17.0)), cx));
+        wait(100, cx);
+        assert_eq!(hint(&local, cx), Some(want), "the same cell");
+        local.update(cx, |view, cx| view.arm_hint(at(6.0), cx));
+        assert_eq!(hint(&local, cx), None, "another cell hides it at once");
+        wait(300, cx);
+        local.update(cx, |view, cx| view.arm_hint(at(1.0), cx));
+        wait(500, cx);
+        assert_eq!(hint(&local, cx), None, "the earlier wait was dropped, and no link is under the pointer now");
+        local.update(cx, |view, cx| view.arm_hint(at(14.0), cx));
+        wait(500, cx);
+        assert_eq!(hint(&local, cx), None, "never for a cell Ctrl+click would not act on");
+        for col in [5.0, 22.0] {
+            remote.update(cx, |view, cx| view.arm_hint(at(col), cx));
+            wait(500, cx);
+            assert_eq!(hint(&remote, cx), None, "no hint over a remote pane's file names");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[gpui::test]
     fn attach_errors_do_not_announce_a_terminal_exit(cx: &mut gpui::TestAppContext) {
         use gpui::*;
