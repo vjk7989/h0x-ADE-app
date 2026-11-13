@@ -3431,6 +3431,10 @@ impl AppWindow {
                     top.or_else(|| self.overlays.iter().find(|o| o.id == WELCOME || o.id == WHATS_NEW)).map(|o| o.id.clone())
                 });
                 if let Some(id) = id {
+                    // Closing the welcome counts as having seen it, so it doesn't come back on every start.
+                    if id == WELCOME && mods::shared("frame.welcomed").is_none_or(|v| v.is_null()) {
+                        mods::set_shared("frame.welcomed".into(), json!("closed"));
+                    }
                     self.close_overlay(&id, window, cx);
                 }
                 return;
@@ -5827,10 +5831,18 @@ mod tests {
         }));
         cx.update(|window, cx| view.update(cx, |this, cx| {
             let welcome = |this: &super::AppWindow| this.overlays.iter().filter(|o| o.id == super::WELCOME).count();
+            // Not finished yet: closing it is remembered, so it doesn't open again on the next start.
+            crate::mods::set_shared("frame.welcomed".into(), serde_json::Value::Null);
             this.open_overlay(super::WELCOME.into(), json!({"kind": "window"}), window, cx);
             assert_eq!(welcome(this), 1);
             this.run("overlay.close", json!({}), window, cx);
             assert_eq!(welcome(this), 0, "no id: the welcome closes");
+            assert_eq!(crate::mods::shared("frame.welcomed"), Some(json!("closed")), "closing the welcome remembers it");
+            // Finished or skipped earlier: closing keeps that answer.
+            crate::mods::set_shared("frame.welcomed".into(), json!("finished"));
+            this.open_overlay(super::WELCOME.into(), json!({"kind": "window"}), window, cx);
+            this.run("overlay.close", json!({}), window, cx);
+            assert_eq!(crate::mods::shared("frame.welcomed"), Some(json!("finished")), "an earlier answer stays");
             this.open_overlay(super::WELCOME.into(), json!({"kind": "window"}), window, cx);
             this.run("overlay.close", json!({ "id": "frame-welcome" }), window, cx);
             assert_eq!(welcome(this), 0, "by its mod's name");
