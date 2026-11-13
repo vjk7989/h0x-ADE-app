@@ -94,6 +94,7 @@ export const levelColors = (t) => LEVELS.map((_, i) => (i === 0 ? t.border : mix
 export function activityInit(view) {
   view.activity = null; // { days } once read; null before
   view.activityHover = null; // [week, row]
+  view.activityModel = null;
 }
 
 export async function loadActivity(view) {
@@ -104,12 +105,19 @@ export async function loadActivity(view) {
 
 const mono = (el) => el.font_family("JetBrains Mono");
 
+// The grid's days, each cell's level and the summary: worked out once per day, record and theme, not per render.
+function model(view, t) {
+  const today = new Date(), stamp = `${key(today)} ${t.accent} ${t.border} ${t.popover}`;
+  const kept = view.activityModel;
+  if (kept && kept.stamp === stamp && kept.record === view.activity) return kept;
+  const weeks = gridDays(today), days = view.activity?.days ?? {};
+  const levels = weeks.map((week) => week.map((d) => (d ? levelOf(minutesOf(days[key(d)])) : 0)));
+  return (view.activityModel = { stamp, record: view.activity, weeks, days, levels, colors: levelColors(t), sum: summarize(weeks, days) });
+}
+
 export function activityBlock(view, t) {
-  const today = new Date();
-  const weeks = gridDays(today);
-  const days = view.activity?.days ?? {};
-  const colors = levelColors(t);
-  const { minutes, active, longest } = summarize(weeks, days);
+  const { weeks, days, levels, colors, sum } = model(view, t);
+  const { minutes, active, longest } = sum;
   const empty = active === 0;
   const hover = view.activityHover;
   const hovered = !empty && hover ? weeks[hover[0]]?.[hover[1]] : null;
@@ -120,7 +128,7 @@ export function activityBlock(view, t) {
       if (!d) return div().id(`st-prof-activity-gap-${w}-${r}`).w(CELL).h(CELL).flex_none();
       const on = hover?.[0] === w && hover?.[1] === r && !empty;
       return div().id(`st-prof-activity-cell-${w}-${r}`).w(CELL).h(CELL).flex_none().rounded(2)
-        .bg(colors[levelOf(minutesOf(days[key(d)]))])
+        .bg(colors[levels[w][r]])
         .when(on, (el) => el.border_1().border_color(t.foreground))
         .on_hover((over, cx) => {
           if (empty) return;

@@ -10001,8 +10001,9 @@ export default class Scenario extends Real {
 fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
+    // The Info page: the probe asks the module's pure helpers and does not draw the 371-cell grid.
     let mut p = props();
-    p["section"] = json!("profile");
+    p["section"] = json!("info");
     let values = fixture(true, p, updates("current", "current"));
     let colors = values["theme"].clone();
     let tree = describe_activity(cx, &staged, values, None, Some(ACTIVITY_PROBE), None);
