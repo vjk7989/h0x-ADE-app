@@ -2990,4 +2990,441 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         assert!(!pending.exists(), "a clean quit leaves no note");
         let _ = std::fs::remove_dir_all(&parent);
     }
+
+    /// What the loopback release server answers per path: a body, or None to drop the connection.
+    type Routes = std::sync::Arc<Mutex<std::collections::HashMap<String, Option<Vec<u8>>>>>;
+
+    /// A plain-http release server on `listener` (the loopback stub only unit tests trust, so
+    /// nothing is signed): answers each GET from `routes`, 404 for a path not there, and
+    /// records the paths asked for. Runs until the process ends.
+    fn release_server(listener: std::net::TcpListener, routes: Routes) -> std::sync::Arc<Mutex<Vec<String>>> {
+        use std::io::{Read, Write};
+        let asked = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let log = asked.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") && stream.read_exact(&mut byte).is_ok() {
+                    request.push(byte[0]);
+                }
+                let path = String::from_utf8_lossy(&request).split(' ').nth(1).unwrap_or_default().to_owned();
+                log.lock().unwrap().push(path.clone());
+                let answer = routes.lock().unwrap().get(&path).cloned();
+                match answer {
+                    Some(Some(body)) => {
+                        let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                        let _ = stream.write_all(&body);
+                    }
+                    Some(None) => {}
+                    None => {
+                        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    }
+                }
+            }
+        });
+        asked
+    }
+
+    /// Runs the unit test `name` again in a child process on a fresh app home (`H0X_ADE_HOME`
+    /// holding settings `{"share_analytics": false}`) with no releases site set: the updater's
+    /// state, markers, notices and core are process-wide. True in the child, which then runs
+    /// the test; false in the parent once the child passed.
+    fn in_own_home(name: &str) -> bool {
+        const CHILD: &str = "H0X_TEST_UPDATE_OWN_HOME";
+        if std::env::var_os(CHILD).is_some() {
+            return true;
+        }
+        let home = std::env::temp_dir().join(format!("h0x-ade-update-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("settings.json"), r#"{"share_analytics": false}"#).unwrap();
+        let test = format!("update::tests::{name}");
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", test.as_str(), "--nocapture", "--test-threads=1"]).env(CHILD, "1").env("H0X_ADE_HOME", &home);
+        for key in ["H0X_ADE_RELEASES_URL", "H0X_CORE_RELEASES_URL", "H0X_RUNTIME_RELEASES_URL", "H0X_ADE_UPDATE_EXPECTED"] {
+            child.env_remove(key);
+        }
+        let out = child.output().unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && log.contains("1 passed"), "{log}");
+        false
+    }
+
+    /// `latest.json` offering `version` for this platform at `url` with checksum `sha`.
+    fn latest_json(version: &str, url: &str, sha: &str) -> Option<Vec<u8>> {
+        Some(format!(r#"{{"version":"{version}","targets":{{"{}":{{"url":"{url}","sha256":"{sha}"}}}}}}"#, target()).into_bytes())
+    }
+
+    /// A release tarball like CI's (built in `dir`): the `h0x-ade` folder with its icon and
+    /// an executable running `body`.
+    #[cfg(target_os = "linux")]
+    fn release_tarball(dir: &Path, body: &str) -> Vec<u8> {
+        let _ = std::fs::remove_dir_all(dir);
+        fake_exe(&dir.join("h0x-ade").join("h0x-ade"), body);
+        std::fs::write(dir.join("h0x-ade").join("h0x-ade.svg"), "<svg/>").unwrap();
+        let tarball = dir.join("release.tar.gz");
+        run(Command::new("tar").arg("-czf").arg(&tarball).arg("-C").arg(dir).arg("h0x-ade")).unwrap();
+        std::fs::read(&tarball).unwrap()
+    }
+
+    /// The running version installed in the app home; started, it leaves `old-ran` beside itself.
+    #[cfg(target_os = "linux")]
+    fn old_install() -> PathBuf {
+        let root = crate::mods::app_dir().join("install").join("h0x-ade");
+        let v = env!("CARGO_PKG_VERSION");
+        fake_exe(&root.join("h0x-ade"), &format!(r#"case "$1" in --version) echo "h0x-ade {v}";; *) touch "$(dirname "$0")/old-ran";; esac"#));
+        std::fs::write(root.join("h0x-ade.svg"), "<svg/>").unwrap();
+        root
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_newer_release_is_downloaded_checked_staged_once_and_swapped_in_with_the_old_one_kept() {
+        if !in_own_home("a_newer_release_is_downloaded_checked_staged_once_and_swapped_in_with_the_old_one_kept") {
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let root = old_install();
+        let bytes = release_tarball(&crate::mods::app_dir().join("release"), r#"case "$1" in --version) echo "h0x-ade 99.0.0";; *) exit 0;; esac"#);
+        let file = "/download/v99.0.0/h0x-ade-linux.tar.gz";
+        let routes = Routes::default();
+        // The checksum compares case-blind. No changelog is published: notes are optional.
+        routes.lock().unwrap().insert("/latest/download/latest.json".into(), latest_json("99.0.0", &format!("{url}{file}"), &sha256(&bytes).to_ascii_uppercase()));
+        routes.lock().unwrap().insert(file.into(), Some(bytes));
+        let asked = release_server(listener, routes);
+        let asked = || asked.lock().unwrap().clone();
+        assert_eq!(check_from(&root, &url), Ok(Some("99.0.0".to_owned())));
+        assert_eq!(asked(), vec!["/latest/download/latest.json", "/download/v99.0.0/changelog.md", file]);
+        assert_eq!(version_of(&beside(&root, ".new")).as_deref(), Some("99.0.0"), "the checked release is staged");
+        assert_eq!(std::fs::read_to_string(beside(&root, ".new.json")).unwrap(), r#"{"version":"99.0.0"}"#);
+        assert!(!beside(&root, ".download").exists(), "the work folder is cleaned up");
+        assert_eq!(version_of(&root).as_deref(), Some(env!("CARGO_PKG_VERSION")), "the install is untouched until the swap");
+        // A later check finds it staged and does not download it again.
+        assert_eq!(check_from(&root, &url), Ok(Some("99.0.0".to_owned())));
+        assert_eq!(asked().iter().filter(|p| *p == file).count(), 1);
+        // Applied on quit: the install holds the new version, `.previous` the old one.
+        assert!(swap(&root, "99.0.0"));
+        assert_eq!(version_of(&root).as_deref(), Some("99.0.0"));
+        assert_eq!(version_of(&beside(&root, ".previous")).as_deref(), Some(env!("CARGO_PKG_VERSION")));
+        assert!(!beside(&root, ".new").exists() && !beside(&root, ".new.json").exists());
+        assert!(marker().exists(), "the next start brings the core up to date");
+        let state = State::load();
+        assert_eq!((state.current.as_str(), state.ok, state.trying.as_deref()), ("99.0.0", 0, Some("99.0.0")));
+        // The relaunch helper watches the new version and has the old one to go back to.
+        let w = watch(&root).expect("a watch with a previous version");
+        assert_eq!((w.new.as_str(), w.old.as_str()), ("99.0.0", env!("CARGO_PKG_VERSION")));
+        assert_eq!((w.exe, w.previous, w.marker, w.pending), (root.join("h0x-ade"), beside(&root, ".previous"), started_marker("99.0.0"), pending_path()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_new_version_that_dies_at_start_is_rolled_back_reported_and_skipped_after_two_tries() {
+        if !in_own_home("a_new_version_that_dies_at_start_is_rolled_back_reported_and_skipped_after_two_tries") {
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let root = old_install();
+        let old = env!("CARGO_PKG_VERSION");
+        // It says its version, so it is staged, but exits at once when started.
+        let bytes = release_tarball(&crate::mods::app_dir().join("release"), r#"case "$1" in --version) echo "h0x-ade 99.0.0";; *) exit 3;; esac"#);
+        let file = "/download/v99.0.0/h0x-ade-linux.tar.gz";
+        let routes = Routes::default();
+        routes.lock().unwrap().insert("/latest/download/latest.json".into(), latest_json("99.0.0", &format!("{url}{file}"), &sha256(&bytes)));
+        routes.lock().unwrap().insert(file.into(), Some(bytes));
+        let asked = release_server(listener, routes);
+        for round in 1..=2u32 {
+            assert_eq!(check_from(&root, &url), Ok(Some("99.0.0".to_owned())), "round {round}");
+            assert!(swap(&root, "99.0.0"), "round {round}");
+            let w = watch(&root).expect("a watch with a previous version");
+            // What `relaunch_expected` runs, for an app that has already quit (no such pid).
+            let status = Command::new("sh")
+                .arg("-c")
+                .arg(WATCH_SH)
+                .arg("999999999")
+                .args([w.root.as_os_str(), w.previous.as_os_str(), w.exe.as_os_str(), w.marker.as_os_str(), w.pending.as_os_str()])
+                .args([w.new.as_str(), w.old.as_str()])
+                .arg(&w.quit)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "round {round}: the old version ran in the helper's place");
+            assert_eq!(version_of(&root).as_deref(), Some(old), "round {round}: the old version is back");
+            assert!(root.join("old-ran").exists(), "round {round}: and was started");
+            assert!(!beside(&root, ".previous").exists(), "round {round}");
+            assert_eq!(version_of(&failed_path(&root, round)).as_deref(), Some("99.0.0"), "round {round}: the failed version is kept");
+            assert!(pending_path().exists(), "round {round}: the helper left a note");
+            // The old version's next start reports it, once.
+            let _ = take_notices();
+            after_start();
+            let notices: Vec<_> = take_notices().into_iter().map(|n| (n.level, n.text)).collect();
+            assert_eq!(notices, [("error", rolled_back_text("App", "99.0.0", old))], "round {round}");
+            assert!(!pending_path().exists(), "round {round}: the note is read once");
+            let state = State::load();
+            assert_eq!((state.failed.as_deref(), state.failures, state.trying.as_deref()), (Some("99.0.0"), round, None), "round {round}");
+            std::fs::remove_file(root.join("old-ran")).unwrap();
+        }
+        // Failed twice in a row: skipped until a newer release, and not downloaded again.
+        assert_eq!(State::load().bad.as_deref(), Some("99.0.0"));
+        assert_eq!(check_from(&root, &url), Ok(None));
+        assert!(!beside(&root, ".new").exists());
+        assert_eq!(version_of(&root).as_deref(), Some(old));
+        assert_eq!(asked.lock().unwrap().iter().filter(|p| *p == file).count(), 2);
+    }
+
+    #[test]
+    fn a_damaged_dropped_or_unusable_release_is_refused_and_nothing_is_staged() {
+        if !in_own_home("a_damaged_dropped_or_unusable_release_is_refused_and_nothing_is_staged") {
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let home = crate::mods::app_dir();
+        let root = home.join("install").join("h0x-ade");
+        std::fs::create_dir_all(&root).unwrap();
+        let latest = "/latest/download/latest.json";
+        let file = "/download/v99.0.0/h0x-ade.tar.gz";
+        let at = format!("{url}{file}");
+        let routes = Routes::default();
+        let asked = release_server(listener, routes.clone());
+        let serve = |path: &str, body: Option<Vec<u8>>| {
+            routes.lock().unwrap().insert(path.to_owned(), body);
+        };
+        let downloads = || asked.lock().unwrap().iter().filter(|p| *p == file).count();
+        let nothing_staged = |case: &str| {
+            for suffix in [".new", ".new.json", ".download"] {
+                assert!(!beside(&root, suffix).exists(), "{case}: {suffix} was left");
+            }
+            let sealed = std::fs::read_dir(&home).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("sealed-")).count();
+            assert_eq!(sealed, 0, "{case}: a sealed copy was left");
+            assert!(std::fs::read_dir(&root).unwrap().next().is_none(), "{case}: the install changed");
+        };
+        let bytes = b"a release file".to_vec();
+        serve(file, Some(bytes.clone()));
+        // Another file's checksum, or none at all.
+        for sha in [sha256(b"another release file"), String::new()] {
+            serve(latest, latest_json("99.0.0", &at, &sha));
+            assert_eq!(check_from(&root, &url), Err("the download is damaged (checksum mismatch)".to_owned()), "sha {sha:?}");
+            nothing_staged("checksum");
+        }
+        assert_eq!(downloads(), 2);
+        // The right checksum, but not a tarball: extracting it fails.
+        serve(latest, latest_json("99.0.0", &at, &sha256(&bytes)));
+        let unpacked = check_from(&root, &url);
+        assert!(unpacked.is_err(), "{unpacked:?}");
+        nothing_staged("not a tarball");
+        // The download breaks off, or the file is not there.
+        serve(file, None);
+        let dropped = check_from(&root, &url);
+        assert!(dropped.as_ref().is_err_and(|e| e.starts_with(&format!("{at}: "))), "{dropped:?}");
+        nothing_staged("dropped");
+        routes.lock().unwrap().remove(file);
+        let missing = check_from(&root, &url);
+        assert!(missing.as_ref().is_err_and(|e| e.starts_with(&format!("{at}: "))), "{missing:?}");
+        nothing_staged("missing");
+        // No build for this platform, the running version, or an older one: nothing is downloaded.
+        let before = downloads();
+        serve(latest, Some(br#"{"version":"99.0.0","targets":{}}"#.to_vec()));
+        assert_eq!(check_from(&root, &url), Ok(None));
+        for version in [env!("CARGO_PKG_VERSION"), "0.0.1"] {
+            serve(latest, latest_json(version, &at, &sha256(&bytes)));
+            assert_eq!(check_from(&root, &url), Ok(None), "{version}");
+        }
+        // An unreadable manifest is an error.
+        for body in [&b""[..], &b"not json"[..], &br#"{"version":1}"#[..], &br#"["99.0.0"]"#[..]] {
+            serve(latest, Some(body.to_vec()));
+            let read = check_from(&root, &url);
+            assert!(read.as_ref().is_err_and(|e| e.starts_with("latest/download/latest.json: ")), "{body:?}: {read:?}");
+        }
+        assert_eq!(downloads(), before);
+        nothing_staged("manifests");
+        // A tarball whose program says another version than the manifest.
+        #[cfg(target_os = "linux")]
+        {
+            let other = release_tarball(&home.join("release"), r#"echo "h0x-ade 98.0.0""#);
+            serve(latest, latest_json("99.0.0", &at, &sha256(&other)));
+            serve(file, Some(other));
+            assert_eq!(check_from(&root, &url), Err("the download doesn't run as 99.0.0".to_owned()));
+            nothing_staged("another version");
+        }
+    }
+
+    #[test]
+    fn an_unreachable_release_site_changes_nothing_and_the_next_check_recovers() {
+        if !in_own_home("an_unreachable_release_site_changes_nothing_and_the_next_check_recovers") {
+            return;
+        }
+        // A port nothing listens on: the site is unreachable.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}");
+        let app = format!("{url}/app");
+        // SAFETY: this child process runs only this test, and no other thread reads the environment yet.
+        unsafe { std::env::set_var("H0X_CORE_RELEASES_URL", format!("{url}/core")) };
+        let root = crate::mods::app_dir().join("install").join("h0x-ade");
+        std::fs::create_dir_all(&root).unwrap();
+        set_core(Some("0.1.0".into()), None);
+        let app_check = check_from(&root, &app);
+        assert!(app_check.as_ref().is_err_and(|e| e.starts_with(&format!("{app}/latest/download/latest.json: "))), "{app_check:?}");
+        let core_check = check_core();
+        assert!(core_check.as_ref().is_err_and(|e| e.starts_with(&format!("{url}/core/latest/download/latest.json: "))), "{core_check:?}");
+        assert_eq!(checked_at(app_check.is_ok() && core_check.is_ok(), 100), None, "a failed check clears the last-checked time");
+        assert_eq!(core().ready, None);
+        assert!(std::fs::read_dir(&root).unwrap().next().is_none(), "the install is untouched");
+        for suffix in [".new", ".new.json", ".download"] {
+            assert!(!beside(&root, suffix).exists(), "{suffix}");
+        }
+        assert!(take_notices().is_empty(), "an offline check shows nothing");
+        // Back online at the same address.
+        let routes = Routes::default();
+        let asked = release_server(std::net::TcpListener::bind(("127.0.0.1", port)).unwrap(), routes.clone());
+        let serve = |path: &str, body: Option<Vec<u8>>| {
+            routes.lock().unwrap().insert(path.to_owned(), body);
+        };
+        let core_latest = "/core/latest/download/latest.json";
+        let core_release = |version: &str, generation: u64| Some(format!(r#"{{"version":"{version}","generation":{generation}}}"#).into_bytes());
+        serve("/app/latest/download/latest.json", Some(format!(r#"{{"version":"{}"}}"#, env!("CARGO_PKG_VERSION")).into_bytes()));
+        serve(core_latest, core_release("0.2.0", crate::core_link::GENERATION));
+        let app_check = check_from(&root, &app);
+        assert_eq!(app_check, Ok(None));
+        let core_check = check_core();
+        assert_eq!(core_check, Ok(()));
+        assert_eq!(checked_at(app_check.is_ok() && core_check.is_ok(), 300), Some(300));
+        assert_eq!(core().ready.as_deref(), Some("0.2.0"), "the newer core is offered");
+        // Another generation, or nothing newer, is not offered.
+        for (version, generation) in [("0.3.0", crate::core_link::GENERATION + 1), ("0.1.0", crate::core_link::GENERATION)] {
+            serve(core_latest, core_release(version, generation));
+            assert_eq!(check_core(), Ok(()));
+            assert_eq!(core().ready, None, "{version} generation {generation}");
+        }
+        // A core a package manager owns, or none connected, is never checked.
+        let before = asked.lock().unwrap().len();
+        set_core(Some("0.1.0".into()), Some("homebrew".into()));
+        assert_eq!(check_core(), Ok(()));
+        set_core(None, None);
+        assert_eq!(check_core(), Ok(()));
+        assert_eq!(asked.lock().unwrap().len(), before);
+        assert!(take_notices().is_empty());
+    }
+
+    #[test]
+    fn a_core_update_that_rolls_back_shows_the_notice_and_is_not_retried_on_its_own() {
+        if !in_own_home("a_core_update_that_rolls_back_shows_the_notice_and_is_not_retried_on_its_own") {
+            return;
+        }
+        // Stand-ins for `h0x-core`: only `h0x-core update --json` and `--version` are run.
+        let dir = crate::mods::app_dir().join("cores");
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        let stub = |name: &str, sh: &[&str], _cmd: &[&str]| {
+            let path = dir.join(name);
+            fake_exe(&path, &sh.join("\n"));
+            path
+        };
+        #[cfg(windows)]
+        let stub = |name: &str, _sh: &[&str], cmd: &[&str]| {
+            let path = dir.join(format!("{name}.cmd"));
+            std::fs::write(&path, format!("@echo off\r\n{}\r\n", cmd.join("\r\n"))).unwrap();
+            path
+        };
+        let run_update = |bin: PathBuf| {
+            crate::core_bin::use_core(bin);
+            update_core();
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while core().updating {
+                assert!(std::time::Instant::now() < deadline, "the core update never finished");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            take_notices().into_iter().map(|n| (n.level, n.text)).collect::<Vec<_>>()
+        };
+        set_core(Some("0.1.0".into()), None);
+        CORE.lock().unwrap().ready = Some("0.2.0".into());
+        // Warning lines first, then the reply: the new core failed and the old one is back.
+        let rolled_back = stub(
+            "rolled-back",
+            &[
+                r#"echo "warning: an old setting was ignored" >&2"#,
+                r#"echo 'WARN h0x_core: slow disk' >&2"#,
+                r#"echo '{"rolled_back":true,"error":"smoke test failed"}' >&2"#,
+                "exit 1",
+            ],
+            &[">&2 echo warning: an old setting was ignored", r#">&2 echo {"rolled_back":true,"error":"smoke test failed"}"#, "exit /b 1"],
+        );
+        let notices = run_update(rolled_back);
+        assert_eq!(notices, [("error", "Core update to 0.2.0 failed, HyperOx went back to 0.1.0. A report was sent.".to_owned())]);
+        let c = core();
+        assert_eq!((c.version.as_deref(), c.ready.as_deref(), c.error.as_deref()), (Some("0.1.0"), Some("0.2.0"), Some("smoke test failed")));
+        assert!(!core_waiting(&c), "a failed core update is tried again only by hand");
+        // A plain failure, nothing rolled back: no rollback notice.
+        let failed = stub("failed", &["echo 'no space left on device' >&2", "exit 1"], &[">&2 echo no space left on device", "exit /b 1"]);
+        assert!(run_update(failed).is_empty());
+        assert_eq!(core().error.as_deref(), Some("no space left on device"));
+        // Tried again by hand, and it works.
+        let works = stub(
+            "works",
+            &[r#"case "$1" in --version) echo "h0x-core 0.2.0";; *) echo '{"now":"h0x-core 0.2.0"}';; esac"#],
+            &[r#"if "%~1"=="--version" goto version"#, r#"echo {"now":"h0x-core 0.2.0"}"#, "exit /b 0", ":version", "echo h0x-core 0.2.0"],
+        );
+        assert_eq!(run_update(works), [("success", "Core updated to 0.2.0".to_owned())]);
+        let c = core();
+        assert_eq!((c.version.as_deref(), c.ready, c.error, c.updating), (Some("0.2.0"), None, None, false));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn watch_ps_puts_previous_back_when_the_new_version_exits_before_it_starts_ok() {
+        let parent = std::env::temp_dir().join(format!("h0x-ade-watch-ps-exit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        // A space and an apostrophe in the install path stay one literal.
+        let base = parent.join("it's my apps");
+        let root = base.join("h0x-ade");
+        let previous = base.join("h0x-ade.previous");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&previous).unwrap();
+        // The new version exits at once; the old one leaves a mark beside itself.
+        std::fs::write(root.join("h0x-ade.cmd"), "@exit /b 3\r\n").unwrap();
+        std::fs::write(previous.join("h0x-ade.cmd"), "@echo ran> \"%~dp0old-ran\"\r\n").unwrap();
+        // A failure kept from before is not overwritten.
+        std::fs::create_dir_all(failed_path(&root, 1)).unwrap();
+        let w = Watch {
+            root: root.clone(),
+            previous: previous.clone(),
+            exe: root.join("h0x-ade.cmd"),
+            marker: base.join("started-0.2.0"),
+            quit: base.join("quit-0.2.0"),
+            pending: base.join("pending-rollback.json"),
+            new: "0.2.0".into(),
+            old: "0.1.9".into(),
+        };
+        // No process has this id (Windows ids are multiples of 4): the app has already quit.
+        let script = watch_script(999_999_999, &w);
+        let powershell = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe");
+        let began = std::time::Instant::now();
+        let status = Command::new(powershell)
+            .current_dir(&parent)
+            .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let ran = root.join("old-ran");
+        while !ran.exists() && began.elapsed() < Duration::from_secs(25) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(ran.exists(), "the old version was started from the install path within 25 s, not after the 60 s wait");
+        assert!(!previous.exists());
+        assert!(failed_path(&root, 2).join("h0x-ade.cmd").exists(), "the new version is kept at the next free .failed-<n>");
+        assert!(std::fs::read_dir(failed_path(&root, 1)).unwrap().next().is_none(), "the earlier failure is untouched");
+        let note = take_pending(&w.pending).expect("the helper leaves a note");
+        assert_eq!((note.from.as_str(), note.to.as_str(), note.reason.as_str()), ("0.2.0", "0.1.9", "the new version exited before it started OK"));
+        let _ = std::fs::remove_dir_all(&parent);
+    }
 }
