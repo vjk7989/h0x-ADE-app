@@ -531,6 +531,31 @@ mod tests {
     }
 
     #[test]
+    fn signing_out_with_sharing_off_queues_nothing_and_keeps_the_install_id() {
+        let dir = home_dir("identify-none-off");
+        let a = make(&dir, Some("phc_test"));
+        a.identify(None, false);
+        a.identify(None, false);
+        assert_eq!(a.distinct_id(), "ab".repeat(16));
+        assert!(sent_batches(&a, true).is_empty());
+    }
+
+    #[test]
+    fn a_sign_in_while_sharing_was_off_is_not_linked_later_but_the_next_one_with_sharing_on_is() {
+        let dir = home_dir("identify-off-then-on");
+        let a = make(&dir, Some("phc_test"));
+        a.identify(Some(("u_1", "google.com")), false);
+        a.identify(None, false);
+        a.identify(Some(("u_2", "github.com")), true);
+        assert_eq!(a.distinct_id(), "account:u_2");
+        let sent = sent_batches(&a, true);
+        let batch = sent[0]["body"]["batch"].as_array().unwrap();
+        let ids: Vec<(&str, &str)> = batch.iter().map(|e| (e["event"].as_str().unwrap(), e["distinct_id"].as_str().unwrap())).collect();
+        assert_eq!(ids, [("$identify", "account:u_2")]);
+        assert!(!sent[0]["body"].to_string().contains("u_1"), "the account signed in with sharing off is never linked");
+    }
+
+    #[test]
     fn batch_body_has_key_events_and_the_install_id() {
         let dir = home_dir("shape");
         let a = make(&dir, Some("phc_test"));

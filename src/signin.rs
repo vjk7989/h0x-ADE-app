@@ -105,7 +105,7 @@ pub struct SignIn {
 
 /// The window height: 640, or less on a short screen (visible height minus 80, never below 460).
 fn window_height(visible: Option<f32>) -> f32 {
-    visible.map_or(640.0, |h| (h - 80.0).clamp(460.0, 640.0))
+    visible.filter(|h| h.is_finite()).map_or(640.0, |h| (h - 80.0).clamp(460.0, 640.0))
 }
 
 pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver<Request>, cx: &mut App) {
@@ -556,5 +556,67 @@ mod tests {
         for error in ["listener: unusable port", "secret: access denied", "", "Sign-in was cancelled", "CANCELLED by user", "cancelled later", "connection refused", "timeout again"] {
             assert_eq!(friendly(error), OTHER, "{error}");
         }
+    }
+
+    #[test]
+    fn a_cancelled_sign_in_offers_skip_again_next_to_try_again() {
+        let c = content(State::Failed(friendly("cancelled")));
+        assert!(c.skip, "Skip is back after Cancel");
+        assert_eq!(c.status, Some(Status::Error(CANCELLED)));
+        assert_eq!((c.primary, c.secondary, c.note), (Some(TRY_AGAIN), None, None));
+    }
+
+    #[test]
+    fn enter_follows_the_skip_focus_after_every_failure_and_never_acts_while_waiting() {
+        for error in [CANCELLED, TIMEOUT, REJECTED, OTHER, UNREACHABLE] {
+            assert_eq!(enter_action(State::Failed(error), false), Action::Start, "{error}");
+            assert_eq!(enter_action(State::Failed(error), true), Action::Skip, "{error}");
+        }
+        for skip_focused in [false, true] {
+            assert_eq!(enter_action(State::Waiting, skip_focused), Action::None);
+        }
+    }
+
+    #[test]
+    fn enter_can_skip_exactly_when_the_skip_button_is_shown() {
+        let states = [State::Idle, State::Waiting, State::Failed(CANCELLED), State::Failed(TIMEOUT), State::Failed(UNREACHABLE)];
+        for state in states {
+            let shown = content(state).skip;
+            assert_eq!(enter_action(state, true) == Action::Skip, shown, "{:?}", content(state).status);
+            // While waiting, a sign-in is in flight: no Skip shown, and Enter does nothing at all.
+            if !shown {
+                assert_eq!(enter_action(state, false), Action::None);
+            }
+        }
+    }
+
+    #[test]
+    fn the_window_height_at_and_around_each_limit() {
+        // 460 + 80 = 540 and 640 + 80 = 720 are the two corners.
+        for (visible, want) in [
+            (539.0, 460.0),
+            (540.0, 460.0),
+            (541.0, 461.0),
+            (719.0, 639.0),
+            (720.0, 640.0),
+            (721.0, 640.0),
+            (80.0, 460.0),
+            (-0.0, 460.0),
+            (-500.0, 460.0),
+            (f32::MIN, 460.0),
+            (f32::NEG_INFINITY, 460.0),
+            (f32::MAX, 640.0),
+            (f32::INFINITY, 640.0),
+            (f32::MIN_POSITIVE, 460.0),
+        ] {
+            assert_eq!(window_height(Some(visible)), want, "{visible}");
+        }
+        assert_eq!(window_height(None), 640.0);
+    }
+
+    #[test]
+    fn a_display_that_reports_no_usable_height_still_gets_a_window_between_460_and_640() {
+        let h = window_height(Some(f32::NAN));
+        assert!(h.is_finite() && (460.0..=640.0).contains(&h), "{h}");
     }
 }

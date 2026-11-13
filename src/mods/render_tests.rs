@@ -2350,6 +2350,169 @@ fn logo_menu_waits_while_an_account_change_runs_and_the_user_mod_only_opens_the_
     assert!(chrome.contains("mod: \"frame-account\"") && !chrome.contains("account(") && !chrome.contains("accountSign") && !chrome.contains("accountSwitch"), "{chrome}");
 }
 
+#[gpui::test]
+fn settings_profile_with_saved_accounts_but_none_current_lists_them_all_with_no_check(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let saved = account_value(&[("u1", "password", "ann"), ("u2", "github.com", "sam")], None);
+    let tree = profile_tree(cx, &staged, saved, Some("this.acctMenu = 'switch';"));
+    for text in ["st-prof-title", "st-prof-signin", "st-acct-switch", "st-acct-menu", "st-acct-pick-u1", "st-acct-pick-u2", "ann", "sam", "st-acct-add", "Add account", "Turned on when you sign in", "Off"] {
+        assert!(tree.contains(text), "{text:?}: {tree}");
+    }
+    for text in ["st-acct-current-", "st-acct-name", "st-acct-signout", "st-acct-remove", "Included with your account", "st-prof-cancel"] {
+        assert!(!tree.contains(text), "{text:?}: nobody is current: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_profile_waiting_with_the_menu_open_shows_one_cancel_and_no_second_sign_in_button(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let setup = Some("this.signingIn = true; this.acctMenu = 'switch';");
+    let tree = profile_tree(cx, &staged, account_value(&[("u1", "password", "ann")], None), setup);
+    assert!(tree.contains("Finish signing in using your browser") && tree.contains("st-prof-title"), "{tree}");
+    assert_eq!(tree.matches("\"st-prof-cancel\"").count(), 1, "{tree}");
+    for text in ["st-prof-signin", "Sign in with your browser", "st-acct-switch", "Waiting\u{2026}"] {
+        assert!(!tree.contains(text), "{text:?} while a sign-in waits: {tree}");
+    }
+    let tree = profile_tree(cx, &staged, account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam")], Some("u1")), setup);
+    assert!(tree.contains("Finish signing in using your browser") && tree.contains("st-acct-name") && tree.contains("Included with your account"), "{tree}");
+    assert_eq!(tree.matches("\"st-prof-cancel\"").count(), 1, "{tree}");
+    assert!(!tree.contains("st-prof-signin"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_profile_a_running_switch_shows_waiting_but_never_cancel(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let signed_in = || account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam")], Some("u1"));
+    for (label, account, setup) in [
+        ("signed in", signed_in(), "this.acctBusy = true;"),
+        ("signed in, menu open", signed_in(), "this.acctBusy = true; this.acctMenu = 'switch';"),
+        ("saved, none current", account_value(&[("u1", "password", "ann")], None), "this.acctBusy = true;"),
+    ] {
+        let tree = profile_tree(cx, &staged, account, Some(setup));
+        assert!(tree.contains("Waiting\u{2026}"), "{label}: {tree}");
+        for text in ["st-prof-cancel", "Finish signing in using your browser", "st-acct-switch", "st-acct-signout"] {
+            assert!(!tree.contains(text), "{label}: {text:?} while a switch runs: {tree}");
+        }
+    }
+}
+
+#[gpui::test]
+fn settings_profile_hides_a_remove_confirm_left_for_another_saved_account_or_when_signed_out(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let two = account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam")], Some("u1"));
+    let tree = profile_tree(cx, &staged, two, Some("this.acctConfirm = 'u2';"));
+    assert!(tree.contains("st-acct-remove") && tree.contains("Remove from this computer"), "{tree}");
+    for text in ["st-acct-confirm", "st-acct-remove-yes", "Remove sam", "Remove vijay", "Your local profile data"] {
+        assert!(!tree.contains(text), "{text:?}: {tree}");
+    }
+    let saved = account_value(&[("u1", "google.com", "vijay")], None);
+    let tree = profile_tree(cx, &staged, saved, Some("this.acctConfirm = 'u1';"));
+    assert!(!tree.contains("st-acct-confirm") && !tree.contains("st-acct-remove"), "signed out has nothing to remove: {tree}");
+}
+
+#[gpui::test]
+fn settings_profile_ids_carry_an_odd_uid_whole(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let long = "x".repeat(128);
+    let uids = ["Ab-9_z", "u.1 \u{fc}", long.as_str()];
+    for current in uids {
+        let accounts = account_value(&[(uids[0], "google.com", "ann"), (uids[1], "github.com", "sam"), (uids[2], "password", "bo")], Some(current));
+        let setup = format!("this.acctMenu = 'switch'; this.acctConfirm = {};", serde_json::to_string(current).unwrap());
+        let tree = profile_tree(cx, &staged, accounts, Some(setup.as_str()));
+        for uid in uids {
+            assert!(tree.contains(&format!("\"st-acct-pick-{uid}\"")), "{uid:?}: {tree}");
+        }
+        assert!(tree.contains(&format!("\"st-acct-current-{current}\"")), "{current:?}: {tree}");
+        assert_eq!(tree.matches("st-acct-current-").count(), 1, "{current:?}: {tree}");
+        assert!(tree.contains("st-acct-confirm"), "the confirm for the current uid shows: {current:?}: {tree}");
+    }
+}
+
+// The letter in the 48px avatar of the Profile header.
+fn profile_initial(tree: &str) -> String {
+    let lines: Vec<&str> = tree.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| l.contains(".rounded_full") && l.contains(".text_size[Number(20.0)]"))
+        .unwrap_or_else(|| panic!("no avatar: {tree}"));
+    lines.get(at + 1).map(|l| l.trim().to_string()).unwrap_or_default()
+}
+
+#[gpui::test]
+fn settings_profile_initial_comes_from_the_name_then_the_email_then_account(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let one = |name: Value, email: Value| {
+        let a = json!({"uid":"u1","provider":"password","name":name,"email":email,"picture":null});
+        json!({"current": a.clone(), "accounts": [a]})
+    };
+    for (name, email, want) in [
+        (json!("zoe"), json!("ann@example.com"), "Z"),
+        (Value::Null, json!("bob@example.com"), "B"),
+        (json!(""), json!("bob@example.com"), "B"),
+        (Value::Null, Value::Null, "A"),
+        (json!(""), json!(""), "A"),
+        (json!("\u{e9}mile"), Value::Null, "\u{c9}"),
+    ] {
+        let tree = profile_tree(cx, &staged, one(name.clone(), email.clone()), None);
+        assert_eq!(profile_initial(&tree), format!("text \"{want}\""), "{name} {email}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_profile_initial_of_a_name_starting_with_an_emoji_is_a_whole_character(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let a = json!({"uid":"u1","provider":"github.com","name":"\u{1f980} Ferris","email":null,"picture":null});
+    let tree = profile_tree(cx, &staged, json!({"current": a.clone(), "accounts": [a]}), None);
+    assert!(!tree.contains('\u{fffd}'), "half a character: {tree}");
+    assert_eq!(profile_initial(&tree), "text \"\u{1f980}\"", "{tree}");
+}
+
+#[gpui::test]
+fn settings_closing_while_a_sign_in_waits_cancels_it_first_and_only_then(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (label, account, state, want) in [
+        ("signed out, waiting", account_value(&[], None), "this.signingIn = true;", vec!["accountCancelSignIn", "closeOverlay"]),
+        ("signed in, adding, waiting", account_value(&[("u1", "google.com", "vijay")], Some("u1")), "this.signingIn = true;", vec!["accountCancelSignIn", "closeOverlay"]),
+        ("nothing waits", account_value(&[], None), "", vec!["closeOverlay"]),
+        ("a switch runs", account_value(&[("u1", "google.com", "vijay")], Some("u1")), "this.acctBusy = true;", vec!["closeOverlay"]),
+    ] {
+        let setup = format!("{state} this.press = (_e, cx) => this.close();");
+        let (_, calls) = describe_pressing(cx, &staged, "frame/settings", profile_values(account), None, &setup, 1);
+        let names: Vec<String> =
+            calls.borrow().effects.iter().map(|(n, _)| n.clone()).filter(|n| n == "accountCancelSignIn" || n == "closeOverlay").collect();
+        assert_eq!(names, want, "{label}: {:?}", calls.borrow().effects);
+        assert!(!calls.borrow().effects.iter().any(|(n, _)| n == "accountSignIn"), "{label}: {:?}", calls.borrow().effects);
+    }
+}
+
+#[gpui::test]
+fn logo_menu_signed_out_offers_sign_in_that_opens_settings_profile(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (label, account) in [("nobody saved", account_value(&[], None)), ("saved, none current", account_value(&[("u1", "password", "ann")], None))] {
+        let mut values = fixture(true, json!({"menu":"account","overlay":"o1"}), updates("current", "current"));
+        values.insert("account".into(), account);
+        let setup = "const real = this.row.bind(this); \
+             this.row = (id, label, hint, action) => { if (id === 'account-settings') { this.press = action; this.label = label; } return real(id, label, hint, action); };";
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/account", values, None, setup, 1);
+        assert!(trees[0].contains("Sign in") && !trees[0].contains("Account settings") && !trees[0].contains("account-signout"), "{label}: {}", trees[0]);
+        let c = calls.borrow();
+        let names: Vec<&str> = c.effects.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"closeOverlay"), "{label}: {:?}", c.effects);
+        let run = c.effects.iter().find(|(n, _)| n == "run").unwrap_or_else(|| panic!("{label}: no run: {:?}", c.effects));
+        assert_eq!(Value::Array(run.1.clone()), json!(["app.settings", {"section":"profile"}]), "{label}");
+        assert!(!names.iter().any(|n| n.starts_with("accountSign")), "{label}: signing in is only on the Profile page: {:?}", c.effects);
+    }
+}
+
 // `entry` with settings.json in `values`' app home holding `settings` (None: missing) and `setup` run after its
 // init. A press is what `setup` leaves in `this.press`: a timer runs it with a live cx, as a click would. Describes
 // the entry once its tasks have finished, then again after each of `presses` presses; returns each description.

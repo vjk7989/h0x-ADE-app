@@ -1224,7 +1224,7 @@ export default class Settings extends View {
   avatar(t, a, size) {
     return div().w(size).h(size).rounded_full().flex_none().flex().items_center().justify_center()
       .bg(t.accent).text_size(Math.round(size * 0.42)).font_semibold().text_color(t.accent_foreground)
-      .child(accountName(a).slice(0, 1).toUpperCase());
+      .child((Array.from(accountName(a))[0] ?? "A").toUpperCase());
   }
 
   // A sentence-case heading inside a page (heading() is the tracked-caps one).
@@ -1252,7 +1252,7 @@ export default class Settings extends View {
   switchButton(t) {
     return h_flex().id("st-acct-switch").px(12).py(5).gap(6).items_center().rounded(7).border_1().border_color(t.border).bg(t.raised)
       .cursor_pointer().text_size(13).text_color(t.foreground).hover((s) => s.bg(t.hover))
-      .on_click((_e, cx) => { this.acctMenu = this.acctMenu ? null : "switch"; this.acctConfirm = null; cx.notify(); })
+      .on_click((_e, cx) => { if (this.signingIn || this.acctBusy) return; this.acctMenu = this.acctMenu ? null : "switch"; this.acctConfirm = null; cx.notify(); })
       .child("Switch account")
       .child(svg(I("chevron-down")).size(14).text_color(t.muted));
   }
@@ -1307,7 +1307,7 @@ export default class Settings extends View {
                 ]))
             // Accounts are saved but none is current: they can still be switched to.
             .when(acct.accounts.length > 0 && !this.signingIn, (el) => el.child(h_flex().pt(6).child(this.acctBusy ? busy : this.switchButton(t))))))
-        .when(this.acctMenu === "switch", (el) => el.child(this.accountMenu(t, acct)))
+        .when(this.acctMenu === "switch" && !this.signingIn && !this.acctBusy, (el) => el.child(this.accountMenu(t, acct)))
         .child(this.subheading(t, "Turned on when you sign in"))
         .children(FEATURES.map(([id, title, about]) => this.profileRow(t, id, title, about, this.stateTag(t, false, "Off"))))
         .child(pairing(this.stateTag(t, false, "Needs sign-in")));
@@ -1323,7 +1323,7 @@ export default class Settings extends View {
           .child(this.switchButton(t))
           .child(this.button(t, "st-acct-signout", "Sign out", (_e, cx) => this.accountDo(() => accountSignOut(cur.uid), cx)))))
       .when(this.signingIn, (el) => el.child(h_flex().w_full().pt(12).child(this.waitingLine(t))))
-      .when(this.acctMenu === "switch", (el) => el.child(this.accountMenu(t, acct)))
+      .when(this.acctMenu === "switch" && !this.signingIn && !this.acctBusy, (el) => el.child(this.accountMenu(t, acct)))
       .child(this.subheading(t, "Included with your account"))
       .children(FEATURES.map(([id, title, about]) => this.profileRow(t, id, title, about, this.stateTag(t, true, "Included"))))
       .child(pairing(this.button(t, "st-prof-remote", "Set up in Remote", (_e, cx) => this.openSection("remote", cx))))
