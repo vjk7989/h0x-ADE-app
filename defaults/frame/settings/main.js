@@ -3,20 +3,21 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
 import { agentsInit, loadAgents, agentsPage } from "./agents.js";
+import { activityInit, loadActivity, activityBlock } from "./activity.js";
 import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, nextCommand, window, account, accountSignIn, accountCancelSignIn, accountSwitch, accountSignOut, accountRemove } from "h0x";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
 const SECTIONS = [
-  { id: "profile", title: "Profile", icon: "user" },
+  { id: "profile", title: "Profile", icon: "user-round" },
   { id: "look", title: "Look", icon: "palette" },
   ...(window()?.platform === "macos" ? [{ id: "keyboard", title: "Keyboard", icon: "keyboard" }] : []),
   { id: "agents", title: "Agents", icon: "terminal" },
   { id: "machines", title: "Machines", icon: "server" },
   { id: "remote", title: "Remote", icon: "smartphone" },
   { id: "alerts", title: "Alerts", icon: "bell" },
-  { id: "mods", title: "Mods", icon: "puzzle" },
-  { id: "updates", title: "Updates", icon: "refresh" },
+  { id: "mods", title: "Mods", icon: "blocks" },
+  { id: "updates", title: "Updates", icon: "refresh-cw" },
   { id: "info", title: "Info", icon: "info" },
 ];
 
@@ -53,9 +54,9 @@ const accountName = (a) => a.name || a.email || "Account";
 
 // What signing in turns on: [row id, title, what it is for]. The wording says what each is for, not that it already works.
 const FEATURES = [
-  ["st-prof-tokens", "Token saving", "For helping your agents spend fewer tokens on each task."],
-  ["st-prof-observe", "Observability engine", "For seeing what your agents and machines did, and when."],
-  ["st-prof-pii", "Blockchain security for PII masking", "For masking personal data before it leaves this computer."],
+  ["st-prof-tokens", "Token saving", "For helping your agents spend fewer tokens on each task.", "gauge"],
+  ["st-prof-observe", "Observability engine", "For seeing what your agents and machines did, and when.", "activity"],
+  ["st-prof-pii", "Blockchain security for PII masking", "For masking personal data before it leaves this computer.", "shield-check"],
 ];
 
 export default class Settings extends View {
@@ -115,6 +116,10 @@ export default class Settings extends View {
     this.publicHost = InputState.new({ placeholder: "Public host, like vps.example.com" });
     this.tick = 0;
     agentsInit(this);
+    activityInit(this);
+    if (this.section === "profile") this.refreshActivity(cx);
+    // The record changes while Profile is open (an agent is working): read it again each minute.
+    cx.timer.every(60000, (cx) => { if (this.section === "profile") this.refreshActivity(cx); });
     if (this.section === "agents") loadAgents(this, cx);
     this.handle = cx.focus_handle();
     this.handle.focus();
@@ -166,7 +171,15 @@ export default class Settings extends View {
     if (id === "machines") cx.spawn(async (cx) => { await this.loadMachines(); cx.notify(); });
     if (id === "remote") cx.spawn(async (cx) => { await this.loadRemote(); cx.notify(); });
     if (id === "agents") loadAgents(this, cx);
+    if (id === "profile") this.refreshActivity(cx);
     cx.notify();
+  }
+
+  refreshActivity(cx) {
+    cx.spawn(async (cx) => {
+      await loadActivity(this);
+      cx.notify();
+    });
   }
 
   // After "Check now": follow the look (the answer comes from the app), then
@@ -274,21 +287,51 @@ export default class Settings extends View {
       .child(div().flex_none().child(control));
   }
 
-  button(t, id, label, onClick) {
-    return div()
+  // kind: "primary" (solid), "danger" (red text) or "row" (a list row: the icon first, label, an arrow out at the end).
+  // `icon` follows the label, or comes first when kind is "first".
+  button(t, id, label, onClick, icon, kind, external) {
+    if (kind === "row") {
+      return h_flex().id(id).h(32).w_full().gap(10).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
+        .on_click(onClick)
+        .child(svg(I(icon)).size(16).text_color(t.muted))
+        .child(div().flex_1().min_w(0).text_size(13).text_color(t.foreground).child(label))
+        .when(Boolean(external), (el) => el.child(svg(I("arrow-up-right")).size(14).text_color(t.muted)));
+    }
+    const primary = kind === "primary";
+    const glyph = () => svg(I(icon)).size(14).text_color(primary ? t.solid_foreground : t.muted);
+    return h_flex()
       .id(id)
-      .px(12)
-      .py(5)
-      .rounded(7)
+      .h(28)
+      .px(10)
+      .gap(6)
+      .items_center()
+      .rounded(6)
       .border_1()
-      .border_color(t.border)
-      .bg(t.raised)
+      .border_color(primary ? t.solid : t.border)
+      .bg(primary ? t.solid : t.raised)
       .cursor_pointer()
-      .text_size(13)
-      .text_color(t.foreground)
-      .hover((s) => s.bg(t.hover))
+      .text_size(12.5)
+      .font_medium()
+      .text_color(primary ? t.solid_foreground : kind === "danger" ? t.blocked : t.foreground)
+      .hover((s) => (primary ? s.opacity(0.88) : s.bg(t.hover)))
       .on_click(onClick)
-      .child(label);
+      .when(Boolean(icon) && kind === "first", (el) => el.child(glyph()))
+      .child(label)
+      .when(Boolean(icon) && kind !== "first", (el) => el.child(glyph()));
+  }
+
+  // [word]: mono, the brackets dim. `color` and `strong` (weight 500) say what it is.
+  tag(t, word, color, strong) {
+    return h_flex().flex_none().font_family(DEFAULT_FONT).text_size(12).line_height("18px")
+      .child(div().text_color(t.dim).child("["))
+      .child(div().text_color(color).when(Boolean(strong), (el) => el.font_medium()).child(word))
+      .child(div().text_color(t.dim).child("]"));
+  }
+
+  // A key cap: "Esc".
+  kbd(t, label) {
+    return h_flex().h(18).px(5).items_center().flex_none().rounded(4).border_1().border_b(2).border_color(t.border).bg(t.background)
+      .font_family(DEFAULT_FONT).text_size(10.5).text_color(t.muted).child(label);
   }
 
   // A button that can't be pressed now.
@@ -324,7 +367,12 @@ export default class Settings extends View {
       .child(b("plus", "+", onPlus));
   }
 
-  toggle(t, id, on, onClick) {
+  // `asTag`: the [on] / [off] tag instead of the switch; the whole tag is the target.
+  toggle(t, id, on, onClick, asTag) {
+    if (asTag) {
+      return h_flex().id(id).px(4).rounded(4).cursor_pointer().hover((s) => s.bg(t.hover)).on_click(onClick)
+        .child(this.tag(t, on ? "on" : "off", on ? t.accent : t.muted, true));
+    }
     return div()
       .id(id)
       .w(36)
@@ -1250,47 +1298,45 @@ export default class Settings extends View {
     return true;
   }
 
+  // An outlined circle with the initial in mono.
   avatar(t, a, size) {
     return div().w(size).h(size).rounded_full().flex_none().flex().items_center().justify_center()
-      .bg(t.accent).text_size(Math.round(size * 0.42)).font_semibold().text_color(t.accent_foreground)
+      .bg(t.raised).border_1().border_color(t.input).font_family(DEFAULT_FONT).text_size(Math.round(size * 0.42)).font_semibold().text_color(t.accent)
       .child((Array.from(accountName(a))[0] ?? "A").toUpperCase());
   }
 
   // A sentence-case heading inside a page (heading() is the tracked-caps one).
   subheading(t, text) {
-    return div().pt(20).pb(4).text_size(13).line_height("18px").font_semibold().text_color(t.foreground).child(text);
+    return div().pt(20).pb(6).text_size(13).line_height("18px").font_semibold().text_color(t.foreground).child(text);
   }
 
-  // A Profile row: the title and what it is for on the left, the control on the right.
-  profileRow(t, id, title, about, control) {
-    return h_flex().id(id).w_full().gap(16).py(12).items_center().border_b(1).border_color(t.border)
-      .child(v_flex().flex_1().min_w(0).gap(3)
-        .child(div().text_size(14).line_height("20px").text_color(t.foreground).child(title))
+  // A Profile row: an icon, the title and what it is for, and the control on the right.
+  profileRow(t, id, title, about, control, icon) {
+    return h_flex().id(id).w_full().gap(12).py(11).items_center().border_b(1).border_color(t.border)
+      .child(div().flex_none().self_start().mt(2).child(svg(I(icon)).size(16).text_color(t.muted)))
+      .child(v_flex().flex_1().min_w(0).gap(2)
+        .child(div().text_size(13.5).line_height("20px").text_color(t.foreground).child(title))
         .child(div().text_size(12.5).line_height("18px").text_color(t.muted).child(about)))
       .child(div().flex_none().child(control));
   }
 
-  // "Off" with a lock, or "Included" with a check: a state, not a switch.
+  // A state, not a switch: [included] says what is, [off] and [needs sign-in] what is not.
   stateTag(t, on, label) {
-    return h_flex().gap(6).items_center().text_size(12.5).line_height("18px")
-      .child(svg(I(on ? "check" : "lock")).size(14).text_color(on ? t.accent : t.muted))
-      .child(div().text_color(on ? t.foreground : t.muted).child(label));
+    return this.tag(t, label, on ? t.foreground : t.muted, false);
   }
 
   // "Switch account" with its chevron; it opens or closes the menu.
   switchButton(t) {
-    return h_flex().id("st-acct-switch").px(12).py(5).gap(6).items_center().rounded(7).border_1().border_color(t.border).bg(t.raised)
-      .cursor_pointer().text_size(13).text_color(t.foreground).hover((s) => s.bg(t.hover))
-      .on_click((_e, cx) => { if (this.signingIn || this.acctBusy) return; this.acctMenu = this.acctMenu ? null : "switch"; this.acctConfirm = null; cx.notify(); })
-      .child("Switch account")
-      .child(svg(I("chevron-down")).size(14).text_color(t.muted));
+    return this.button(t, "st-acct-switch", "Switch account",
+      (_e, cx) => { if (this.signingIn || this.acctBusy) return; this.acctMenu = this.acctMenu ? null : "switch"; this.acctConfirm = null; cx.notify(); },
+      "chevrons-up-down");
   }
 
   // What to do while the browser sign-in is open, and Cancel.
   waitingLine(t) {
     return h_flex().gap(12).items_center()
       .child(h_flex().gap(8).items_center()
-        .child(svg(I("refresh")).size(16).text_color(t.accent))
+        .child(svg(I("refresh-cw")).size(16).text_color(t.accent))
         .child(div().text_size(13).font_medium().text_color(t.foreground).child("Finish signing in using your browser")))
       .child(this.button(t, "st-prof-cancel", "Cancel", (_e, cx) => { accountCancelSignIn(); cx.notify(); }));
   }
@@ -1312,61 +1358,60 @@ export default class Settings extends View {
         div().text_color(t.foreground).child("Add account"))));
   }
 
-  // Settings > Profile: who is signed in (or that nobody is), and what signing in turns on.
+  // Settings > Profile: who is signed in (or that nobody is), this computer's agent activity, and what signing in turns on.
   profile(t) {
     const acct = account();
     const cur = acct.current;
     const busy = div().text_size(12.5).text_color(t.muted).child("Waiting…");
-    const pairing = (control) => this.profileRow(t, "st-prof-pairing", "Phone and Telegram pairing", "For following and answering your agents from your phone or Telegram.", control);
+    const pairing = (control) => this.profileRow(t, "st-prof-pairing", "Phone and Telegram pairing", "For following and answering your agents from your phone or Telegram.", control, "send");
+    const menu = (el) => el.when(this.acctMenu === "switch" && !this.signingIn && !this.acctBusy, (e) => e.child(this.accountMenu(t, acct)));
     if (!cur) {
-      return v_flex().w_full()
-        .child(h_flex().w_full().gap(16).items_start().pb(18).border_b(1).border_color(t.border)
-          .child(div().w(48).h(48).flex_none().rounded_full().flex().items_center().justify_center().bg(t.raised).border_1().border_color(t.border)
-            .child(svg(I("user")).size(22).text_color(t.muted)))
+      return menu(v_flex().w_full()
+        .child(h_flex().w_full().gap(14).items_start().pb(18).border_b(1).border_color(t.border)
+          .child(div().w(44).h(44).flex_none().rounded_full().flex().items_center().justify_center().bg(t.raised).border_1().border_color(t.input)
+            .child(svg(I("user-round")).size(20).text_color(t.muted)))
           .child(v_flex().flex_1().min_w(0).gap(2)
             .child(div().id("st-prof-title").text_size(18).line_height("24px").font_semibold().text_color(t.foreground).child("You're using HyperOx without an account"))
-            .child(div().text_size(13).line_height("19px").text_color(t.muted).child("Your spaces, terminals and agents work as usual. Sign in to turn on the features below."))
+            .child(div().text_size(12.5).line_height("18px").text_color(t.muted).child("Your spaces, terminals and agents work as usual. Sign in to turn on the features below."))
             .child(h_flex().gap(8).pt(12).items_center()
               .children(this.signingIn
                 ? [this.waitingLine(t)]
                 : [
-                  div().id("st-prof-signin").px(12).py(5).rounded(7).border_1().border_color(t.accent).bg(t.accent).cursor_pointer()
-                    .text_size(13).font_medium().text_color(t.accent_foreground).on_click((_e, cx) => this.signIn(cx)).child("Sign in with your browser"),
-                  div().text_size(13).line_height("19px").text_color(t.muted).child("Opens pavii.tech. Use Google, GitHub or email."),
+                  this.button(t, "st-prof-signin", "Sign in with your browser", (_e, cx) => this.signIn(cx), null, "primary"),
+                  div().text_size(12.5).line_height("18px").text_color(t.muted).child("Opens pavii.tech. Use Google, GitHub or email."),
                 ]))
             // Accounts are saved but none is current: they can still be switched to.
-            .when(acct.accounts.length > 0 && !this.signingIn, (el) => el.child(h_flex().pt(6).child(this.acctBusy ? busy : this.switchButton(t))))))
-        .when(this.acctMenu === "switch" && !this.signingIn && !this.acctBusy, (el) => el.child(this.accountMenu(t, acct)))
+            .when(acct.accounts.length > 0 && !this.signingIn, (el) => el.child(h_flex().pt(6).child(this.acctBusy ? busy : this.switchButton(t)))))))
+        .child(activityBlock(this, t))
         .child(this.subheading(t, "Turned on when you sign in"))
-        .children(FEATURES.map(([id, title, about]) => this.profileRow(t, id, title, about, this.stateTag(t, false, "Off"))))
-        .child(pairing(this.stateTag(t, false, "Needs sign-in")));
+        .children(FEATURES.map(([id, title, about, icon]) => this.profileRow(t, id, title, about, this.stateTag(t, false, "off"), icon)))
+        .child(pairing(this.stateTag(t, false, "needs sign-in")));
     }
-    return v_flex().w_full()
-      .child(h_flex().w_full().gap(16).items_start().pb(18).border_b(1).border_color(t.border)
-        .child(this.avatar(t, cur, 48))
-        .child(v_flex().flex_1().min_w(0).gap(2)
+    return menu(v_flex().w_full()
+      .child(h_flex().w_full().gap(14).items_start().pb(18).border_b(1).border_color(t.border)
+        .child(this.avatar(t, cur, 44))
+        .child(v_flex().flex_1().min_w(0)
           .child(div().id("st-acct-name").truncate().text_size(18).line_height("24px").font_semibold().text_color(t.foreground).child(accountName(cur)))
-          .when(Boolean(cur.email), (el) => el.child(div().id("st-acct-email").truncate().text_size(13).line_height("19px").text_color(t.muted).child(cur.email)))
-          .child(div().id("st-acct-provider").text_size(13).line_height("19px").text_color(t.muted).child(`Signed in with ${PROVIDERS[cur.provider] ?? cur.provider}`)))
+          .when(Boolean(cur.email), (el) => el.child(div().id("st-acct-email").truncate().mt(2).font_family(DEFAULT_FONT).text_size(12).line_height("18px").text_color(t.muted).child(cur.email)))
+          .child(div().id("st-acct-provider").text_size(12.5).line_height("18px").text_color(t.dim).child(`Signed in with ${PROVIDERS[cur.provider] ?? cur.provider}`)))
         .child(this.acctBusy ? busy : h_flex().gap(8).flex_none()
           .child(this.switchButton(t))
-          .child(this.button(t, "st-acct-signout", "Sign out", (_e, cx) => this.accountDo(() => accountSignOut(cur.uid), cx)))))
-      .when(this.signingIn, (el) => el.child(h_flex().w_full().pt(12).child(this.waitingLine(t))))
-      .when(this.acctMenu === "switch" && !this.signingIn && !this.acctBusy, (el) => el.child(this.accountMenu(t, acct)))
+          .child(this.button(t, "st-acct-signout", "Sign out", (_e, cx) => this.accountDo(() => accountSignOut(cur.uid), cx), "log-out", "first"))))
+      .when(this.signingIn, (el) => el.child(h_flex().w_full().pt(12).child(this.waitingLine(t)))))
+      .child(activityBlock(this, t))
       .child(this.subheading(t, "Included with your account"))
-      .children(FEATURES.map(([id, title, about]) => this.profileRow(t, id, title, about, this.stateTag(t, true, "Included"))))
-      .child(pairing(this.button(t, "st-prof-remote", "Set up in Remote", (_e, cx) => this.openSection("remote", cx))))
+      .children(FEATURES.map(([id, title, about, icon]) => this.profileRow(t, id, title, about, this.stateTag(t, true, "included"), icon)))
+      .child(pairing(this.button(t, "st-prof-remote", "Set up in Remote", (_e, cx) => this.openSection("remote", cx), "arrow-right")))
       .child(this.subheading(t, "This computer"))
       .child(this.acctConfirm === cur.uid
-        ? v_flex().id("st-acct-confirm").w_full().mt(12).gap(10).p(12).rounded(9).border_1().border_color(t.blocked).bg(t.popover)
+        ? v_flex().id("st-acct-confirm").w_full().mt(12).gap(10).p(12).rounded(6).border_1().border_color(t.blocked).bg(t.popover)
           .child(div().text_size(13).line_height("19px").text_color(t.foreground).child(`Remove ${accountName(cur)} from this computer? Your local profile data for this account is deleted; your online account stays.`))
           .child(h_flex().gap(8).justify_end()
             .child(this.button(t, "st-acct-remove-no", "Cancel", (_e, cx) => { this.acctConfirm = null; cx.notify(); }))
-            .child(div().id("st-acct-remove-yes").px(12).py(5).rounded(7).border_1().border_color(t.blocked).bg(t.blocked).cursor_pointer()
-              .text_size(13).text_color(t.accent_foreground).on_click((_e, cx) => this.accountDo(() => accountRemove(cur.uid), cx)).child("Remove")))
+            .child(h_flex().id("st-acct-remove-yes").h(28).px(10).items_center().rounded(6).border_1().border_color(t.blocked).bg(t.blocked).cursor_pointer()
+              .text_size(12.5).font_medium().text_color(t.accent_foreground).on_click((_e, cx) => this.accountDo(() => accountRemove(cur.uid), cx)).child("Remove")))
         : this.profileRow(t, "st-acct-remove-row", "Remove from this computer", "Deletes this account's local profile data. Your online account stays.",
-          div().id("st-acct-remove").px(12).py(5).rounded(7).border_1().border_color(t.border).bg(t.raised).cursor_pointer()
-            .text_size(13).text_color(t.blocked).hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.acctConfirm = cur.uid; this.acctMenu = null; cx.notify(); }).child("Remove…")));
+          this.button(t, "st-acct-remove", "Remove…", (_e, cx) => { this.acctConfirm = cur.uid; this.acctMenu = null; cx.notify(); }, null, "danger"), "trash-2"));
   }
 
   info(t) {
@@ -1375,44 +1420,53 @@ export default class Settings extends View {
       const why = openLink(url);
       if (why) notify({ title: "Can't open the link", body: why, level: "error" });
     };
-    const link = (id, url, label) => div().id(id).cursor_pointer().text_color(t.accent).on_click(open(url)).child(`${label} ↗`);
-    const card = (title, ...kids) => v_flex().flex_1().min_w(0).gap(8).p(16).rounded(10).border_1().border_color(t.border).bg(t.raised)
-      .child(div().text_size(11.5).font_semibold().text_color(t.dim).child(title.toUpperCase()))
+    const link = (id, url, label) => h_flex().id(id).gap(3).items_center().cursor_pointer().text_size(12.5).text_color(t.accent).on_click(open(url))
+      .child(label)
+      .child(svg(I("arrow-up-right")).size(13).text_color(t.accent));
+    // One cell of the ruled grid: a rule under every row, and one between the two columns.
+    const cell = (title, right, last, ...kids) => v_flex().flex_1().min_w(0).py(16)
+      .when(!right, (el) => el.pr(20).border_r(1).border_color(t.border))
+      .when(right, (el) => el.pl(20))
+      .when(!last, (el) => el.border_b(1).border_color(t.border))
+      .child(div().mb(8).text_size(12.5).font_semibold().text_color(t.muted).child(title))
       .children(kids);
-    const partner = (name, who, id, url, site) => h_flex().w_full().gap(12).items_center()
+    const partner = (name, who, id, url, site, second) => h_flex().w_full().gap(12).items_center()
+      .when(second, (el) => el.pt(10).border_t(1).border_color(t.border))
       .child(v_flex().flex_1().min_w(0).gap(1)
-        .child(div().text_size(12.5).text_color(t.dim).child(name))
+        .child(div().text_size(11.5).text_color(t.muted).child(name))
         .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child(who)))
-      .child(div().flex_none().text_size(13).child(link(id, url, site)));
+      .child(div().flex_none().child(link(id, url, site)));
     return v_flex()
       .w_full()
-      .gap(12)
-      .child(h_flex().w_full().gap(16).p(18).items_center().rounded(12).border_1().border_color(t.border)
-        .bg(t.raised)
-        .child(image("frame/welcome/hyperox.png").w(52).h(52).rounded(10).flex_none())
-        .child(v_flex().flex_1().min_w(0).gap(3)
+      .child(h_flex().w_full().gap(14).pb(18).items_center().border_b(1).border_color(t.border)
+        .child(image("frame/welcome/hyperox.png").w(40).h(40).rounded(9).border_1().border_color(t.border).flex_none())
+        .child(v_flex().flex_1().min_w(0).gap(2)
           .child(h_flex().gap(8).items_center()
-            .child(div().text_size(24).font_semibold().text_color(t.foreground).child("HyperOx"))
-            .child(div().id("st-info-version").px(7).rounded(5).bg(t.hover).text_size(11).text_color(t.muted).child(`v${u.app.version}`)))
-          .child(div().text_size(13).text_color(t.muted).child("Agentic development environment"))))
-      .child(h_flex().w_full().gap(12).items_stretch()
-        .child(card("About",
-          div().text_size(13.5).font_semibold().text_color(t.foreground).child("The desktop workspace for AI coding agents."),
-          div().text_size(13).line_height("20px").text_color(t.muted).child("A secure space to build with AI coding agents. Your code and your conversations stay on your own machine."),
-          link("st-info-learn", "https://pavii.tech", "Learn more")))
-        .child(card("Resources",
-          this.button(t, "st-info-install", "Installation guide", open("https://www.pavii.tech/products/dev-tools/docs/")),
-          this.button(t, "st-info-docs", "Documentation", open("https://www.pavii.tech/products/dev-tools/docs/")),
-          this.button(t, "st-info-feedback", "Send feedback", () => notify({ title: "The feedback forum is coming soon.", level: "info" })))))
-      .child(h_flex().w_full().gap(12).items_stretch()
-        .child(card("Partners",
-          partner("Built by", "Team Pavii", "st-info-pavii", "https://pavii.tech", "pavii.tech"),
-          div().h(1).bg(t.border),
-          partner("Security & blockchain partner", "Buckleson", "st-info-buckleson", "https://buckleson.com", "buckleson.com")))
-        .child(card("Privacy", this.analytics(t, open))))
-      .child(h_flex().w_full().gap(12).pt(6).justify_between().text_size(12).text_color(t.dim)
+            .child(div().text_size(20).line_height("26px").font_semibold().text_color(t.foreground).child("HyperOx"))
+            .child(div().id("st-info-version").font_family(DEFAULT_FONT).text_size(12).text_color(t.dim).child(`v${u.app.version}`)))
+          .child(div().text_size(12.5).text_color(t.muted).child("Agentic development environment"))))
+      .child(h_flex().w_full().items_stretch()
+        .child(cell("About", false, false,
+          div().text_size(13.5).line_height("20px").text_color(t.foreground).child("The desktop workspace for AI coding agents."),
+          div().mt(6).text_size(12.5).line_height("19px").text_color(t.muted).child("A secure space to build with AI coding agents. Your code and your conversations stay on your own machine."),
+          div().mt(8).child(link("st-info-learn", "https://pavii.tech", "Learn more"))))
+        .child(cell("Resources", true, false,
+          v_flex().w_full()
+            .child(this.button(t, "st-info-install", "Installation guide", open("https://www.pavii.tech/products/dev-tools/docs/"), "download", "row", true))
+            .child(div().h(1).bg(t.border))
+            .child(this.button(t, "st-info-docs", "Documentation", open("https://www.pavii.tech/products/dev-tools/docs/"), "book-open", "row", true))
+            .child(div().h(1).bg(t.border))
+            .child(this.button(t, "st-info-feedback", "Send feedback", () => notify({ title: "The feedback forum is coming soon.", level: "info" }), "message-square", "row")))))
+      .child(h_flex().w_full().items_stretch()
+        .child(cell("Partners", false, true,
+          partner("Built by", "Team Pavii", "st-info-pavii", "https://pavii.tech", "pavii.tech", false),
+          partner("Security & blockchain partner", "Buckleson", "st-info-buckleson", "https://buckleson.com", "buckleson.com", true)))
+        .child(cell("Privacy", true, true, this.analytics(t, open))))
+      .child(h_flex().w_full().gap(12).pt(14).justify_between().text_size(11).text_color(t.muted)
         .child(div().child("Currently closed source (open source soon)"))
-        .child(div().child(`Version ${u.app.version} · Core ${u.core.version || "unknown"} · Open-source notices`)));
+        .child(h_flex().gap(6).font_family(DEFAULT_FONT)
+          .child(div().child(`v${u.app.version} \u00b7 core ${u.core.version || "unknown"} \u00b7`))
+          .child(div().text_color(t.accent).child("open-source notices"))));
   }
 
   // "Share usage analytics": the switch (settings.json share_analytics), and an "i" that opens what is sent.
@@ -1423,13 +1477,14 @@ export default class Settings extends View {
       .w_full()
       .gap(8)
       .child(h_flex().w_full().gap(10).items_center()
-        .child(div().flex_1().text_size(13.5).font_semibold().text_color(t.foreground).child("Share usage analytics"))
+        .child(div().flex_1().text_size(13.5).font_medium().text_color(t.foreground).child("Share usage analytics"))
         .child(div().id("st-analytics-info").w(18).h(18).rounded(9).flex().items_center().justify_center().border_1().border_color(t.border)
-          .text_size(11).font_semibold().text_color(this.analyticsAbout ? t.accent : t.dim).cursor_pointer().hover((s) => s.bg(t.hover))
+          .cursor_pointer().hover((s) => s.bg(t.hover))
           .on_click((_e, cx) => { this.analyticsAbout = !this.analyticsAbout; cx.notify(); })
-          .child("i"))
-        .child(this.toggle(t, "st-analytics", on, (_e, cx) => this.change((p) => { if (on) p.share_analytics = false; else delete p.share_analytics; }, cx))))
-      .when(Boolean(this.analyticsAbout), (el) => el.child(v_flex().w_full().gap(8).p(12).rounded(9).border_1().border_color(t.border).bg(t.background)
+          .child(svg(I("info")).size(12).text_color(this.analyticsAbout ? t.accent : t.dim)))
+        .child(this.toggle(t, "st-analytics", on, (_e, cx) => this.change((p) => { if (on) p.share_analytics = false; else delete p.share_analytics; }, cx), true)))
+      .child(para("Usage data and failure reports, tied to a random install ID. Never what you type."))
+      .when(Boolean(this.analyticsAbout), (el) => el.child(v_flex().w_full().gap(8).p(12).rounded(6).border_1().border_color(t.border).bg(t.background)
         .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("How HyperOx handles your data (beta)"))
         .child(para("During the beta, HyperOx sends usage data and failure reports so we can fix problems and improve the app. You are identified by a random install ID, not your name or email. We never send what you type, your prompts, agent replies, terminal contents, file or folder names, or your keys. IP addresses are not stored; your approximate location (country and city) is."))
         .child(para("When you're signed in, your usage is linked to your HyperOx account ID (not your email)."))
@@ -1451,23 +1506,23 @@ export default class Settings extends View {
       .gap(2)
       .border_r(1)
       .border_color(t.border)
-      .child(div().px(10).pt(6).pb(12).text_size(16).font_semibold().text_color(t.foreground).child("Settings"))
+      .child(h_flex().px(10).pt(6).pb(12).items_center().child(div().flex_1().text_size(15).font_semibold().text_color(t.foreground).child("Settings")).child(this.kbd(t, "Esc")))
       .children(
         SECTIONS.map((s) => {
           const on = s.id === this.section;
           return h_flex()
             .id(`st-s-${s.id}`)
             .gap(10)
+            .h(32)
             .px(10)
-            .py(7)
             .items_center()
-            .rounded(7)
+            .rounded(6)
             .cursor_pointer()
-            .bg(on ? t.raised : "#00000000")
-            .hover((st) => st.bg(t.raised))
+            .bg(on ? t.selected : "#00000000")
+            .hover((st) => st.bg(on ? t.selected : t.hover))
             .on_click((_e, cx) => this.openSection(s.id, cx))
-            .child(svg(I(s.icon)).size(15).text_color(on ? t.accent : t.dim))
-            .child(div().flex_1().text_size(13.5).text_color(on ? t.foreground : t.muted).child(s.title))
+            .child(svg(I(s.icon)).size(16).text_color(on ? t.accent : t.dim))
+            .child(div().flex_1().text_size(13).text_color(on ? t.foreground : t.muted).child(s.title))
             .when(s.id === "updates" && waiting, (el) => el.child(div().w(7).h(7).rounded(4).bg(t.accent)));
         }),
       );
@@ -1496,7 +1551,7 @@ export default class Settings extends View {
         cx.stop_propagation();
         cx.notify();
       })
-      .child(nav.h_full().child(div().flex_1()).child(this.button(t, "st-feedback", "Send feedback", () => { closeOverlay(props()?.overlay); run("app.feedback"); })))
+      .child(nav.h_full().child(div().flex_1()).child(this.button(t, "st-feedback", "Send feedback", () => { closeOverlay(props()?.overlay); run("app.feedback"); }, "message-square", "first").w_full().h(30)))
       .child(
         // A bar that always shows: the pages are taller than the dialog and
         // people should see that they scroll.

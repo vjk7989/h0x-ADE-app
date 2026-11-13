@@ -197,6 +197,8 @@ fn module(mut values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> Hos
             let reply = match name {
                 _ if scripted.is_some() => scripted,
                 "readTextFile" if first == "/fixture/app/settings.json" || first == "/fixture/app/programs.json" || first == "/fixture/.ssh/config" => Some(Value::Null),
+                // Profile's activity graph: no record yet.
+                "readTextFile" if first == "/fixture/app/usage/activity.json" => Some(Value::Null),
                 // The to-do panel's first run: no lists yet, so it creates the index and its first list.
                 "readTextFile" if first == "/fixture/app/todo/lists.md" || first == "/fixture/app/todo/tasks.md" => Some(Value::Null),
                 "writeTextFile" if first == "/fixture/app/todo/lists.md" || first == "/fixture/app/todo/tasks.md" => Some(Value::Null),
@@ -1871,7 +1873,7 @@ fn settings_info_shows_the_product_makers_and_versions_with_no_source_links(cx: 
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     // A known core version, then none (null, a missing key): the page still renders and says "unknown".
-    for (core, shown) in [(Some(json!("0.1.5")), "Core 0.1.5"), (Some(Value::Null), "Core unknown"), (None, "Core unknown")] {
+    for (core, shown) in [(Some(json!("0.1.5")), "core 0.1.5"), (Some(Value::Null), "core unknown"), (None, "core unknown")] {
         let mut p = props();
         p["section"] = json!("info");
         let mut u = updates("current", "current");
@@ -1899,9 +1901,9 @@ fn settings_info_shows_the_product_makers_and_versions_with_no_source_links(cx: 
             "Buckleson",
             "buckleson.com",
             "Currently closed source (open source soon)",
-            "Version 0.1.0",
+            "v0.1.0 \u{b7} core",
             shown,
-            "Open-source notices",
+            "open-source notices",
         ] {
             assert!(tree.contains(text), "{core}: the Info page shows {text:?}: {tree}");
         }
@@ -2214,12 +2216,12 @@ fn settings_info_is_layout_c_a_banner_and_four_cards_and_no_account(cx: &mut Tes
     let tree = info_account_tree(cx, &staged, two, None);
     for text in [
         "HyperOx", "st-info-version", "v0.1.0", "Agentic development environment",
-        "ABOUT", "RESOURCES", "PARTNERS", "PRIVACY", "st-analytics", "st-analytics-info",
-        "Currently closed source (open source soon)", "Version 0.1.0", "Open-source notices",
+        "About", "Resources", "Partners", "Privacy", "st-analytics", "st-analytics-info",
+        "Currently closed source (open source soon)", "v0.1.0 \u{b7} core", "open-source notices",
     ] {
         assert!(tree.contains(text), "{text:?}: {tree}");
     }
-    assert!(tree.find("HyperOx").unwrap() < tree.find("ABOUT").unwrap(), "the banner is above the cards: {tree}");
+    assert!(tree.find("HyperOx").unwrap() < tree.find("About").unwrap(), "the banner is above the cards: {tree}");
 }
 
 #[gpui::test]
@@ -2263,13 +2265,13 @@ fn settings_profile_signed_in_shows_the_account_the_included_features_and_the_re
         "vijay", "vijay@example.com", "Google", "Signed in with Google", "st-acct-name", "st-acct-email", "st-acct-provider",
         "st-acct-switch", "Switch", "st-acct-signout", "Sign out",
         "Included with your account", "st-prof-tokens", "Token saving", "st-prof-observe", "Observability engine",
-        "st-prof-pii", "Blockchain security for PII masking", "Included", "st-prof-pairing", "Phone and Telegram pairing",
+        "st-prof-pii", "Blockchain security for PII masking", "included", "st-prof-pairing", "Phone and Telegram pairing",
         "st-prof-remote", "Set up in Remote", "This computer", "st-acct-remove", "Remove from this computer",
     ] {
         assert!(tree.contains(text), "{text:?}: {tree}");
     }
     // The menu and the confirmation are closed until asked; the account's tokens are never shown.
-    for text in ["st-acct-pick-", "st-acct-add", "st-acct-confirm", "st-acct-remove-yes", "Not signed in", "st-prof-signin", "Turned on when you sign in", "Needs sign-in", "Your local profile data"] {
+    for text in ["st-acct-pick-", "st-acct-add", "st-acct-confirm", "st-acct-remove-yes", "Not signed in", "st-prof-signin", "Turned on when you sign in", "needs sign-in", "Your local profile data"] {
         assert!(!tree.contains(text), "{text:?} is not shown at first: {tree}");
     }
     assert!(!tree.contains("GitHub"), "the other account is only in the Switch menu: {tree}");
@@ -2289,12 +2291,12 @@ fn settings_profile_without_an_account_says_so_offers_sign_in_and_shows_the_feat
             "st-prof-title", "You're using HyperOx without an account", "Your spaces, terminals and agents work as usual. Sign in to turn on the features below.",
             "st-prof-signin", "Sign in with your browser", "Opens pavii.tech. Use Google, GitHub or email.",
             "Turned on when you sign in", "st-prof-tokens", "Token saving", "st-prof-observe", "Observability engine", "st-prof-pii",
-            "Blockchain security for PII masking", "Off", "st-prof-pairing", "Phone and Telegram pairing", "Needs sign-in",
+            "Blockchain security for PII masking", "off", "st-prof-pairing", "Phone and Telegram pairing", "needs sign-in",
         ] {
             assert!(tree.contains(text), "{label}: {text:?}: {tree}");
         }
         assert!(tree.lines().find(|l| l.contains("\"st-prof-signin\"")).is_some_and(|l| l.contains(":on_click(fn)")), "{label}: {tree}");
-        for text in ["Not signed in", "Included", "Set up in Remote", "st-acct-signout", "st-acct-remove", "st-prof-cancel"] {
+        for text in ["Not signed in", "Included", "included", "Set up in Remote", "st-acct-signout", "st-acct-remove", "st-prof-cancel"] {
             assert!(!tree.contains(text), "{label}: {text:?}: {tree}");
         }
         assert_eq!(tree.contains("st-acct-switch"), switch, "{label}: saved accounts can be switched to: {tree}");
@@ -2432,7 +2434,7 @@ fn settings_profile_shows_a_very_long_name_and_email_whole_and_keeps_its_buttons
         assert!(tree.contains(text), "{text:?}: {tree}");
     }
     let tree = info_account_tree(cx, &staged, account, None);
-    for text in ["ABOUT", "PRIVACY"] {
+    for text in ["About", "Privacy"] {
         assert!(tree.contains(text), "{text:?}: {tree}");
     }
 }
@@ -2602,7 +2604,7 @@ fn settings_profile_with_saved_accounts_but_none_current_lists_them_all_with_no_
     let staged = Staged::new();
     let saved = account_value(&[("u1", "password", "ann"), ("u2", "github.com", "sam")], None);
     let tree = profile_tree(cx, &staged, saved, Some("this.acctMenu = 'switch';"));
-    for text in ["st-prof-title", "st-prof-signin", "st-acct-switch", "st-acct-menu", "st-acct-pick-u1", "st-acct-pick-u2", "ann", "sam", "st-acct-add", "Add account", "Turned on when you sign in", "Off"] {
+    for text in ["st-prof-title", "st-prof-signin", "st-acct-switch", "st-acct-menu", "st-acct-pick-u1", "st-acct-pick-u2", "ann", "sam", "st-acct-add", "Add account", "Turned on when you sign in", "off"] {
         assert!(tree.contains(text), "{text:?}: {tree}");
     }
     for text in ["st-acct-current-", "st-acct-name", "st-acct-signout", "st-acct-remove", "Included with your account", "st-prof-cancel"] {
@@ -9839,4 +9841,215 @@ fn files_panel_reveals_a_linked_program_and_open_again_never_forces_a_reveal(cx:
     assert_eq!(log[0], ("/fixture/project/tools/setup.exe".to_owned(), Value::Null));
     assert_eq!(log[1].1, Value::Null, "Open again asks the host, which decides; it never forces a reveal");
     assert!(disk.borrow().reads.is_empty(), "a program is never read: {:?}", disk.borrow().reads);
+}
+
+// Settings > Profile's agent activity graph: the real mod, with the record on a faked disk.
+fn describe_activity(cx: &mut TestAppContext, staged: &Staged, values: BTreeMap<String, Value>, record: Option<&str>, entry: Option<&str>, setup: Option<&str>) -> String {
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    if let Some(text) = record {
+        // Scripted replies are on, so a file put on the fake disk reads back.
+        calls.borrow_mut().replies.insert("fixture-unused".into(), Value::Null);
+        calls.borrow_mut().files.insert("/fixture/app/usage/activity.json".into(), text.into());
+    }
+    let policy = Policy::new()
+        .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+        .with_host_module(module(values, calls.clone()))
+        .unwrap();
+    let root = match (entry, setup) {
+        (Some(file), _) => staged.0.join(file),
+        (None, Some(s)) => staged.wrapper("frame/settings", s),
+        (None, None) => staged.0.join("frame/settings"),
+    };
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root, policy, window, cx))
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
+    let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
+    tree
+}
+
+fn activity_cells(tree: &str) -> (usize, usize) {
+    (tree.matches("st-prof-activity-cell-").count(), tree.matches("st-prof-activity-gap-").count())
+}
+
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    digits.as_bytes().rchunks(3).rev().map(|c| std::str::from_utf8(c).unwrap()).collect::<Vec<_>>().join(",")
+}
+
+// A record with the same day (42 min, 3 sessions, 18.2k tokens) on every date a grid can hold.
+fn full_record() -> String {
+    let today = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() / 86_400) as i64;
+    let days: serde_json::Map<String, Value> = (-420i64..=420)
+        .map(|d| {
+            let n = today + d; // days since 1970-01-01 around the test clock, UTC: any zone's grid lies inside this range
+            let (y, m, day) = civil(n);
+            (format!("{y:04}-{m:02}-{day:02}"), json!({"seconds": 2520, "sessions": 3, "tokens": 18200}))
+        })
+        .collect();
+    json!({"version": 1, "days": days}).to_string()
+}
+
+fn civil(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+#[gpui::test]
+fn settings_profile_draws_the_53_by_7_activity_grid_with_its_empty_state_and_no_tooltip(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let two = account_value(&[("u1", "google.com", "vijay")], Some("u1"));
+    let signed_out = account_value(&[], None);
+    for (label, account) in [("signed in", two), ("signed out", signed_out)] {
+        let tree = describe_activity(cx, &staged, profile_values(account), None, None, None);
+        for text in ["st-prof-activity", "st-prof-activity-grid", "Agent activity \u{b7} this computer", "last 12 months", "Mon", "Wed", "Fri", "st-prof-activity-empty", "No agent activity recorded yet", " \u{b7} starts with your first agent session"] {
+            assert!(tree.contains(text), "{label}: {text:?}: {tree}");
+        }
+        // 53 weeks of 7 rows: a cell for every day up to today, a blank slot for the rest of this week.
+        let (cells, gaps) = activity_cells(&tree);
+        assert_eq!(cells + gaps, 371, "{label}: {tree}");
+        assert!((365..=371).contains(&cells), "{label}: {cells} days");
+        for text in ["st-prof-activity-summary", "st-prof-activity-legend-", "st-prof-activity-tip"] {
+            assert!(!tree.contains(text), "{label}: the empty state has no {text:?}: {tree}");
+        }
+    }
+}
+
+#[gpui::test]
+fn settings_profile_activity_shows_the_summary_the_legend_and_a_tooltip_on_hover(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let account = account_value(&[("u1", "google.com", "vijay")], Some("u1"));
+    let record = full_record();
+    let tree = describe_activity(cx, &staged, profile_values(account.clone()), Some(&record), None, None);
+    let (cells, gaps) = activity_cells(&tree);
+    assert_eq!(cells + gaps, 371, "{tree}");
+    for (i, text) in [format!("{} min", grouped(cells * 42)), format!("{cells} active days"), "longest streak".to_owned(), format!("{cells} days")].iter().enumerate() {
+        assert!(tree.contains(text.as_str()), "{i} {text:?}: {tree}");
+    }
+    for text in ["st-prof-activity-summary", "st-prof-activity-legend-0", "st-prof-activity-legend-4", "less", "more"] {
+        assert!(tree.contains(text), "{text:?}: {tree}");
+    }
+    assert!(!tree.contains("st-prof-activity-empty") && !tree.contains("No agent activity recorded yet") && !tree.contains("st-prof-activity-tip"), "{tree}");
+    // Hovering today's cell (the last column, this weekday's row) shows its day.
+    let hover = "const today = new Date(); this.activityHover = [52, today.getDay()];";
+    let tree = describe_activity(cx, &staged, profile_values(account), Some(&record), None, Some(hover));
+    for text in ["st-prof-activity-tip", "42 min", "3 sessions", "18.2k tokens"] {
+        assert!(tree.contains(text), "{text:?}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_profile_activity_treats_a_damaged_or_foreign_file_as_no_record(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let account = account_value(&[("u1", "google.com", "vijay")], Some("u1"));
+    for record in ["{not json", "", "null", "[]", r#"{"version":2,"days":{"2026-11-03":{"seconds":600}}}"#, r#"{"version":1,"days":[]}"#, r#"{"version":1,"days":{"bad":{"seconds":600},"2026-11-03":5}}"#] {
+        let tree = describe_activity(cx, &staged, profile_values(account.clone()), Some(record), None, None);
+        assert!(tree.contains("No agent activity recorded yet") && tree.contains("st-prof-activity-grid"), "{record:?}: {tree}");
+        assert!(!tree.contains("st-prof-activity-summary"), "{record:?}: {tree}");
+    }
+}
+
+// The graph's pure parts, asked of the mod's own module through a probe scenario.
+const ACTIVITY_PROBE: &str = r#"
+import Real from './frame/settings/main.js';
+import { div } from 'gpui-kit';
+import { theme } from 'h0x';
+import { tooltip, levelOf, levelColors, minutesOf, short, summarize, gridDays, parseActivity } from './frame/settings/activity.js';
+export default class Scenario extends Real {
+  render(cx) {
+    const sat = new Date(2026, 10, 14);
+    const day = { seconds: 2520, sessions: 3, tokens: 18200 };
+    const probe = {
+      tip: tooltip(new Date(2026, 10, 3), day),
+      tipOne: tooltip(new Date(2026, 10, 3), { seconds: 60, sessions: 1, tokens: 0 }),
+      tipNone: tooltip(new Date(2026, 10, 3), undefined),
+      levels: [0, 1, 14, 15, 59, 60, 179, 180, 1000].map(levelOf),
+      minutes: [0, 1, 89, 90, 3600].map((seconds) => minutesOf({ seconds })),
+      colors: levelColors(theme()),
+      short: [999, 1000, 18200, 999999, 1000000, 1250000].map(short),
+      summary: summarize(gridDays(sat), { '2026-11-14': { seconds: 3600 }, '2026-11-13': { seconds: 600 }, '2026-11-12': { seconds: 60 }, '2026-11-10': { seconds: 120 } }),
+      slots: gridDays(sat).flat().length,
+      real: gridDays(sat).flat().filter(Boolean).length,
+      first: gridDays(sat)[0][0].toDateString(),
+      parsed: [parseActivity(null), parseActivity('{not json'), parseActivity('{"version":2,"days":{}}'),
+        parseActivity('{"version":1,"days":{"2026-11-03":{"seconds":5,"sessions":-1,"tokens":"x"},"bad":{"seconds":9}}}')],
+    };
+    return super.render(cx).child(div().child('PROBE ' + JSON.stringify(probe) + ' END'));
+  }
+}
+"#;
+
+#[gpui::test]
+fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("activity-probe.js"), ACTIVITY_PROBE).unwrap();
+    let mut p = props();
+    p["section"] = json!("profile");
+    let values = fixture(true, p, updates("current", "current"));
+    let colors = values["theme"].clone();
+    let tree = describe_activity(cx, &staged, values, None, Some("activity-probe.js"), None);
+    let probe = tree.split("PROBE ").nth(1).and_then(|t| t.split(" END").next()).unwrap_or_else(|| panic!("{tree}"));
+    let probe: Value = serde_json::from_str(probe).unwrap_or_else(|e| panic!("{e}: {probe}"));
+    assert_eq!(probe["tip"], json!(["Tue 3 Nov 2026", "42 min", "3 sessions", "18.2k tokens"]));
+    assert_eq!(probe["tipOne"], json!(["Tue 3 Nov 2026", "1 min", "1 session"]), "tokens are left out when 0");
+    assert_eq!(probe["tipNone"], json!(["Tue 3 Nov 2026", "0 min", "0 sessions"]));
+    // 0 / 1-14 / 15-59 / 60-179 / 180+ minutes.
+    assert_eq!(probe["levels"], json!([0, 1, 1, 2, 2, 3, 3, 4, 4]));
+    assert_eq!(probe["minutes"], json!([0, 1, 1, 2, 60]), "any time at all counts as a minute");
+    assert_eq!(probe["short"], json!(["999", "1k", "18.2k", "1M", "1M", "1.3M"]));
+    assert_eq!(probe["summary"], json!({"minutes": 73, "active": 4, "longest": 3}));
+    // A Saturday ends the grid: all 371 days are real and the first is the Sunday 52 weeks before its week.
+    assert_eq!((probe["slots"].clone(), probe["real"].clone()), (json!(371), json!(371)));
+    assert_eq!(probe["first"], json!("Sun Nov 09 2025"));
+    assert_eq!(probe["parsed"], json!([{}, {}, {}, {"2026-11-03": {"seconds": 5, "sessions": 0, "tokens": 0}}]));
+    // Level 0 is the border, level 4 the accent, 1-3 the accent mixed over the popover (40%, 62%, 82%).
+    let hex = |name: &str| {
+        let v = colors[name].as_str().unwrap().to_owned();
+        let n = u32::from_str_radix(&v[1..7], 16).unwrap();
+        [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+    };
+    let (accent, popover) = (hex("accent"), hex("popover"));
+    let mixed = |share: f64| {
+        let c: Vec<String> = (0..3).map(|i| format!("{:02x}", (f64::from(accent[i]) * share + f64::from(popover[i]) * (1.0 - share)).round() as u32)).collect();
+        format!("#{}", c.concat())
+    };
+    assert_eq!(probe["colors"], json!([colors["border"], mixed(0.4), mixed(0.62), mixed(0.82), colors["accent"]]));
+}
+
+#[gpui::test]
+fn settings_profile_and_info_keep_every_id(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let signed_in = describe_activity(cx, &staged, profile_values(account_value(&[("u1", "google.com", "vijay")], Some("u1"))), None, None, None);
+    for id in [
+        "st-acct-name", "st-acct-email", "st-acct-provider", "st-acct-switch", "st-acct-signout", "st-prof-tokens", "st-prof-observe", "st-prof-pii", "st-prof-pairing",
+        "st-prof-remote", "st-acct-remove-row", "st-acct-remove", "st-s-profile", "st-s-look", "st-s-info", "st-feedback",
+    ] {
+        assert!(signed_in.contains(id), "{id}: {signed_in}");
+    }
+    let order = |tree: &str, parts: &[&str]| parts.iter().map(|p| tree.find(p).unwrap_or_else(|| panic!("{p}: {tree}"))).collect::<Vec<_>>();
+    let at = order(&signed_in, &["st-acct-name", "st-prof-activity", "Included with your account", "This computer"]);
+    assert!(at.windows(2).all(|w| w[0] < w[1]), "header, activity, Included, This computer: {at:?}");
+    let mut p = props();
+    p["section"] = json!("info");
+    let info = describe_activity(cx, &staged, fixture(true, p, updates("current", "current")), None, None, None);
+    for id in ["st-info-version", "st-info-learn", "st-info-install", "st-info-docs", "st-info-feedback", "st-info-pavii", "st-info-buckleson", "st-analytics", "st-analytics-info"] {
+        assert!(info.contains(id), "{id}: {info}");
+    }
+    assert!(info.contains("Usage data and failure reports, tied to a random install ID. Never what you type."), "{info}");
 }
