@@ -10008,7 +10008,9 @@ fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppCo
     let colors = values["theme"].clone();
     let tree = describe_activity(cx, &staged, values, None, Some(ACTIVITY_PROBE), None);
     let probe = tree.split("PROBE ").nth(1).and_then(|t| t.split(" END").next()).unwrap_or_else(|| panic!("{tree}"));
-    let probe: Value = serde_json::from_str(probe).unwrap_or_else(|e| panic!("{e}: {probe}"));
+    // The tree prints a text node as a Rust debug string: undo its escapes (\" and \\) to get the JSON back.
+    let probe = serde_json::from_str::<String>(&format!("\"{probe}\"")).unwrap_or_else(|e| panic!("{e}: {probe}"));
+    let probe: Value = serde_json::from_str(&probe).unwrap_or_else(|e| panic!("{e}: {probe}"));
     assert_eq!(probe["tip"], json!(["Tue 3 Nov 2026", "42 min", "3 sessions", "18.2k tokens"]));
     assert_eq!(probe["tipOne"], json!(["Tue 3 Nov 2026", "1 min", "1 session"]), "tokens are left out when 0");
     assert_eq!(probe["tipNone"], json!(["Tue 3 Nov 2026", "0 min", "0 sessions"]));
