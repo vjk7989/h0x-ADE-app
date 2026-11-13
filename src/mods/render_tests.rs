@@ -2031,14 +2031,21 @@ fn new_menu_shows_the_real_slot_keys_the_custom_agents_and_add_agent(cx: &mut Te
 fn palette_offers_a_new_session_for_each_installed_or_own_agent_with_its_key(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    let mut values = fixture(true, props(), updates("current", "current"));
-    values.insert("knownAgentsList".into(), agents_fixture());
-    // The agents arrive asynchronously: look after the later presses.
-    let (trees, _) = describe_pressing(cx, &staged, "frame/palette", values, None, "this.query = 'session';", 2);
-    let tree = trees.last().unwrap();
-    for text in ["New Claude Code session", "New Aider session", "ctrl", "shift"] {
-        assert!(tree.contains(text), "missing {text}: {tree}");
+    // The agents arrive asynchronously: look after the later presses. Each is searched by name, so
+    // the many "Sessions" commands can't push it below the rows the palette draws.
+    let search = |cx: &mut TestAppContext, query: &str| {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("knownAgentsList".into(), agents_fixture());
+        let (trees, _) = describe_pressing(cx, &staged, "frame/palette", values, None, &format!("this.query = '{query}';"), 2);
+        trees.last().unwrap().clone()
+    };
+    for (query, title) in [("claude", "New Claude Code session"), ("aider", "New Aider session")] {
+        let tree = search(cx, query);
+        for text in [title, "ctrl", "shift"] {
+            assert!(tree.contains(text), "{query}: missing {text}: {tree}");
+        }
     }
+    let tree = search(cx, "codex");
     assert!(!tree.contains("New Codex session"), "not installed: {tree}");
 }
 
