@@ -52,6 +52,14 @@ export function unit() {
 
 // ---- text
 
+/**
+ * The weight to draw `text` in. The bold face has no ' * + , . / < = > ? \ _ | or ",
+ * so bold text with one would show another glyph or overlap: it stays regular instead.
+ */
+export function boldWeight(text) {
+  return /["'*+,./<=>?\\_|]/.test(String(text ?? "")) ? 400 : 700;
+}
+
 /** A label in the Win98 font. `&File` underlines the F (its access key). */
 export function label(text, o = {}) {
   const s = String(text ?? "");
@@ -65,7 +73,7 @@ export function label(text, o = {}) {
   } else {
     el = div().child(s);
   }
-  if (o.bold) el = el.font_weight(700);
+  if (o.bold) el = el.font_weight(boldWeight(s));
   if (o.color) el = el.text_color(o.color);
   return el;
 }
@@ -270,7 +278,7 @@ export function titleBar(u, o) {
         .flex_1()
         .min_w(0)
         .truncate()
-        .font_weight(700)
+        .font_weight(boldWeight(o.title))
         .text_color(active ? C.title : C.inactiveText)
         .child(o.title ?? ""),
     )

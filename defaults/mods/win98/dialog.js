@@ -19,7 +19,7 @@ import {
 } from "h0x";
 import {
   C, ASSETS, FONT, DOS, unit, root, win, bevel, button, field, well, label, plain, icon, programIcon, sfx, perform, etch,
-  scale, gradient, openDialog, dosPath, setApp,
+  scale, gradient, openDialog, dosPath, setApp, boldWeight,
 } from "./kit.js";
 import { userName } from "./taskbar.js";
 
@@ -143,7 +143,7 @@ export default class Dialog {
           .flex()
           .justify_center()
           .text_size(u(14))
-          .font_weight(700)
+          .font_weight(boldWeight(msg))
           .text_color(C.white)
           .child(msg),
       );
