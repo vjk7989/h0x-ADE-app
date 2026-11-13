@@ -21,6 +21,9 @@ struct Table {
     interpreters: Vec<String>,
     #[serde(default)]
     programs: BTreeMap<String, Entry>,
+    /// Keys only the person's `programs.json` has (not in the built-in table): their own agents.
+    #[serde(skip)]
+    custom: std::collections::BTreeSet<String>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -43,6 +46,9 @@ struct Entry {
     /// How to start it, for an agent people can start from a menu (`knownAgents()`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     run: Vec<String>,
+    /// Where one of the person's own agents sits among the others in the number-key slots (lower first).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    order: Option<i64>,
 }
 
 impl Entry {
@@ -58,28 +64,67 @@ impl Entry {
         if !mine.run.is_empty() {
             self.run = mine.run;
         }
+        self.order = mine.order.or(self.order);
     }
+}
+
+/// The built-in agents that hold slots 1-4, in order; the person's own follow.
+const SLOT_AGENTS: &[&str] = &["claude", "codex", "opencode", "gemini"];
+/// `agent.new` and its keys count slots 1 to this.
+const SLOTS: usize = 9;
+
+/// The keys of the agents in the number-key slots (slot 1 first): the fixed ones that can start,
+/// then the person's own, by `order` and then key. At most `SLOTS`.
+fn slot_keys(t: &Table) -> Vec<String> {
+    let runs = |k: &str| t.programs.get(k).is_some_and(|e| !e.run.is_empty());
+    let mut keys: Vec<String> = SLOT_AGENTS.iter().filter(|k| runs(k)).map(|k| k.to_string()).collect();
+    let mut own: Vec<&String> = t.custom.iter().filter(|k| runs(k) && !SLOT_AGENTS.contains(&k.as_str())).collect();
+    own.sort_by_key(|k| (t.programs[*k].order.unwrap_or(i64::MAX), k.to_string()));
+    keys.extend(own.into_iter().cloned());
+    keys.truncate(SLOTS);
+    keys
+}
+
+/// The slot (1-9) `agent.new` was asked for: a whole number, or digits as text.
+pub fn slot_number(index: Option<&Value>) -> Result<usize, String> {
+    let n = match index {
+        Some(Value::Number(n)) => n.as_u64(),
+        Some(Value::String(s)) => s.trim().parse().ok(),
+        _ => None,
+    };
+    n.filter(|n| (1..=SLOTS as u64).contains(n)).map(|n| n as usize).ok_or_else(|| format!("agent.new needs index: a slot from 1 to {SLOTS}"))
 }
 
 /// The agents people pick most, first in menus; the rest follow by name.
 const AGENTS_FIRST: &[&str] = &["claude", "codex", "pi", "opencode", "cursor", "copilot", "amp", "gemini", "grok"];
 
 /// Every agent the table can start (entries with `run`), most picked first:
-/// `{ key, name, icon, tint, tile, color, run }`.
+/// `{ key, name, icon, tint, tile, color, run, slot, custom }`.
 pub fn startable() -> Vec<Value> {
     TABLE.with(|t| {
         let t = t.borrow();
         let mut keys: Vec<&String> = t.programs.iter().filter(|(_, e)| !e.run.is_empty()).map(|(k, _)| k).collect();
         keys.sort_by_key(|k| (AGENTS_FIRST.iter().position(|f| f == k).unwrap_or(AGENTS_FIRST.len()), k.to_string()));
-        keys.into_iter()
-            .map(|k| {
-                let e = &t.programs[k];
-                let mut v = shown(k, e, None, false, true);
-                v["run"] = json!(e.run);
-                v
-            })
-            .collect()
+        keys.into_iter().map(|k| startable_entry(&t, k)).collect()
     })
+}
+
+/// The agents holding the number-key slots, slot 1 first, shaped as `startable()` entries.
+pub fn slots() -> Vec<Value> {
+    TABLE.with(|t| {
+        let t = t.borrow();
+        slot_keys(&t).iter().map(|k| startable_entry(&t, k)).collect()
+    })
+}
+
+/// `{ key, name, icon, tint, tile, color, run, slot, custom }`: `slot` is 1-9 or null.
+fn startable_entry(t: &Table, key: &str) -> Value {
+    let e = &t.programs[key];
+    let mut v = shown(key, e, None, false, true);
+    v["run"] = json!(e.run);
+    v["slot"] = slot_keys(t).iter().position(|k| k == key).map_or(Value::Null, |i| json!(i + 1));
+    v["custom"] = json!(t.custom.contains(key));
+    v
 }
 
 /// Which of `commands` this machine can start, asked of the shell agents start
@@ -167,17 +212,25 @@ pub fn load() -> Result<(), String> {
         Ok(text) => match serde_json::from_str::<Table>(&text) {
             Err(e) => Err(format!("programs.json: {e}")),
             Ok(mine) => {
-                table.shells.extend(mine.shells);
-                table.interpreters.extend(mine.interpreters);
-                for (key, entry) in mine.programs {
-                    table.programs.entry(key).or_default().over(entry);
-                }
+                merge(&mut table, mine);
                 Ok(())
             }
         },
     };
     TABLE.with(|t| *t.borrow_mut() = table);
     result
+}
+
+/// The person's table on top of the built-in one, entry by entry.
+fn merge(table: &mut Table, mine: Table) {
+    table.shells.extend(mine.shells);
+    table.interpreters.extend(mine.interpreters);
+    for (key, entry) in mine.programs {
+        if !table.programs.contains_key(&key) {
+            table.custom.insert(key.clone());
+        }
+        table.programs.entry(key).or_default().over(entry);
+    }
 }
 
 /// How a terminal shows: from the agent's own report (`app`), else the
@@ -421,6 +474,66 @@ mod tests {
     fn key(app: Option<&str>, argv: &[&str]) -> String {
         let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
         resolve(&t(), app, &argv)["key"].as_str().unwrap().to_owned()
+    }
+
+    fn with_mine(mine: &str) -> Table {
+        let mut table = t();
+        merge(&mut table, serde_json::from_str(mine).unwrap());
+        table
+    }
+
+    #[test]
+    fn slots_are_the_four_agents_then_the_persons_own() {
+        assert_eq!(slot_keys(&t()), ["claude", "codex", "opencode", "gemini"]);
+        let table = with_mine(r#"{ "programs": { "zed": { "run": ["zed-agent"] }, "aider": { "run": ["aider", "--yes"] }, "idle": { "name": "No run" } } }"#);
+        assert_eq!(slot_keys(&table), ["claude", "codex", "opencode", "gemini", "aider", "zed"], "customs by key; no run: no slot");
+        let entries: Vec<Value> = slot_keys(&table).iter().map(|k| startable_entry(&table, k)).collect();
+        assert_eq!(entries[0]["slot"], json!(1));
+        assert_eq!(entries[0]["custom"], json!(false));
+        assert_eq!(entries[4]["slot"], json!(5));
+        assert_eq!(entries[4]["custom"], json!(true));
+        assert_eq!(entries[4]["run"], json!(["aider", "--yes"]));
+        // An agent outside the slots still lists, with no slot.
+        assert_eq!(startable_entry(&table, "pi")["slot"], Value::Null);
+        assert_eq!(startable_entry(&table, "pi")["custom"], json!(false));
+    }
+
+    #[test]
+    fn custom_agents_sort_by_order_then_key_and_stop_at_nine() {
+        let table = with_mine(r#"{ "programs": {
+            "c": { "run": ["c"], "order": 2 }, "b": { "run": ["b"], "order": 2 }, "a": { "run": ["a"] },
+            "first": { "run": ["f"], "order": -5 }, "neg": { "run": ["n"], "order": 1 }
+        } }"#);
+        assert_eq!(slot_keys(&table), ["claude", "codex", "opencode", "gemini", "first", "neg", "b", "c", "a"], "ties by key; no order last");
+        let many: Vec<String> = (0..20).map(|i| format!(r#""x{i:02}": {{ "run": ["x{i}"] }}"#)).collect();
+        let table = with_mine(&format!(r#"{{ "programs": {{ {} }} }}"#, many.join(",")));
+        let keys = slot_keys(&table);
+        assert_eq!(keys.len(), 9, "at most nine");
+        assert_eq!(&keys[4..], ["x00", "x01", "x02", "x03", "x04"]);
+    }
+
+    #[test]
+    fn overriding_a_built_in_agent_keeps_its_slot_and_is_not_custom() {
+        let table = with_mine(r#"{ "programs": { "codex": { "run": ["codex", "--fast"], "order": 1 }, "claude": { "name": "Mine" } } }"#);
+        assert_eq!(slot_keys(&table), ["claude", "codex", "opencode", "gemini"]);
+        let codex = startable_entry(&table, "codex");
+        assert_eq!(codex["run"], json!(["codex", "--fast"]));
+        assert_eq!(codex["custom"], json!(false));
+        assert_eq!(codex["slot"], json!(2));
+        // A mine-only entry whose run is removed again by an empty list keeps nothing to start.
+        let table = with_mine(r#"{ "programs": { "gone": { "name": "x" } } }"#);
+        assert_eq!(slot_keys(&table).len(), 4);
+    }
+
+    #[test]
+    fn slot_numbers_are_one_to_nine() {
+        for (given, want) in [(json!(1), 1), (json!(9), 9), (json!("3"), 3), (json!(" 4 "), 4)] {
+            assert_eq!(slot_number(Some(&given)), Ok(want), "{given}");
+        }
+        for bad in [json!(0), json!(10), json!(-1), json!(1.5), json!("x"), json!(""), json!(null), json!([1]), json!(true)] {
+            assert!(slot_number(Some(&bad)).is_err(), "{bad}");
+        }
+        assert!(slot_number(None).is_err());
     }
 
     #[test]

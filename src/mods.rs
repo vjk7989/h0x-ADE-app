@@ -1120,6 +1120,12 @@ pub fn forget_known_agents() {
     }
 }
 
+/// Whether the agent `key` of `list` (`programs::startable()`) can start on a machine: asked
+/// of the same once-a-minute check as `knownAgents()`. Blocks on a shell: not for the window thread.
+pub fn agent_installed(on: Option<String>, list: Vec<Value>, key: &str) -> bool {
+    known_agents(on, list).as_array().is_some_and(|a| a.iter().any(|v| v["key"] == key && v["installed"] == true))
+}
+
 fn known_agents(on: Option<String>, list: Vec<Value>) -> Value {
     let commands: Vec<String> = list.iter().filter_map(|a| a["run"][0].as_str().map(str::to_owned)).collect();
     let cached = SEEN.lock().ok().and_then(|s| s.as_ref()?.get(&on).filter(|(at, checked, _)| at.elapsed().as_secs() < 60 && checked == &commands).map(|(_, _, v)| v.clone()));

@@ -7,7 +7,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { commands, layouts, keys, run, theme, props, closeOverlay, openOverlay, shared, window as win } from "h0x";
+import { commands, layouts, keys, run, theme, props, closeOverlay, openOverlay, shared, spaces, knownAgents, window as win } from "h0x";
 
 // The list keeps one height while you move: rows and group titles have fixed
 // heights, and the window shows as many as fit in LIST_H.
@@ -76,8 +76,8 @@ function titleOf(name) {
   return { group: noun.charAt(0).toUpperCase() + noun.slice(1), title: `${verb.replace(/_/g, " ")} ${noun}`.replace(/^./, (c) => c.toUpperCase()) };
 }
 
-// Every entry for the state we're in now.
-function entries() {
+// Every entry for the state we're in now; `agents` are the ones knownAgents() found.
+function entries(agents) {
   const known = new Set(commands().map((c) => c.name));
   const mac = win()?.platform === "macos";
   const list = NAMED.filter(([n]) => known.has(n))
@@ -86,6 +86,10 @@ function entries() {
   for (const l of layouts()) {
     const t = { main: "HyperOx", terminals: "Terminals", win98: "HyperOx 98" }[l] ?? l.charAt(0).toUpperCase() + l.slice(1);
     list.push({ name: "layout.switch", args: { name: l }, group: "Layout", title: `Layout: ${t}`, words: `look ${l}` });
+  }
+  // A session of each agent that is installed (or the person's own), by its slot: the key is agent.new:<slot>.
+  for (const a of agents) {
+    if (a.slot && (a.installed || a.custom)) list.push({ name: "agent.new", args: { index: a.slot }, group: "Agent", title: `New ${a.name} session`, words: `start agent ${a.key}` });
   }
   // Anything new in the app shows up too, until it gets a better name here.
   const named = new Set(NAMED.map(([n]) => n));
@@ -100,7 +104,9 @@ function entries() {
 function keyOf(e, bound) {
   const v = Object.values(e.args)[0];
   const want = v === undefined ? e.name : `${e.name}:${v}`;
-  const k = bound.find((b) => b.section === "global" && b.action === want);
+  // Agent slots are bound twice (ctrl-shift-1 and ctrl-!): the first form shows.
+  const all = bound.filter((b) => b.section === "global" && b.action === want);
+  const k = all.find((b) => /shift/.test(b.keys)) ?? all[0];
   return k ? k.keys : null;
 }
 
@@ -141,6 +147,13 @@ export default class Palette extends View {
     this.scroll = 0;
     this.recent = JSON.parse(localStorage.getItem("recent") ?? "[]");
     this.handle = cx.focus_handle();
+    // The agents, for "New <name> session" (knownAgents() answers from its own short cache).
+    const machine = spaces().find((s) => s.active)?.machine;
+    this.agents = [];
+    cx.spawn(async (cx) => {
+      try { this.agents = await knownAgents({ on: machine }); } catch {}
+      cx.notify();
+    });
   }
 
   close() {
@@ -164,7 +177,7 @@ export default class Palette extends View {
 
   // The rows to show: grouped when empty, ranked while typing.
   rows() {
-    const all = entries();
+    const all = entries(this.agents);
     const q = this.query.trim().toLowerCase().replace(/\s+/g, "");
     if (!q) {
       const recent = this.recent.map((id) => all.find((e) => e.id === id)).filter(Boolean).slice(0, 5);

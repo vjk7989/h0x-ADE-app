@@ -623,14 +623,14 @@ export default class Welcome extends View {
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .child(
             div()
-              .id("w-body")
+              .id(`w-body-${this.page}`)
               .size_full()
               .overflow_y_scroll()
               // Padding inside, not on the scroll area: there it counts as
               // content and a page that fits still shows a bar.
               .child(div().px(22).pt(22).pb(20).child([this.pageOne, this.pageTwo, this.pageThree, this.pageFour][this.page - 1].call(this, t))),
           )
-          .child(Scrollbar.vertical("w-body").mode("always").absolute().inset_0()),
+          .child(Scrollbar.vertical(`w-body-${this.page}`).mode("always").absolute().inset_0()),
       )
       .child(
         h_flex()

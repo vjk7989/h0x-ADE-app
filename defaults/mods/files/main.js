@@ -88,7 +88,7 @@ export default class Files extends View {
         // One bad command never ends the loop: the panel keeps opening files.
         try {
           if (c.startsWith("open:")) { this.openFile(c.slice(5), cx); opened = true; continue; }
-          if (opened && /^line:\d+$/.test(c)) { this.line = Number(c.slice(5)); this.reveal(); }
+          if (opened && /^line:\d+$/.test(c)) this.setLine(Number(c.slice(5)));
         } catch (_e) { this.line = null; }
         opened = false;
       }
@@ -137,9 +137,16 @@ export default class Files extends View {
       if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file });
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on, space }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
-      this.pending = new Set(); this.marks = {}; this.show(null, cx); this.watched = null; this.error = null; this.limited = false;
+      // A file opened from a terminal link stays up when the folder behind it settles (a new profile's first
+      // look at the folder can change the context a moment after the click): its view is left alone, unless
+      // it is still loading (that load belongs to the old context), then it is opened again.
+      const kept = this.link;
+      this.pending = new Set(); this.marks = {}; this.watched = null; this.error = null; this.limited = false;
       this.loading = false;
-      if (saved?.file) this.show(saved.file, cx);
+      if (!kept) this.show(null, cx);
+      if (kept) {
+        if (!this.code && !this.fileError) { this.openFile(kept.full, cx); this.setLine(kept.line); }
+      } else if (saved?.file) this.show(saved.file, cx);
     }
     this.check(cx);
     this.flush(cx);
@@ -195,7 +202,16 @@ export default class Files extends View {
   openFile(full, cx) {
     const path = full.replaceAll("\\", "/"), root = this.root?.replaceAll("\\", "/");
     this.show(root && !this.on && path.startsWith(root + "/") ? path.slice(root.length + 1) : path, cx, true);
+    this.link = { full, line: null };
     cx.notify();
+  }
+
+  // `files.line:<n>`: the line to show once the file just opened is loaded (and again if it is reopened).
+  setLine(n) {
+    if (this.link) this.link.line = n;
+    if (!n) return;
+    this.line = n;
+    this.reveal();
   }
 
   // Once the opened file is loaded: the pending line (clamped to the last one) is scrolled to.
@@ -209,6 +225,7 @@ export default class Files extends View {
 
   show(path, cx, local) {
     this.line = null;
+    if (!local) this.link = null;
     const prev = this.doc;
     if (prev && cx) {
       // Leaving a file saves it; edits held back by a disk conflict wait for its reopening.
