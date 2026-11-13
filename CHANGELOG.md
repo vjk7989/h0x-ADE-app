@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.1.26] - 2026-11-13
+
+Sign in with your Pavii account. Bundles h0x-core 0.1.16.
+
+### Added
+- Sign in to HyperOx with your Pavii account (Google, GitHub or email). HyperOx opens www.pavii.tech in your browser and you return with one click; the sign-in is kept encrypted on your computer and lasts 30 days offline.
+- Several accounts can be signed in on one computer: switch between them, sign out, or remove one from this computer, from Settings → Info or the HyperOx logo menu.
+- A redesigned Settings → Info page with your account, resources, partners and privacy in one place.
+- Pairing a phone or Telegram needs a signed-in account.
+- Hold the mouse over a file link in a terminal to see "Ctrl+click to open", and Ctrl+click file names like plan.md to open them in Files.
+
+### Changed
+- Usage analytics are linked to your HyperOx account ID once you're signed in (never your email).
+
+### Fixed
+- HyperOx finds its own runtime instead of another program named h0x.
+- Settings → Updates says "Not checked yet." before the first check instead of showing an error.
+- The welcome window closes properly.
+
 ## [0.1.25] - 2026-11-13
 
 Updates that look after themselves, and a better to-do list. Bundles h0x-core 0.1.16.
