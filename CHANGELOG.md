@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.1.28] - 2026-11-13
+
+Sign in when you want to. Bundles h0x-core 0.1.16.
+
+### Added
+- "Skip sign-in" on the welcome screen. HyperOx works fully on this computer without an account; signing in turns on token saving, the observability engine and blockchain security for PII masking, and phone or Telegram pairing. Your choice is remembered.
+- Settings → Profile: sign in, see your account, switch accounts, sign out, or remove an account from this computer. The HyperOx logo menu and the Remote page now open it.
+
+### Fixed
+- Your account's email now shows for Google and GitHub sign-ins.
+- With analytics turned off, signing in no longer sends anything to analytics.
+- The welcome window fits smaller screens.
+
 ## [0.1.27] - 2026-11-13
 
 Signing in works. Bundles h0x-core 0.1.16.
