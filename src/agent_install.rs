@@ -117,7 +117,7 @@ fn path_has(list: &str, dir: &str, windows: bool) -> bool {
 /// The shell rc file's new text, or None when it already puts OpenCode's folder on PATH
 /// (a non-comment line that names PATH and the folder; an alias to the binary does not).
 fn rc_update(existing: &str) -> Option<String> {
-    if existing.lines().any(|l| !l.trim_start().starts_with('#') && l.contains(".opencode/bin") && (l.contains("PATH") || l.contains("fish_add_path"))) {
+    if existing.lines().any(|l| !l.trim_start().starts_with('#') && l.contains(".opencode/bin") && l.to_ascii_lowercase().contains("path")) {
         return None;
     }
     let mut text = existing.to_owned();
