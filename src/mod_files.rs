@@ -8,20 +8,38 @@ use std::sync::Mutex;
 pub const LIMIT: u64 = 1024 * 1024;
 static WRITES: Mutex<()> = Mutex::new(());
 
+/// Text from file bytes: a UTF-8 BOM is dropped, UTF-16 with a BOM (what Windows PowerShell 5.1's
+/// `>` writes) is decoded, anything else must be valid UTF-8.
+fn decode(bytes: Vec<u8>) -> Result<String, String> {
+    let utf16 = |rest: &[u8], le: bool| {
+        if rest.len() % 2 != 0 {
+            return Err("UTF-16 text has an odd number of bytes".to_string());
+        }
+        let units = rest.chunks_exact(2).map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) });
+        char::decode_utf16(units).collect::<Result<String, _>>().map_err(|e| e.to_string())
+    };
+    match bytes.as_slice() {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, true),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, false),
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8(rest.to_vec()).map_err(|_| "stream did not contain valid UTF-8".to_string()),
+        _ => String::from_utf8(bytes).map_err(|_| "stream did not contain valid UTF-8".to_string()),
+    }
+}
+
 pub fn read(path: &Path) -> Result<Option<String>, String> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.to_string()),
     };
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     file.take(LIMIT + 1)
-        .read_to_string(&mut text)
+        .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if text.len() as u64 > LIMIT {
+    if bytes.len() as u64 > LIMIT {
         return Err("Text file exceeds 1 MiB".into());
     }
-    Ok(Some(text))
+    decode(bytes).map(Some)
 }
 
 fn write(path: &Path, text: &str, expected: Option<&str>) -> Result<(), String> {
@@ -233,6 +251,19 @@ pub fn remove_app_file(path: String) -> impl std::future::Future<Output = Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_reads_utf8_bom_and_both_utf16_orders() {
+        let le: Vec<u8> = [0xFF, 0xFE].into_iter().chain("hi \u{e9}\u{1F600}\r\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let be: Vec<u8> = [0xFE, 0xFF].into_iter().chain("hi \u{e9}\u{1F600}\r\n".encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        assert_eq!(decode(le).unwrap(), "hi \u{e9}\u{1F600}\r\n");
+        assert_eq!(decode(be).unwrap(), "hi \u{e9}\u{1F600}\r\n");
+        assert_eq!(decode(b"\xEF\xBB\xBFplain".to_vec()).unwrap(), "plain");
+        assert_eq!(decode("no bom".as_bytes().to_vec()).unwrap(), "no bom");
+        assert_eq!(decode(Vec::new()).unwrap(), "");
+        assert!(decode(vec![0xFF, 0x41]).unwrap_err().contains("valid UTF-8"), "invalid UTF-8 stays an error");
+        assert!(decode(vec![0xFF, 0xFE, 0x41]).is_err(), "odd UTF-16 length");
+    }
 
     #[test]
     fn remove_deletes_only_inside_the_app_home() {

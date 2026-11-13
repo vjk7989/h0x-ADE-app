@@ -260,14 +260,15 @@ fn hex(v: u32) -> Hsla {
     rgb(v).into()
 }
 
+/// Outer 2px FOCUS band (4px out) with a 2px PANEL gap against the element; later shadows paint on top.
 fn ring() -> Vec<BoxShadow> {
     vec![
-        BoxShadow::new(px(0.0), px(0.0), hex(PANEL)).spread_radius(px(2.0)),
         BoxShadow::new(px(0.0), px(0.0), hex(FOCUS)).spread_radius(px(4.0)),
+        BoxShadow::new(px(0.0), px(0.0), hex(PANEL)).spread_radius(px(2.0)),
     ]
 }
 
-/// A fully rounded button with a 2px focus ring when reached by keyboard: 44px, or the quieter
+/// A fully rounded button with a 2px focus ring while it has focus (not `focus_visible`: the ring must not hide after a mouse move): 44px, or the quieter
 /// 40px Skip pill.
 fn pill(id: &'static str, label: &'static str, primary: bool, icon: Option<&'static [u8]>) -> Stateful<Div> {
     let ring = ring();
@@ -288,7 +289,7 @@ fn pill(id: &'static str, label: &'static str, primary: bool, icon: Option<&'sta
         .font_weight(FontWeight::MEDIUM)
         .when(primary, |d| d.bg(hex(ACCENT)).border_color(hex(ACCENT)).text_color(hex(ACCENT_INK)).hover(|s| s.bg(hex(ACCENT_HI))))
         .when(!primary, |d| d.bg(hex(PANEL)).border_color(hex(RULE_2)).text_color(hex(INK)).hover(|s| s.bg(hex(PAPER_2))))
-        .focus_visible(move |mut s| {
+        .focus(move |mut s| {
             s.box_shadow = Some(ring);
             s
         })
@@ -302,7 +303,7 @@ fn link(id: &'static str, label: &'static str, url: &'static str) -> Stateful<Di
         .tab_index(0)
         .cursor_pointer()
         .underline()
-        .focus_visible(|mut s| {
+        .focus(|mut s| {
             s.box_shadow = Some(ring());
             s
         })
@@ -462,8 +463,17 @@ mod tests {
     // Not `super::*`: that brings in `gpui::test`, which `#[test]` would then expand forever.
     use super::{
         Action, CANCELLED, OTHER, PERKS, PERKS_LEAD, REJECTED, SIGN_IN, SIGN_IN_NOTE, SKIP_NOTE, State, Status, TIMEOUT, TRY_AGAIN, UNREACHABLE, content, decide,
-        enter_action, friendly, window_height,
+        FOCUS, PANEL, enter_action, friendly, ring, window_height,
     };
+
+    #[test]
+    fn the_focus_ring_is_a_2px_focus_band_outside_a_2px_gap() {
+        let ring = ring();
+        let widths: Vec<f32> = ring.iter().map(|s| f32::from(s.spread_radius)).collect();
+        assert_eq!(widths, [4.0, 2.0], "the wide FOCUS shadow paints first, the PANEL gap over its inner half");
+        assert_eq!(ring[0].color, super::hex(FOCUS));
+        assert_eq!(ring[1].color, super::hex(PANEL));
+    }
 
     #[test]
     fn idle_offers_sign_in_with_a_note_and_nothing_else() {
