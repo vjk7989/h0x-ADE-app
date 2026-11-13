@@ -1021,6 +1021,7 @@ impl AppWindow {
         }
         match serde_json::from_str::<Node>(&text) {
             Ok(mut n) => {
+                tracing::info!(target: "files_dbg", "check_layout_file: the layout file changed on disk");
                 self.written_layout = text;
                 let was_broken = !self.layout_file_ok;
                 self.layout_file_ok = true;
@@ -1311,6 +1312,9 @@ impl AppWindow {
     }
 
     fn remove_copy(&mut self, slot: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(c) = self.copies.get(slot).filter(|c| c.inst.name == "files") {
+            tracing::info!(target: "files_dbg", "files copy REMOVED slot={slot} id={}", c.id);
+        }
         if let Some(copy) = self.copies.remove(slot)
             && let (Some(runtime), Some(root)) = (&self.runtime, copy.root)
         {
@@ -1466,7 +1470,11 @@ impl AppWindow {
                         self.deliver_open(path, line, cx);
                     }
                 }
+                let is_files = inst.name == "files";
                 let copy = self.load(inst, window, cx);
+                if is_files {
+                    tracing::info!(target: "files_dbg", "files copy CREATED slot={slot} id={} loaded={}", copy.id, copy.root.is_some());
+                }
                 if slot.starts_with("float:")
                     && let Some(root) = &copy.root
                 {
@@ -1477,6 +1485,7 @@ impl AppWindow {
         }
         self.publish_shown_copies();
         if let Some((path, line)) = self.pending_open.take() {
+            tracing::info!(target: "files_dbg", "pending_open taken {} line={line:?}", path.display());
             self.deliver_open(path, line, cx);
         }
 
@@ -2889,6 +2898,9 @@ impl AppWindow {
         // A mod someone edited under 0.1.0 still says project.* / context.*.
         let current = crate::keys::current(name);
         let name = current.as_str();
+        if name.starts_with("layout.") || name.starts_with("tab.") || name.starts_with("space.") {
+            tracing::info!(target: "files_dbg", "command {name} {args}");
+        }
         // `name:value`, as in keys.json.
         if let Some((n, v)) = name.split_once(':')
             && let Some(c) = crate::commands::find(n)
@@ -3829,6 +3841,7 @@ impl AppWindow {
         }
         // With no Files panel yet, the first one started from here is the one this open is for.
         let due = u32::from(!self.copies.values().any(|c| c.inst.name == "files" && c.root.is_some()));
+        tracing::info!(target: "files_dbg", "open_in_files {} line={line:?} due={due} copies={:?}", path.display(), self.copies.iter().filter(|(_, c)| c.inst.name == "files").map(|(s, c)| (s.clone(), c.id, c.root.is_some())).collect::<Vec<_>>());
         self.last_link_open = Some((path.clone(), line, Instant::now(), due));
         if send_open("files", &path, line) {
             return;
@@ -3838,6 +3851,7 @@ impl AppWindow {
             crate::links::open(&crate::links::Target::File(path));
         } else if !send_open("files", &path, line) {
             // The mod's copy starts on a `sync`, which delivers it (or shows the folder).
+            tracing::info!(target: "files_dbg", "pending_open set {} line={line:?}", path.display());
             self.pending_open = Some((path, line));
             self.sync(window, cx);
         }
@@ -3853,6 +3867,7 @@ impl AppWindow {
                 if wait > 0 {
                     cx.background_executor().timer(Duration::from_millis(wait)).await;
                 }
+                tracing::info!(target: "files_dbg", "deliver_open attempt after {wait} ms (sent before: {sent})");
                 match (send_open("files", &path, line), sent) {
                     (true, true) | (false, true) => return,
                     (true, false) => sent = true,
@@ -4153,6 +4168,7 @@ impl AppWindow {
             self.check_layout_file(window, cx);
         }
         let edited: BTreeSet<String> = changed.iter().filter_map(|p| crate::files::mod_of(p)).collect();
+        tracing::info!(target: "files_dbg", "files_changed {:?} edited_mods={:?}", changed.iter().take(8).collect::<Vec<_>>(), edited);
         if edited.is_empty() {
             return;
         }
@@ -4165,6 +4181,7 @@ impl AppWindow {
         let Some(runtime) = self.runtime.clone() else { return };
         for copy in self.copies.values_mut().filter(|c| edited.contains(&c.inst.name) && loaded.contains(&c.id)) {
             let Some(root) = &copy.root else { continue };
+            tracing::info!(target: "files_dbg", "reload_now mod={} id={}", copy.inst.name, copy.id);
             let error = runtime.reload_now(root, window, cx).err().map(|e| format!("{e:#}"));
             if let Some(e) = &error {
                 tracing::warn!("mod reload failed: {e}");
@@ -4184,6 +4201,7 @@ impl AppWindow {
             return;
         }
         for (slot, inst) in stale {
+            tracing::info!(target: "files_dbg", "recheck_mods drops {slot}");
             self.remove_copy(&slot, window, cx);
             // The layout's copies come back in `sync`; an overlay's in its place.
             if self.overlays.iter().any(|o| o.slot == slot) {
@@ -4936,6 +4954,7 @@ fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
 /// `line:<n>`, about the file just opened. A panel that only knows `open:` still opens the file.
 fn send_open(panel: &str, path: &std::path::Path, line: Option<u32>) -> bool {
     let sent = mods::send_command(panel, &format!("open:{}", path.display()));
+    tracing::info!(target: "files_dbg", "send_open {panel} {} line={line:?} -> {sent}", path.display());
     if sent && let Some(line) = line {
         let _ = mods::send_command(panel, &format!("line:{line}"));
     }

@@ -293,6 +293,9 @@ export function window(): {
  *  this is false, and catch up once it is true again. */
 export function windowVisible(): boolean;
 
+/** Temporary: writes a line to the app log (target files_dbg). */
+export function debugLog(text: string): void;
+
 /** For a floating mod: where it sits now. `vertical` on the left/right edges, horizontal on
  *  top/bottom; while dragged, where it would land. `hovered` is true while the pointer is on it
  *  (or it's dragged); a `peek` drawer is open then. Null for mods that don't float. */

@@ -1477,6 +1477,13 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .function("window", reader(reads.clone(), "window", |s| &s.window))
         .function("revision", |_| Ok(HostValue::Number(snapshot_revision())))
         .function("windowVisible", |_| Ok(HostValue::Bool(window_visible())))
+        // Temporary (files_dbg): a mod's line in the app log.
+        .function("debugLog", |a| {
+            if let Some(text) = a.get(0).and_then(HostValue::as_str) {
+                tracing::info!(target: "files_dbg", "js {text}");
+            }
+            Ok(HostValue::Null)
+        })
         .function("theme", |_| Ok(to_host(&serde_json::to_value(&*crate::settings::theme()).unwrap_or(Value::Null))))
         .function("settings", |_| Ok(to_host(&serde_json::to_value(&*crate::settings::get()).unwrap_or(Value::Null))))
         .function("keys", |_| {

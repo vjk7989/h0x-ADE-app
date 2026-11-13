@@ -277,6 +277,12 @@ pub(crate) fn ctrl_shift_digit(vkey: u16, control: bool, alt: bool) -> Option<ch
     }
 }
 
+/// HyperOx: a Ctrl+Shift+digit chord is a shortcut, never text: the character it makes on this layout
+/// (the rupee sign on English India) must not win over the binding (`prefer_character_input`), nor be typed.
+pub(crate) fn is_digit_chord(vkey: u16, modifiers: &Modifiers) -> bool {
+    modifiers.shift && ctrl_shift_digit(vkey, modifiers.control, modifiers.alt).is_some()
+}
+
 fn get_key_from_vkey(vkey: VIRTUAL_KEY) -> Option<String> {
     let key_data = unsafe { MapVirtualKeyW(vkey.0 as u32, MAPVK_VK_TO_CHAR) };
     if key_data == 0 {
@@ -434,6 +440,20 @@ const CANDIDATE_VKEYS: &[VIRTUAL_KEY] = &[
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_ctrl_shift_digit_chord_is_a_shortcut_but_altgr_and_plain_shift_still_type() {
+        use super::is_digit_chord;
+        use gpui::Modifiers;
+        let held = |control, shift, alt| Modifiers { control, shift, alt, ..Default::default() };
+        for vkey in 0x30u16..=0x39 {
+            assert!(is_digit_chord(vkey, &held(true, true, false)), "{vkey:#x}");
+            assert!(!is_digit_chord(vkey, &held(true, true, true)), "AltGr+digit types");
+            assert!(!is_digit_chord(vkey, &held(false, true, false)), "Shift+digit types the symbol");
+            assert!(!is_digit_chord(vkey, &held(true, false, false)), "Ctrl+digit has no shift: its own binding");
+        }
+        assert!(!is_digit_chord(0x41, &held(true, true, false)), "a letter");
+    }
+
     #[test]
     fn ctrl_shift_digit_names_the_number_row_key_on_every_layout() {
         use super::ctrl_shift_digit;
