@@ -341,6 +341,17 @@ export function feedbackClearImages(): null;
 export function sendFeedback(body: import("gpui-kit").HostValue, images?: string[]): Promise<string | null>;
 /** Opens one of the Info page's links (pavii.tech, its docs, buckleson.com) in the browser; any other URL is refused. Resolves to an error message, or null. Settings frame only. */
 export function openLink(url: string): string | null;
+/** Who is signed in: the current account and every account on this computer (never tokens). Settings frame and the logo menu only. */
+export function account(): { current: Account | null; accounts: Account[] };
+export interface Account { uid: string; provider: "google.com" | "github.com" | "password"; name: string | null; email: string | null; picture: string | null }
+/** Opens the browser to sign in and resolves when done (up to 5 minutes): an error message, or null. Settings frame and the logo menu only. */
+export function accountSignIn(): Promise<string | null>;
+/** Makes another signed-in account current. Returns an error message, or null. Settings frame and the logo menu only. */
+export function accountSwitch(uid: string): string | null;
+/** Signs an account out (it stays on this computer). Returns an error message, or null. Settings frame and the logo menu only. */
+export function accountSignOut(uid: string): string | null;
+/** Removes an account and its local profile data from this computer. Returns an error message, or null. Settings frame and the logo menu only. */
+export function accountRemove(uid: string): string | null;
 /** Copies plain text (at most 4096 bytes) to the system clipboard. Returns an error message, or null. Settings frame only. */
 export function copyText(text: string): string | null;
 

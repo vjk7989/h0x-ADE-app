@@ -1136,6 +1136,21 @@ fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Opti
     }
 }
 
+fn account_json(a: &crate::auth::Account) -> Value {
+    json!({ "uid": a.uid, "provider": a.provider, "name": a.name, "email": a.email, "picture": a.picture })
+}
+
+/// null on success (re-identifying analytics when the current account changed), else the reason.
+fn account_change(done: Result<(), String>, identity_changed: bool) -> HostValue {
+    match done {
+        Ok(()) => {
+            if identity_changed { crate::analytics::identify(crate::auth::current().as_ref()); }
+            HostValue::Null
+        }
+        Err(why) => HostValue::Str(why),
+    }
+}
+
 fn module(inst: Instance, copy: u64) -> HostModule {
     let reads = Rc::new(RefCell::new(LiveReads::default()));
     LIVE_READS.with_borrow_mut(|copies| {
@@ -1145,6 +1160,8 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     let props = inst.props.clone();
     let feedback_frame = inst.name == "frame-feedback";
     let settings_frame = inst.name == "frame-settings";
+    // Accounts are the settings frame's and the logo menu's (workspace-chrome) alone.
+    let account_ok = settings_frame || inst.name == "workspace-chrome";
     let feedback_from = inst.props.get("from").and_then(Value::as_str).unwrap_or("person").to_owned();
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
     let (cmd_tx, commands) = async_channel::unbounded::<String>();
@@ -1251,6 +1268,44 @@ fn module(inst: Instance, copy: u64) -> HostModule {
                     Err(why) => HostValue::Str(why),
                 })
             })
+        })
+        .function("account", move |_| {
+            if !account_ok { return Err(HostError::new("accounts are for settings and the logo menu")); }
+            let accounts: Vec<Value> = crate::auth::accounts().iter().map(account_json).collect();
+            Ok(to_host(&json!({ "current": crate::auth::current().as_ref().map(account_json), "accounts": accounts })))
+        })
+        .async_function("accountSignIn", move |_| {
+            if !account_ok { return Err(HostError::new("accounts are for settings and the logo menu")); }
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let _ = tx.send_blocking(crate::auth::sign_in(|url| crate::links::open(&crate::links::Target::Url(url.to_owned()))));
+            });
+            Ok(async move {
+                Ok(match rx.recv().await {
+                    Ok(Ok(_)) => {
+                        crate::analytics::identify(crate::auth::current().as_ref());
+                        HostValue::Null
+                    }
+                    Ok(Err(why)) => HostValue::Str(why),
+                    Err(_) => HostValue::Str("sign-in was interrupted".into()),
+                })
+            })
+        })
+        .function("accountSwitch", move |a| {
+            if !account_ok { return Err(HostError::new("accounts are for settings and the logo menu")); }
+            Ok(account_change(crate::auth::switch(a.string(0)?), true))
+        })
+        .function("accountSignOut", move |a| {
+            if !account_ok { return Err(HostError::new("accounts are for settings and the logo menu")); }
+            let uid = a.string(0)?;
+            let was_current = crate::auth::current().is_some_and(|c| c.uid == uid);
+            Ok(account_change(crate::auth::sign_out(uid), was_current))
+        })
+        .function("accountRemove", move |a| {
+            if !account_ok { return Err(HostError::new("accounts are for settings and the logo menu")); }
+            let uid = a.string(0)?;
+            let was_current = crate::auth::current().is_some_and(|c| c.uid == uid);
+            Ok(account_change(crate::auth::remove(uid), was_current))
         })
         .function("openLink", move |a| {
             if !settings_frame { return Err(HostError::new("opening links is frame-only")); }
