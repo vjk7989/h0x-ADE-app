@@ -16,8 +16,11 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Firebase public web config of pavii.tech (it ships in the login page; not a secret).
-const API_KEY: &str = "AIzaSyAmEshUrnliZJdtlyCA4TKqAoSVEQuoYGo";
+/// The desktop API key of Firebase project pavii-ai3 ("HyperOx desktop"): public like any
+/// browser key, limited to the Token Service and Identity Toolkit APIs and with no website
+/// restriction. The website's own key only accepts requests from pavii.tech pages, so a
+/// desktop app without a web referrer is refused with it.
+const API_KEY: &str = "AIzaSyBoU_fZ2-5aNVDgxjLqSJq_GBUL4BfvG6o";
 const PROJECT_ID: &str = "pavii-ai3";
 const LOGIN_URL: &str = "https://www.pavii.tech/login/";
 const GRACE_SECS: u64 = 30 * 24 * 60 * 60;
