@@ -2039,14 +2039,15 @@ fn palette_offers_a_new_session_for_each_installed_or_own_agent_with_its_key(cx:
         let (trees, _) = describe_pressing(cx, &staged, "frame/palette", values, None, &format!("this.query = '{query}';"), 2);
         trees.last().unwrap().clone()
     };
-    for (query, title) in [("claude", "New Claude Code session"), ("aider", "New Aider session")] {
+    // The title is drawn in pieces around the matched letters ("New\u{a0}", "Claude", "\u{a0}Code\u{a0}session").
+    for (query, name, key) in [("claude", "Claude", "1"), ("aider", "Aider", "5")] {
         let tree = search(cx, query);
-        for text in [title, "ctrl", "shift"] {
-            assert!(tree.contains(text), "{query}: missing {text}: {tree}");
+        for text in ["text \"New\\u{a0}\"".to_owned(), format!("text \"{name}\""), "session".to_owned(), "text \"Agent\"".to_owned(), "text \"ctrl\"".to_owned(), "text \"shift\"".to_owned(), format!("text \"{key}\"")] {
+            assert!(tree.contains(&text), "{query}: missing {text}: {tree}");
         }
     }
     let tree = search(cx, "codex");
-    assert!(!tree.contains("New Codex session"), "not installed: {tree}");
+    assert!(!tree.contains("text \"Agent\""), "Codex is not installed, so no agent row: {tree}");
 }
 
 #[test]
