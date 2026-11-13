@@ -37,7 +37,6 @@ impl Isolated {
     fn apply(&self, cmd: &mut Command) {
         cmd.env("H0X_ADE_HOME", &self.home)
             .env("H0X_CORE_SESSION", &self.session)
-            .env("H0X_ADE_SKIP_SIGNIN", "1")
             .env("H0X_CORE_DIRS", &self.core_dir)
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("XDG_STATE_HOME", self.root.join("state"))
@@ -347,6 +346,8 @@ fn a_shell_launch_opens_hyperox_in_its_folder() {
     for dir in [&env.home, &a, &b, &c] {
         std::fs::create_dir_all(dir).unwrap();
     }
+    // This computer has already signed in or skipped: the marker lets the launch past the sign-in screen.
+    std::fs::write(env.home.join("signin-done"), "1").unwrap();
     // Open and done tasks and steps for the To-do panel screenshot below (the app home's todo/
     // folder): the progress bar, step counts and the Completed count all have something to show.
     std::fs::create_dir_all(env.home.join("todo")).unwrap();
@@ -465,6 +466,14 @@ fn a_shell_launch_opens_hyperox_in_its_folder() {
     std::thread::sleep(Duration::from_secs(3));
     let saved = env.command(EXE).arg("shot").arg(&shot).stdin(Stdio::null()).output();
     eprintln!("info page: settings {:?}, screenshot {} {:?}", opened.map(|o| o.status), shot.display(), saved.map(|o| (o.status, String::from_utf8_lossy(&o.stderr).into_owned())));
+
+    // For a person to look at, not an assertion: Settings on the Profile page (signed out), saved
+    // where CI uploads it with the Info page (artifact `info-page-<platform>`).
+    let profile_shot = std::env::var_os("RUNNER_TEMP").map(PathBuf::from).unwrap_or_else(|| root.clone()).join("profile-page.png");
+    let opened = env.command(EXE).args(["do", "app.settings", "--section", "profile"]).stdin(Stdio::null()).output();
+    std::thread::sleep(Duration::from_secs(3));
+    let saved = env.command(EXE).arg("shot").arg(&profile_shot).stdin(Stdio::null()).output();
+    eprintln!("profile page: settings {:?}, screenshot {} {:?}", opened.map(|o| o.status), profile_shot.display(), saved.map(|o| (o.status, String::from_utf8_lossy(&o.stderr).into_owned())));
 
     // For a person to look at, not an assertion: Settings > Look with the shipped themes, then the
     // window in a light and a dark new theme (artifact `info-page-<platform>`). A light theme is

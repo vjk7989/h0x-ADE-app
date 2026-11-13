@@ -264,6 +264,7 @@ jobs:
           name: info-page-${{ matrix.platform }}
           path: |
             ${{ runner.temp }}/info-page.png
+            ${{ runner.temp }}/profile-page.png
             ${{ runner.temp }}/todo-panel.png
             ${{ runner.temp }}/look-themes.png
             ${{ runner.temp }}/theme-neo-brutalism.png
