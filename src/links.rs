@@ -121,8 +121,13 @@ pub fn resolve_with_line(link: &str, cwd: Option<&Path>) -> Option<(Target, Opti
     if link.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("file:")) {
         return file_uri_path(link).and_then(|path| resolve_with_line(&path, cwd));
     }
-    let scheme = link.split_once(':').is_some_and(|(s, _)| {
-        s.len() > 1 && s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    // `file.rs:12` looks like a scheme ("file.rs:") but is a file and a line: a dotted name before
+    // a colon and a digit is a path.
+    let scheme = link.split_once(':').is_some_and(|(s, rest)| {
+        s.len() > 1
+            && s.starts_with(|c: char| c.is_ascii_alphabetic())
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+            && !(s.contains('.') && rest.starts_with(|c: char| c.is_ascii_digit()))
     });
     if scheme {
         return Some((Target::Url(link.to_owned()), None));
@@ -543,7 +548,7 @@ mod tests {
         assert_eq!(resolve_with_line("src/x.rs:3", Some(&sub)).and_then(|(_, l)| l), Some(3));
         assert_eq!(resolve("near.rs", Some(&sub)), Some(Target::File(sub.join("near.rs"))), "the folder's own file wins");
         assert_eq!(resolve("src/none.rs", Some(&sub)), None);
-        std::fs::remove_dir_all(dir.join(".git")).unwrap();
+        std::fs::remove_file(dir.join(".git")).unwrap();
         std::fs::create_dir(dir.join(".git")).unwrap();
         assert_eq!(git_root(&sub), Some(dir.clone()), ".git may be a folder");
         std::fs::remove_dir_all(&dir).unwrap();
