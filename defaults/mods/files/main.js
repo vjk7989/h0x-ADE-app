@@ -138,12 +138,15 @@ export default class Files extends View {
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on, space }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
       // A file opened from a terminal link stays up when the folder behind it settles (a new profile's first
-      // look at the folder can change the context a moment after the click).
+      // look at the folder can change the context a moment after the click): its view is left alone, unless
+      // it is still loading (that load belongs to the old context), then it is opened again.
       const kept = this.link;
-      this.pending = new Set(); this.marks = {}; this.show(null, cx); this.watched = null; this.error = null; this.limited = false;
+      this.pending = new Set(); this.marks = {}; this.watched = null; this.error = null; this.limited = false;
       this.loading = false;
-      if (kept) { this.openFile(kept.full, cx); this.setLine(kept.line); }
-      else if (saved?.file) this.show(saved.file, cx);
+      if (!kept) this.show(null, cx);
+      if (kept) {
+        if (!this.code && !this.fileError) { this.openFile(kept.full, cx); this.setLine(kept.line); }
+      } else if (saved?.file) this.show(saved.file, cx);
     }
     this.check(cx);
     this.flush(cx);

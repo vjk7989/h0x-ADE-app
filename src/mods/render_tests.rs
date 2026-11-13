@@ -2033,11 +2033,13 @@ fn palette_offers_a_new_session_for_each_installed_or_own_agent_with_its_key(cx:
     let staged = Staged::new();
     let mut values = fixture(true, props(), updates("current", "current"));
     values.insert("knownAgentsList".into(), agents_fixture());
-    let (trees, _) = describe_pressing(cx, &staged, "frame/palette", values, None, "this.query = 'session';", 0);
+    // The agents arrive asynchronously: look after the later presses.
+    let (trees, _) = describe_pressing(cx, &staged, "frame/palette", values, None, "this.query = 'session';", 2);
+    let tree = trees.last().unwrap();
     for text in ["New Claude Code session", "New Aider session", "ctrl", "shift"] {
-        assert!(trees[0].contains(text), "missing {text}: {}", trees[0]);
+        assert!(tree.contains(text), "missing {text}: {tree}");
     }
-    assert!(!trees[0].contains("New Codex session"), "not installed: {}", trees[0]);
+    assert!(!tree.contains("New Codex session"), "not installed: {tree}");
 }
 
 #[test]
@@ -4746,11 +4748,13 @@ fn files_panel_keeps_a_linked_file_and_its_line_when_the_folder_context_settles_
     files_step(&mut visual, &disk, "openfile /fixture/project/a.txt");
     files_step(&mut visual, &disk, "line 30");
     files_wait(&mut visual, 200);
-    // The context key changes (a fresh profile's first look at the folder): the file stays and is shown at its line again.
+    // The context key changes (a fresh profile's first look at the folder): the file stays, at its line.
     files_step(&mut visual, &disk, "rekey");
     files_wait(&mut visual, 300);
     let state = files_state(&mut visual, &disk);
-    assert_eq!((state["file"].clone(), state["cursors"].clone()), (json!("a.txt"), json!([29, 29])), "{state}");
+    assert_eq!(state["file"], json!("a.txt"), "{state}");
+    assert_eq!(state["cursors"].as_array().and_then(|c| c.last()), Some(&json!(29)), "{state}");
+    assert_eq!(state["value"], json!(hundred), "{state}");
     // Going back is the person's own choice and is kept.
     files_step(&mut visual, &disk, "back");
     files_step(&mut visual, &disk, "rekey");
