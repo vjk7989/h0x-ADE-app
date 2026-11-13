@@ -121,13 +121,13 @@ pub fn resolve_with_line(link: &str, cwd: Option<&Path>) -> Option<(Target, Opti
     if link.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("file:")) {
         return file_uri_path(link).and_then(|path| resolve_with_line(&path, cwd));
     }
-    // `file.rs:12` looks like a scheme ("file.rs:") but is a file and a line: a dotted name before
-    // a colon and a digit is a path.
+    // `file.rs:12` looks like a scheme ("file.rs:") but is a file and a line: a dotted name is a
+    // scheme only before "//" (`com.example.app://x`).
     let scheme = link.split_once(':').is_some_and(|(s, rest)| {
         s.len() > 1
             && s.starts_with(|c: char| c.is_ascii_alphabetic())
             && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
-            && !(s.contains('.') && rest.starts_with(|c: char| c.is_ascii_digit()))
+            && (!s.contains('.') || rest.starts_with("//"))
     });
     if scheme {
         return Some((Target::Url(link.to_owned()), None));
