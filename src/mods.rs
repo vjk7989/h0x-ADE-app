@@ -1966,8 +1966,7 @@ mod tests {
         std::thread::spawn(|| {
             use gpui_shell::HostArguments;
             // Even a path that does not exist: a refused caller never gets as far as looking at it.
-            let missing = if cfg!(windows) { r"C:
-onexistent-h0xideo.mp4" } else { "/nonexistent-h0x/video.mp4" };
+            let missing = if cfg!(windows) { r"C:\nonexistent-h0x\video.mp4" } else { "/nonexistent-h0x/video.mp4" };
             let args = || HostArguments::new([HostValue::Str(missing.into())]);
             for name in ["", "test", "Files", "files ", "files-x", "frame-files", "frame-settings", "frame-welcome", "my-mod/files", "workspace-chrome"] {
                 let host = module(Instance { name: name.into(), props: Value::Null }, 1);
@@ -1993,11 +1992,12 @@ onexistent-h0xideo.mp4" } else { "/nonexistent-h0x/video.mp4" };
         }
         let full = if cfg!(windows) { r"C:\Users\me\clip.mp4" } else { "/home/me/clip.mp4" };
         assert!(local_full_path(full).is_ok());
-        for bad in ["", "clip.mp4", "./clip.mp4", "a\0b", r"\server\share\clip.mp4", "//server/share/clip.mp4"] {
+        for bad in ["", "clip.mp4", "./clip.mp4", "a\0b", r"\\server\share\clip.mp4", "//server/share/clip.mp4"] {
             assert!(local_full_path(bad).is_err(), "{bad:?}");
         }
         assert_eq!(open_file("clip.mp4", false), "needs a full path");
-        assert_eq!(open_file(r"\server\share\clip.mp4", false), "network paths are not opened");
+        let share = if cfg!(windows) { r"\servershareip.mp4" } else { "//server/share/clip.mp4" };
+        assert_eq!(open_file(share, false), "network paths are not opened");
     }
 
     #[test]
