@@ -9011,6 +9011,28 @@ fn todo_turned_off_in_settings_stays_off_in_the_tab_bar(cx: &mut TestAppContext)
 }
 
 #[test]
+fn settings_sections_have_their_own_icons() {
+    let js = include_str!("../../defaults/frame/settings/main.js");
+    let icons: Vec<&str> = js.lines().filter(|l| l.trim_start().starts_with("{ id: \"") && l.contains("icon: \"")).filter_map(|l| l.split("icon: \"").nth(1)?.split('"').next()).collect();
+    assert!(icons.len() >= 8, "{icons:?}");
+    let mut seen = std::collections::BTreeSet::new();
+    assert!(icons.iter().all(|i| seen.insert(*i)), "an icon is used twice: {icons:?}");
+}
+
+#[test]
+fn todo_panel_gets_alt_up_down_before_the_agent_keys() {
+    let text = include_str!("../../defaults/keys.json");
+    crate::keys::parse(text).unwrap();
+    let sections: BTreeMap<String, BTreeMap<String, String>> = serde_json::from_str(text).unwrap();
+    for (key, agent) in [("alt-up", "agent.prev"), ("alt-down", "agent.next")] {
+        assert_eq!(sections["global"].get(key).map(String::as_str), Some(agent), "{key} still switches agents");
+        // "terminal" in a mod section hands the key to the focused mod, whose reorder reads it.
+        assert_eq!(sections["mod:todo"].get(key).map(String::as_str), Some("terminal"), "{key} reaches the to-do panel");
+    }
+    assert!(include_str!("../../defaults/mods/todo/main.js").contains("m.alt ? this.reorder("));
+}
+
+#[test]
 fn todo_key_is_a_shipped_mod_command_on_every_platform() {
     for (text, key) in [(include_str!("../../defaults/keys.json"), "ctrl-shift-j"), (include_str!("../../defaults/keys.macos.json"), "cmd-shift-j")] {
         crate::keys::parse(text).unwrap();

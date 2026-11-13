@@ -11,11 +11,11 @@ const SECTIONS = [
   { id: "look", title: "Look", icon: "palette" },
   ...(window()?.platform === "macos" ? [{ id: "keyboard", title: "Keyboard", icon: "keyboard" }] : []),
   { id: "machines", title: "Machines", icon: "server" },
-  { id: "remote", title: "Remote", icon: "shield" },
+  { id: "remote", title: "Remote", icon: "smartphone" },
   { id: "alerts", title: "Alerts", icon: "bell" },
-  { id: "mods", title: "Mods", icon: "shield" },
+  { id: "mods", title: "Mods", icon: "puzzle" },
   { id: "updates", title: "Updates", icon: "refresh" },
-  { id: "info", title: "Info", icon: "shield" },
+  { id: "info", title: "Info", icon: "info" },
 ];
 
 const LOOKS = { main: "HyperOx", terminals: "Terminals", win98: "HyperOx 98" };
