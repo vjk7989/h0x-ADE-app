@@ -1056,6 +1056,59 @@ pub fn run_here(command: &str, args: &[String]) -> Option<String> {
     run_blocking(command, args, None, EXEC_LIMIT).ok().map(|(_, out, _)| out)
 }
 
+/// What `openFile` does with a local file.
+#[derive(Debug, PartialEq)]
+enum OpenPlan {
+    /// The editor reads it: nothing is done.
+    Text,
+    /// The system's default app opens it.
+    Open,
+    /// Shown in its folder (programs are never run).
+    Reveal,
+}
+
+/// The same choice a terminal's Ctrl+click makes (`links::kind`), or a forced reveal.
+fn open_plan(kind: crate::links::Kind, reveal: bool) -> OpenPlan {
+    match kind {
+        _ if reveal => OpenPlan::Reveal,
+        crate::links::Kind::Text => OpenPlan::Text,
+        crate::links::Kind::System => OpenPlan::Open,
+        crate::links::Kind::Reveal => OpenPlan::Reveal,
+    }
+}
+
+/// A full local path, or why not: relative, empty, NUL, or one that can name another machine.
+fn local_full_path(path: &str) -> Result<PathBuf, String> {
+    let p = PathBuf::from(path);
+    if path.is_empty() || path.contains('\0') || !p.is_absolute() {
+        return Err("needs a full path".into());
+    }
+    if crate::links::network(&p) {
+        return Err("network paths are not opened".into());
+    }
+    Ok(p)
+}
+
+/// "opened", "revealed" or "text" (nothing done); anything else is why it failed.
+fn open_file(path: &str, reveal: bool) -> String {
+    let p = match local_full_path(path) {
+        Ok(p) if p.exists() => p,
+        Ok(_) => return "the file is not there".into(),
+        Err(why) => return why,
+    };
+    match open_plan(crate::links::kind(&p), reveal) {
+        OpenPlan::Text => "text".into(),
+        OpenPlan::Open => {
+            crate::links::open_default(&p);
+            "opened".into()
+        }
+        OpenPlan::Reveal => {
+            crate::links::open(&crate::links::Target::File(p));
+            "revealed".into()
+        }
+    }
+}
+
 /// The agents a machine can start (`knownAgents()`), asked at most once a minute.
 type InstalledCache = std::collections::HashMap<Option<String>, (std::time::Instant, Vec<String>, Vec<String>)>;
 static SEEN: std::sync::Mutex<Option<InstalledCache>> = std::sync::Mutex::new(None);
@@ -1144,6 +1197,7 @@ fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Opti
     }
 }
 
+const OPEN_FILE_REFUSED: &str = "opening files is for the files panel";
 const INSTALL_REFUSED: &str = "installing OpenCode is for the welcome frame";
 const ACCOUNT_REFUSED: &str = "accounts are for the settings and account frames";
 
@@ -1186,6 +1240,8 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     let account_ok = settings_frame || inst.name == "frame-account";
     // The install runs a fixed recipe, but only onboarding offers it.
     let welcome_frame = inst.name == "frame-welcome";
+    // Opening a file in the system's app is for the shipped files panel (the clicks of a person), nobody else.
+    let files_panel = inst.name == "files";
     let feedback_from = inst.props.get("from").and_then(Value::as_str).unwrap_or("person").to_owned();
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
     let (cmd_tx, commands) = async_channel::unbounded::<String>();
@@ -1350,6 +1406,12 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             if !allowed_link(url) { return Ok(HostValue::Str("that link is not allowed".into())); }
             crate::links::open(&crate::links::Target::Url(url.to_owned()));
             Ok(HostValue::Null)
+        })
+        .function("openFile", move |a| {
+            if !files_panel { return Err(HostError::new(OPEN_FILE_REFUSED)); }
+            let path = a.string(0)?;
+            let reveal = a.get(1).map(from_host).is_some_and(|o| o["reveal"] == json!(true));
+            Ok(HostValue::Str(open_file(path, reveal)))
         })
         .function("copyText", move |a| {
             if !settings_frame { return Err(HostError::new("copying is frame-only")); }
@@ -1897,6 +1959,45 @@ mod tests {
         ] {
             assert!(!allowed_link(url), "{url:?} must be refused");
         }
+    }
+
+    #[test]
+    fn open_file_is_for_the_files_panel_alone() {
+        std::thread::spawn(|| {
+            use gpui_shell::HostArguments;
+            // Even a path that does not exist: a refused caller never gets as far as looking at it.
+            let missing = if cfg!(windows) { r"C:
+onexistent-h0xideo.mp4" } else { "/nonexistent-h0x/video.mp4" };
+            let args = || HostArguments::new([HostValue::Str(missing.into())]);
+            for name in ["", "test", "Files", "files ", "files-x", "frame-files", "frame-settings", "frame-welcome", "my-mod/files", "workspace-chrome"] {
+                let host = module(Instance { name: name.into(), props: Value::Null }, 1);
+                let err = host.call("openFile", &args()).expect_err(name);
+                assert_eq!(err.message(), OPEN_FILE_REFUSED, "{name:?}");
+            }
+            let host = module(Instance { name: "files".into(), props: Value::Null }, 2);
+            assert_eq!(host.call("openFile", &args()), Ok(HostValue::Str("the file is not there".into())));
+            assert!(host.call("openFile", &HostArguments::default()).is_err(), "no argument");
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn open_file_decides_like_a_terminal_click_and_only_for_local_full_paths() {
+        use crate::links::Kind;
+        assert_eq!(open_plan(Kind::Text, false), OpenPlan::Text);
+        assert_eq!(open_plan(Kind::System, false), OpenPlan::Open);
+        assert_eq!(open_plan(Kind::Reveal, false), OpenPlan::Reveal);
+        for kind in [Kind::Text, Kind::System, Kind::Reveal] {
+            assert_eq!(open_plan(kind, true), OpenPlan::Reveal, "Show in folder always shows");
+        }
+        let full = if cfg!(windows) { r"C:\Users\me\clip.mp4" } else { "/home/me/clip.mp4" };
+        assert!(local_full_path(full).is_ok());
+        for bad in ["", "clip.mp4", "./clip.mp4", "a\0b", r"\server\share\clip.mp4", "//server/share/clip.mp4"] {
+            assert!(local_full_path(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(open_file("clip.mp4", false), "needs a full path");
+        assert_eq!(open_file(r"\server\share\clip.mp4", false), "network paths are not opened");
     }
 
     #[test]
