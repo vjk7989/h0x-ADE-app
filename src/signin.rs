@@ -105,7 +105,7 @@ pub struct SignIn {
 
 /// The window height: 640, or less on a short screen (visible height minus 80, never below 460).
 fn window_height(visible: Option<f32>) -> f32 {
-    visible.filter(|h| h.is_finite()).map_or(640.0, |h| (h - 80.0).clamp(460.0, 640.0))
+    visible.filter(|h| !h.is_nan()).map_or(640.0, |h| (h - 80.0).clamp(460.0, 640.0))
 }
 
 pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver<Request>, cx: &mut App) {

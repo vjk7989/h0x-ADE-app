@@ -2114,7 +2114,9 @@ fn settings_profile_esc_closes_the_menu_then_the_confirm_then_cancels_the_sign_i
              const go = (_e, cx) => {{ this.escapeAccount(); if (--this.left > 0) this.press = go; }}; if (this.left > 0) this.press = go;"
         )
     };
-    for (n, menu, confirm, waiting, cancels) in [(0, true, true, true, 0), (1, false, true, true, 0), (2, false, false, true, 0), (3, false, false, true, 1)] {
+    // The Switch menu is never drawn while a sign-in waits (it holds "Add account"), so it is hidden from the start;
+    // the first Esc still goes to it (the confirm stays), which keeps the order.
+    for (n, menu, confirm, waiting, cancels) in [(0, false, true, true, 0), (1, false, true, true, 0), (2, false, false, true, 0), (3, false, false, true, 1)] {
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", signed_in(), None, &esc(n), 3);
         let tree = trees.last().unwrap();
         assert_eq!(tree.contains("st-acct-menu"), menu, "{n} Esc: {tree}");
