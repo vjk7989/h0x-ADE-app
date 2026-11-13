@@ -497,6 +497,23 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         ),
     )?;
 
+    // HyperOx: moves the cursor to a 0-based line, which scrolls the editor to it.
+    let cursor_editor = runtime.clone();
+    globals.set(
+        "__editor_set_cursor_line",
+        Func::from(
+            move |ctx: Ctx<'_>, handle: EntityHandle, line: u32| -> JsResult<()> {
+                let state = live_editor(&ctx, &cursor_editor, handle)?;
+                scope::with_current(|window, cx| {
+                    state.update(cx, |state, cx| {
+                        state.set_cursor_position(gpui_base::input::Position::new(line, 0), window, cx)
+                    });
+                })
+                .ok_or_else(|| needs_call(&ctx, "set_cursor_line()"))
+            },
+        ),
+    )?;
+
     let subscribe_editor = runtime.clone();
     globals.set(
         "__editor_on",

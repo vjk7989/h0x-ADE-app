@@ -35,6 +35,13 @@ export default class Pane extends View {
     return panes().find((p) => p.pane === props()?.pane);
   }
 
+  // Copy acts on the focused terminal: focus this pane's first. The app copies the selection when one
+  // exists, else the visible screen.
+  copy(pane) {
+    run("pane.focus", { pane });
+    run("terminal.copy_screen", {});
+  }
+
   button(t, id, icon, command, args) {
     return div()
       .id(id)
@@ -47,6 +54,21 @@ export default class Pane extends View {
         run(command, args);
       })
       .child(svg(`mods/pane/${icon}.svg`).size(14));
+  }
+
+  copyButton(t, pane) {
+    return div()
+      .id(`ph-c-${pane}`)
+      .p(3)
+      .rounded(4)
+      .text_color(t.dim)
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .tooltip("Copy (selection or screen)")
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        this.copy(pane);
+      })
+      .child(svg("mods/pane/copy.svg").size(14));
   }
 
   render(cx) {
@@ -77,6 +99,7 @@ export default class Pane extends View {
       .when(st === "blocked", el => el.child(div().flex_none().px(6).h(18).flex().items_center().rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).child("Needs you")))
       .when(st === "done", el => el.child(div().size(7).flex_none().rounded(4).bg(t.done)))
       .when(this.hovered, el => el
+        .child(this.copyButton(t, pane))
         .child(this.button(t, `ph-r-${pane}`, "split-right", "pane.split", { direction: "right", pane }))
         .child(this.button(t, `ph-d-${pane}`, "split-down", "pane.split", { direction: "down", pane }))
         .child(this.button(t, `ph-z-${pane}`, p.zoomed ? "unzoom" : "zoom", "pane.zoom", { pane }))

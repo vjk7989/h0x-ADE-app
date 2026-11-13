@@ -36,6 +36,12 @@ function items(p, git) {
       // no pane to split, zoom or close: its pane is the block's id.
       const inTab = panes().some((pane) => pane.pane === tg.pane);
       return [
+        ...(term
+          ? [
+              ["Copy", "terminal.copy_screen", {}],
+              ["Paste", "terminal.paste", {}],
+            ]
+          : []),
         ...(inTab
           ? [
               ["Split right", "pane.split", { direction: "right", pane: tg.pane }],
@@ -91,7 +97,7 @@ function items(p, git) {
 }
 
 function menuIcon(command) {
-  const name = command.endsWith(".close") || command === "sessions.delete" ? "x" : command === "sessions.pin" ? "pin" : command === "sessions.unpin" ? "pin-off" : command === "sessions.reveal" ? "folder" : command === "sessions.copy" ? "file-text" : command.endsWith(".rename") ? "square-pen" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "app.theme" ? "settings" : command === "pane.split" ? "panel-right" : command === "pane.zoom" ? "square" : "terminal";
+  const name = command.endsWith(".close") || command === "sessions.delete" ? "x" : command === "sessions.pin" ? "pin" : command === "sessions.unpin" ? "pin-off" : command === "sessions.reveal" ? "folder" : command === "sessions.copy" ? "file-text" : command.endsWith(".rename") ? "square-pen" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "app.theme" ? "settings" : command === "pane.split" ? "panel-right" : command === "pane.zoom" ? "square" : command === "terminal.copy_screen" ? "copy" : "terminal";
   return `mods/workspace-chrome/${name}.svg`;
 }
 

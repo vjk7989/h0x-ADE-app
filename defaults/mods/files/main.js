@@ -72,7 +72,14 @@ export default class Files extends View {
     cx.timer.every(1000, cx => this.tick(cx));
     // `files.open:<path>` from a terminal link click.
     cx.spawn(async cx => {
-      for (;;) { const c = await nextCommand(); if (c.startsWith("open:")) this.openFile(c.slice(5), cx); }
+      // `files.line:<n>` right after an open: the 1-based line to show.
+      let opened = false;
+      for (;;) {
+        const c = await nextCommand();
+        if (c.startsWith("open:")) { this.openFile(c.slice(5), cx); opened = true; continue; }
+        if (opened && /^line:\d+$/.test(c)) { this.line = Number(c.slice(5)); this.reveal(); }
+        opened = false;
+      }
     });
   }
 
@@ -179,7 +186,16 @@ export default class Files extends View {
     cx.notify();
   }
 
+  // Once the opened file is loaded: the pending line (clamped to the last one) is scrolled to.
+  reveal() {
+    if (!this.line || !this.code) return;
+    const last = this.code.value().split("\n").length;
+    this.code.set_cursor_line(Math.min(this.line, last) - 1);
+    this.line = null;
+  }
+
   show(path, cx, local) {
+    this.line = null;
     const prev = this.doc;
     if (prev && cx) {
       // Leaving a file saves it; edits held back by a disk conflict wait for its reopening.
@@ -203,6 +219,7 @@ export default class Files extends View {
           value: large ? disk.slice(0, 400000) + "\n… (file truncated)" : draft ? draft.draft : disk,
           font_family: settings().font_family, font_size: 12,
           syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
+        this.reveal();
         if (on || large) { this.doc = { full, hint: on ? "read-only: remote machine" : "read-only: too large" }; return; }
         const saved = draft ? draft.saved : disk;
         const doc = this.doc = { full, path, space: context.space, state: this.code, editable: true, saved, disk, eol: eol(saved), version: 0,
