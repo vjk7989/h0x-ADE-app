@@ -747,7 +747,7 @@ fn sign_in_in(dir: &Path, open: impl FnOnce(&str), exchange: Exchange, wait: Dur
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     pub(crate) static SIGN_IN_TESTS: Mutex<()> = Mutex::new(());

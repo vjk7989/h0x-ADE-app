@@ -1955,7 +1955,7 @@ mod tests {
     fn cancelling_a_sign_in_is_allowed_to_the_settings_and_account_frames() {
         std::thread::spawn(|| {
             // cancel_sign_in bumps a shared counter that the auth tests watch.
-            let _g = crate::auth::SIGN_IN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+            let _g = crate::auth::tests::SIGN_IN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
             for name in ["frame-settings", "frame-account"] {
                 let host = module(Instance { name: name.into(), props: Value::Null }, 1);
                 let got = host.call("accountCancelSignIn", &gpui_shell::HostArguments::default());
