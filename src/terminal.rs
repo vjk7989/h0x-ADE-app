@@ -927,10 +927,13 @@ impl TerminalView {
         let (x, y) = local(&g, pos);
         let (col, row) = (x / f32::from(g.cell.width), y / f32::from(g.cell.height));
         let mut target = None;
+        // A remote pane's files are not on this machine: no link, and never a stat here.
+        let remote = self.address.contains('/');
         let hit = g.vt.link_at(col as u16, row as u16, |text, at, joined| {
             // In lines joined back together only a file that exists proves the join right.
             if let Some(range) = links::find(text, at)
                 && let Some(link) = links::resolve(&text[range.clone()], self.cwd.as_deref())
+                && !(remote && matches!(link, links::Target::File(_)))
                 && (!joined || matches!(link, links::Target::File(_)))
             {
                 target = Some(LinkTarget::External(link));
@@ -939,8 +942,7 @@ impl TerminalView {
             if joined {
                 return None;
             }
-            // A remote pane's folder is not on this machine: never stat it here.
-            if !self.address.contains('/')
+            if !remote
                 && let Some((range, link)) = links::bare_file(text, at, self.cwd.as_deref())
             {
                 target = Some(LinkTarget::External(link));
@@ -953,6 +955,9 @@ impl TerminalView {
         })?;
         // OSC 8 links bypass text detection.
         let target = target.or_else(|| links::resolve(&hit.target, self.cwd.as_deref()).map(LinkTarget::External))?;
+        if remote && matches!(target, LinkTarget::External(links::Target::File(_))) {
+            return None;
+        }
         Some((target, hit.spans))
     }
 
@@ -1287,6 +1292,7 @@ fn hint_text(target: &LinkTarget, mac: bool) -> String {
             Some(name) => format!("{key}+click to open {}", name.to_string_lossy()),
             None => format!("{key}+click to open"),
         },
+        LinkTarget::Terminal(_) => format!("{key}+click to peek"),
         _ => format!("{key}+click to open"),
     }
 }
@@ -2381,7 +2387,8 @@ mod tests {
         assert_eq!(hint_text(&file, true), "⌘+click to open main.rs");
         let root = LinkTarget::External(crate::links::Target::File(std::path::PathBuf::from("/")));
         assert_eq!(hint_text(&root, false), "Ctrl+click to open");
-        assert_eq!(hint_text(&LinkTarget::Terminal("t1".into()), false), "Ctrl+click to open");
+        assert_eq!(hint_text(&LinkTarget::Terminal("t1".into()), false), "Ctrl+click to peek");
+        assert_eq!(hint_text(&LinkTarget::Terminal("t1".into()), true), "⌘+click to peek");
     }
 
     #[gpui::test]
