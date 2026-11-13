@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.1.30] - 2026-11-14
+
+Signing in finishes on pavii.tech, and a round of polish. Bundles h0x-core 0.1.16.
+
+### Changed
+- After you sign in or sign up, the browser comes back to pavii.tech to say you're done (you can close the tab), and HyperOx celebrates with confetti.
+
+### Fixed
+- The copy chip copies a whole command even when it wraps onto the next line, and copying the screen keeps wrapped lines whole.
+- Quoted file names with spaces, like "my notes.md", are links.
+- The onboarding page that picks your panels no longer hides them just by being opened.
+- The Files header always shows the file name.
+- The HyperOx 98 look keeps the drive letter in titles, and its settings labels are easier to read.
+
 ## [0.1.29] - 2026-11-13
 
 Smoother terminals, one-click copy, and OpenCode in onboarding. Bundles h0x-core 0.1.16.
