@@ -48,17 +48,33 @@ pub fn word(text: &str, at: usize) -> Option<Range<usize>> {
 }
 
 /// A bare file name under the pointer (`plan.md`, `docs\plan.md` on Windows) that
-/// exists in the terminal's folder; the text detector only sees names with a slash.
+/// is a file in the terminal's folder; the text detector only sees names with a slash.
 pub fn bare_file(text: &str, at: usize, cwd: Option<&Path>) -> Option<(Range<usize>, Target)> {
-    let range = word_in(text, at, cfg!(windows))?;
+    let mut range = word_in(text, at, cfg!(windows))?;
+    if cfg!(windows) {
+        // The word loses what it trims or cannot hold: `.\` and `..\` name folders, and
+        // `C:` names the drive. A rooted path with no drive would mean the pane's own.
+        while range.start > 0 && text.as_bytes()[range.start - 1] == b'.' {
+            range.start -= 1;
+        }
+        if text[range.clone()].starts_with(['/', '\\']) {
+            let before = text[..range.start].as_bytes();
+            let drive = before.len() >= 2 && before[before.len() - 1] == b':' && before[before.len() - 2].is_ascii_alphabetic();
+            let word_before = before.len() >= 3 && (before[before.len() - 3].is_ascii_alphanumeric() || before[before.len() - 3] == b'_');
+            if !drive || word_before {
+                return None;
+            }
+            range.start -= 2;
+        }
+    }
     let name = text[range.clone()].rsplit(['/', '\\']).next()?;
     let (stem, ext) = name.rsplit_once('.')?;
     if stem.is_empty() || !(1..=10).contains(&ext.len()) || !ext.bytes().all(|b| b.is_ascii_alphanumeric()) {
         return None;
     }
     match resolve(&text[range.clone()], cwd)? {
-        target @ Target::File(_) => Some((range, target)),
-        Target::Url(_) => None,
+        target @ Target::File(_) if matches!(&target, Target::File(path) if path.is_file()) => Some((range, target)),
+        _ => None,
     }
 }
 
@@ -1028,6 +1044,75 @@ mod tests {
             let text = r"open docs\plan2.md.";
             assert_eq!(hit(text, 8), Some((r"docs\plan2.md".into(), Target::File(dir.join(r"docs\plan2.md")))));
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bare_file_names_with_odd_cases_punctuation_and_lengths() {
+        let dir = std::env::temp_dir().join(format!("h0x-bare-odd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["UPPER.MD", "café.md", "日本.txt", "archive.tar.gz", "a.abcdefghij", "a.abcdefghijk", "a.m-d", "note.md"] {
+            std::fs::write(dir.join(name), "").unwrap();
+        }
+        let hit = |text: &str, at: usize| bare_file(text, at, Some(&dir)).map(|(r, t)| (text[r].to_owned(), t));
+        let file = |name: &str| Some((name.to_owned(), Target::File(dir.join(name))));
+        assert_eq!(hit("UPPER.MD", 0), file("UPPER.MD"), "an uppercase extension");
+        assert_eq!(hit("open café.md", 6), file("café.md"));
+        assert_eq!(hit("日本.txt", 0), file("日本.txt"));
+        assert_eq!(hit("x archive.tar.gz y", 4), file("archive.tar.gz"));
+        assert_eq!(hit("a.abcdefghij", 0), file("a.abcdefghij"), "a ten-letter extension");
+        assert_eq!(hit("a.abcdefghijk", 0), None, "eleven letters is no extension");
+        assert_eq!(hit("a.m-d", 0), None, "an extension of letters and digits only");
+        for text in ["note.md.", "note.md,", "note.md;", "note.md:", "'note.md'", "`note.md`", "[note.md]", "\"note.md\"", "note.md!"] {
+            let at = text.find('n').unwrap();
+            assert_eq!(hit(text, at), file("note.md"), "{text:?}");
+        }
+        assert_eq!(hit("note.md", 7), None, "just past the end");
+        assert_eq!(hit("note.md", 99), None, "far past the end");
+        assert_eq!(hit("", 0), None, "empty text");
+        assert_eq!(hit("note.md", 2), file("note.md"));
+        assert_eq!(bare_file("note.md", 0, Some(Path::new(""))), None, "an empty folder name is no folder");
+        if !cfg!(windows) {
+            // Only Windows reads a backslash as a separator.
+            assert_eq!(hit(r"x\note.md", 2), None);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_folder_named_like_a_file_is_not_a_bare_file_link() {
+        let dir = std::env::temp_dir().join(format!("h0x-bare-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs.md")).unwrap();
+        assert_eq!(bare_file("see docs.md now", 4, Some(&dir)), None, "a folder");
+        assert_eq!(bare_file("see docs.md/ now", 4, Some(&dir)), None, "a folder with its slash");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_bare_names_keep_their_drive_and_dot_folders() {
+        let dir = std::env::temp_dir().join(format!("h0x-bare-win-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("plan.md"), "").unwrap();
+        std::fs::write(dir.join("sub").join("plan.md"), "").unwrap();
+        let same = |found: Option<(Range<usize>, Target)>, want: PathBuf| match found {
+            Some((_, Target::File(path))) => path.canonicalize().ok() == want.canonicalize().ok(),
+            _ => false,
+        };
+        let sub = dir.join("sub");
+        // `.\` and `..\` name the pane's folder and its parent, never the drive's root.
+        assert!(same(bare_file(r"open .\plan.md", 7, Some(&sub)), sub.join("plan.md")), r".\plan.md");
+        assert!(same(bare_file(r"open ..\plan.md", 8, Some(&sub)), dir.join("plan.md")), r"..\plan.md");
+        // Another drive's path is that drive's: not the same folders on the pane's drive.
+        let full = dir.join("plan.md").display().to_string();
+        let drive = full.as_bytes()[0];
+        let other = if drive.eq_ignore_ascii_case(&b'Q') { 'R' } else { 'Q' };
+        let elsewhere = format!("{other}{}", &full[1..]);
+        let at = elsewhere.rfind("plan").unwrap();
+        assert_eq!(bare_file(&elsewhere, at, Some(&sub)), None, "{elsewhere}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

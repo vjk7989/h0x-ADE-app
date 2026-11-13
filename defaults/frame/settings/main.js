@@ -1087,7 +1087,7 @@ export default class Settings extends View {
       ? `Up to date.${checked}`
       : u.tried
         ? "No successful check. Check your connection and try again."
-        : "Not checked yet";
+        : "Not checked yet.";
     // Pressed: "Checking\u2026" while it looks, then "Up to date" for a moment
     // (a find changes the row instead). One per row: an element shows once.
     const asked = this.asked && Date.now() - this.asked < 3000;

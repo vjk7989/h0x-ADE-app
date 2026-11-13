@@ -5837,6 +5837,38 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_overlay_close_takes_a_popup_first_and_never_another_window() {
+        in_own_process("overlay_close_order");
+    }
+
+    #[gpui::test]
+    fn overlay_close_order(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("overlay_close_order") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let ids = |this: &super::AppWindow| this.overlays.iter().map(|o| o.id.clone()).collect::<Vec<_>>();
+            this.run("overlay.close", json!({}), window, cx);
+            assert!(this.overlays.is_empty(), "nothing open: nothing happens");
+            this.open_overlay("notes".into(), json!({"kind": "window"}), window, cx);
+            this.run("overlay.close", json!({}), window, cx);
+            assert_eq!(ids(this), ["notes"], "a window that is not the welcome stays");
+            this.open_overlay(super::WELCOME.into(), json!({"kind": "window"}), window, cx);
+            this.open_overlay("pop".into(), json!({"kind": "popup"}), window, cx);
+            this.run("overlay.close", json!({}), window, cx);
+            assert_eq!(ids(this), ["notes", super::WELCOME], "the popup goes first");
+            this.run("overlay.close", json!({}), window, cx);
+            assert_eq!(ids(this), ["notes"], "then the welcome");
+            this.run("overlay.close", json!({}), window, cx);
+            assert_eq!(ids(this), ["notes"]);
+        }));
+    }
+
+    #[test]
     fn a_second_rename_press_closes_the_prompt() {
         in_own_process("rename_prompt_opens_once");
     }

@@ -323,7 +323,7 @@ pub struct CoreInfo {
 static CORE: Mutex<CoreInfo> = Mutex::new(CoreInfo { version: None, managed: None, ready: None, updating: false, error: None });
 /// When the last check succeeded (unix seconds); a failed check clears it.
 static CHECKED: Mutex<Option<u64>> = Mutex::new(None);
-/// A check has finished (well or not): before that the screen says "Not checked yet".
+/// A check has finished (well or not): before that the screen says "Not checked yet.".
 static TRIED: AtomicBool = AtomicBool::new(false);
 /// "Check now" wakes the checker early.
 static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
@@ -634,7 +634,7 @@ mod runtime {
         let on_path = std::env::split_paths(path).filter(|dir| dir.is_absolute());
         let mut found: Vec<PathBuf> = Vec::new();
         for bin in beside.chain(on_path).map(|dir| dir.join(program())).filter(|bin| bin.is_file()) {
-            if !found.contains(&bin) {
+            if !found.iter().any(|seen| same_key(seen) == same_key(&bin)) {
                 found.push(bin);
             }
         }
@@ -661,7 +661,18 @@ mod runtime {
 
     /// `X.Y.Z` from `h0x X.Y.Z`.
     pub fn version_in(text: &str) -> Option<String> {
-        text.trim().strip_prefix("h0x ")?.split_whitespace().next().map(str::to_owned)
+        let word = text.trim().strip_prefix("h0x ")?.split_whitespace().next()?;
+        let (core, _) = word.split_once(['-', '+']).unwrap_or((word, ""));
+        let numbers: Vec<&str> = core.split('.').collect();
+        let digits = |n: &&str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+        (numbers.len() == 3 && numbers.iter().all(digits)).then(|| word.to_owned())
+    }
+
+    /// A path as a comparison key: no `\\?\` prefix, and no case on Windows.
+    pub fn same_key(path: &Path) -> String {
+        let text = path.to_string_lossy();
+        let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+        if cfg!(windows) { text.replace('/', "\\").to_lowercase() } else { text.to_owned() }
     }
 
     pub fn version(bin: &Path) -> Option<String> {
@@ -2380,6 +2391,94 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         let after = status();
         assert_eq!(after["tried"], true, "a failed check has been tried");
         assert!(after["checked"].is_null(), "and still is not a successful one");
+    }
+
+    #[test]
+    fn the_updates_page_reads_tried_and_words_each_state_in_order() {
+        let page = include_str!("../defaults/frame/settings/main.js");
+        let start = page.find("  updates(t) {").expect("the settings frame has an Updates page");
+        let updates = &page[start..];
+        let at = |s: &str| updates.find(s).unwrap_or_else(|| panic!("{s:?} is on the Updates page"));
+        assert!(status().get("tried").is_some(), "the key the page reads is sent");
+        // checking, then a success, then a real failure, then nothing has run yet.
+        let (checking, done, failed, never) = (at("u.checking ? \"Checking\\u2026\""), at("`Up to date.${checked}`"), at("No successful check."), at("\"Not checked yet.\""));
+        assert!(checking < done && done < failed && failed < never, "the order of the wording");
+        assert!(at("u.tried") < failed, "the failure text is gated on a check having run");
+    }
+
+    #[test]
+    fn runtime_versions_accept_prereleases_and_refuse_the_core() {
+        assert_eq!(runtime::version_in("h0x 0.9.16-rc.1\n").as_deref(), Some("0.9.16-rc.1"));
+        assert_eq!(runtime::version_in("  h0x 0.9.16\r\n").as_deref(), Some("0.9.16"), "Windows line ends and padding");
+        assert_eq!(runtime::version_in("h0x-core 0.1.16"), None);
+        assert_eq!(runtime::version_in("H0X 0.9.16"), None);
+        assert_eq!(runtime::version_in("h0x"), None);
+    }
+
+    #[test]
+    fn a_verbatim_and_a_plain_spelling_of_one_folder_are_one_candidate() {
+        assert_eq!(runtime::same_key(Path::new("/a/b")), runtime::same_key(Path::new("/a/b")));
+        assert_ne!(runtime::same_key(Path::new("/a/b")), runtime::same_key(Path::new("/a/c")));
+        #[cfg(windows)]
+        {
+            assert_eq!(runtime::same_key(Path::new(r"\\?\C:\HyperOx\runtime\h0x.exe")), runtime::same_key(Path::new(r"c:\hyperox\runtime\h0x.exe")));
+            assert_eq!(runtime::same_key(Path::new(r"C:\a\b")), runtime::same_key(Path::new("C:/a/b")));
+        }
+    }
+
+    #[test]
+    fn a_foreign_h0x_whose_version_line_is_not_a_version_is_skipped() {
+        // Another program called h0x may well print "h0x <words>": only "h0x X.Y.Z" is ours.
+        for line in ["h0x is a hex viewer", "h0x version 2", "h0x (unknown)", "h0x 1.2", "h0x 1.2.x", "h0x 1.2.3.4", "h0x ..", "h0x -1.2.3"] {
+            assert_eq!(runtime::version_in(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn runtime_candidates_are_deduped_and_path_stands_in_for_a_missing_sibling() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-runtime-dedupe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (app, runtime_dir, other) = (root.join("app"), root.join("runtime"), root.join("other bin"));
+        for dir in [&app, &other] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let name = if cfg!(windows) { "h0x.exe" } else { "h0x" };
+        std::fs::write(other.join(name), b"").unwrap();
+        let path = std::env::join_paths([other.clone(), other.clone()]).unwrap();
+        assert_eq!(runtime::candidates(&path, &[app.as_path()]), vec![other.join(name)], "no sibling: PATH, once");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::write(runtime_dir.join(name), b"").unwrap();
+        let path = std::env::join_paths([runtime_dir.clone(), other.clone(), runtime_dir.clone()]).unwrap();
+        assert_eq!(runtime::candidates(&path, &[app.as_path(), app.as_path()]), vec![runtime_dir.join(name), other.join(name)], "the sibling on PATH too is one candidate");
+        let top = root.ancestors().last().unwrap();
+        assert_eq!(runtime::candidates(&path, &[top]), vec![runtime_dir.join(name), other.join(name)], "an install at the filesystem root has no sibling");
+        #[cfg(windows)]
+        {
+            let quoted = std::ffi::OsString::from(format!("\"{}\";{}", runtime_dir.display(), other.display()));
+            assert_eq!(runtime::candidates(&quoted, &[app.as_path()]), vec![runtime_dir.join(name), other.join(name)], "a quoted PATH entry is the same sibling");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_first_candidate_that_answers_as_h0x_is_the_runtime() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-runtime-answers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (app, core_like, foreign, real, later) = (root.join("app"), root.join("runtime/h0x"), root.join("foreign/h0x"), root.join("real/h0x"), root.join("later/h0x"));
+        std::fs::create_dir_all(&app).unwrap();
+        fake_exe(&core_like, "echo h0x-core 0.1.16");
+        fake_exe(&foreign, "echo hexdump 2.1");
+        fake_exe(&real, "echo h0x 0.9.16-rc.1");
+        fake_exe(&later, "echo h0x 0.9.17");
+        let path = std::env::join_paths([foreign.parent().unwrap(), real.parent().unwrap(), later.parent().unwrap()]).unwrap();
+        let found = runtime::candidates(&path, &[app.as_path()]);
+        assert_eq!(found, vec![core_like.clone(), foreign.clone(), real.clone(), later.clone()]);
+        assert_eq!(runtime::version(&core_like), None, "the core's line is not the runtime's");
+        assert_eq!(runtime::version(&foreign), None);
+        let first = found.into_iter().find(|bin| runtime::version(bin).is_some());
+        assert_eq!(first, Some(real), "foreign ones are skipped, and the first real one wins");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
