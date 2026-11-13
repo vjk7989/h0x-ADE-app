@@ -346,6 +346,8 @@ export function account(): { current: Account | null; accounts: Account[] };
 export interface Account { uid: string; provider: "google.com" | "github.com" | "password"; name: string | null; email: string | null; picture: string | null }
 /** Opens the browser to sign in and resolves when done (up to 5 minutes): an error message, or null. App frames only (Settings and the logo menu). */
 export function accountSignIn(): Promise<string | null>;
+/** Stops a pending accountSignIn at once (it then resolves to "cancelled"); does nothing when none is pending. App frames only (Settings and the logo menu). */
+export function accountCancelSignIn(): null;
 /** Makes another signed-in account current. Returns an error message, or null. App frames only (Settings and the logo menu). */
 export function accountSwitch(uid: string): string | null;
 /** Signs an account out (it stays on this computer). Returns an error message, or null. App frames only (Settings and the logo menu). */
