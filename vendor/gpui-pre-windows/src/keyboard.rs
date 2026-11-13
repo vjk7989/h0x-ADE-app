@@ -250,12 +250,30 @@ pub(crate) fn get_keystroke_key(
     scan_code: u32,
     modifiers: &mut Modifiers,
 ) -> Option<String> {
+    // HyperOx: Ctrl+Shift+<digit row> is `ctrl-shift-4` on every layout. Converting it to the
+    // layout's shifted symbol (`$` on US, `₹` on English India, `§` on German) made the shortcut
+    // depend on the layout, and a symbol with no binding was typed into the terminal.
+    if modifiers.shift
+        && let Some(digit) = ctrl_shift_digit(vkey.0, modifiers.control, modifiers.alt)
+    {
+        return Some(digit.to_string());
+    }
     if modifiers.shift && need_to_convert_to_shifted_key(vkey) {
         get_shifted_key(vkey, scan_code).inspect(|_| {
             modifiers.shift = false;
         })
     } else {
         get_key_from_vkey(vkey)
+    }
+}
+
+/// HyperOx: the digit a Ctrl+Shift chord on the number row names (virtual keys 0x30-0x39),
+/// whatever the layout puts on Shift+digit. Not with Alt held: that is AltGr on Windows, which
+/// types characters.
+pub(crate) fn ctrl_shift_digit(vkey: u16, control: bool, alt: bool) -> Option<char> {
+    match vkey {
+        0x30..=0x39 if control && !alt => char::from_u32(vkey as u32),
+        _ => None,
     }
 }
 
@@ -416,6 +434,20 @@ const CANDIDATE_VKEYS: &[VIRTUAL_KEY] = &[
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ctrl_shift_digit_names_the_number_row_key_on_every_layout() {
+        use super::ctrl_shift_digit;
+        for (vkey, digit) in (0x30u16..=0x39).zip('0'..='9') {
+            assert_eq!(ctrl_shift_digit(vkey, true, false), Some(digit), "{vkey:#x}");
+            assert_eq!(ctrl_shift_digit(vkey, false, false), None, "no Ctrl: the symbol");
+            assert_eq!(ctrl_shift_digit(vkey, true, true), None, "AltGr types");
+            assert_eq!(ctrl_shift_digit(vkey, false, true), None);
+        }
+        for vkey in [0x2f, 0x3a, 0x41, 0x5a, 0x60, 0x70, 0xba, 0xdb, 0] {
+            assert_eq!(ctrl_shift_digit(vkey, true, false), None, "{vkey:#x}");
+        }
+    }
+
     use crate::WindowsKeyboardMapper;
     use gpui::{Keystroke, Modifiers, PlatformKeyboardMapper};
 

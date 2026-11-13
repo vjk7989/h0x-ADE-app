@@ -106,12 +106,37 @@ export function loadAgents(view, cx) {
     const ag = view.ag;
     ag.raw = await readTextFile(file());
     ag.damaged = parseTable(ag.raw).damaged ?? null;
-    try { ag.list = await knownAgents({}); } catch { ag.list ??= []; }
+    try { ag.list = settle(ag, await knownAgents({})); } catch { ag.list ??= []; }
     cx.notify();
   });
 }
 
-function edit(view, cx, change) {
+// What the person just saved shows at once; the app takes a moment to reload programs.json, so a list that does
+// not have it yet is topped up. A change is dropped from `ag.pending` once the app's list agrees (or after a while).
+function settle(ag, list) {
+  const out = list.map((a) => ({ ...a }));
+  ag.pending = (ag.pending ?? []).filter((p) => Date.now() - p.at < 8000);
+  const kept = [];
+  for (const p of ag.pending) {
+    const at = out.findIndex((a) => a.key === p.key);
+    if (p.kind === "remove") { if (at >= 0) { out.splice(at, 1); kept.push(p); } }
+    else if (p.kind === "edit") { if (at >= 0 && (out[at].name !== p.entry.name || out[at].run.join("\0") !== p.entry.run.join("\0"))) { Object.assign(out[at], p.entry); kept.push(p); } }
+    else if (at < 0) {
+      const used = out.map((a) => a.slot).filter(Number.isFinite);
+      out.push({ ...p.entry, key: p.key, custom: true, installed: null, slot: used.length && Math.max(...used) < 9 ? Math.max(...used) + 1 : null });
+      kept.push(p);
+    }
+  }
+  ag.pending = kept;
+  return out;
+}
+
+function remember(ag, change) {
+  (ag.pending ??= []).push({ ...change, at: Date.now() });
+  ag.list = settle(ag, ag.list ?? []);
+}
+
+function edit(view, cx, change, saved) {
   const ag = view.ag;
   cx.spawn(async (cx) => {
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -126,7 +151,9 @@ function edit(view, cx, change) {
       try {
         await writeTextFile(file(), JSON.stringify(next, null, 2) + "\n", ag.raw);
         ag.error = null; ag.form = null; ag.confirm = null;
+        if (saved) remember(ag, saved());
         cx.timer.after(800, (cx) => loadAgents(view, cx));
+        cx.timer.after(2500, (cx) => loadAgents(view, cx));
         break;
       } catch (e) { if (attempt === 2) ag.error = `Could not save programs.json: ${e?.message ?? e}`; }
     }
@@ -151,9 +178,11 @@ export function openForm(view, agent, cx) {
 export function saveForm(view, cx) {
   const ag = view.ag;
   if (!ag.form || ag.damaged) return;
+  let made = null, editing = null;
   edit(view, cx, (next) => {
     const entry = checkEntry(ag.name.value(), ag.command.value(), next, ag.form.key);
     if (entry.error) return entry.error;
+    made = entry; editing = ag.form.key;
     if (ag.form.key) {
       if (next.programs[entry.key] === undefined) return "That agent is gone from programs.json.";
       next.programs[entry.key] = { ...next.programs[entry.key], name: entry.name, run: entry.run };
@@ -161,11 +190,11 @@ export function saveForm(view, cx) {
       const orders = Object.values(next.programs).map((e) => e?.order).filter(Number.isFinite);
       next.programs[entry.key] = { name: entry.name, run: entry.run, order: (orders.length ? Math.max(...orders) : 0) + 1 };
     }
-  });
+  }, () => ({ kind: editing ? "edit" : "add", key: made.key, entry: { name: made.name, run: made.run } }));
 }
 
 export function removeAgent(view, key, cx) {
-  edit(view, cx, (next) => { delete next.programs[key]; });
+  edit(view, cx, (next) => { delete next.programs[key]; }, () => ({ kind: "remove", key }));
 }
 
 function keyOf(slot) {
@@ -179,6 +208,7 @@ export function agentsPage(view, t, cx) {
   const ag = view.ag;
   const mono = settings().font_family;
   const link = (id, label, color, onClick) => div().id(id).cursor_pointer().text_size(12).text_color(color).hover((s) => s.text_color(t.foreground)).on_click(onClick).child(label);
+  // The slots (installed or not) and the person's own agents.
   const list = (ag.list ?? []).filter((a) => a.slot || a.custom).sort((a, b) => (a.slot ?? 99) - (b.slot ?? 99));
   const cell = (w, text, color) => div().w(w).flex_none().truncate().font_family(mono).text_size(12).text_color(color).child(text);
   const actions = (a) =>
@@ -197,7 +227,7 @@ export function agentsPage(view, t, cx) {
       .child(cell(110, a.slot ? keyOf(a.slot) : "", t.dim))
       .child(div().w(130).flex_none().truncate().text_size(13).text_color(t.foreground).child(a.name))
       .child(div().flex_1().min_w(0).truncate().font_family(mono).text_size(12).text_color(t.muted).child((a.run ?? []).join(" ")))
-      .child(cell(86, a.installed ? "installed" : "not installed", a.installed ? t.done : t.dim))
+      .child(div().w(116).flex_none().font_family(mono).text_size(12).text_color(a.installed ? t.done : t.dim).child(a.installed === null ? "[checking]" : a.installed ? "[installed]" : "[not installed]"))
       .child(actions(a));
   const field = (label, state) =>
     h_flex().gap(12).items_center()

@@ -2161,6 +2161,47 @@ fn agents_page_removes_only_the_chosen_own_agent_and_keeps_the_rest(cx: &mut Tes
     assert_eq!(serde_json::from_str::<Value>(&c.writes[0].1).unwrap(), json!({"programs":{"other":{"name":"Other","run":["o"],"order":2}}}));
 }
 
+#[gpui::test]
+fn new_menu_lists_every_slot_dimmed_when_missing_then_installed_agents_and_never_unslotted_missing_ones(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    values.insert("knownAgentsList".into(), json!([
+        {"key":"claude","name":"Claude Code","icon":"icons/claude.svg","tint":false,"run":["claude"],"slot":1,"custom":false,"installed":true},
+        {"key":"gemini","name":"Gemini","icon":"icons/gemini.svg","tint":true,"run":["gemini"],"slot":4,"custom":false,"installed":false},
+        {"key":"cursor","name":"Cursor","icon":"icons/cursor.svg","tint":true,"run":["cursor-agent"],"slot":null,"custom":false,"installed":false},
+        {"key":"pi","name":"Pi","icon":"icons/pi.svg","tint":true,"run":["pi"],"slot":null,"custom":false,"installed":true}
+    ]));
+    let (trees, _) = describe_pressing(cx, &staged, "mods/new-menu", values, None, "", 0);
+    let tree = &trees[0];
+    for text in ["Claude Code", "Gemini", "not installed", "Pi"] {
+        assert!(tree.contains(text), "missing {text}: {tree}");
+    }
+    assert!(!tree.contains("Cursor"), "an agent with no slot that is not installed is not offered: {tree}");
+}
+
+#[gpui::test]
+fn agents_page_shows_a_saved_agent_at_once_and_states_in_full(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (trees, _) = describe_pressing(cx, &staged, "frame/settings", agents_values(), None, &agents_save("Mine", "mine --x"), 2);
+    let tree = trees.last().unwrap();
+    assert!(tree.contains("ag-mine"), "the new agent is listed without waiting for the app: {tree}");
+    assert!(tree.contains("[installed]") && tree.contains("[not installed]"), "{tree}");
+}
+
+#[gpui::test]
+fn welcome_names_the_real_guide_path_under_a_moved_home(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    values.insert("appHome".into(), json!("/elsewhere/hx"));
+    let (trees, _) = describe_pressing(cx, &staged, "frame/welcome", values, None, "this.page = 4;", 0);
+    assert!(trees[0].contains("Read /elsewhere/hx/AGENTS.md,"), "{}", trees[0]);
+    let (trees, _) = describe_pressing(cx, &staged, "frame/welcome", fixture(true, props(), updates("current", "current")), None, "this.page = 4;", 0);
+    assert!(trees[0].contains("Read ~/app/AGENTS.md,"), "{}", trees[0]);
+}
+
 fn press_button(id: &str) -> String {
     format!("const real = this.button.bind(this); this.button = (t, id, label, onClick) => {{ if (id === '{id}') this.press = onClick; return real(t, id, label, onClick); }};")
 }

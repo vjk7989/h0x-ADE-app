@@ -382,6 +382,8 @@ pub struct AppWindow {
     overlays: Vec<Overlay>,
     /// A text file clicked in a terminal, waiting for the files panel to show.
     pending_open: Option<(PathBuf, Option<u32>)>,
+    /// The last file a terminal link opened in the Files panel, and when: a panel started again soon after gets it back.
+    last_link_open: Option<(PathBuf, Option<u32>, Instant, u32)>,
     folders: BTreeMap<String, Found>,
     /// Mods placed once; later the layout decides where (or whether) they show.
     seen: BTreeSet<String>,
@@ -504,6 +506,7 @@ impl AppWindow {
             copies: HashMap::new(),
             overlays: Vec::new(),
             pending_open: None,
+            last_link_open: None,
             folders: mods::scan().into_iter().map(|f| (f.id.clone(), f)).collect(),
             seen,
             bounds: Default::default(),
@@ -1450,6 +1453,19 @@ impl AppWindow {
         let want: HashMap<String, Instance> = mods_visible.into_iter().collect();
         for (slot, inst) in want {
             if !self.copies.contains_key(&slot) {
+                // A Files panel that starts again soon after a link opened a file in the one before
+                // (its state went with it) gets the file and line back.
+                // The panel the click itself brings up (`due`) is not that: it gets the open the usual way.
+                if inst.name == "files"
+                    && let Some((path, line, at, due)) = self.last_link_open.as_mut()
+                {
+                    if *due > 0 {
+                        *due -= 1;
+                    } else if reopens_after_remount(Some(at.elapsed()), self.pending_open.is_some()) {
+                        let (path, line) = (path.clone(), *line);
+                        self.deliver_open(path, line, cx);
+                    }
+                }
                 let copy = self.load(inst, window, cx);
                 if slot.starts_with("float:")
                     && let Some(root) = &copy.root
@@ -2859,7 +2875,11 @@ impl AppWindow {
     }
 
     fn command_error(&mut self, name: &str, error: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let spec = json!({"kind":"toast", "notification":{"title":format!("{name} failed"),"body":error,"level":"error"}});
+        self.error_toast(&format!("{name} failed"), error, window, cx);
+    }
+
+    fn error_toast(&mut self, title: &str, body: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let spec = json!({"kind":"toast", "notification":{"title":title,"body":body,"level":"error"}});
         self.open_overlay(mods::new_overlay_id(), spec, window, cx);
     }
 
@@ -3308,7 +3328,7 @@ impl AppWindow {
                 let list = crate::programs::startable();
                 let key = agent["key"].as_str().unwrap_or_default().to_owned();
                 let name = agent["name"].as_str().unwrap_or_default().to_owned();
-                let (run, place) = (agent["run"].clone(), on.clone().unwrap_or_else(|| "this computer".into()));
+                let (run, machine) = (agent["run"].clone(), on.clone());
                 // The check runs a shell: off the window thread, then the tab opens (or a toast says why not).
                 cx.spawn_in(window, async move |this, cx| {
                     let found = cx.background_executor().spawn(async move { mods::agent_installed(on, list, &key) }).await;
@@ -3316,7 +3336,8 @@ impl AppWindow {
                         if found {
                             this.run("tab.new", json!({ "name": name, "space": space, "argv": run }), window, cx);
                         } else {
-                            this.command_error("agent.new", &format!("{name} is not installed on {place}"), window, cx);
+                            let (title, body) = agent_missing(&name, machine.as_deref());
+                            this.error_toast(&title, &body, window, cx);
                         }
                     });
                 })
@@ -3806,6 +3827,9 @@ impl AppWindow {
             crate::links::open_text_elsewhere(&path);
             return;
         }
+        // With no Files panel yet, the first one started from here is the one this open is for.
+        let due = u32::from(!self.copies.values().any(|c| c.inst.name == "files" && c.root.is_some()));
+        self.last_link_open = Some((path.clone(), line, Instant::now(), due));
         if send_open("files", &path, line) {
             return;
         }
@@ -4646,6 +4670,11 @@ impl AppWindow {
 
 const UPDATE_PILL_HEIGHT: f32 = 34.0;
 
+/// An overlay the "Updated to" pill stays out of the way of (its "Got it" sits at the same corner).
+fn hides_update_pill(overlay: &str) -> bool {
+    overlay == WHATS_NEW
+}
+
 impl AppWindow {
     /// "HyperOx 0.2.0 is ready · Restart": the frame's, so no layout or mod can hide it.
     /// What's waiting, in words: the pill shows it until clicked or dismissed.
@@ -4671,6 +4700,8 @@ impl AppWindow {
         let label = self.update_ready.clone().or_else(|| success.then(|| format!("Updated to {}", env!("CARGO_PKG_VERSION"))))?;
         let dismissal = app_version.map(|v| format!("app:{v}")).unwrap_or_else(|| label.clone());
         if self.update_dismissed.as_ref() == Some(&dismissal) { return None; }
+        // What's new has its own button where the pill sits.
+        if self.overlays.iter().any(|o| hides_update_pill(&o.id)) { return None; }
         let pill = div()
             .absolute()
             .right(settings::z(16.0))
@@ -4909,6 +4940,20 @@ fn send_open(panel: &str, path: &std::path::Path, line: Option<u32>) -> bool {
         let _ = mods::send_command(panel, &format!("line:{line}"));
     }
     sent
+}
+
+/// The toast for an agent that isn't installed: "Can't start Codex", "Codex is not installed on this computer."
+fn agent_missing(name: &str, machine: Option<&str>) -> (String, String) {
+    (format!("Can't start {name}"), format!("{name} is not installed on {}.", machine.unwrap_or("this computer")))
+}
+
+/// How soon after a link opened a file a new Files panel is the old one come back.
+const REOPEN_WITHIN: Duration = Duration::from_secs(30);
+
+/// Whether a Files panel being started now should be handed the file a link opened `since` ago:
+/// not while that very open is still waiting for the panel (`opening_now`).
+fn reopens_after_remount(since: Option<Duration>, opening_now: bool) -> bool {
+    !opening_now && since.is_some_and(|d| d < REOPEN_WITHIN)
 }
 
 fn needs_model_pane(name: &str, args: &Value) -> bool {
@@ -6478,6 +6523,32 @@ export default class SystemToast extends View {
         for name in ["pane.focus", "terminal.copy", "terminal.copy_screen", "terminal.paste", "terminal.paste_image", "terminal.right_click"] {
             assert!(!super::needs_model_pane(name, &json!({})), "{name}");
         }
+    }
+
+    #[test]
+    fn a_missing_agent_toast_names_the_agent_and_the_machine() {
+        assert_eq!(super::agent_missing("Codex", None), ("Can't start Codex".to_owned(), "Codex is not installed on this computer.".to_owned()));
+        assert_eq!(super::agent_missing("Claude Code", Some("dev-box")).1, "Claude Code is not installed on dev-box.");
+    }
+
+    #[test]
+    fn only_the_whats_new_overlay_hides_the_update_pill() {
+        assert!(super::hides_update_pill(super::WHATS_NEW));
+        for id in ["frame-welcome", "toast", "", "frame-whatsnew2"] {
+            assert!(!super::hides_update_pill(id), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_files_panel_started_again_soon_after_a_link_click_reopens_the_file() {
+        use super::reopens_after_remount as reopens;
+        use std::time::Duration;
+        let soon = Some(Duration::from_secs(8));
+        assert!(reopens(soon, false), "a new panel a few seconds after the click");
+        assert!(!reopens(soon, true), "the open already waiting is the one delivered");
+        assert!(!reopens(None, false), "no link was clicked");
+        assert!(!reopens(Some(Duration::from_secs(31)), false), "long after, it is just a new panel");
+        assert!(reopens(Some(Duration::ZERO), false));
     }
 
     #[test]
