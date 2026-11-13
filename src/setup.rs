@@ -128,7 +128,7 @@ impl Setup {
                 Ok(()) => {
                     let Some(requests) = self.requests.take() else { return };
                     window.remove_window();
-                    crate::open_main(core, requests, cx);
+                    crate::open_gated(core, requests, cx);
                     return;
                 }
                 Err(m) => {

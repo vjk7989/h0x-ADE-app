@@ -31,7 +31,10 @@ struct Analytics {
     dir: PathBuf,
     token: Option<String>,
     host: String,
+    /// The install id: the distinct id while nobody is signed in.
     id: String,
+    /// `account:<uid>` while someone is signed in (never the email).
+    account: Mutex<Option<String>>,
 }
 
 static GLOBAL: OnceLock<Analytics> = OnceLock::new();
@@ -61,6 +64,7 @@ pub fn start(share: bool) {
             token: Some(token.to_string()),
             host,
             id,
+            account: Mutex::new(crate::auth::current().map(|a| account_id(&a.uid))),
         })
         .is_err()
     {
@@ -100,6 +104,18 @@ pub fn event(name: &str, props: Value) {
     {
         a.record(false, name, props);
     }
+}
+
+/// Events belong to this account from now on (`None`: signed out, back to the install id).
+/// Signing in also links the install id to the account.
+pub fn identify(account: Option<&crate::auth::Account>) {
+    if let Some(a) = GLOBAL.get() {
+        a.identify(account.map(|x| (x.uid.as_str(), x.provider.as_str())));
+    }
+}
+
+fn account_id(uid: &str) -> String {
+    format!("account:{uid}")
 }
 
 /// A failure report: kept whatever the sharing setting says. `kind` is a short fixed word.
@@ -211,6 +227,20 @@ fn scrub(v: Value, home: &str) -> Value {
 }
 
 impl Analytics {
+    fn distinct_id(&self) -> String {
+        let account = self.account.lock().unwrap_or_else(|e| e.into_inner());
+        account.clone().unwrap_or_else(|| self.id.clone())
+    }
+
+    /// Switches the distinct id. Signing in (`Some((uid, provider))`) also links the install id
+    /// to the account with PostHog's `$identify`; only the provider is sent as a person property.
+    fn identify(&self, who: Option<(&str, &str)>) {
+        *self.account.lock().unwrap_or_else(|e| e.into_inner()) = who.map(|(uid, _)| account_id(uid));
+        if let Some((_, provider)) = who {
+            self.record(false, "$identify", json!({ "$anon_distinct_id": self.id, "$set": { "provider": provider } }));
+        }
+    }
+
     fn queue(&self) -> PathBuf {
         self.dir.join("analytics").join("queue.jsonl")
     }
@@ -238,7 +268,7 @@ impl Analytics {
         } else {
             name.to_string()
         };
-        let event = json!({ "event": name, "distinct_id": self.id, "timestamp": iso8601(ms), "properties": props });
+        let event = json!({ "event": name, "distinct_id": self.distinct_id(), "timestamp": iso8601(ms), "properties": props });
         let _guard = FILES.lock().unwrap_or_else(|e| e.into_inner());
         let wrote = if failure {
             let file = self.reports().join(format!(
@@ -429,6 +459,7 @@ mod tests {
             token: token.map(Into::into),
             host: "https://example.test".into(),
             id: "ab".repeat(16),
+            account: Mutex::new(None),
         }
     }
 
@@ -449,6 +480,37 @@ mod tests {
         a.record(false, "x", json!({}));
         a.record(true, "y", json!({}));
         assert!(!dir.join("analytics").exists() && !dir.join("reports").exists());
+        assert!(sent_batches(&a, true).is_empty());
+    }
+
+    #[test]
+    fn signing_in_switches_the_distinct_id_and_sends_identify_without_an_email() {
+        let dir = home_dir("identify");
+        let a = make(&dir, Some("phc_test"));
+        let install = "ab".repeat(16);
+        a.record(false, "before", json!({}));
+        a.identify(Some(("u_123", "github")));
+        a.record(false, "after", json!({}));
+        a.identify(None);
+        a.record(false, "signed_out", json!({}));
+        let sent = sent_batches(&a, true);
+        let batch = sent[0]["body"]["batch"].as_array().unwrap();
+        let ids: Vec<(&str, &str)> = batch.iter().map(|e| (e["event"].as_str().unwrap(), e["distinct_id"].as_str().unwrap())).collect();
+        assert_eq!(
+            ids,
+            [("before", install.as_str()), ("$identify", "account:u_123"), ("after", "account:u_123"), ("signed_out", install.as_str())]
+        );
+        let identify = &batch[1]["properties"];
+        assert_eq!(identify["$anon_distinct_id"], install, "the id is a hex string, not a path");
+        assert_eq!(identify["$set"], json!({ "provider": "github" }));
+        assert!(!sent[0]["body"].to_string().contains('@'));
+    }
+
+    #[test]
+    fn signing_out_sends_no_identify() {
+        let dir = home_dir("identify-out");
+        let a = make(&dir, Some("phc_test"));
+        a.identify(None);
         assert!(sent_batches(&a, true).is_empty());
     }
 

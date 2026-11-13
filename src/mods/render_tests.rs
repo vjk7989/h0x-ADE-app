@@ -80,6 +80,14 @@ fn updates(app: &str, core: &str) -> Value {
     })
 }
 
+fn account_value(accounts: &[(&str, &str, &str)], current: Option<&str>) -> Value {
+    let list: Vec<Value> = accounts
+        .iter()
+        .map(|(uid, provider, name)| json!({"uid":uid,"provider":provider,"name":name,"email":format!("{name}@example.com"),"picture":null}))
+        .collect();
+    json!({"current": list.iter().find(|a| Some(a["uid"].as_str().unwrap()) == current).cloned(), "accounts": list})
+}
+
 fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Value> {
     let program =
         json!({"key":"pi", "name":"Pi", "icon":null, "tint":true, "tile":"#334455", "color":"#aabbcc", "shell":false, "agent":true});
@@ -93,6 +101,8 @@ fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Val
         ("settings".into(), serde_json::to_value(crate::settings::Settings::default()).unwrap()),
         ("themes".into(), json!([{"name":"graphite", "colors": &*crate::settings::theme()}])),  ("fonts".into(), json!(["Monospace", "Sans"])),
         ("updates".into(), update),
+        // Signed in by default, so the pairing buttons are live; a test signs out by replacing it.
+        ("account".into(), account_value(&[("u1", "google.com", "vijay")], Some("u1"))),
         ("window".into(), json!({"platform":"linux","titlebar":"none","buttons":true,"maximized":false,"fullscreen":false,"active":true})),
         ("revision".into(), json!(0)),
         ("windowVisible".into(), json!(true)),
@@ -137,7 +147,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         shared.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "playSound", "setAgentOrder", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes", "openLink", "copyText"] {
+    for name in ["run", "playSound", "setAgentOrder", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes", "openLink", "copyText", "accountSwitch", "accountSignOut", "accountRemove"] {
         let calls = calls.clone();
         module = module.function(name, move |a| {
             if name == "run" {
@@ -166,6 +176,11 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
     module = module.async_function("feedbackPickImages", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("pickFolder", |_| Ok(async { Ok(HostValue::Null) }));
+    let signing_in = calls.clone();
+    module = module.async_function("accountSignIn", move |_| {
+        signing_in.borrow_mut().effects.push(("accountSignIn".into(), Vec::new()));
+        Ok(async { Ok(HostValue::Null) })
+    });
     for name in ["nextCommand", "watchFolder"] {
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     }
@@ -1922,6 +1937,246 @@ fn settings_info_buttons_open_only_allowed_links_and_feedback_is_coming_soon(cx:
     assert!(links.iter().all(|l| l.as_str().is_some_and(allowed_link)), "{links:?}");
     let notes: Vec<&Value> = c.effects.iter().filter(|(n, _)| n == "notify").map(|(_, a)| &a[0]).collect();
     assert_eq!(notes, [&json!({"title":"The feedback forum is coming soon.","level":"info"})], "feedback shows only the notice, never an error: {:?}", c.effects);
+}
+
+fn info_account_tree(cx: &mut TestAppContext, staged: &Staged, account: Value, setup: Option<&str>) -> String {
+    let mut values = info_values();
+    values.insert("account".into(), account);
+    describe_with_values(cx, staged, "frame/settings", values, setup).unwrap()
+}
+
+#[gpui::test]
+fn settings_info_is_layout_c_a_banner_with_the_account_and_four_cards(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let two = account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam")], Some("u1"));
+    let tree = info_account_tree(cx, &staged, two, None);
+    for text in [
+        "HyperOx", "st-info-version", "v0.1.0", "Agentic development environment",
+        "vijay", "vijay@example.com", "Google", "st-acct-switch", "Switch", "st-acct-signout", "Sign out", "st-acct-more",
+        "ABOUT", "RESOURCES", "PARTNERS", "PRIVACY", "st-analytics", "st-analytics-info",
+        "Currently closed source (open source soon)", "Version 0.1.0", "Open-source notices",
+    ] {
+        assert!(tree.contains(text), "{text:?}: {tree}");
+    }
+    // The menus and the confirmation are closed until asked; the account's tokens are never shown.
+    for text in ["st-acct-pick-", "st-acct-add", "st-acct-remove", "st-acct-signin", "Not signed in"] {
+        assert!(!tree.contains(text), "{text:?} is not shown at first: {tree}");
+    }
+    assert!(!tree.contains("GitHub"), "the other account is only in the Switch menu: {tree}");
+    assert!(tree.find("HyperOx").unwrap() < tree.find("ABOUT").unwrap(), "the banner is above the cards: {tree}");
+}
+
+#[gpui::test]
+fn settings_info_without_an_account_offers_sign_in_and_nothing_to_sign_out(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (label, account) in [
+        ("none", account_value(&[], None)),
+        ("accounts but none current", account_value(&[("u1", "password", "ann")], None)),
+    ] {
+        let tree = info_account_tree(cx, &staged, account, None);
+        assert!(tree.contains("Not signed in") && tree.contains("st-acct-signin") && tree.contains("Sign in"), "{label}: {tree}");
+        assert!(!tree.contains("st-acct-signout") && !tree.contains("st-acct-more"), "{label}: {tree}");
+        assert!(tree.contains("st-info-install") && tree.contains("st-analytics"), "{label}: the cards stay: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_info_switch_menu_lists_accounts_with_a_check_on_the_current_and_add_account(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let accounts = account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam"), ("u3", "password", "ann")], Some("u2"));
+    let tree = info_account_tree(cx, &staged, accounts, Some("this.acctMenu = 'switch';"));
+    for text in ["st-acct-pick-u1", "st-acct-pick-u2", "st-acct-pick-u3", "\u{2713}", "st-acct-add", "Add account", "GitHub", "Email", "Google"] {
+        assert!(tree.contains(text), "{text:?}: {tree}");
+    }
+    assert_eq!(tree.matches('\u{2713}').count(), 1, "one check, on the current account: {tree}");
+    assert!(!tree.contains("st-acct-remove"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_info_remove_asks_first_and_says_what_is_deleted(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let accounts = || account_value(&[("u1", "google.com", "vijay")], Some("u1"));
+    let tree = info_account_tree(cx, &staged, accounts(), Some("this.acctMenu = 'more';"));
+    assert!(tree.contains("st-acct-remove") && tree.contains("Remove from this computer"), "{tree}");
+    assert!(!tree.contains("st-acct-confirm") && !tree.contains("Your local profile data"), "no remove without the confirm step: {tree}");
+    let tree = info_account_tree(cx, &staged, accounts(), Some("this.acctMenu = 'more'; this.acctConfirm = 'u1';"));
+    assert!(
+        tree.contains("Remove vijay from this computer? Your local profile data for this account is deleted; your online account stays."),
+        "{tree}"
+    );
+    assert!(tree.contains("st-acct-remove-yes") && tree.contains("st-acct-remove-no"), "{tree}");
+    // A confirmation left for another account is not shown for this one.
+    let tree = info_account_tree(cx, &staged, accounts(), Some("this.acctMenu = 'more'; this.acctConfirm = 'someone-else';"));
+    assert!(!tree.contains("st-acct-confirm"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_info_privacy_text_names_the_account_id_and_keeps_the_rest_word_for_word(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tree = info_account_tree(cx, &staged, account_value(&[], None), Some("this.analyticsAbout = true;"));
+    for text in [ANALYTICS_ABOUT[0], ANALYTICS_ABOUT[1], ANALYTICS_ABOUT[2], "When you're signed in, your usage is linked to your HyperOx account ID (not your email)."] {
+        assert!(tree.contains(text), "{text}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_info_account_card_shows_a_very_long_name_and_email_whole_and_keeps_its_buttons(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let name = format!("Ana Mar\u{ed}a {}", "L\u{f3}pez-Garc\u{ed}a ".repeat(30)).trim_end().to_string();
+    let email = format!("{name}@example.com");
+    let tree = info_account_tree(cx, &staged, account_value(&[("u1", "google.com", name.as_str())], Some("u1")), None);
+    for text in [name.as_str(), email.as_str(), "st-acct-name", "st-acct-email", "st-acct-switch", "st-acct-signout", "st-acct-more", "Google", "ABOUT", "PRIVACY"] {
+        assert!(tree.contains(text), "{text:?}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_info_account_card_without_a_name_shows_the_email_and_without_either_says_account(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let only = |email: Value, provider: &str| {
+        let a = json!({"uid":"u1","provider":provider,"name":null,"email":email,"picture":null});
+        json!({"current": a.clone(), "accounts": [a]})
+    };
+    // The card between the name and the buttons.
+    let card = |tree: &str| {
+        let (start, end) = (tree.find("st-acct-name").unwrap_or_else(|| panic!("{tree}")), tree.find("st-acct-switch").unwrap_or_else(|| panic!("{tree}")));
+        assert!(start < end, "the name is above the buttons: {tree}");
+        tree[start..end].to_string()
+    };
+    let tree = info_account_tree(cx, &staged, only(json!("ann@example.com"), "password"), None);
+    let shown = card(&tree);
+    assert!(shown.contains("ann@example.com") && shown.contains("st-acct-email") && shown.contains("Email"), "{shown}");
+    assert!(!tree.contains("Not signed in") && tree.contains("st-acct-signout"), "{tree}");
+    for email in [Value::Null, json!("")] {
+        let tree = info_account_tree(cx, &staged, only(email.clone(), "github.com"), None);
+        let shown = card(&tree);
+        assert!(shown.contains("Account") && shown.contains("GitHub"), "{email}: {shown}");
+        assert!(!tree.contains("st-acct-email") && !tree.contains("Not signed in"), "{email}: {tree}");
+    }
+}
+
+// The Remote page with the bridge answering `ls`, and `account` replaced.
+fn describe_remote_account(cx: &mut TestAppContext, staged: &Staged, account: Value, ls: Value) -> String {
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    calls.borrow_mut().replies = remote_replies(ls, json!([])).into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    let mut p = props();
+    p["section"] = json!("remote");
+    let mut values = fixture(true, p, updates("current", "current"));
+    values.insert("account".into(), account);
+    let policy = Policy::new()
+        .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+        .with_host_module(module(values, calls))
+        .unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), staged.wrapper("frame/settings", ""), policy, window, cx))
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
+    let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    tree
+}
+
+#[gpui::test]
+fn settings_remote_pairing_is_gated_on_signing_in_but_existing_pairings_stay(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let paired = json!([{"id":"i1","transport":"telegram","user_id":"42","label":"me","paired_at_ms":1700000000000i64}]);
+    let signed_out = account_value(&[], None);
+    for (label, ids) in [("no pairings", json!([])), ("one pairing", paired)] {
+        let tree = describe_remote_account(cx, &staged, signed_out.clone(), bridge_ls(ids.clone(), false, "set"));
+        assert!(tree.contains("Sign in to pair a phone or Telegram.") && tree.contains("st-r-signin"), "{label}: {tree}");
+        assert!(tree.contains("st-r-pair") && tree.contains("st-r-web-start"), "{label}: the buttons are there, disabled: {tree}");
+        // Disabled: dimmed, no pointer, no click handler.
+        let pair_line = tree.lines().find(|l| l.contains("\"st-r-pair\"")).unwrap_or_else(|| panic!("{label}: {tree}"));
+        assert!(pair_line.contains(".opacity[") && !pair_line.contains(":on_click(fn)") && !pair_line.contains(".cursor_pointer"), "{label}: {pair_line}");
+        let web_line = tree.lines().find(|l| l.contains("\"st-r-web-start\"")).unwrap_or_else(|| panic!("{label}: {tree}"));
+        assert!(web_line.contains(".opacity[") && !web_line.contains(":on_click(fn)"), "{label}: {web_line}");
+        if ids != json!([]) {
+            assert!(tree.contains("Paired with 1 account") && tree.contains("st-r-unpair-i1") && tree.contains("st-r-lock"), "{label}: existing pairings keep working: {tree}");
+        }
+        // Signed in: no note, live buttons.
+        let tree = describe_remote_account(cx, &staged, account_value(&[("u1", "google.com", "vijay")], Some("u1")), bridge_ls(ids, false, "set"));
+        assert!(!tree.contains("Sign in to pair") && !tree.contains("st-r-signin"), "{label}: {tree}");
+        let pair_line = tree.lines().find(|l| l.contains("\"st-r-pair\"")).unwrap_or_else(|| panic!("{label}: {tree}"));
+        assert!(pair_line.contains(":on_click(fn)") && !pair_line.contains(".opacity["), "{label}: {pair_line}");
+    }
+}
+
+#[gpui::test]
+fn logo_menu_shows_the_current_account_the_others_and_the_account_actions(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut menu = |account: Value, setup: Option<&str>| {
+        let mut values = fixture(true, json!({"menu":"account","overlay":"o1"}), updates("current", "current"));
+        values.insert("account".into(), account);
+        describe_with_values(cx, &staged, "frame/account", values, setup).unwrap()
+    };
+    let tree = menu(account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam")], Some("u1")), None);
+    for text in ["account-menu", "vijay", "Google", "account-switch-u2", "sam", "GitHub", "account-add", "Add account", "account-settings", "Account settings", "account-signout", "Sign out"] {
+        assert!(tree.contains(text), "{text:?}: {tree}");
+    }
+    assert!(!tree.contains("account-switch-u1"), "the current account is not offered as a switch: {tree}");
+    assert!(!tree.contains("st-info") && !tree.contains("search"), "it is the menu, not the bar: {tree}");
+    // Signed out: no name, no Sign out; adding an account is there.
+    let tree = menu(account_value(&[], None), None);
+    assert!(tree.contains("Not signed in") && tree.contains("account-add") && tree.contains("account-settings"), "{tree}");
+    assert!(!tree.contains("account-signout") && !tree.contains("account-switch-"), "{tree}");
+}
+
+#[gpui::test]
+fn logo_menu_choices_close_the_menu_then_switch_or_open_settings_info(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (id, effect, args) in [
+        ("account-switch-u2", "accountSwitch", json!(["u2"])),
+        ("account-signout", "accountSignOut", json!(["u1"])),
+        ("account-add", "accountSignIn", json!([])),
+        ("account-settings", "run", json!(["app.settings", {"section":"info"}])),
+    ] {
+        let mut values = fixture(true, json!({"menu":"account","overlay":"o1"}), updates("current", "current"));
+        values.insert("account".into(), account_value(&[("u1", "google.com", "vijay"), ("u2", "github.com", "sam")], Some("u1")));
+        let setup = format!(
+            "const real = this.row.bind(this); \
+             this.row = (id, label, hint, action) => {{ if (id === '{id}') this.press = action; return real(id, label, hint, action); }};"
+        );
+        let (_, calls) = describe_pressing(cx, &staged, "frame/account", values, None, &setup, 1);
+        let c = calls.borrow();
+        let names: Vec<&str> = c.effects.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"closeOverlay"), "{id}: the menu closes: {:?}", c.effects);
+        let hit = c.effects.iter().find(|(n, _)| n == effect).unwrap_or_else(|| panic!("{id}: no {effect}: {:?}", c.effects));
+        assert_eq!(Value::Array(hit.1.clone()), args, "{id}: {:?}", c.effects);
+    }
+}
+
+#[gpui::test]
+fn logo_menu_is_not_drawn_in_the_bar_and_the_brand_is_clickable(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tree = describe(cx, &staged, "mods/workspace-chrome", true, props(), updates("current", "current"), None).unwrap();
+    assert!(tree.contains("\"brand\"") && tree.contains("HyperOx"), "{tree}");
+    assert!(!tree.contains("account-menu") && !tree.contains("account-add"), "the menu opens in its own popup: {tree}");
+}
+
+#[gpui::test]
+fn logo_menu_waits_while_an_account_change_runs_and_the_user_mod_only_opens_the_frame(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(true, json!({"overlay":"o1"}), updates("current", "current"));
+    values.insert("account".into(), account_value(&[("u1", "google.com", "vijay")], Some("u1")));
+    let tree = describe_with_values(cx, &staged, "frame/account", values, Some("this.busy = true;")).unwrap();
+    assert!(tree.contains("Waiting") && !tree.contains("account-add") && !tree.contains("account-signout"), "{tree}");
+    // The logo only opens the frame: the mods/ copy (a person's to edit) has no account calls to use.
+    let chrome = include_str!("../../defaults/mods/workspace-chrome/main.js");
+    assert!(chrome.contains("mod: \"frame-account\"") && !chrome.contains("account(") && !chrome.contains("accountSign") && !chrome.contains("accountSwitch"), "{chrome}");
 }
 
 // `entry` with settings.json in `values`' app home holding `settings` (None: missing) and `setup` run after its
@@ -5937,7 +6192,7 @@ fn todo_module(values: BTreeMap<String, Value>, host: Rc<RefCell<TodoHost>>) -> 
         h.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "openOverlay", "closeOverlay", "notify", "playSound", "openLink", "copyText"] {
+    for name in ["run", "openOverlay", "closeOverlay", "notify", "playSound", "openLink", "copyText", "accountSwitch", "accountSignOut", "accountRemove"] {
         let h = host.clone();
         module = module.function(name, move |a| {
             let args: Vec<Value> = (0..2).filter_map(|i| a.get(i).map(from_host)).collect();
@@ -5957,6 +6212,8 @@ fn todo_module(values: BTreeMap<String, Value>, host: Rc<RefCell<TodoHost>>) -> 
             Ok(if name == "openOverlay" || name == "notify" { "fixture-overlay".into() } else { HostValue::Null })
         });
     }
+    // The settings frame imports the account calls; this host never signs in.
+    module = module.async_function("accountSignIn", |_| Ok(async { Ok(HostValue::Null) }));
     for name in ["nextCommand", "watchFolder"] {
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     }

@@ -1,6 +1,6 @@
 import { View, div, image, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { theme, run, props, window, shared, setShared, updates, layout } from "h0x";
+import { theme, run, props, window, shared, setShared, updates, layout, openOverlay } from "h0x";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -23,12 +23,12 @@ function toggleSidebar() {
   run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 268) : window()?.platform === "macos" ? 76 : 44 });
 }
 
+// The logo menu is an app frame (frame-account): only app frames may use the account calls.
+function openAccountMenu() {
+  openOverlay({ mod: "frame-account", kind: "popup", width: 250 });
+}
+
 export default class WorkspaceChrome extends View {
-  button(id, label, action) {
-    const t = theme();
-    return div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
-      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(action).child(label);
-  }
   render() {
     const t = theme();
     const collapsed = narrow();
@@ -47,10 +47,16 @@ export default class WorkspaceChrome extends View {
     }
     return h_flex().size_full().bg(t.chrome).pl(collapsed ? 6 : 14).pr(10).gap(4).items_center().text_size(13.5)
       .when(window()?.platform === "macos" && !window()?.fullscreen && !collapsed, el => el.pl(76))
-      .when(!collapsed, el => el.child(h_flex().flex_1().gap(8).items_center().child(svg("mods/workspace-chrome/hyperox-mark.svg").size(20).text_color(t.foreground)).child(div().font_semibold().text_color(t.foreground).child("HyperOx"))
+      .when(!collapsed, el => el.child(h_flex().id("brand").flex_1().gap(8).items_center().cursor_pointer().on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(openAccountMenu).child(svg("mods/workspace-chrome/hyperox-mark.svg").size(20).text_color(t.foreground)).child(div().font_semibold().text_color(t.foreground).child("HyperOx"))
         .child(div().id("brand-beta").flex_none().px(5).rounded(4).border(1).border_color(t.border).text_size(10).font_medium().text_color(t.muted).child("Beta"))))
       .when(!collapsed, el => el.child(this.button("search", svg("mods/workspace-chrome/search.svg").size(15), () => run("mod.open", { name: "picker" }))))
       // On the macOS rail the traffic lights fill the row; the agents list's » unfolds it.
       .when(!(collapsed && window()?.platform === "macos"), el => el.child(this.button("sidebar-toggle", svg("mods/workspace-chrome/sidebar.svg").size(15), toggleSidebar)));
+  }
+
+  button(id, label, action) {
+    const t = theme();
+    return div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(action).child(label);
   }
 }

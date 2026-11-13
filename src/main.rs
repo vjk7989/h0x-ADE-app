@@ -3,6 +3,7 @@
 
 mod agent_usage;
 mod analytics;
+mod auth;
 #[path = "analytics/events.rs"]
 mod events;
 mod bench;
@@ -29,8 +30,10 @@ mod os_notice;
 mod process_cwd;
 mod programs;
 mod remote_shell;
+mod secret;
 mod settings;
 mod setup;
+mod signin;
 mod sound;
 mod spaces_share;
 mod spawn;
@@ -251,11 +254,22 @@ fn main() {
             if let Some(tx) = mods::request_sender() {
                 control::listen(tx);
             }
+            // Never blocks start-up; offline keeps the grace period.
+            std::thread::spawn(auth::refresh_all);
             match core {
-                Ok(core) => open_main(core, requests, cx),
+                Ok(core) => open_gated(core, requests, cx),
                 Err(need) => setup::open(need, requests, cx),
             }
         });
+}
+
+/// The main window once someone is signed in; the sign-in screen first otherwise.
+pub fn open_gated(core: std::sync::Arc<core_link::Core>, requests: async_channel::Receiver<mods::Request>, cx: &mut App) {
+    if signin::required() {
+        signin::open(core, requests, cx);
+    } else {
+        open_main(core, requests, cx);
+    }
 }
 
 /// The main window, on a connected core.
