@@ -111,6 +111,11 @@ pub struct TerminalView {
     pub quoting: Quoting,
     /// The link under the pointer while the link modifier is held.
     link: Option<LinkTarget>,
+    /// The "Ctrl+click to open" hint, while the pointer rests on a link without the modifier.
+    link_hint: Option<String>,
+    /// The cell the hint was last armed for: it resolves again only when the pointer enters another.
+    hint_cell: Option<(u16, u16)>,
+    hint_task: Option<Task<()>>,
     /// Right-clicks go to the program when it takes the mouse (Shift: the menu).
     pub right_click_to_program: bool,
     grid: Rc<RefCell<Grid>>,
@@ -250,6 +255,9 @@ impl TerminalView {
             cwd: None,
             quoting: Quoting::default(),
             link: None,
+            link_hint: None,
+            hint_cell: None,
+            hint_task: None,
             right_click_to_program: false,
             grid: Rc::new(RefCell::new(Grid {
                 vt: Vt::new(size_hint.0.max(2), size_hint.1.max(1)),
@@ -819,6 +827,7 @@ impl TerminalView {
             // leak its keystrokes into the shell running in this terminal.
             return;
         }
+        self.hide_hint(cx);
         let k = &ev.keystroke;
         // Typing clears a selection, as in HyperOx.
         if !k.key.starts_with("shift") && !k.key.starts_with("control") && !k.key.starts_with("alt") {
@@ -833,6 +842,7 @@ impl TerminalView {
 
     fn scroll(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
+        self.hide_hint(cx);
         let mut g = self.grid.borrow_mut();
         let steps = scroll_delta_steps(&mut self.scrolled, ev.delta, ev.touch_phase, g.cell, g.vt.cols, g.vt.rows);
         let n = steps.y.unsigned_abs() as usize;
@@ -937,6 +947,37 @@ impl TerminalView {
         // OSC 8 links bypass text detection.
         let target = target.or_else(|| links::resolve(&hit.target, self.cwd.as_deref()).map(LinkTarget::External))?;
         Some((target, hit.spans))
+    }
+
+    fn hide_hint(&mut self, cx: &mut Context<Self>) {
+        self.hint_cell = None;
+        self.hint_task = None;
+        if self.link_hint.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// After the pointer rests on a cell for `HINT_DELAY`, shows the hint if a link is there.
+    fn arm_hint(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let cell = {
+            let g = self.grid.borrow();
+            let (x, y) = local(&g, pos);
+            ((x / f32::from(g.cell.width)) as u16, (y / f32::from(g.cell.height)) as u16)
+        };
+        if self.hint_cell == Some(cell) {
+            return;
+        }
+        self.hide_hint(cx);
+        self.hint_cell = Some(cell);
+        self.hint_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HINT_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some((target, _)) = this.link_at(pos) {
+                    this.link_hint = Some(hint_text(&target, cfg!(target_os = "macos")));
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     fn start_selection(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
@@ -1228,6 +1269,19 @@ fn paste_image_bytes(format: ImageFormat, bytes: &[u8]) -> Option<(ImageFormat, 
     let mut png = std::io::Cursor::new(Vec::new());
     image.write_to(&mut png, image::ImageFormat::Png).ok()?;
     Some((ImageFormat::Png, std::borrow::Cow::Owned(png.into_inner())))
+}
+
+const HINT_DELAY: Duration = Duration::from_millis(400);
+
+fn hint_text(target: &LinkTarget, mac: bool) -> String {
+    let key = if mac { "⌘" } else { "Ctrl" };
+    match target {
+        LinkTarget::External(links::Target::File(path)) => match path.file_name() {
+            Some(name) => format!("{key}+click to open {}", name.to_string_lossy()),
+            None => format!("{key}+click to open"),
+        },
+        _ => format!("{key}+click to open"),
+    }
 }
 
 fn link_mods(m: &Modifiers) -> bool {
@@ -1981,6 +2035,9 @@ impl Render for TerminalView {
         let found = hover.filter(|_| link_mods(&window.modifiers())).and_then(|pos| self.link_at(pos));
         let (link, spans) = found.unzip();
         self.link = link;
+        if self.link.is_some() {
+            self.link_hint = None;
+        }
         self.grid.borrow_mut().link_spans = spans.unwrap_or_default();
         let grid = self.grid.clone();
         let grid_paint = self.grid.clone();
@@ -2037,6 +2094,7 @@ impl Render for TerminalView {
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !hovered {
                     this.grid.borrow_mut().hover = None;
+                    this.hide_hint(cx);
                     if this.link.is_some() {
                         cx.notify();
                     }
@@ -2104,6 +2162,11 @@ impl Render for TerminalView {
                 this.grid.borrow_mut().hover = Some(ev.position);
                 if link_mods(&ev.modifiers) || this.link.is_some() {
                     cx.notify();
+                }
+                if link_mods(&ev.modifiers) || this.selecting || ev.pressed_button.is_some() {
+                    this.hide_hint(cx);
+                } else {
+                    this.arm_hint(ev.position, cx);
                 }
                 if !this.selecting && ev.pressed_button.is_none() {
                     this.mouse(GHOSTTY_MOUSE_ACTION_MOTION, None, ev.position, ev.modifiers);
@@ -2255,6 +2318,23 @@ impl Render for TerminalView {
                         ),
                 )
             })
+            .when_some(self.link_hint.clone(), |d, hint| {
+                d.child(
+                    div()
+                        .absolute()
+                        .bottom_2()
+                        .left_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(crate::settings::color("border"))
+                        .bg(crate::settings::color("popover"))
+                        .text_color(crate::settings::color("muted"))
+                        .text_xs()
+                        .child(hint),
+                )
+            })
             .when_some(ended, |d, why| {
                 d.child(
                     div()
@@ -2281,8 +2361,21 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScrollTarget, pages_to_lines, scroll_target};
+    use super::{LinkTarget, ScrollTarget, hint_text, pages_to_lines, scroll_target};
     use serde_json::{Value, json};
+
+    #[test]
+    fn link_hint_names_the_key_and_the_file() {
+        let url = LinkTarget::External(crate::links::Target::Url("https://example.com".into()));
+        assert_eq!(hint_text(&url, false), "Ctrl+click to open");
+        assert_eq!(hint_text(&url, true), "⌘+click to open");
+        let file = LinkTarget::External(crate::links::Target::File(std::path::PathBuf::from("src").join("main.rs")));
+        assert_eq!(hint_text(&file, false), "Ctrl+click to open main.rs");
+        assert_eq!(hint_text(&file, true), "⌘+click to open main.rs");
+        let root = LinkTarget::External(crate::links::Target::File(std::path::PathBuf::from("/")));
+        assert_eq!(hint_text(&root, false), "Ctrl+click to open");
+        assert_eq!(hint_text(&LinkTarget::Terminal("t1".into()), false), "Ctrl+click to open");
+    }
 
     #[gpui::test]
     fn attach_errors_do_not_announce_a_terminal_exit(cx: &mut gpui::TestAppContext) {
