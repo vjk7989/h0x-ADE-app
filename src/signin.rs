@@ -1074,7 +1074,7 @@ mod tests {
         let (_, trail) = rain.cell(0, 3, 0).expect("the trail above the head");
         assert!(trail < 0.26 && trail > 0.04);
         assert!(rain.cell(0, 3, 0).unwrap().1 > rain.cell(0, 1, 0).map_or(0.0, |c| c.1) || rain.cell(0, 1, 0).is_none());
-        assert!(GLYPHS.iter().all(u8::is_ascii) && GLYPHS.len() == 36);
+        assert!(GLYPHS.iter().all(u8::is_ascii) && GLYPHS.len() == 37);
         assert_eq!(rain.cell(9, 0, 0), None, "past the last column");
         for frame in 0..200 {
             for r in 0..10 {
