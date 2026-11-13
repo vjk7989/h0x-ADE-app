@@ -103,6 +103,9 @@ const THEMES: &[(&str, &str)] = &[
     ("darkmatter", include_str!("../defaults/themes/darkmatter.json")),
     ("soft-pop", include_str!("../defaults/themes/soft-pop.json")),
     ("neo-brutalism", include_str!("../defaults/themes/neo-brutalism.json")),
+    ("sodium", include_str!("../defaults/themes/sodium.json")),
+    ("voltage", include_str!("../defaults/themes/voltage.json")),
+    ("phosphor", include_str!("../defaults/themes/phosphor.json")),
 ];
 
 /// `themes/<name>.json`: a palette, plus `colors` overrides like settings.json's.
@@ -1524,10 +1527,10 @@ mod tests {
             parse_theme_file(name, text).unwrap_or_else(|e| panic!("{e}"));
         }
         let names: Vec<&str> = THEMES.iter().map(|(n, _)| *n).collect();
-        for want in ["atom-one-dark", "win98", "amber-minimal", "candyland", "claymorphism", "darkmatter", "soft-pop", "neo-brutalism"] {
+        for want in ["atom-one-dark", "win98", "amber-minimal", "candyland", "claymorphism", "darkmatter", "soft-pop", "neo-brutalism", "sodium", "voltage", "phosphor"] {
             assert!(names.contains(&want), "{want} is not shipped: {names:?}");
         }
-        assert_eq!(names.len(), 8, "{names:?}");
+        assert_eq!(names.len(), 11, "{names:?}");
         assert_eq!(PRESETS, ["graphite", "ink", "moss", "paper"]);
         for name in PRESETS {
             assert!(preset(name).is_some(), "{name}");
@@ -1587,6 +1590,29 @@ mod tests {
             for i in (1..=7).chain(9..=15) {
                 let ratio = contrast(rgb(&t, &format!("ansi{i}")), bg);
                 assert!(ratio >= 3.0, "{name}: ansi{i} {} on {} is {ratio:.2}:1, under 3:1", t[&format!("ansi{i}")], t["background"]);
+            }
+        }
+    }
+
+    #[test]
+    fn sodium_voltage_and_phosphor_are_dark_with_their_palette_and_readable_text() {
+        fn lum(c: u32) -> f64 {
+            let ch = |s: u32| {
+                let v = ((c >> s) & 255) as f64 / 255.0;
+                if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0)
+        }
+        let contrast = |a: u32, b: u32| (lum(a).max(lum(b)) + 0.05) / (lum(a).min(lum(b)) + 0.05);
+        let rgb = |t: &Theme, k: &str| u32::from_str_radix(t[k].trim_start_matches('#'), 16).unwrap_or_else(|_| panic!("{k} {}", t[k]));
+        for (name, background, cursor, accent) in [("sodium", "#000000", "#ffd60a", "#ffd60a"), ("voltage", "#0d0b14", "#ff2e63", "#00e5ff"), ("phosphor", "#030a05", "#39ff14", "#39d353")] {
+            let (p, t) = shipped(name);
+            assert!(!is_light(p.background), "{name} is dark");
+            assert_eq!((t["background"].as_str(), t["cursor"].as_str(), t["accent"].as_str()), (background, cursor, accent), "{name}");
+            let bg = rgb(&t, "background");
+            assert!(contrast(rgb(&t, "foreground"), bg) >= 7.0, "{name}: foreground");
+            for i in (1..=7).chain(9..=15) {
+                assert!(contrast(rgb(&t, &format!("ansi{i}")), bg) >= 3.0, "{name}: ansi{i}");
             }
         }
     }
