@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, window, account, accountSignIn, accountCancelSignIn, accountSwitch, accountSignOut, accountRemove } from "h0x";
+import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, nextCommand, window, account, accountSignIn, accountCancelSignIn, accountSwitch, accountSignOut, accountRemove } from "h0x";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -98,6 +98,14 @@ export default class Settings extends View {
     this.tick = 0;
     this.handle = cx.focus_handle();
     this.handle.focus();
+    // `frame-settings.section:<id>` (app.settings --section while open) switches the section.
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        const id = c.startsWith("section:") ? c.slice(8) : "";
+        if (SECTIONS.some((s) => s.id === id)) this.openSection(id, cx);
+      }
+    });
     cx.spawn(async (cx) => {
       await this.load();
       if (this.section === "machines") await this.loadMachines();

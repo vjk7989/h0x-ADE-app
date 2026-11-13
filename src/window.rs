@@ -305,6 +305,8 @@ impl OverlayKind {
 
 /// The first-run welcome's overlay id.
 const WELCOME: &str = "frame-welcome";
+/// The What's new window's overlay id (one at a time).
+const WHATS_NEW: &str = "frame-whatsnew";
 
 struct Overlay {
     id: String,
@@ -776,7 +778,9 @@ impl AppWindow {
         let width = 880.0_f32.min((f32::from(viewport.width) / settings::zoom() - 24.0).max(1.0));
         let height = 760.0_f32.min((f32::from(viewport.height) / settings::zoom() - 24.0).max(1.0));
         let spec = json!({ "mod": "frame-whatsnew", "kind": "window", "width": width, "height": height, "props": { "notes": notes } });
-        self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+        // A fixed id, like the welcome: one at a time, and `overlay.close` (bare or --id) ends it.
+        self.remove_overlay(WHATS_NEW, window, cx);
+        self.open_overlay(WHATS_NEW.into(), spec, window, cx);
     }
 
     fn open_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3424,7 +3428,7 @@ impl AppWindow {
                 // Default: the top dialog or popup, else the welcome (a window, so never "modal").
                 let id = Self::owned(a, "id").or_else(|| {
                     let top = self.overlays.iter().rev().find(|o| o.kind.modal_keys());
-                    top.or_else(|| self.overlays.iter().find(|o| o.id == WELCOME)).map(|o| o.id.clone())
+                    top.or_else(|| self.overlays.iter().find(|o| o.id == WELCOME || o.id == WHATS_NEW)).map(|o| o.id.clone())
                 });
                 if let Some(id) = id {
                     self.close_overlay(&id, window, cx);
@@ -3465,8 +3469,13 @@ impl AppWindow {
                 // Once: a second press doesn't stack another; asking for a section opens it there.
                 let section = Self::owned(a, "section");
                 let open = self.overlays.iter().any(|o| o.id == "settings");
-                if open && section.is_some() {
-                    self.close_overlay("settings", window, cx);
+                // Open already: its copy switches (no close and reopen under one id, where the old
+                // copy's late closeOverlay could end the new one).
+                if open && let Some(s) = &section {
+                    if mods::send_command("frame-settings", &format!("section:{s}")) {
+                        return;
+                    }
+                    self.remove_overlay("settings", window, cx);
                 }
                 if !open || section.is_some() {
                     crate::events::panel_opened("settings");
