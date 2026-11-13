@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.1.27] - 2026-11-13
+
+Signing in works. Bundles h0x-core 0.1.16.
+
+### Fixed
+- Signing in no longer fails after the browser step with "Couldn't reach Pavii". HyperOx now uses its own desktop key to confirm the sign-in.
+
+### Changed
+- A new, light welcome screen for signing in: "Welcome to HyperOx", your one-stop ADE for development, security and observability.
+
 ## [0.1.26] - 2026-11-13
 
 Sign in with your Pavii account. Bundles h0x-core 0.1.16.
