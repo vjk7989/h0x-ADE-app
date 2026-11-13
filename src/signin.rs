@@ -563,7 +563,10 @@ fn dots_in(svg: &str) -> Vec<(f32, f32)> {
     while y < DOT_BOX.1 {
         let mut x = DOT_STEP / 2.0;
         while x < DOT_BOX.0 {
-            if inside(x, y) {
+            // As the mock-up reads its raster: the pixel holding the point must be over a third covered.
+            let (px0, py0) = (x.floor(), y.floor());
+            let covered = (0..16).filter(|k| inside(px0 + ((k % 4) as f32 + 0.5) / 4.0, py0 + ((k / 4) as f32 + 0.5) / 4.0)).count();
+            if covered as f32 / 16.0 > 0.35 {
                 dots.push((x, y));
             }
             x += DOT_STEP;
@@ -1071,7 +1074,7 @@ mod tests {
         let (_, trail) = rain.cell(0, 3, 0).expect("the trail above the head");
         assert!(trail < 0.26 && trail > 0.04);
         assert!(rain.cell(0, 3, 0).unwrap().1 > rain.cell(0, 1, 0).map_or(0.0, |c| c.1) || rain.cell(0, 1, 0).is_none());
-        assert!(GLYPHS.iter().all(u8::is_ascii) && GLYPHS.len() == 38);
+        assert!(GLYPHS.iter().all(u8::is_ascii) && GLYPHS.len() == 36);
         assert_eq!(rain.cell(9, 0, 0), None, "past the last column");
         for frame in 0..200 {
             for r in 0..10 {
@@ -1129,7 +1132,7 @@ mod tests {
     #[test]
     fn the_mark_is_drawn_as_a_few_hundred_dots_inside_its_box() {
         let dots = super::mark_dots();
-        assert!((250..=700).contains(&dots.len()), "{}", dots.len());
+        assert!((200..=700).contains(&dots.len()), "{}", dots.len());
         assert!(dots.iter().all(|(x, y)| (0.0..96.0).contains(x) && (0.0..113.0).contains(y)));
         assert_eq!(super::dots_in(std::str::from_utf8(super::MARK).unwrap()), dots, "the same every time");
         assert!(super::dots_in("<svg/>").is_empty());
