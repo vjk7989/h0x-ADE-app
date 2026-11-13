@@ -2115,7 +2115,7 @@ fn settings_remote_pairing_is_gated_on_signing_in_but_existing_pairings_stay(cx:
 fn logo_menu_shows_the_current_account_the_others_and_the_account_actions(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    let menu = |account: Value, setup: Option<&str>| {
+    let mut menu = |account: Value, setup: Option<&str>| {
         let mut values = fixture(true, json!({"menu":"account","overlay":"o1"}), updates("current", "current"));
         values.insert("account".into(), account);
         describe_with_values(cx, &staged, "frame/account", values, setup).unwrap()
