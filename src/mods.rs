@@ -1996,7 +1996,7 @@ mod tests {
             assert!(local_full_path(bad).is_err(), "{bad:?}");
         }
         assert_eq!(open_file("clip.mp4", false), "needs a full path");
-        let share = if cfg!(windows) { r"\servershareip.mp4" } else { "//server/share/clip.mp4" };
+        let share = if cfg!(windows) { r"\\server\share\clip.mp4" } else { "//server/share/clip.mp4" };
         assert_eq!(open_file(share, false), "network paths are not opened");
     }
 
