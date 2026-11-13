@@ -190,8 +190,13 @@ fn palette(name: &str) -> Result<(Palette, BTreeMap<String, String>), String> {
         return Ok((p.clone(), BTreeMap::new()));
     }
     let path = theme_path(name);
+    // A shipped theme is always there: its file is installed at start, and until then (or if
+    // it was deleted) the copy built into the app stands in.
+    let shipped = || THEMES.iter().find(|(n, _)| *n == name).map(|(_, text)| (*text).to_owned());
     let text = std::fs::read_to_string(&path)
-        .map_err(|_| format!("theme {name:?} is not one of {} and there is no themes/{name}.json", PRESETS.join(", ")))?;
+        .ok()
+        .or_else(shipped)
+        .ok_or_else(|| format!("theme {name:?} is not one of {} and there is no themes/{name}.json", PRESETS.join(", ")))?;
     parse_theme_file(name, &text)
 }
 
