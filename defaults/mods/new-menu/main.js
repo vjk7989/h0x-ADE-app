@@ -6,7 +6,9 @@ import { theme, spaces, panes, knownAgents, run, openOverlay, closeOverlay, prop
 const KNOWN = "new-menu.agents";
 
 function shortcut(name) {
-  const k = keys().find(b => b.section === "global" && b.action === name);
+  // Agent slots are bound twice (ctrl-shift-1 and ctrl-!): show the first form.
+  const bound = keys().filter(b => b.section === "global" && b.action === name);
+  const k = bound.find(b => /shift/.test(b.keys)) ?? bound[0];
   if (!k?.keys.trim()) return "";
   const mac = window()?.platform === "macos";
   const names = mac ? { ctrl: "⌃", alt: "⌥", shift: "⇧", cmd: "⌘", fn: "fn" } : { ctrl: "Ctrl", alt: "Alt", shift: "Shift", cmd: "Super", fn: "Fn" };
@@ -48,13 +50,15 @@ export default class NewMenu extends View {
   render() {
     const t = theme();
     const space = spaces().find(s => s.active);
-    const installed = this.agents.filter(a => a.installed);
-    const choices = [...installed, ...this.agents.filter(a => !a.installed).slice(0, 2)];
-    return v_flex().min_h(0).w_full().h(Math.min(491, 167 + Math.max(1, choices.length) * 31)).bg(t.popover).p(5).text_size(12.8)
+    // Installed built-ins and all the person's own agents; a few more built-ins are offered as not installed.
+    const shown = this.agents.filter(a => a.installed || a.custom);
+    const choices = [...shown, ...this.agents.filter(a => !a.installed && !a.custom).slice(0, 2)];
+    return v_flex().min_h(0).w_full().h(Math.min(522, 198 + Math.max(1, choices.length) * 31)).bg(t.popover).p(5).text_size(12.8)
       .id("new-menu").track_focus(this.handle)
       .on_key_down((e) => {
         if (e.modifiers.control || e.modifiers.platform || e.modifiers.alt) return;
-        const agent = /^[1-9]$/.test(e.key) ? installed[Number(e.key) - 1] : null;
+        // A digit is the agent's slot, as in its key.
+        const agent = /^[1-9]$/.test(e.key) ? shown.find(a => a.slot === Number(e.key) && a.installed) : null;
         if (!agent) return;
         closeOverlay(props().overlay);
         run("tab.new", { name: agent.name, space: space?.id, argv: agent.run });
@@ -63,7 +67,8 @@ export default class NewMenu extends View {
       .child(div().px(9).pt(8).pb(4).text_size(11).text_color(t.dim).child("Start an agent"))
       .child(v_flex().flex_1().min_h(0).overflow_y_scrollbar()
         .children(choices.map((a, i) => this.row(a.key, a.tint ? svg(a.icon).size(14).text_color(t.foreground) : image(a.icon).size(14), a.name,
-          () => run("tab.new", { name: a.name, space: space?.id, argv: a.run }), a.installed ? (i < 9 ? String(i + 1) : "") : "not installed", a.installed)))
+          () => run("tab.new", { name: a.name, space: space?.id, argv: a.run }), a.installed ? (a.slot ? shortcut(`agent.new:${a.slot}`) : "") : "not installed", a.installed)))
+        .child(this.row("add-agent", div().w(14).child("+"), "Add agent…", () => run("app.settings", { section: "agents" })))
         .when(this.agents.length === 0, el => el.child(div().px(9).py(6).text_color(t.dim).child(this.failed ? "Could not load agents" : "Checking installed agents…"))))
       .child(div().h(1).mx(4).my(5).bg(t.border))
       .child(this.row("space", div().w(14).child("+"), "New space", () => run("space.new"), shortcut("space.new")))

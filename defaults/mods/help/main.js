@@ -17,6 +17,7 @@ const GROUPS = [
 function label(action) {
   if (action.startsWith("send:")) return "type " + JSON.stringify(action.slice(5));
   const [name, arg] = action.split(":");
+  if (name === "agent.new") return `new session of agent ${arg}`;
   const words = name.replace(/[._]/g, " ");
   return arg ? `${words} ${arg}` : words;
 }
