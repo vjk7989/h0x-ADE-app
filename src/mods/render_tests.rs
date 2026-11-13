@@ -1832,13 +1832,16 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
         u["checked"] = json!(checked);
         u["checking"] = json!(checking);
         let setup = asked.then_some("this.asked = Date.now();");
+        let tried = u.get("tried").and_then(|t| t.as_bool()).unwrap_or(false);
         let tree = describe(cx, &staged, "frame/settings", true, p, u, setup).unwrap();
         let succeeded = !checking && checked.is_some();
         assert_eq!(tree.contains("Up to date"), succeeded, "success requires a completed, successful check: {tree}");
         if !checking && checked.is_none() {
             assert!(tree.contains("check-app") && tree.contains("check-core"), "failed checks must remain retryable: {tree}");
         }
-        assert!(tree.contains(if checking { "Checking" } else if succeeded { "Up to date" } else { "Check your connection" }), "check status missing: {tree}");
+        // A check that never ran is not a failed one: without `tried` the page says so.
+        let failed_text = if tried { "Check your connection" } else { "Not checked yet" };
+        assert!(tree.contains(if checking { "Checking" } else if succeeded { "Up to date" } else { failed_text }), "check status missing: {tree}");
     }
     eprintln!("27 settings cases, each twice: {:?}", start.elapsed());
 }
