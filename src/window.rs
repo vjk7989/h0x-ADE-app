@@ -303,6 +303,9 @@ impl OverlayKind {
     }
 }
 
+/// The first-run welcome's overlay id.
+const WELCOME: &str = "frame-welcome";
+
 struct Overlay {
     id: String,
     kind: OverlayKind,
@@ -780,7 +783,9 @@ impl AppWindow {
         // A window over the live app (nothing dims), centered and movable:
         // each step changes what's behind it, and a click beside it doesn't end it.
         let spec = json!({ "mod": "frame-welcome", "kind": "window", "width": 660, "height": 600 });
-        self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+        // Its mod's name is its id, so `overlay.close --id frame-welcome` ends it (one at a time).
+        self.remove_overlay(WELCOME, window, cx);
+        self.open_overlay(WELCOME.into(), spec, window, cx);
     }
 
     /// Tells the updater which core this is and who owns it (off the UI thread).
@@ -3416,7 +3421,11 @@ impl AppWindow {
                 }
             }
             "overlay.close" => {
-                let id = Self::owned(a, "id").or_else(|| self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.id.clone()));
+                // Default: the top dialog or popup, else the welcome (a window, so never "modal").
+                let id = Self::owned(a, "id").or_else(|| {
+                    let top = self.overlays.iter().rev().find(|o| o.kind.modal_keys());
+                    top.or_else(|| self.overlays.iter().find(|o| o.id == WELCOME)).map(|o| o.id.clone())
+                });
                 if let Some(id) = id {
                     self.close_overlay(&id, window, cx);
                 }
@@ -5790,6 +5799,40 @@ mod tests {
             assert!(this.model.tab("tb1").is_none());
             assert!(this.model.tab("tb3").is_some());
             assert!(this.overlays.iter().any(|o| o.id == "float"));
+        }));
+    }
+
+    #[test]
+    fn overlay_close_closes_the_welcome_with_or_without_an_id() {
+        in_own_process("overlay_close_welcome");
+    }
+
+    #[gpui::test]
+    fn overlay_close_welcome(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("overlay_close_welcome") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let welcome = |this: &super::AppWindow| this.overlays.iter().filter(|o| o.id == super::WELCOME).count();
+            this.open_overlay(super::WELCOME.into(), json!({"kind": "window"}), window, cx);
+            assert_eq!(welcome(this), 1);
+            this.run("overlay.close", json!({}), window, cx);
+            assert_eq!(welcome(this), 0, "no id: the welcome closes");
+            this.open_overlay(super::WELCOME.into(), json!({"kind": "window"}), window, cx);
+            this.run("overlay.close", json!({ "id": "frame-welcome" }), window, cx);
+            assert_eq!(welcome(this), 0, "by its mod's name");
+            // A dialog on top is still what a bare close ends first.
+            this.open_overlay(super::WELCOME.into(), json!({"kind": "window"}), window, cx);
+            this.open_overlay("dlg".into(), json!({"kind": "dialog"}), window, cx);
+            this.run("overlay.close", json!({}), window, cx);
+            assert!(!this.overlays.iter().any(|o| o.id == "dlg"));
+            assert_eq!(welcome(this), 1);
+            this.run("overlay.close", json!({ "id": "nothing" }), window, cx);
+            assert_eq!(welcome(this), 1, "an unknown id closes nothing");
         }));
     }
 

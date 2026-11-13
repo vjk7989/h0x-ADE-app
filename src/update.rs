@@ -323,6 +323,8 @@ pub struct CoreInfo {
 static CORE: Mutex<CoreInfo> = Mutex::new(CoreInfo { version: None, managed: None, ready: None, updating: false, error: None });
 /// When the last check succeeded (unix seconds); a failed check clears it.
 static CHECKED: Mutex<Option<u64>> = Mutex::new(None);
+/// A check has finished (well or not): before that the screen says "Not checked yet".
+static TRIED: AtomicBool = AtomicBool::new(false);
 /// "Check now" wakes the checker early.
 static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 /// The checker runs (a release, or pointed at a test server), and is looking right now.
@@ -417,6 +419,7 @@ pub fn status() -> serde_json::Value {
         "notes": crate::update_notes::notes(ready().as_deref()),
         "core": core(),
         "checked": *CHECKED.lock().unwrap(),
+        "tried": TRIED.load(Ordering::Relaxed),
         "checks": RUNNING.load(Ordering::Relaxed),
         "checking": CHECKING.load(Ordering::Relaxed),
     })
@@ -494,7 +497,7 @@ pub fn start() {
                 let _ = check_runtime();
             }
             let now = unix_now();
-            *CHECKED.lock().unwrap() = checked_at(succeeded, now);
+            note_checked(succeeded, now);
             CHECKING.store(false, Ordering::Relaxed);
             asked = sleep(wait);
         }
@@ -524,6 +527,12 @@ fn core_waiting(core: &CoreInfo) -> bool {
 
 fn checked_at(succeeded: bool, now: u64) -> Option<u64> {
     succeeded.then_some(now)
+}
+
+/// A check finished: when it succeeded (a failure clears that), and that one has run.
+fn note_checked(succeeded: bool, now: u64) {
+    *CHECKED.lock().unwrap() = checked_at(succeeded, now);
+    TRIED.store(true, Ordering::Relaxed);
 }
 
 /// Looks for a newer core of this app's generation.
@@ -614,14 +623,31 @@ mod runtime {
         parse(&out.stdout).map_err(|e| format!("{e} {}", String::from_utf8_lossy(&out.stderr).trim()).trim().to_owned())
     }
 
-    /// The first absolute PATH entry holding `h0x`.
-    pub fn find_in(path: &OsStr) -> Option<PathBuf> {
-        let name = if cfg!(windows) { "h0x.exe" } else { "h0x" };
-        std::env::split_paths(path).filter(|dir| dir.is_absolute()).map(|dir| dir.join(name)).find(|bin| bin.is_file())
+    fn program() -> &'static str {
+        if cfg!(windows) { "h0x.exe" } else { "h0x" }
     }
 
+    /// Where a runtime may be, best first: `runtime/h0x` beside each given install folder (the
+    /// app's, the core's), then every absolute PATH entry holding `h0x`. Files only.
+    pub fn candidates(path: &OsStr, installs: &[&Path]) -> Vec<PathBuf> {
+        let beside = installs.iter().filter(|dir| dir.is_absolute()).filter_map(|dir| Some(dir.parent()?.join("runtime")));
+        let on_path = std::env::split_paths(path).filter(|dir| dir.is_absolute());
+        let mut found: Vec<PathBuf> = Vec::new();
+        for bin in beside.chain(on_path).map(|dir| dir.join(program())).filter(|bin| bin.is_file()) {
+            if !found.contains(&bin) {
+                found.push(bin);
+            }
+        }
+        found
+    }
+
+    /// The first candidate that is a HyperOx runtime (`--version` says `h0x X.Y.Z`); a foreign
+    /// `h0x` earlier on PATH is skipped without a word.
     pub fn find() -> Option<PathBuf> {
-        find_in(&std::env::var_os("PATH")?)
+        let app = super::root();
+        let core = crate::core_bin::path();
+        let installs: Vec<&Path> = app.as_deref().into_iter().chain(core.parent()).collect();
+        candidates(&std::env::var_os("PATH").unwrap_or_default(), &installs).into_iter().find(|bin| version(bin).is_some())
     }
 
     /// A nix profile or store path: nix owns that runtime.
@@ -2313,13 +2339,47 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         let name = if cfg!(windows) { "h0x.exe" } else { "h0x" };
         std::fs::write(with.join(name), b"").unwrap();
         let path = |dirs: &[PathBuf]| std::env::join_paths(dirs).unwrap();
-        assert_eq!(runtime::find_in(&path(&[empty.clone(), with.clone()])), Some(with.join(name)));
-        assert_eq!(runtime::find_in(&path(&[empty.clone()])), None, "not installed");
-        assert_eq!(runtime::find_in(std::ffi::OsStr::new("")), None, "an empty PATH");
-        assert_eq!(runtime::find_in(&path(&[PathBuf::from("rel")])), None, "relative entries are skipped");
+        let first = |path: &std::ffi::OsStr| runtime::candidates(path, &[]).into_iter().next();
+        assert_eq!(first(&path(&[empty.clone(), with.clone()])), Some(with.join(name)));
+        assert_eq!(first(&path(&[empty.clone()])), None, "not installed");
+        assert_eq!(first(std::ffi::OsStr::new("")), None, "an empty PATH");
+        assert_eq!(first(&path(&[PathBuf::from("rel")])), None, "relative entries are skipped");
         std::fs::create_dir_all(empty.join(name)).unwrap();
-        assert_eq!(runtime::find_in(&path(&[empty])), None, "a folder named h0x is not the program");
+        assert_eq!(first(&path(&[empty])), None, "a folder named h0x is not the program");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_runtime_beside_the_install_comes_before_path_and_spaces_are_fine() {
+        let root = std::env::temp_dir().join(format!("h0x-ade-runtime-beside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join("Hyper Ox");
+        let (app, core, runtime_dir, foreign) = (base.join("bin"), base.join("core"), base.join("runtime"), root.join("foreign"));
+        for dir in [&app, &core, &runtime_dir, &foreign] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let name = if cfg!(windows) { "h0x.exe" } else { "h0x" };
+        std::fs::write(runtime_dir.join(name), b"").unwrap();
+        std::fs::write(foreign.join(name), b"").unwrap();
+        let path = std::env::join_paths([foreign.clone()]).unwrap();
+        let found = runtime::candidates(&path, &[app.as_path(), core.as_path()]);
+        assert_eq!(found, vec![runtime_dir.join(name), foreign.join(name)], "the sibling of the app and the core (once), then PATH in order");
+        assert_eq!(runtime::candidates(&path, &[Path::new("rel/bin")]), vec![foreign.join(name)], "a relative install folder is not trusted");
+        assert_eq!(runtime::candidates(&path, &[]), vec![foreign.join(name)]);
+        assert!(runtime::candidates(std::ffi::OsStr::new(""), &[&app]).len() == 1, "no PATH: just the sibling");
+        // A foreign h0x (a file that is no program) never makes it through `--version`.
+        assert_eq!(runtime::version(&foreign.join(name)), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_check_that_has_not_run_is_not_a_failed_one() {
+        let before = status()["tried"].as_bool();
+        assert!(before.is_some(), "the screen reads tried");
+        note_checked(false, 5);
+        let after = status();
+        assert_eq!(after["tried"], true, "a failed check has been tried");
+        assert!(after["checked"].is_null(), "and still is not a successful one");
     }
 
     #[test]
@@ -2389,18 +2449,19 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         std::fs::create_dir_all(&spaced).unwrap();
         let name = if cfg!(windows) { "h0x.exe" } else { "h0x" };
         std::fs::write(spaced.join(name), b"").unwrap();
+        let first = |path: &std::ffi::OsStr| runtime::candidates(path, &[]).into_iter().next();
         let path = std::env::join_paths([root.join("missing dir"), spaced.clone()]).unwrap();
-        assert_eq!(runtime::find_in(&path), Some(spaced.join(name)));
+        assert_eq!(first(&path), Some(spaced.join(name)));
         assert!(!runtime::managed(&spaced.join(name)), "a folder with spaces is not a nix one");
         assert!(!runtime::managed(Path::new(r"C:\Program Files\h0x\h0x.exe")));
         #[cfg(windows)]
         {
             let quoted = std::ffi::OsString::from(format!("C:\\nowhere;\"{}\"", spaced.display()));
-            assert_eq!(runtime::find_in(&quoted), Some(spaced.join(name)), "a quoted PATH entry is the same folder");
+            assert_eq!(first(&quoted), Some(spaced.join(name)), "a quoted PATH entry is the same folder");
             let bare = root.join("bare");
             std::fs::create_dir_all(&bare).unwrap();
             std::fs::write(bare.join("h0x"), b"").unwrap();
-            assert_eq!(runtime::find_in(bare.as_os_str()), None, "on Windows only h0x.exe is the program");
+            assert_eq!(first(bare.as_os_str()), None, "on Windows only h0x.exe is the program");
         }
         let _ = std::fs::remove_dir_all(&root);
     }
