@@ -835,7 +835,7 @@ mod tests {
         let (result, url) = run_sign_in(&dir, &exchange_ok("u1"), Duration::from_secs(20), |port, state| {
             assert!(post(port, "/callback", "state=wrong&refresh_token=evil").contains("400"));
             assert!(post(port, "/other", "x=1").contains("404"));
-            assert!(post(port, "/callback", "", MAX_BODY + 1).contains("413"));
+            assert!(post_declaring(port, "/callback", "", MAX_BODY + 1).contains("413"));
             let ok = post(port, "/callback", &format!("state={state}&id_token=a.b.c&refresh_token=rt0&provider=github.com"));
             assert!(ok.contains("200") && ok.contains("signed in to HyperOx"), "{ok}");
         });
@@ -887,5 +887,267 @@ mod tests {
         assert_eq!(result.unwrap_err(), "cancelled");
         assert_eq!(load(&dir), Store::default());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn form_values_are_decoded_once_with_plus_as_a_space_and_2b_as_a_plus() {
+        let s = "st-1_x";
+        let session = |t: &str| -> Result<Form, &'static str> { Ok(Form::Session { refresh_token: t.into() }) };
+        assert_eq!(parse_form("state=st-1_x&refresh_token=a%2Bb%2bc+d", s), session("a+b+c d"));
+        assert_eq!(parse_form("state=st-1_x&refresh_token=%252B", s), session("%2B"), "decoded once only");
+        assert_eq!(parse_form("state=st-1_x&refresh_token=%C3%A9", s), session("\u{e9}"));
+        assert_eq!(parse_form("state=st-1_x&refresh_token=r%2", s), session("r%2"), "a cut-off escape is kept");
+        // Encoded keys and an encoded state still match.
+        assert_eq!(parse_form("%73tate=st%2D1%5Fx&refresh%5Ftoken=r", s), session("r"));
+        // An empty token beside a cancel is a cancel; a token beside an error is neither.
+        assert_eq!(parse_form("state=st-1_x&refresh_token=&error=cancelled", s), Ok(Form::Cancelled));
+        assert_eq!(parse_form("state=st-1_x&refresh_token=rt&error=cancelled", s), Err("incomplete"));
+        // A repeated field: the last one counts.
+        assert_eq!(parse_form("state=st-1_x&state=nope&refresh_token=r", s), Err("wrong state"));
+        assert_eq!(parse_form("state=nope&state=st-1_x&refresh_token=r", s), session("r"));
+    }
+
+    #[test]
+    fn verify_refuses_another_project_another_user_and_a_uid_unsafe_for_paths() {
+        fn answer(payload: serde_json::Value, user_id: String) -> impl Fn(&str) -> Result<Exchanged, Failure> {
+            let id_token = jwt(&payload);
+            move |rt: &str| Ok(Exchanged { id_token: id_token.clone(), refresh_token: rt.to_string(), user_id: user_id.clone() })
+        }
+        let mut other_project = good_payload("u1");
+        other_project["aud"] = "pavii-ai2".into();
+        let mut no_aud = good_payload("u1");
+        no_aud.as_object_mut().unwrap().remove("aud");
+        let mut aud_list = good_payload("u1");
+        aud_list["aud"] = serde_json::json!([PROJECT_ID]);
+        for payload in [other_project, no_aud, aud_list] {
+            let err = verify("rt", &answer(payload.clone(), "u1".into())).err().unwrap();
+            assert!(err.starts_with("rejected: "), "{payload}: {err}");
+        }
+        // securetoken says 200 but for a different user than the token.
+        assert_eq!(verify("rt", &answer(good_payload("u1"), "u2".into())).err().unwrap(), "rejected: account mismatch");
+        // Both agree on a uid that could leave a folder: still refused.
+        for uid in ["../x", "..\\x", "a/b", "C:\\x", "u 1", ""] {
+            let err = verify("rt", &answer(good_payload(uid), uid.into())).err().unwrap();
+            assert!(err.starts_with("rejected: "), "{uid:?}: {err}");
+        }
+        // 128 characters is the longest uid.
+        let longest = "a".repeat(128);
+        let (claims, token) = verify("rt", &answer(good_payload(&longest), longest.clone())).unwrap();
+        assert_eq!((claims.uid.len(), token.as_str()), (128, "rt"));
+        let too_long = "a".repeat(129);
+        assert_eq!(verify("rt", &answer(good_payload(&too_long), too_long.clone())).err().unwrap(), "rejected: account mismatch");
+        // A 200 answer with an empty refresh token is not a session.
+        let empty = "{\"id_token\":\"i\",\"refresh_token\":\"\",\"user_id\":\"u\"}\n200";
+        assert!(matches!(parse_exchange(empty), Err(Failure::Network(_))));
+    }
+
+    #[test]
+    fn accounts_json_ignores_unknown_fields_but_an_entry_without_last_verified_drops_the_file() {
+        let dir = scratch("json-shape");
+        std::fs::create_dir_all(&dir).unwrap();
+        let want = Store { current: Some("u1".into()), accounts: vec![entry("u1", 7)] };
+        let extra = r#"{"current":"u1","future":1,"accounts":[{"uid":"u1","provider":"google.com","name":null,"email":null,"picture":null,"last_verified":7,"plan":"pro"}]}"#;
+        std::fs::write(dir.join("accounts.json"), extra).unwrap();
+        assert_eq!(load(&dir), want, "unknown fields are ignored");
+        let minimal = r#"{"current":"u1","accounts":[{"uid":"u1","provider":"google.com","last_verified":7}]}"#;
+        std::fs::write(dir.join("accounts.json"), minimal).unwrap();
+        assert_eq!(load(&dir), want, "missing name, email and picture are none");
+        let no_time = r#"{"current":"u1","accounts":[{"uid":"u1","provider":"google.com","last_verified":7},{"uid":"u2","provider":"github.com"}]}"#;
+        std::fs::write(dir.join("accounts.json"), no_time).unwrap();
+        assert_eq!(load(&dir), Store::default(), "one entry without last_verified makes the file unreadable");
+        assert_eq!(current_in(&dir, 7), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_uid_unsafe_for_paths_in_accounts_json_is_never_used_as_a_path() {
+        let dir = scratch("traversal");
+        std::fs::create_dir_all(dir.join("x")).unwrap();
+        std::fs::write(dir.join("x").join("keep"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("profiles")).unwrap();
+        let bad = ["../x", "..\\x"];
+        save(&dir, &Store { current: Some(bad[0].into()), accounts: bad.iter().map(|u| entry(u, 100)).collect() }).unwrap();
+        for uid in bad {
+            assert!(remove_in(&dir, uid).is_err(), "{uid:?}");
+            assert!(sign_out_in(&dir, uid).is_err(), "{uid:?}");
+        }
+        let asked = std::cell::Cell::new(0);
+        refresh_all_in(
+            &dir,
+            &|_| {
+                asked.set(asked.get() + 1);
+                Err(Failure::Network("offline".into()))
+            },
+            200,
+        );
+        assert_eq!(asked.get(), 0, "no token is looked up for such a uid");
+        assert!(dir.join("x").join("keep").exists(), "nothing outside profiles/ is touched");
+        assert!(!dir.join("secrets").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removing_an_account_without_a_profile_folder_and_signing_out_another_keep_the_rest() {
+        let dir = scratch("no-profile");
+        for uid in ["u1", "u2", "u3"] {
+            store_session(&dir, &decode_claims(&jwt(&good_payload(uid))).unwrap(), uid, 100).unwrap();
+        }
+        assert_eq!(load(&dir).current.as_deref(), Some("u3"));
+        // Signing out an account that is not current leaves the current one.
+        sign_out_in(&dir, "u1").unwrap();
+        assert_eq!(load(&dir).current.as_deref(), Some("u3"));
+        // No profiles folder at all: remove still works and the next account becomes current.
+        assert!(!dir.join("profiles").exists());
+        remove_in(&dir, "u3").unwrap();
+        assert_eq!(load(&dir).current.as_deref(), Some("u2"));
+        // A well-formed uid that was never signed in: nothing to do.
+        remove_in(&dir, "never-signed-in").unwrap();
+        assert_eq!(load(&dir).accounts.iter().map(|e| e.uid.as_str()).collect::<Vec<_>>(), ["u2"]);
+        assert_eq!(crate::secret::get(&dir, "account.u2").unwrap().as_deref(), Some("u2"));
+        assert_eq!(crate::secret::get(&dir, "account.u3").unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_grace_window_survives_extreme_clocks_and_a_refresh_with_a_clock_set_back() {
+        assert!(within_grace(0, GRACE_SECS));
+        assert!(!within_grace(0, GRACE_SECS + 1));
+        assert!(!within_grace(0, u64::MAX));
+        assert!(within_grace(u64::MAX, 0), "no overflow when the last check is in the future");
+        let dir = scratch("clock-back");
+        store_session(&dir, &decode_claims(&jwt(&good_payload("u1"))).unwrap(), "t1", 10_000).unwrap();
+        refresh_all_in(&dir, &exchange_ok("u1"), 500);
+        assert_eq!(load(&dir).accounts[0].last_verified, 500, "the check time is the clock's, even if earlier");
+        assert!(current_in(&dir, 500 + GRACE_SECS).is_some());
+        assert!(current_in(&dir, 501 + GRACE_SECS).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_secret_store_failure_during_sign_in_stores_no_account() {
+        let _g = SIGN_IN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("no-secret");
+        std::fs::create_dir_all(&dir).unwrap();
+        // `secrets` is a file, so the store cannot be written.
+        std::fs::write(dir.join("secrets"), "not a folder").unwrap();
+        let (result, _) = run_sign_in(&dir, &exchange_ok("u1"), Duration::from_secs(20), |port, state| {
+            let page = post(port, "/callback", &format!("state={state}&refresh_token=rt0"));
+            assert!(page.contains("Sign-in failed") && !page.contains("signed in to HyperOx"), "{page}");
+        });
+        let err = result.unwrap_err();
+        assert!(err.starts_with("secret: "), "{err}");
+        assert!(!dir.join("accounts.json").exists(), "no half-written account");
+        assert_eq!(current_in(&dir, now()), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_guessed_or_altered_state_from_another_local_process_is_refused_and_nothing_is_stored() {
+        let _g = SIGN_IN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("guess");
+        let never = |_: &str| -> Result<Exchanged, Failure> { panic!("a refused callback is never exchanged") };
+        let (result, _) = run_sign_in(&dir, &never, Duration::from_secs(20), |port, state| {
+            let guessed = new_state();
+            assert_eq!(guessed.len(), state.len());
+            assert_ne!(guessed, state);
+            let mut bodies = vec![
+                format!("state={guessed}&refresh_token=evil"),
+                format!("state={}&refresh_token=evil", &state[..42]),
+                format!("state={state}x&refresh_token=evil"),
+                format!("state=%20{state}&refresh_token=evil"),
+                format!("state={state}&state={guessed}&refresh_token=evil"),
+                format!("state={guessed}&error=cancelled"),
+            ];
+            let upper = state.to_ascii_uppercase();
+            if upper != state {
+                bodies.push(format!("state={upper}&refresh_token=evil"));
+            }
+            for body in bodies {
+                let page = post(port, "/callback", &body);
+                assert!(page.contains("400") && !page.contains("signed in") && !page.contains("cancelled"), "{body}: {page}");
+            }
+            // The state in a GET query counts for nothing.
+            let mut get = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            get.write_all(format!("GET /callback?state={state}&refresh_token=evil HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).unwrap();
+            let mut page = String::new();
+            let _ = get.read_to_string(&mut page);
+            assert!(page.contains("404"), "{page}");
+            // The real page ends it.
+            post(port, "/callback", &format!("state={state}&error=cancelled"));
+        });
+        assert_eq!(result.unwrap_err(), "cancelled");
+        assert_eq!(load(&dir), Store::default());
+        assert!(!dir.join("secrets").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_huge_header_a_bad_length_or_a_silent_client_is_let_go_and_the_real_callback_still_lands() {
+        let _g = SIGN_IN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("slow");
+        let (result, _) = run_sign_in(&dir, &exchange_ok("u1"), Duration::from_secs(60), |port, state| {
+            let answered_soon = |mut s: TcpStream| {
+                s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                let start = Instant::now();
+                let mut reply = String::new();
+                let _ = s.read_to_string(&mut reply);
+                assert!(start.elapsed() < Duration::from_secs(9), "the listener held the connection: {reply}");
+                reply
+            };
+            // A header that never ends is cut off past MAX_HEAD.
+            let mut big = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let _ = big.write_all(format!("POST /callback HTTP/1.1\r\nX-Pad: {}", "a".repeat(MAX_HEAD * 2)).as_bytes());
+            let reply = answered_soon(big);
+            assert!(reply.is_empty() || reply.contains("400"), "{reply}");
+            // A length that is not a number.
+            let mut bad = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            bad.write_all(b"POST /callback HTTP/1.1\r\nContent-Length: lots\r\n\r\n").unwrap();
+            assert!(answered_soon(bad).contains("400"));
+            // A client that connects and says nothing is dropped after the read timeout.
+            let silent = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            assert!(answered_soon(silent).contains("400"));
+            // A body shorter than its length, then silence: dropped too.
+            let mut short = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            short.write_all(b"POST /callback HTTP/1.1\r\nContent-Length: 100\r\n\r\nstate=").unwrap();
+            assert!(answered_soon(short).contains("400"));
+            let ok = post(port, "/callback", &format!("state={state}&refresh_token=rt0"));
+            assert!(ok.contains("signed in to HyperOx"), "{ok}");
+        });
+        assert_eq!(result.unwrap().uid, "u1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_sign_ins_at_once_get_their_own_port_and_state_and_one_cancel_stops_both() {
+        let _g = SIGN_IN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let (a, b) = (scratch("twice-a"), scratch("twice-b"));
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let results: Vec<Result<Account, String>> = std::thread::scope(|s| {
+            let runs: Vec<_> = [&a, &b]
+                .into_iter()
+                .map(|dir| {
+                    let tx = tx.clone();
+                    s.spawn(move || {
+                        let exchange = exchange_ok("u1");
+                        sign_in_in(dir, |url| tx.send(url.to_string()).unwrap(), &exchange, Duration::from_secs(20))
+                    })
+                })
+                .collect();
+            let first = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            let second = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            let (port1, state1) = (url_part(&first, "port"), url_part(&first, "state"));
+            let (port2, state2) = (url_part(&second, "port"), url_part(&second, "state"));
+            assert_ne!(port1, port2);
+            assert_ne!(state1, state2);
+            // One attempt's state is no good at the other's port.
+            let crossed = post(port2.parse().unwrap(), "/callback", &format!("state={state1}&refresh_token=rt"));
+            assert!(crossed.contains("400"), "{crossed}");
+            cancel_sign_in();
+            runs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(results, [Err("cancelled".to_string()), Err("cancelled".to_string())]);
+        assert_eq!((load(&a), load(&b)), (Store::default(), Store::default()));
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
     }
 }

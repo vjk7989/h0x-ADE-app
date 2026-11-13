@@ -166,7 +166,8 @@ impl Render for SignIn {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Not `super::*`: that brings in `gpui::test`, which `#[test]` would then expand forever.
+    use super::{CANCELLED, UNREACHABLE, decide, friendly};
 
     #[test]
     fn signed_out_shows_the_screen_signed_in_opens_main() {
@@ -185,5 +186,17 @@ mod tests {
         assert_eq!(friendly("CANCELLED by user"), CANCELLED);
         assert_eq!(friendly("connection refused"), UNREACHABLE);
         assert_eq!(friendly(""), UNREACHABLE);
+    }
+
+    #[test]
+    fn each_stable_sign_in_error_gets_plain_words_never_the_raw_error() {
+        assert_eq!(friendly("cancelled"), CANCELLED);
+        assert_eq!(friendly("network: curl: (6) Could not resolve host: securetoken.googleapis.com"), UNREACHABLE);
+        assert_eq!(friendly("network: HTTP 503"), UNREACHABLE);
+        for error in ["timeout", "rejected: USER_DISABLED", "rejected: account mismatch", "listener: unusable port", "secret: access denied"] {
+            let words = friendly(error);
+            assert_ne!(words, CANCELLED, "{error}");
+            assert!(!words.contains(error), "{error}: {words}");
+        }
     }
 }

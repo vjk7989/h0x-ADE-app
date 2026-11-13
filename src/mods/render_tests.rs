@@ -2024,6 +2024,44 @@ fn settings_info_privacy_text_names_the_account_id_and_keeps_the_rest_word_for_w
     }
 }
 
+#[gpui::test]
+fn settings_info_account_card_shows_a_very_long_name_and_email_whole_and_keeps_its_buttons(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let name = format!("Ana Mar\u{ed}a {}", "L\u{f3}pez-Garc\u{ed}a ".repeat(30)).trim_end().to_string();
+    let email = format!("{name}@example.com");
+    let tree = info_account_tree(cx, &staged, account_value(&[("u1", "google.com", name.as_str())], Some("u1")), None);
+    for text in [name.as_str(), email.as_str(), "st-acct-name", "st-acct-email", "st-acct-switch", "st-acct-signout", "st-acct-more", "Google", "ABOUT", "PRIVACY"] {
+        assert!(tree.contains(text), "{text:?}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_info_account_card_without_a_name_shows_the_email_and_without_either_says_account(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let only = |email: Value, provider: &str| {
+        let a = json!({"uid":"u1","provider":provider,"name":null,"email":email,"picture":null});
+        json!({"current": a.clone(), "accounts": [a]})
+    };
+    // The card between the name and the buttons.
+    let card = |tree: &str| {
+        let (start, end) = (tree.find("st-acct-name").unwrap_or_else(|| panic!("{tree}")), tree.find("st-acct-switch").unwrap_or_else(|| panic!("{tree}")));
+        assert!(start < end, "the name is above the buttons: {tree}");
+        tree[start..end].to_string()
+    };
+    let tree = info_account_tree(cx, &staged, only(json!("ann@example.com"), "password"), None);
+    let shown = card(&tree);
+    assert!(shown.contains("ann@example.com") && shown.contains("st-acct-email") && shown.contains("Email"), "{shown}");
+    assert!(!tree.contains("Not signed in") && tree.contains("st-acct-signout"), "{tree}");
+    for email in [Value::Null, json!("")] {
+        let tree = info_account_tree(cx, &staged, only(email.clone(), "github.com"), None);
+        let shown = card(&tree);
+        assert!(shown.contains("Account") && shown.contains("GitHub"), "{email}: {shown}");
+        assert!(!tree.contains("st-acct-email") && !tree.contains("Not signed in"), "{email}: {tree}");
+    }
+}
+
 // The Remote page with the bridge answering `ls`, and `account` replaced.
 fn describe_remote_account(cx: &mut TestAppContext, staged: &Staged, account: Value, ls: Value) -> String {
     let calls = Rc::new(RefCell::new(Calls::default()));

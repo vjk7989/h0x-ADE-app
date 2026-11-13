@@ -1891,6 +1891,40 @@ mod tests {
     }
 
     #[test]
+    fn account_calls_are_refused_to_every_mod_but_the_settings_frame_and_workspace_chrome() {
+        std::thread::spawn(|| {
+            use gpui_shell::HostArguments;
+            const REFUSED: &str = "accounts are for settings and the logo menu";
+            let uid = || HostArguments::new([HostValue::Str("u1".into())]);
+            for name in [
+                "",
+                "test",
+                "settings",
+                "frame-feedback",
+                "frame-settings-x",
+                "Frame-Settings",
+                "workspace-chrome-x",
+                "Workspace-Chrome",
+                "workspace-chrome ",
+                "frame-workspace-chrome",
+                "my-mod/workspace-chrome",
+                r"my-mod\workspace-chrome",
+            ] {
+                let host = module(Instance { name: name.into(), props: Value::Null }, 1);
+                for function in ["account", "accountSwitch", "accountSignOut", "accountRemove"] {
+                    let err = host.call(function, &uid()).expect_err(name);
+                    assert_eq!(err.message(), REFUSED, "{name:?} {function}");
+                    assert!(host.call(function, &HostArguments::default()).is_err(), "{name:?} {function}");
+                }
+                let started = host.begin("accountSignIn", &HostArguments::default()).err().map(|e| e.message().to_string());
+                assert_eq!(started.as_deref(), Some(REFUSED), "{name:?}: no sign-in is started");
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
     fn every_link_on_the_info_page_is_allowed_and_none_points_to_source_repos() {
         let page = include_str!("../defaults/frame/settings/main.js");
         let start = page.find("  info(t) {").expect("the settings frame has an Info page");
