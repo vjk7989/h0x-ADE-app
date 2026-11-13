@@ -41,6 +41,12 @@ export function knownAgents(options?: { on?: string | null }): Promise<(Program 
  *  own toasts): "started", or "running" when an install is already going. */
 export function installOpenCode(): "started" | "running";
 
+/** The files panel only: opens a file of this machine (a full path) the way a terminal's Ctrl+click
+ *  does. "opened": its default app was started; "revealed": shown in its folder (programs, scripts
+ *  and extensionless files are never run; `reveal: true` forces this); "text": the editor reads it,
+ *  nothing was done. Anything else is why it could not (a relative or network path, a missing file). */
+export function openFile(path: string, options?: { reveal?: boolean }): string;
+
 /** Opens the system's folder picker (this machine). Resolves with the chosen folder, or null
  *  when the person cancels. `prompt`: the confirm button's text (default "Open"). */
 export function pickFolder(options?: { prompt?: string }): Promise<string | null>;

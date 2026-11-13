@@ -147,7 +147,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         shared.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "playSound", "setAgentOrder", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes", "openLink", "copyText", "accountSwitch", "accountSignOut", "accountRemove", "accountCancelSignIn", "installOpenCode"] {
+    for name in ["run", "playSound", "setAgentOrder", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes", "openLink", "copyText", "accountSwitch", "accountSignOut", "accountRemove", "accountCancelSignIn", "installOpenCode", "openFile"] {
         let calls = calls.clone();
         module = module.function(name, move |a| {
             if name == "run" {
@@ -4209,6 +4209,7 @@ struct FilesDisk {
     sends: Vec<Vec<String>>,
     commands: std::collections::VecDeque<String>,
     notes: Vec<String>,
+    opens: Vec<(String, Value)>,
 }
 
 const FILES_SCENARIO: &str = r#"
@@ -4216,6 +4217,8 @@ import Real from './mods/files/main.js';
 import { command, note } from 'fixture';
 import { EditorState } from 'gpui-base';
 export default class Scenario extends Real {
+  // Keeps the not-text card's buttons so the scenario can press them.
+  openedCard(t, button) { return super.openedCard(t, (id, label, click) => { (this.clicks ??= {})[id] = click; return button(id, label, click); }); }
   init(props, cx) {
     super.init(props, cx);
     // Records the lines the panel scrolls its editor to (0-based), then does it.
@@ -4232,6 +4235,7 @@ export default class Scenario extends Real {
         else if (verb === 'line') { this.line = Number(arg); this.reveal(); }
         else if (verb === 'openline') { const at2 = arg.indexOf(' '); this.show(arg.slice(at2 + 1), cx); this.line = Number(arg.slice(0, at2)); }
         else if (verb === 'openfile') this.openFile(arg, cx);
+        else if (verb === 'click') this.clicks[arg](null, cx);
         else if (verb === 'back') this.show(null, cx);
         else if (verb === 'keep') this.save(cx, true);
         else if (verb === 'reload') this.reload(cx);
@@ -4239,7 +4243,7 @@ export default class Scenario extends Real {
         else if (verb === 'state') {
           const d = this.doc;
           note(JSON.stringify({ file: this.file ?? null, value: this.code ? this.code.value() : null, editable: Boolean(d?.editable),
-            cursors: this.cursors ?? [], pending: this.line ?? null, dirty: Boolean(d?.dirty), conflict: Boolean(d?.conflict), error: d?.error ?? null, hint: d?.hint ?? null }));
+            opened: this.opened ?? null, cursors: this.cursors ?? [], pending: this.line ?? null, dirty: Boolean(d?.dirty), conflict: Boolean(d?.conflict), error: d?.error ?? null, hint: d?.hint ?? null }));
         }
         cx.notify();
       }
@@ -4270,6 +4274,15 @@ fn files_module(values: BTreeMap<String, Value>, disk: Rc<RefCell<FilesDisk>>) -
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     }
     module = module.async_function("exec", |_| Ok(std::future::ready(Ok(to_host(&json!({"code":0,"stdout":"","stderr":""}))))));
+    // The host decides like a terminal click: programs are shown in their folder, the rest opened.
+    let opens = disk.clone();
+    module = module.function("openFile", move |a| {
+        let path = a.string(0)?.to_owned();
+        let options = a.get(1).map(from_host).unwrap_or(Value::Null);
+        let answer = if options["reveal"] == json!(true) || path.ends_with(".exe") { "revealed" } else { "opened" };
+        opens.borrow_mut().opens.push((path, options));
+        Ok(HostValue::Str(answer.into()))
+    });
     let read = disk.clone();
     module = module.async_function("readTextFile", move |a| {
         let path = a.string(0)?.to_owned();
@@ -4419,6 +4432,72 @@ fn describe_files(
     let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
     tree
+}
+
+// A file that is not text goes to the system, never to the editor: a card says what was done.
+#[gpui::test]
+fn files_panel_hands_a_video_to_the_system_and_a_program_to_its_folder_and_previews_text(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[("/fixture/project/a.txt", "hello\n"), ("/fixture/project/video.mp4", "\0\0\0 ftyp"), ("/fixture/project/setup.exe", "MZ\0\0")]);
+    let opens = |disk: &Rc<RefCell<FilesDisk>>| disk.borrow().opens.clone();
+
+    let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, "this.show('video.mp4', cx);");
+    assert_eq!(opens(&disk), [("/fixture/project/video.mp4".to_owned(), Value::Null)], "{tree}");
+    assert!(tree.contains("video.mp4") && tree.contains("Opened in its default app"), "{tree}");
+    assert!(tree.contains("Open again") && tree.contains("Show in folder"), "{tree}");
+    assert!(disk.borrow().reads.is_empty(), "a video is never read as text: {:?}", disk.borrow().reads);
+
+    let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, "this.show('setup.exe', cx);");
+    assert!(tree.contains("Shown in its folder") && !tree.contains("Opened in its default app"), "{tree}");
+
+    let before = opens(&disk).len();
+    let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, "this.show('a.txt', cx);");
+    assert_eq!(opens(&disk).len(), before, "text is previewed, not opened");
+    assert!(!tree.contains("Open again") && !tree.contains("Opened in"), "{tree}");
+}
+
+#[gpui::test]
+fn files_panel_open_again_and_show_in_folder_call_the_host_and_a_remote_file_is_never_opened(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[("/fixture/project/video.mp4", "\0\0\0 ftyp")]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "open video.mp4");
+    files_wait(&mut visual, 200);
+    assert_eq!(files_state(&mut visual, &disk)["opened"], json!({"full": "/fixture/project/video.mp4", "how": "opened"}));
+    files_step(&mut visual, &disk, "click files-show-folder");
+    files_step(&mut visual, &disk, "click files-open-again");
+    let log = disk.borrow().opens.clone();
+    assert_eq!(
+        log,
+        [
+            ("/fixture/project/video.mp4".to_owned(), Value::Null),
+            ("/fixture/project/video.mp4".to_owned(), json!({"reveal": true})),
+            ("/fixture/project/video.mp4".to_owned(), Value::Null),
+        ]
+    );
+    files_wait(&mut visual, 50);
+    assert_eq!(files_state(&mut visual, &disk)["opened"]["how"], json!("opened"), "Open again says what it did");
+
+    // A remote panel: the read-only preview or the error as before, openFile never called.
+    let mut remote = files_values(idle_agent());
+    remote.get_mut("spaces").unwrap()[0]["machine"] = json!("remote");
+    let disk = files_disk(&[("/fixture/project/video.mp4", "\0\0\0 ftyp")]);
+    let tree = describe_files(cx, &staged, remote, &disk, "this.show('video.mp4', cx);");
+    assert!(disk.borrow().opens.is_empty(), "{:?}", disk.borrow().opens);
+    assert!(tree.contains("Binary file") && !tree.contains("Open again"), "{tree}");
+}
+
+// A local file with a text extension but binary bytes: the same card, with its two buttons.
+#[gpui::test]
+fn files_panel_offers_the_buttons_for_a_local_binary_file_it_cannot_preview(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[("/fixture/project/blob.txt", "a\0b")]);
+    let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, "this.show('blob.txt', cx);");
+    assert!(tree.contains("Binary file") && tree.contains("Open again") && tree.contains("Show in folder"), "{tree}");
+    assert!(disk.borrow().opens.is_empty(), "nothing is opened until a button is pressed");
 }
 
 #[gpui::test]
@@ -5187,7 +5266,7 @@ fn sessions_module(mut values: BTreeMap<String, Value>, host: Rc<RefCell<Session
         h.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "openOverlay", "closeOverlay", "notify", "setAgentOrder", "installOpenCode"] {
+    for name in ["run", "openOverlay", "closeOverlay", "notify", "setAgentOrder", "installOpenCode", "openFile"] {
         let h = host.clone();
         module = module.function(name, move |a| {
             let args: Vec<Value> = (0..2).filter_map(|i| a.get(i).map(from_host)).collect();
@@ -6709,7 +6788,7 @@ fn todo_module(values: BTreeMap<String, Value>, host: Rc<RefCell<TodoHost>>) -> 
         h.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "openOverlay", "closeOverlay", "notify", "playSound", "openLink", "copyText", "accountSwitch", "accountSignOut", "accountRemove", "accountCancelSignIn", "installOpenCode"] {
+    for name in ["run", "openOverlay", "closeOverlay", "notify", "playSound", "openLink", "copyText", "accountSwitch", "accountSignOut", "accountRemove", "accountCancelSignIn", "installOpenCode", "openFile"] {
         let h = host.clone();
         module = module.function(name, move |a| {
             let args: Vec<Value> = (0..2).filter_map(|i| a.get(i).map(from_host)).collect();

@@ -2,7 +2,7 @@
 // themselves (VS Code-style auto-save); remote and truncated files are read-only previews.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { spaces, panes, focused, agents, core, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, windowVisible, layout, nextCommand } from "h0x";
+import { spaces, panes, focused, agents, core, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, windowVisible, layout, nextCommand, openFile } from "h0x";
 
 // Whether the layout shows this panel (as the sessions panel asks): no hidden
 // node on the way, and the selected child of each stack. Not in the layout: shown.
@@ -26,6 +26,15 @@ function location() {
 }
 const key = () => JSON.stringify(location());
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
+// The extensions the editor reads (links.rs TEXT). A file with any other real extension goes to
+// openFile first, and the host has the last word: it answers "text" for one it would have us read.
+const TEXT_EXT = new Set(["txt", "md", "markdown", "json", "jsonc", "toml", "yaml", "yml", "rs", "js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "go", "java", "kt", "c", "h", "cpp", "hpp", "cs", "rb", "php", "sh", "bash", "zsh", "fish", "html", "htm", "css", "scss", "xml", "csv", "log", "ini", "cfg", "conf"]);
+const nonText = path => {
+  const name = path.split("/").pop(), dot = name.lastIndexOf("."), ext = dot > 0 ? name.slice(dot + 1) : "";
+  return /^[A-Za-z0-9]+$/.test(ext) && !TEXT_EXT.has(ext.toLowerCase());
+};
+// What the card says about a file the system was handed (anything else is an error string).
+const HOW = { opened: "Opened in its default app", revealed: "Shown in its folder" };
 const PER_FOLDER = 500, TOTAL = 5000;
 // Saves of one file this close together are one edit; a note lists at most LISTED files.
 const BURST = 30000, LISTED = 5;
@@ -207,15 +216,24 @@ export default class Files extends View {
       this.save(cx);
     }
     prev?.timer?.cancel();
-    this.code?.release(); this.code = null; this.doc = null; this.file = path; this.fileError = null;
+    this.code?.release(); this.code = null; this.doc = null; this.file = path; this.fileError = null; this.opened = null;
     if (!path || !cx) return;
     const context = this.context, root = this.root, on = local ? null : this.on, full = /^(\/|[A-Za-z]:\/)/.test(path) ? path : `${root}/${path}`;
     cx.spawn(async cx => {
       try {
+        // A video or a program is never read as text: the system opens it (or shows it in its folder).
+        if (!on && nonText(path)) {
+          const how = openFile(full);
+          if (this.file !== path || !this.current(context)) return;
+          if (how !== "text") { this.opened = { full, how }; cx.notify(); return; }
+        }
         const disk = await readTextFile(full, { on });
         if (this.file !== path || !this.current(context)) return;
         if (disk === null) { this.fileError = "This file is no longer available"; return; }
-        if (disk.includes("\0")) { this.fileError = "Binary file · no text preview"; return; }
+        if (disk.includes("\0")) {
+          if (on) this.fileError = "Binary file · no text preview"; else this.opened = { full, how: "binary" };
+          return;
+        }
         const t = theme(), ext = path.includes(".") ? path.split(".").pop() : "txt";
         const large = disk.length > 400000, draft = on || large ? null : this.drafts.get(full);
         this.drafts.delete(full);
@@ -384,7 +402,22 @@ ${doc.path}`, now = Date.now(), edit = this.edits.get(id);
             this.save(cx); cx.stop_propagation(); cx.notify();
           })
           .child(Editor.new(this.code).flex_1().min_h(0))
+        : this.opened ? this.openedCard(t, button)
         : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
+  }
+
+  // A file that is not text: what was done with it, and the two ways to do it again.
+  openedCard(t, button) {
+    const o = this.opened, name = o.full.split("/").pop();
+    const say = o.how === "binary" ? "Binary file · no text preview" : HOW[o.how] ?? `Cannot open this file: ${reason(o.how)}`;
+    const again = (id, label, options) => button(id, label, (_e, cx) => {
+      const how = openFile(o.full, options);
+      if (this.opened === o) { this.opened = { full: o.full, how }; cx.notify(); }
+    });
+    return v_flex().id("files-opened").flex_1().min_h(0).items_center().justify_center().gap(10).p(16)
+      .child(div().max_w_full().truncate().font_semibold().child(name))
+      .child(div().text_size(12).text_color(t.dim).child(say))
+      .child(h_flex().gap(8).child(again("files-open-again", "Open again")).child(again("files-show-folder", "Show in folder", { reveal: true })));
   }
 
   // The panel or the app closes: write what's pending (bounded by the host's close budget).
