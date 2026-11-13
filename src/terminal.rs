@@ -45,7 +45,7 @@ enum LinkTarget {
 pub enum TerminalEvent {
     Peek(String),
     /// A text file clicked: HyperOx's editor shows it.
-    OpenFile(std::path::PathBuf),
+    OpenFile(std::path::PathBuf, Option<u32>),
     TitleChanged,
     /// The program ended.
     Ended,
@@ -75,6 +75,10 @@ struct Grid {
     images: HashMap<(u32, u64, [u32; 4]), Arc<RenderImage>>,
     /// Where the pointer is over the pane.
     hover: Option<Point<Pixels>>,
+    /// When the view last scrolled by wheel, page click or command: the scrollbar shows plainly for a while after.
+    scrolled_at: Option<Instant>,
+    /// The copy chip drawn on the hovered command line last paint, and its row.
+    chip: Option<(Bounds<Pixels>, u16)>,
     /// The link under the pointer to underline: (row, first column, last column).
     link_spans: vt::Spans,
     /// Text an input method is still composing ("nihao" before "\u{4f60}\u{597d}"),
@@ -111,6 +115,8 @@ pub struct TerminalView {
     pub quoting: Quoting,
     /// The link under the pointer while the link modifier is held.
     link: Option<LinkTarget>,
+    /// The line the link `link_at` last found names in its file (`file.rs:12`).
+    link_line: Cell<Option<u32>>,
     /// The "Ctrl+click to open" hint, while the pointer rests on a link without the modifier.
     link_hint: Option<String>,
     /// The cell the hint was last armed for: it resolves again only when the pointer enters another.
@@ -127,6 +133,13 @@ pub struct TerminalView {
     typed_at: Cell<Option<Instant>>,
     /// Scrolled this gesture, in lines, toward the next whole one.
     scrolled: Point<f32>,
+    /// Wheel lines still to scroll, one line at a time (see `ScrollAnim`).
+    scroll_anim: RefCell<ScrollAnim>,
+    scroll_task: Option<Task<()>>,
+    /// When "Copied" last showed (`COPIED_SHOWN`), and the timer that hides it.
+    copied_at: Option<Instant>,
+    copied_task: Option<Task<()>>,
+    scrollbar_task: Option<Task<()>>,
     /// Search UI and query belong to this terminal view, not the window. Each
     /// terminal in a tab therefore keeps its own query and match position.
     search_open: bool,
@@ -255,6 +268,7 @@ impl TerminalView {
             cwd: None,
             quoting: Quoting::default(),
             link: None,
+            link_line: Cell::new(None),
             link_hint: None,
             hint_cell: None,
             hint_task: None,
@@ -273,6 +287,8 @@ impl TerminalView {
                 buttons_down: Vec::new(),
                 images: HashMap::new(),
                 hover: None,
+                scrolled_at: None,
+                chip: None,
                 link_spans: Vec::new(),
                 marked: None,
                 cursor_at: None,
@@ -286,6 +302,11 @@ impl TerminalView {
             shown_in: Cell::new(0),
             typed_at: Cell::new(None),
             scrolled: point(0.0, 0.0),
+            scroll_anim: RefCell::new(ScrollAnim::default()),
+            scroll_task: None,
+            copied_at: None,
+            copied_task: None,
+            scrollbar_task: None,
             search_open: false,
             search_keys: false,
             search_query: String::new(),
@@ -581,6 +602,7 @@ impl TerminalView {
 
     fn send(&self, bytes: &[u8]) {
         self.typed_at.set(Some(Instant::now()));
+        self.scroll_anim.borrow_mut().cancel();
         let mut g = self.grid.borrow_mut();
         if let Some(ch) = g.channel
             && !bytes.is_empty()
@@ -698,10 +720,38 @@ impl TerminalView {
         let Some(text) = self.grid.borrow().vt.selection_text() else {
             return false;
         };
+        self.put_on_clipboard(text, cx);
+        true
+    }
+
+    /// `terminal.copy_screen`: the selection if there is one, else the visible screen.
+    /// Returns whether anything was copied.
+    pub fn copy_screen(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.copy(cx) {
+            return true;
+        }
+        let text = {
+            let g = self.grid.borrow();
+            screen_text(&(0..g.vt.rows).filter_map(|row| g.vt.row_text(row)).collect::<Vec<_>>())
+        };
+        if text.is_empty() {
+            return false;
+        }
+        self.put_on_clipboard(text, cx);
+        true
+    }
+
+    /// Writes the clipboard (on Linux the primary selection too) and shows "Copied" for `COPIED_SHOWN`.
+    fn put_on_clipboard(&mut self, text: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
         #[cfg(target_os = "linux")]
         cx.write_to_primary(ClipboardItem::new_string(text));
-        true
+        self.copied_at = Some(Instant::now());
+        self.copied_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_SHOWN + Duration::from_millis(50)).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        }));
+        cx.notify();
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
@@ -850,6 +900,38 @@ impl TerminalView {
             return;
         }
         let up = steps.y > 0;
+        if matches!(ev.delta, ScrollDelta::Lines(_)) && n > 0 && !g.vt.mouse_tracking() && !g.vt.alt_screen() {
+            drop(g);
+            let idle = !self.scroll_anim.borrow().active();
+            self.scroll_anim.borrow_mut().add(-steps.y, Instant::now());
+            self.touch_scrollbar(cx);
+            if idle {
+                self.scroll_task = Some(cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor().timer(Duration::from_millis(16)).await;
+                        let keep = this.update(cx, |this, cx| {
+                            let mut g = this.grid.borrow_mut();
+                            if g.vt.mouse_tracking() || g.vt.alt_screen() {
+                                this.scroll_anim.borrow_mut().cancel();
+                                return false;
+                            }
+                            let step = this.scroll_anim.borrow_mut().next(Instant::now(), g.vt.rows as i32);
+                            if step != 0 {
+                                g.vt.scroll_viewport(step as isize);
+                                cx.notify();
+                            }
+                            this.scroll_anim.borrow().active()
+                        });
+                        if !keep.unwrap_or(false) {
+                            break;
+                        }
+                    }
+                }));
+            }
+            cx.notify();
+            return;
+        }
+        self.scroll_anim.borrow_mut().cancel();
         if g.vt.mouse_tracking() {
             let ((x, y), size) = mouse_at(&g, ev.position);
             let out = scroll_mouse_bytes(&mut g.vt, steps, x, y, size);
@@ -869,8 +951,19 @@ impl TerminalView {
             }
         } else {
             g.vt.scroll_viewport(if up { -(n as isize) } else { n as isize });
+            drop(g);
+            self.touch_scrollbar(cx);
         }
         cx.notify();
+    }
+
+    /// Marks a scroll: the scrollbar shows plainly for `SCROLLBAR_SHOWN`, then repaints in its resting look.
+    fn touch_scrollbar(&mut self, cx: &mut Context<Self>) {
+        self.grid.borrow_mut().scrolled_at = Some(Instant::now());
+        self.scrollbar_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SCROLLBAR_SHOWN + Duration::from_millis(50)).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        }));
     }
 
     pub fn scroll_history(&mut self, target: ScrollTarget, cx: &mut Context<Self>) {
@@ -883,6 +976,9 @@ impl TerminalView {
             ScrollTarget::Top => g.vt.scroll_to_top(),
             ScrollTarget::Bottom => g.vt.scroll_to_bottom(),
         }
+        drop(g);
+        self.scroll_anim.borrow_mut().cancel();
+        self.touch_scrollbar(cx);
         cx.notify();
     }
 
@@ -927,16 +1023,23 @@ impl TerminalView {
         let (x, y) = local(&g, pos);
         let (col, row) = (x / f32::from(g.cell.width), y / f32::from(g.cell.height));
         let mut target = None;
+        let mut line = None;
         // A remote pane's files are not on this machine: no link, and never a stat here.
         let remote = self.address.contains('/');
         let hit = g.vt.link_at(col as u16, row as u16, |text, at, joined| {
+            if !remote && let Some((range, link, l)) = links::drive_file(text, at, self.cwd.as_deref()) {
+                target = Some(LinkTarget::External(link));
+                line = l;
+                return Some(range);
+            }
             // In lines joined back together only a file that exists proves the join right.
             if let Some(range) = links::find(text, at)
-                && let Some(link) = links::resolve(&text[range.clone()], self.cwd.as_deref())
+                && let Some((link, l)) = links::resolve_with_line(&text[range.clone()], self.cwd.as_deref())
                 && !(remote && matches!(link, links::Target::File(_)))
                 && (!joined || matches!(link, links::Target::File(_)))
             {
                 target = Some(LinkTarget::External(link));
+                line = l;
                 return Some(range);
             }
             if joined {
@@ -954,10 +1057,15 @@ impl TerminalView {
             Some(range)
         })?;
         // OSC 8 links bypass text detection.
-        let target = target.or_else(|| links::resolve(&hit.target, self.cwd.as_deref()).map(LinkTarget::External))?;
+        let target = target.or_else(|| {
+            let (link, l) = links::resolve_with_line(&hit.target, self.cwd.as_deref())?;
+            line = l;
+            Some(LinkTarget::External(link))
+        })?;
         if remote && matches!(target, LinkTarget::External(links::Target::File(_))) {
             return None;
         }
+        self.link_line.set(line);
         Some((target, hit.spans))
     }
 
@@ -1124,6 +1232,70 @@ fn scrollbar_lane(bounds: Bounds<Pixels>, origin: Point<Pixels>, text_width: Pix
     Bounds::new(point(left, origin.y), size(edge - left, height))
 }
 
+/// The scrollbar is 8 px wide while the pointer is over it, else 4.
+fn scrollbar_width(hovered: bool) -> f32 {
+    if hovered { 8.0 } else { 4.0 }
+}
+
+/// How long the scrollbar keeps its strong look after a scroll.
+const SCROLLBAR_SHOWN: Duration = Duration::from_secs(1);
+
+/// Whether the scrollbar draws strong: under the pointer, or `since_scroll` after a scroll is within `SCROLLBAR_SHOWN`.
+fn scrollbar_strong(hovered: bool, since_scroll: Option<Duration>) -> bool {
+    hovered || since_scroll.is_some_and(|d| d < SCROLLBAR_SHOWN)
+}
+
+/// A click on the rail at `y` pages toward it: -1 up (above the thumb at `thumb_top`), 1 down.
+fn scrollbar_page(thumb_top: f32, y: f32) -> isize {
+    if y < thumb_top { -1 } else { 1 }
+}
+
+/// Wheel lines still to scroll, one line per step over `SCROLL_ANIM`, easing out.
+/// New wheel lines join what is left. `now` is passed in so tests need no clock.
+#[derive(Default)]
+struct ScrollAnim {
+    /// Lines this burst (signed), lines already given, and when it began.
+    total: i32,
+    done: i32,
+    start: Option<Instant>,
+}
+
+const SCROLL_ANIM: Duration = Duration::from_millis(120);
+
+impl ScrollAnim {
+    fn active(&self) -> bool {
+        self.start.is_some()
+    }
+
+    fn cancel(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Adds `lines` to what is left; the curve starts again over the sum.
+    fn add(&mut self, lines: i32, now: Instant) {
+        if lines == 0 {
+            return;
+        }
+        self.total = self.total - self.done + lines;
+        self.done = 0;
+        self.start = if self.total == 0 { None } else { Some(now) };
+    }
+
+    /// The lines to scroll now, at most `cap` (a screen) either way.
+    fn next(&mut self, now: Instant, cap: i32) -> i32 {
+        let Some(start) = self.start else { return 0 };
+        let t = (now.saturating_duration_since(start).as_secs_f32() / SCROLL_ANIM.as_secs_f32()).clamp(0.0, 1.0);
+        let due = if t >= 1.0 { self.total } else { (self.total as f32 * (1.0 - (1.0 - t) * (1.0 - t))).round() as i32 };
+        let cap = cap.max(1);
+        let step = (due - self.done).clamp(-cap, cap);
+        self.done += step;
+        if self.done == self.total {
+            self.cancel();
+        }
+        step
+    }
+}
+
 fn scrollbar_grab_at(top: f32, len: f32, y: f32) -> f32 {
     if y >= top && y < top + len { y - top } else { len / 2.0 }
 }
@@ -1284,6 +1456,91 @@ fn paste_image_bytes(format: ImageFormat, bytes: &[u8]) -> Option<(ImageFormat, 
 }
 
 const HINT_DELAY: Duration = Duration::from_millis(400);
+
+/// How long the "Copied" chip shows.
+const COPIED_SHOWN: Duration = Duration::from_millis(1200);
+
+fn copied_chip_live(since: Duration) -> bool {
+    since < COPIED_SHOWN
+}
+
+/// The text of the visible `rows`: each without trailing blanks, no empty lines at the end, `\n` between.
+fn screen_text(rows: &[String]) -> String {
+    let mut lines: Vec<&str> = rows.iter().map(|r| r.trim_end()).collect();
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// Prompts a bare `> ` counts for only before one of these: elsewhere it is a markdown quote.
+const PROMPT_COMMANDS: &[&str] = &[
+    "git", "npm", "npx", "pnpm", "yarn", "bun", "node", "cargo", "rustup", "rustc", "python", "python3", "pip", "cd", "ls", "dir", "cat", "echo", "make", "docker", "kubectl", "curl", "ssh", "sudo", "mkdir", "rm", "cp", "mv",
+    "go", "dotnet", "winget", "choco", "code", "claude", "gh", "tsc", "deno", "brew", "apt", "cmake",
+];
+
+/// The command on a terminal line, without its prompt and trailing blanks: after a well-known
+/// prompt (`PS C:\x> `, `C:\x>`, `$ `, `% `, `❯ `, `user@host:~$ `, `> ` before a common command)
+/// or inside an agent's `Bash(...)` header. None for anything else, and for a prompt alone.
+fn command_on_line(text: &str) -> Option<String> {
+    let line = text.trim_end();
+    let t = line.trim_start();
+    let indent = line.len() - t.len();
+    let looks_like_command = |c: &str| c.chars().next().is_some_and(|ch| ch.is_alphabetic() || matches!(ch, '.' | '/' | '~' | '_' | '\\'));
+    let found = (|| {
+        // An agent's tool header: `Bash(git status)`, maybe after a bullet.
+        let header = t.trim_start_matches(['●', '⏺', '•', '*', '-']).trim_start();
+        if let Some(inner) = header.strip_prefix("Bash(").and_then(|r| r.strip_suffix(')')) {
+            return Some(inner);
+        }
+        // PowerShell: `PS C:\x> cmd`.
+        if let Some(rest) = t.strip_prefix("PS") {
+            if let Some(cmd) = rest.strip_prefix("> ") {
+                return Some(cmd);
+            }
+            if let Some(path) = rest.strip_prefix(' ')
+                && let Some(i) = path.find("> ")
+                && !path[..i].contains(char::is_whitespace)
+                && path[..i].contains([':', '\\', '/', '~'])
+            {
+                return Some(&path[i + 2..]);
+            }
+        }
+        // cmd.exe: `C:\x>cmd`.
+        let b = t.as_bytes();
+        if b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\'
+            && let Some(i) = t.find('>')
+            && !t[..i].ends_with(' ')
+        {
+            return Some(&t[i + 1..]);
+        }
+        if let Some(cmd) = t.strip_prefix("$ ") {
+            return Some(cmd).filter(|c| looks_like_command(c.trim_start()));
+        }
+        if indent == 0 {
+            if let Some(cmd) = t.strip_prefix("% ").or_else(|| t.strip_prefix("❯ ")) {
+                return Some(cmd).filter(|c| looks_like_command(c.trim_start()));
+            }
+            if let Some(cmd) = t.strip_prefix("> ") {
+                let word = cmd.trim_start().split_whitespace().next().unwrap_or("");
+                return Some(cmd).filter(|_| PROMPT_COMMANDS.contains(&word));
+            }
+            // `user@host:~/x$ cmd` and `[user@host x]$ cmd`.
+            if let Some(i) = t.find("$ ") {
+                let prefix = &t[..i];
+                let plain = !prefix.contains(char::is_whitespace)
+                    && prefix.contains('@')
+                    && prefix.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '@' | ':' | '~' | '/' | '\\' | '-'));
+                let bracketed = prefix.starts_with('[') && prefix.ends_with(']') && prefix.contains('@');
+                if plain || bracketed {
+                    return Some(&t[i + 2..]).filter(|c| looks_like_command(c.trim_start()));
+                }
+            }
+        }
+        None
+    })()?;
+    Some(found.trim().to_owned()).filter(|c| !c.is_empty())
+}
 
 fn hint_text(target: &LinkTarget, mac: bool) -> String {
     let key = if mac { "⌘" } else { "Ctrl" };
@@ -1945,15 +2202,37 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             && let Some((top, len)) = scrollbar_thumb(sb.total, sb.offset, sb.len, track, f32::from(cell.height))
         {
             let lane = scrollbar_lane(bounds, origin, cell.width * f32::from(g.vt.cols), px(track));
-            let w = px(4.0);
+            let hovered = g.hover.is_some_and(|p| lane.contains(&p));
+            let strong = scrollbar_strong(hovered, g.scrolled_at.map(|t| t.elapsed()));
+            let w = px(scrollbar_width(hovered));
             let x = lane.origin.x + lane.size.width - w - px(2.0);
             let color = crate::settings::color("muted");
             let rail = Bounds::new(point(x + w / 2.0 - px(0.5), origin.y), size(px(1.0), px(track)));
-            window.paint_quad(fill(snap_box(rail), color.opacity(0.35)));
+            window.paint_quad(fill(snap_box(rail), color.opacity(if strong { 0.6 } else { 0.5 })));
             let thumb = Bounds::new(point(x, origin.y + px(top)), size(w, px(len)));
-            window.paint_quad(fill(snap_box(thumb), color).corner_radii(w / 2.0));
+            window.paint_quad(fill(snap_box(thumb), color.opacity(if strong { 1.0 } else { 0.75 })).corner_radii(w / 2.0));
             g.thumb = Some(Bounds::new(point(lane.origin.x, thumb.origin.y), size(lane.size.width, thumb.size.height)));
             g.track = Some(lane);
+        }
+        // A copy chip at the right end of a hovered command line (not on the alternate screen: its rows aren't stable text).
+        g.chip = None;
+        if !g.vt.alt_screen()
+            && let Some(h) = g.hover.filter(|h| bounds.contains(h) && h.y >= origin.y)
+        {
+            let row = (f32::from(h.y - origin.y) / f32::from(cell.height)) as u16;
+            if g.vt.row_text(row).is_some_and(|t| command_on_line(&t).is_some()) {
+                let font_size = px(crate::settings::font_size());
+                let color = crate::settings::color("muted");
+                let run = TextRun { len: 4, font: cell_font(false, false), color, background_color: None, underline: None, strikethrough: None };
+                let line = window.text_system().shape_line("Copy".into(), font_size, &[run], None);
+                let w = line.width + px(12.0);
+                let right = origin.x + cell.width * f32::from(g.vt.cols) - px(12.0);
+                let chip = Bounds::new(point((right - w).max(origin.x), origin.y + cell.height * row as f32), size(w, cell.height));
+                let hot = chip.contains(&h);
+                window.paint_quad(fill(snap_box(chip), crate::settings::color(if hot { "hover" } else { "popover" })).corner_radii(px(4.0)));
+                let _ = line.paint(chip.origin + point(px(6.0), px(0.0)), cell.height, TextAlign::Left, None, window, cx);
+                g.chip = Some((chip, row));
+            }
         }
     }
 }
@@ -2108,9 +2387,7 @@ impl Render for TerminalView {
                 if !hovered {
                     this.grid.borrow_mut().hover = None;
                     this.hide_hint(cx);
-                    if this.link.is_some() {
-                        cx.notify();
-                    }
+                    cx.notify();
                 }
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, cx| {
@@ -2121,7 +2398,7 @@ impl Render for TerminalView {
                     match target {
                         // A file on another machine is not ours to open: it is shown in its folder as before.
                         LinkTarget::External(links::Target::File(path)) if !this.address.contains('/') => match links::kind(&path) {
-                            links::Kind::Text => cx.emit(TerminalEvent::OpenFile(path)),
+                            links::Kind::Text => cx.emit(TerminalEvent::OpenFile(path, this.link_line.get())),
                             links::Kind::System => links::open_default(&path),
                             links::Kind::Reveal => links::open(&links::Target::File(path)),
                         },
@@ -2131,18 +2408,32 @@ impl Render for TerminalView {
                     return;
                 }
                 let mut g = this.grid.borrow_mut();
+                if let Some((chip, row)) = g.chip
+                    && chip.contains(&ev.position)
+                {
+                    let command = g.vt.row_text(row).and_then(|t| command_on_line(&t));
+                    drop(g);
+                    if let Some(command) = command {
+                        this.put_on_clipboard(command, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if let (Some(track), Some(thumb)) = (g.track, g.thumb)
                     && track.contains(&ev.position)
                 {
                     let grab = scrollbar_grab_at(f32::from(thumb.origin.y), f32::from(thumb.size.height), f32::from(ev.position.y));
-                    this.scrollbar_grab = Some(grab);
-                    if !thumb.contains(&ev.position) {
-                        let sb = g.vt.scrollbar();
-                        let top = f32::from(ev.position.y - track.origin.y) - grab;
-                        let min = f32::from(g.cell.height);
-                        g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, f32::from(track.size.height), min, top));
+                    if thumb.contains(&ev.position) {
+                        this.scrollbar_grab = Some(grab);
+                    } else {
+                        let page = scrollbar_page(f32::from(thumb.origin.y), f32::from(ev.position.y)) * g.vt.rows as isize;
+                        g.vt.scroll_viewport(page);
                     }
                     drop(g);
+                    if this.scrollbar_grab.is_none() {
+                        this.scroll_anim.borrow_mut().cancel();
+                        this.touch_scrollbar(cx);
+                    }
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -2172,7 +2463,18 @@ impl Render for TerminalView {
                 }
             }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
-                this.grid.borrow_mut().hover = Some(ev.position);
+                let changed = {
+                    let mut g = this.grid.borrow_mut();
+                    let was = g.track.zip(g.hover).is_some_and(|(t, h)| t.contains(&h));
+                    // The command chip follows the hovered row.
+                    let row_of = |g: &Grid, p: Point<Pixels>| (f32::from(p.y - g.origin.y) / f32::from(g.cell.height)).floor() as i32;
+                    let moved = g.hover.is_none_or(|h| row_of(&g, h) != row_of(&g, ev.position));
+                    g.hover = Some(ev.position);
+                    moved || was != g.track.is_some_and(|t| t.contains(&ev.position))
+                };
+                if changed {
+                    cx.notify();
+                }
                 if link_mods(&ev.modifiers) || this.link.is_some() {
                     cx.notify();
                 }
@@ -2346,6 +2648,23 @@ impl Render for TerminalView {
                         .text_color(crate::settings::color("muted"))
                         .text_xs()
                         .child(hint),
+                )
+            })
+            .when(self.copied_at.is_some_and(|t| copied_chip_live(t.elapsed())), |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_2()
+                        .right_4()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(crate::settings::color("border"))
+                        .bg(crate::settings::color("popover"))
+                        .text_color(crate::settings::color("foreground"))
+                        .text_xs()
+                        .child("Copied ✓"),
                 )
             })
             .when_some(ended, |d, why| {
@@ -3395,7 +3714,7 @@ mod tests {
         let seen = opened.clone();
         cx.update(|_, app| {
             app.subscribe(&terminal, move |_, event: &super::TerminalEvent, _| {
-                if let super::TerminalEvent::OpenFile(path) = event {
+                if let super::TerminalEvent::OpenFile(path, _) = event {
                     seen.borrow_mut().push(path.clone());
                 }
             })
@@ -3729,6 +4048,157 @@ mod tests {
         assert_eq!(thumb(80, 40, 40, 100.0, 4.0), Some((50.0, 50.0)));
         // A huge scrollback still leaves a grabbable thumb.
         assert_eq!(thumb(10_000, 0, 40, 100.0, 4.0), Some((0.0, 4.0)));
+    }
+
+    #[test]
+    fn scroll_anim_steps_sum_to_the_wheel_lines() {
+        use std::time::{Duration, Instant};
+        for n in [3, -3, 1, -1, 40, -40] {
+            let t0 = Instant::now();
+            let mut a = super::ScrollAnim::default();
+            a.add(n, t0);
+            assert!(a.active());
+            let mut sum = 0;
+            for ms in (0..=200).step_by(16) {
+                let s = a.next(t0 + Duration::from_millis(ms), 1000);
+                assert!(s == 0 || s.signum() == n.signum());
+                sum += s;
+            }
+            assert_eq!(sum, n);
+            assert!(!a.active(), "finished");
+        }
+    }
+
+    #[test]
+    fn scroll_anim_takes_added_lines_and_caps_a_frame() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut a = super::ScrollAnim::default();
+        a.add(3, t0);
+        let first = a.next(t0 + Duration::from_millis(16), 24);
+        a.add(3, t0 + Duration::from_millis(16));
+        let mut sum = first;
+        for ms in 2..30 {
+            sum += a.next(t0 + Duration::from_millis(16 * ms), 24);
+        }
+        assert_eq!(sum, 6, "new lines extend what is left");
+        a.add(100, t0);
+        assert_eq!(a.next(t0 + Duration::from_secs(1), 24), 24, "a frame moves at most a screen");
+        assert!(a.active());
+        a.cancel();
+        a.add(-100, t0);
+        assert_eq!(a.next(t0 + Duration::from_secs(1), 24), -24);
+    }
+
+    #[test]
+    fn screen_text_trims_rows_and_trailing_empty_lines() {
+        let rows = |r: &[&str]| r.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::screen_text(&rows(&["$ ls   ", "a  b", "", "c", "   ", ""])), "$ ls\na  b\n\nc");
+        assert_eq!(super::screen_text(&rows(&["  indented", ""])), "  indented");
+        assert_eq!(super::screen_text(&rows(&["\u{4f60}\u{597d} x  ", "\u{4e16}\u{754c}"])), "\u{4f60}\u{597d} x\n\u{4e16}\u{754c}");
+        assert_eq!(super::screen_text(&rows(&["", "  ", ""])), "");
+        assert_eq!(super::screen_text(&[]), "");
+    }
+
+    #[test]
+    fn copied_chip_lasts_a_little_over_a_second() {
+        use std::time::Duration;
+        assert!(super::copied_chip_live(Duration::ZERO));
+        assert!(super::copied_chip_live(Duration::from_millis(1199)));
+        assert!(!super::copied_chip_live(Duration::from_millis(1200)));
+    }
+
+    #[test]
+    fn command_on_line_strips_well_known_prompts() {
+        let c = |t: &str| super::command_on_line(t);
+        for (line, want) in [
+            ("PS C:\\Users\\me> git status   ", "git status"),
+            ("PS C:\\Users\\me\\my-proj> npm test", "npm test"),
+            ("PS> dir", "dir"),
+            ("C:\\Users\\me>cargo build", "cargo build"),
+            ("$ cargo test --all", "cargo test --all"),
+            ("    $ npm install", "npm install"),
+            ("% ls -la", "ls -la"),
+            ("\u{276f} git log --oneline", "git log --oneline"),
+            ("user@host:~/x$ make", "make"),
+            ("me@box:/srv/app$ ./run.sh --fast", "./run.sh --fast"),
+            ("[me@box src]$ ls", "ls"),
+            ("> git push", "git push"),
+            ("> npm run build", "npm run build"),
+            ("\u{25cf} Bash(git diff --stat)", "git diff --stat"),
+            ("Bash(cargo fmt)", "cargo fmt"),
+            ("  \u{23fa} Bash(ls -la)  ", "ls -la"),
+        ] {
+            assert_eq!(c(line).as_deref(), Some(want), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn command_on_line_ignores_prose_quotes_numbers_paths_and_bare_prompts() {
+        for line in [
+            "",
+            "   ",
+            "$",
+            "$ ",
+            "\u{276f}",
+            "\u{276f} ",
+            "PS C:\\Users\\me> ",
+            "C:\\Users\\me>",
+            "Bash()",
+            "> this is a quoted sentence",
+            "> Note: install it first",
+            ">",
+            "5 > 3",
+            "if x > 3 then",
+            "The total is $ 5.00 today",
+            "$ 100 total",
+            "50% done",
+            "/usr/local/bin/git",
+            "C:\\Users\\me\\file.txt",
+            "src/terminal.rs:120",
+            "a > b",
+            "hello world",
+            "Reading the Bash( docs",
+            "see user@host.com for $ help",
+            "    > git push",
+        ] {
+            assert_eq!(super::command_on_line(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn scroll_anim_edges() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut a = super::ScrollAnim::default();
+        assert_eq!(a.next(t0, 24), 0);
+        a.add(0, t0);
+        assert!(!a.active());
+        a.add(5, t0);
+        a.add(-5, t0);
+        assert!(!a.active(), "opposite input cancels out");
+        a.add(5, t0);
+        assert_eq!(a.next(t0 + Duration::from_secs(1), 0), 1, "a cap under one still moves a line");
+        a.cancel();
+        assert!(!a.active());
+        assert_eq!(a.next(t0 + Duration::from_secs(1), 24), 0);
+    }
+
+    #[test]
+    fn scrollbar_widens_under_the_pointer_and_stays_strong_for_a_second() {
+        use std::time::Duration;
+        assert_eq!(super::scrollbar_width(false), 4.0);
+        assert_eq!(super::scrollbar_width(true), 8.0);
+        assert!(super::scrollbar_strong(true, None));
+        assert!(!super::scrollbar_strong(false, None));
+        assert!(super::scrollbar_strong(false, Some(Duration::from_millis(900))));
+        assert!(!super::scrollbar_strong(false, Some(Duration::from_millis(1000))));
+    }
+
+    #[test]
+    fn scrollbar_rail_click_pages_toward_the_click() {
+        assert_eq!(super::scrollbar_page(100.0, 20.0), -1);
+        assert_eq!(super::scrollbar_page(100.0, 300.0), 1);
     }
 
     #[test]

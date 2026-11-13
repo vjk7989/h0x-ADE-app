@@ -1044,6 +1044,23 @@ impl Vt {
         (unsafe { ghostty_terminal_grid_ref(self.term, p, &mut r) } == GHOSTTY_SUCCESS).then_some(r)
     }
 
+    /// The screen row the viewport starts at (rows count from the top of the scrollback).
+    fn viewport_top(&self) -> Option<u32> {
+        unsafe {
+            let r = self.grid_ref(GHOSTTY_POINT_TAG_VIEWPORT, 0, 0)?;
+            let mut p = GhosttyPointCoordinate::default();
+            (ghostty_terminal_point_from_grid_ref(self.term, &r, GHOSTTY_POINT_TAG_SCREEN, &mut p) == GHOSTTY_SUCCESS).then_some(p.y)
+        }
+    }
+
+    /// The text of a viewport row, a blank cell as a space and a wide character as one.
+    pub fn row_text(&self, row: u16) -> Option<String> {
+        if row >= self.rows {
+            return None;
+        }
+        self.link_row(self.viewport_top()? + row as u32).map(|r| r.text)
+    }
+
     /// The link at a viewport cell: a link the program marked (OSC 8), or a
     /// URL or path in the text. Follows lines the terminal wrapped, also into
     /// rows scrolled out of view. Then tries the lines around joined, their
@@ -1055,14 +1072,7 @@ impl Vt {
             return None;
         }
         // Screen rows count from the top of the scrollback; the viewport starts at `top`.
-        let top = unsafe {
-            let r = self.grid_ref(GHOSTTY_POINT_TAG_VIEWPORT, 0, 0)?;
-            let mut p = GhosttyPointCoordinate::default();
-            if ghostty_terminal_point_from_grid_ref(self.term, &r, GHOSTTY_POINT_TAG_SCREEN, &mut p) != GHOSTTY_SUCCESS {
-                return None;
-            }
-            p.y
-        };
+        let top = self.viewport_top()?;
         let hovered = top + row as u32;
         // A URL longer than this many rows isn't one worth finding.
         const REACH: u32 = 32;
