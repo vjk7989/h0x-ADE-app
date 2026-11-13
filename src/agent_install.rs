@@ -114,9 +114,10 @@ fn path_has(list: &str, dir: &str, windows: bool) -> bool {
     list.split(if windows { ';' } else { ':' }).any(|p| !p.trim().is_empty() && norm(p) == want)
 }
 
-/// The shell rc file's new text, or None when it already puts OpenCode's folder on PATH.
+/// The shell rc file's new text, or None when it already puts OpenCode's folder on PATH
+/// (a non-comment line that names PATH and the folder; an alias to the binary does not).
 fn rc_update(existing: &str) -> Option<String> {
-    if existing.lines().any(|l| !l.trim_start().starts_with('#') && l.contains(".opencode/bin")) {
+    if existing.lines().any(|l| !l.trim_start().starts_with('#') && l.contains(".opencode/bin") && (l.contains("PATH") || l.contains("fish_add_path"))) {
         return None;
     }
     let mut text = existing.to_owned();
@@ -128,11 +129,23 @@ fn rc_update(existing: &str) -> Option<String> {
     Some(text)
 }
 
-/// One line for a toast: the first that names an error, else the last that says anything.
+/// One line for a toast: the first that names an error (`error`, or npm 9's `ERR!`), else the last that says anything.
 fn failure_line(output: &str) -> String {
     let lines = || output.lines().map(str::trim).filter(|l| !l.is_empty());
-    let line = lines().find(|l| l.to_lowercase().contains("error")).or_else(|| lines().last()).unwrap_or("no details in the log");
+    let line = lines().find(|l| { let l = l.to_lowercase(); l.contains("error") || l.contains("err!") }).or_else(|| lines().last()).unwrap_or("no details in the log");
     line.chars().take(120).collect()
+}
+
+/// The failure toast's button: the log, opened by the system's own viewer in a terminal.
+fn failure_actions(log: &Path, os: Os) -> Value {
+    let log = log.to_string_lossy().into_owned();
+    let log = log.as_str();
+    let argv = match os {
+        Os::Windows => vec!["notepad.exe", log],
+        Os::Mac => vec!["open", "-t", log],
+        Os::Linux => vec!["xdg-open", log],
+    };
+    json!([{ "label": "Show log", "name": "terminal.open", "args": { "argv": argv, "name": "OpenCode install log" } }])
 }
 
 static TOASTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
@@ -202,7 +215,7 @@ fn install(log: &Path) {
             "Installed. Open a new terminal, type `opencode`, then `/connect` to pick a model.",
             json!([{ "label": "Open OpenCode", "name": "terminal.open", "args": { "argv": ["opencode"], "name": "OpenCode" } }]),
         ),
-        Err(why) => toast("error", &format!("OpenCode couldn't be installed: {}", failure_line(&why)), json!([])),
+        Err(why) => toast("error", &format!("OpenCode couldn't be installed: {}", failure_line(&why)), failure_actions(log, this_os())),
     }
 }
 
@@ -460,9 +473,202 @@ mod tests {
     }
 
     #[test]
+    fn the_failure_toast_offers_the_log() {
+        let log = Path::new("/h/logs/opencode-install.log");
+        for (os, program) in [(Os::Windows, "notepad.exe"), (Os::Mac, "open"), (Os::Linux, "xdg-open")] {
+            let a = failure_actions(log, os);
+            assert_eq!(a[0]["label"], "Show log");
+            assert_eq!(a[0]["name"], "terminal.open");
+            let argv = a[0]["args"]["argv"].as_array().unwrap();
+            assert_eq!(argv[0], program);
+            assert_eq!(argv.last().unwrap(), "/h/logs/opencode-install.log");
+        }
+    }
+
+    #[test]
     fn a_second_start_while_one_runs_says_so() {
         RUNNING.store(true, Ordering::SeqCst);
         assert_eq!(start(), "running");
         RUNNING.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn plan_for_odd_architectures_and_method_names() {
+        for arch in ["", "x86", "arm", "X86_64", "x86_64 ", "riscv64"] {
+            assert!(plan_for(Os::Windows, false, arch).is_empty(), "{arch:?}");
+            assert_eq!(plan_for(Os::Windows, true, arch), vec![Method::Npm], "npm builds for any arch: {arch:?}");
+            assert_eq!(plan_for(Os::Linux, false, arch), vec![Method::Script], "the script decides: {arch:?}");
+        }
+        assert_eq!((Method::Npm.name(), Method::Script.name(), Method::Native("x").name()), ("npm", "script", "native"));
+    }
+
+    #[test]
+    fn integrity_tolerates_spacing_but_only_a_padded_standard_sha512() {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let digest = sha2::Sha512::digest(b"opencode").to_vec();
+        let good = format!("sha512-{}", b64.encode(&digest));
+        for spaced in [format!("  {good}  "), format!("\t{good}\n"), format!("sha256-AAAA\n\t{good}"), format!("sha1-x   sha256-y {good} md5-z")] {
+            assert!(integrity_ok(&spaced, &digest).is_ok(), "{spaced:?}");
+        }
+        let sha256 = format!("sha256-{}", b64.encode(sha2::Sha256::digest(b"opencode")));
+        assert!(integrity_ok(&sha256, &sha2::Sha256::digest(b"opencode")).unwrap_err().contains("no sha512"), "a sha256 alone is not enough");
+        let unpadded = good.trim_end_matches('=').to_owned();
+        let url_safe = format!("sha512-{}", base64::engine::general_purpose::URL_SAFE.encode(&digest));
+        let bad = [
+            unpadded,
+            good.to_uppercase(),
+            good.replacen("sha512-", "SHA512-", 1),
+            good.replacen("sha512-", "sha512 -", 1),
+            good.replacen("sha512-", "sha512=", 1),
+            format!("{good}?opt"),
+            format!("{good}=="),
+            format!("sha512-{}", b64.encode(&digest[..32])),
+            format!("sha512-{}", b64.encode([&digest[..], &[0u8][..]].concat())),
+        ];
+        for bad in &bad {
+            assert!(integrity_ok(bad, &digest).is_err(), "{bad:?}");
+        }
+        if url_safe != good {
+            assert!(integrity_ok(&url_safe, &digest).is_err(), "{url_safe:?}");
+        }
+        assert!(integrity_ok(&good, &[]).unwrap_err().contains("does not match"), "an empty digest");
+        assert!(integrity_ok(&good, &digest[..63]).is_err());
+    }
+
+    #[test]
+    fn the_hash_of_an_empty_file_and_a_missing_file() {
+        let dir = std::env::temp_dir().join(format!("h0x-oc-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("empty");
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(sha512_file(&file).unwrap(), sha2::Sha512::digest(b"").to_vec());
+        // Exactly one buffer, and one byte past it.
+        for len in [64 * 1024, 64 * 1024 + 1] {
+            std::fs::write(&file, vec![1u8; len]).unwrap();
+            assert_eq!(sha512_file(&file).unwrap(), sha2::Sha512::digest(vec![1u8; len]).to_vec(), "{len}");
+        }
+        assert!(sha512_file(&dir.join("missing")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn registry_metadata_refuses_other_hosts_plain_http_and_odd_shapes() {
+        let meta = |tarball: &str| format!(r#"{{"dist":{{"tarball":"{tarball}","integrity":"sha512-AA=="}}}}"#);
+        for tarball in [
+            "http://registry.npmjs.org/@opencode/cli-windows-x64/-/x.tgz",
+            "https://registry.npmjs.org.evil.example/x.tgz",
+            "https://registry.npmjs.org@evil.example/x.tgz",
+            "https://registry.npmjs.org:443@evil.example/x.tgz",
+            "https://REGISTRY.npmjs.org/x.tgz",
+            " https://registry.npmjs.org/x.tgz",
+            "https://registry.yarnpkg.com/x.tgz",
+            "file:///C:/x.tgz",
+            "https://registry.npmjs.org",
+            "",
+        ] {
+            assert!(parse_meta(&meta(tarball)).is_err(), "{tarball:?}");
+        }
+        for bad in [
+            "null",
+            "[]",
+            "\"dist\"",
+            r#"{"dist":null}"#,
+            r#"{"dist":"https://registry.npmjs.org/x.tgz"}"#,
+            r#"{"dist":{"tarball":7,"integrity":"sha512-AA=="}}"#,
+            r#"{"dist":{"tarball":"https://registry.npmjs.org/x.tgz","integrity":null}}"#,
+            r#"{"dist":{"tarball":"https://registry.npmjs.org/x.tgz","integrity":["sha512-AA=="]}}"#,
+            r#"{"tarball":"https://registry.npmjs.org/x.tgz","integrity":"sha512-AA=="}"#,
+            r#"{"dist":{"tarball":"https://registry.npmjs.org/x.tgz","integrity":"sha512-AA=="}"#,
+        ] {
+            assert!(parse_meta(bad).is_err(), "{bad:?}");
+        }
+        let (tarball, integrity) = parse_meta(&meta("https://registry.npmjs.org/a/-/a-1.tgz")).unwrap();
+        assert_eq!((tarball.as_str(), integrity.as_str()), ("https://registry.npmjs.org/a/-/a-1.tgz", "sha512-AA=="));
+        // Extra fields and whitespace around the JSON are fine.
+        let roomy = "\n  { \"name\": \"x\", \"dist\": { \"shasum\": \"ab\", \"tarball\": \"https://registry.npmjs.org/x.tgz\", \"integrity\": \"sha512-AA==\" } }\n";
+        assert!(parse_meta(roomy).is_ok());
+    }
+
+    #[test]
+    fn path_detection_with_empty_entries_env_vars_and_roots() {
+        assert!(path_has(r";;C:\x;;", r"C:\x", true));
+        assert!(!path_has(";;", "", true), "an empty folder is never on PATH");
+        assert!(!path_has(r"C:\x;;D:\y", "", true));
+        assert!(!path_has("::", "", false));
+        assert!(!path_has("/usr/bin::/bin", "", false));
+        assert!(path_has(r"  C:\x  ;D:\y", r"C:\x", true), "blanks around an entry");
+        assert!(path_has(r#"C:\a;"C:\Program Files\x\";D:\y"#, r"C:\Program Files\x", true));
+        // Stored unexpanded, the entry is not the expanded folder: the expanded list catches it.
+        let raw = r"%USERPROFILE%\.opencode\bin;C:\Windows";
+        assert!(!path_has(raw, r"C:\Users\Me\.opencode\bin", true));
+        assert!(path_has(&raw.replace("%USERPROFILE%", r"C:\Users\Me"), r"C:\Users\Me\.opencode\bin", true));
+        assert!(path_has(raw, r"%userprofile%\.OpenCode\bin\", true), "the same unexpanded spelling");
+        assert!(path_has("C:\\Users\\\u{c4}nne\\.opencode\\bin", "c:\\users\\\u{e4}nne\\.opencode\\bin", true), "non-ASCII case");
+        assert!(!path_has(r"C:\Users\Me\.opencode\bin;C:\x", r"C:\Users\Me\.opencode", true), "a parent is not the folder");
+        assert!(!path_has(r"C:\Users\Me\.opencode\bin2", r"C:\Users\Me\.opencode\bin", true), "a prefix is not the folder");
+        assert!(!path_has(r"C:\Users\Me\.opencode\bin", r"C:\Users\Me\.opencode\bin2", true));
+        assert!(path_has("/usr/bin:/", "/", false), "the root folder");
+        assert!(!path_has("/home/me/.opencode/bin", "/home/me/.opencode/bin;", false));
+    }
+
+    #[test]
+    fn rc_update_only_appends_and_keeps_crlf_and_unterminated_files() {
+        for existing in ["", "\n", "alias a=b", "alias a=b\n", "alias a=b\r\n", "a\r\nb\r\n", "a\rb", "export X=\u{e9}\u{4f60}", "   ", "# .opencode/bin is mentioned only in a comment"] {
+            let new = rc_update(existing).unwrap_or_else(|| panic!("{existing:?}"));
+            assert!(new.starts_with(existing), "the old text stays first: {existing:?}");
+            let added = &new[existing.len()..];
+            assert!(added.ends_with(&format!("{RC_LINE}\n")), "{existing:?}: {added:?}");
+            assert!(added == format!("{RC_LINE}\n") || added == format!("\n{RC_LINE}\n"), "{existing:?}: {added:?}");
+            assert_eq!(new.matches(RC_LINE).count(), 1, "{existing:?}");
+            assert!(new.lines().any(|l| l == RC_LINE), "the line stands alone: {existing:?}");
+            assert_eq!(rc_update(&new), None, "added once: {existing:?}");
+        }
+        assert_eq!(rc_update("alias a=b\r\n").unwrap(), format!("alias a=b\r\n{RC_LINE}\n"));
+        assert_eq!(rc_update("x").unwrap(), format!("x\n{RC_LINE}\n"));
+        assert!(rc_update("    # export PATH=$HOME/.opencode/bin:$PATH").is_some(), "an indented comment");
+        assert_eq!(rc_update("  export PATH=\"$HOME/.opencode/bin:$PATH\"\r\n"), None, "indented, CRLF");
+        assert_eq!(rc_update("path+=(~/.opencode/bin)"), None, "zsh's path array");
+    }
+
+    /// A line that only mentions the folder (an alias to the binary) does not put it on PATH.
+    #[test]
+    fn rc_update_is_not_fooled_by_an_alias_to_the_binary() {
+        assert!(rc_update("alias oc=\"$HOME/.opencode/bin/opencode\"\n").is_some());
+    }
+
+    #[test]
+    fn failure_line_with_crlf_unicode_and_huge_logs() {
+        assert_eq!(failure_line(""), "no details in the log");
+        assert_eq!(failure_line("\r\n\r\n\t \n"), "no details in the log");
+        assert_eq!(failure_line("one\r\ntwo\r\n"), "two", "a CR is no detail");
+        assert_eq!(failure_line("ok\r\nERROR: disk full\r\nbye\r\n"), "ERROR: disk full", "any case");
+        let wide = "\u{e9}".repeat(500);
+        assert_eq!(failure_line(&wide), "\u{e9}".repeat(120), "cut on characters, not bytes");
+        assert_eq!(failure_line(&"\u{1f600}".repeat(130)).chars().count(), 120);
+        let mut huge = "progress line\n".repeat(200_000);
+        huge.push_str("npm error code E404\n");
+        huge.push_str(&"trailing\n".repeat(100_000));
+        assert_eq!(failure_line(&huge), "npm error code E404");
+        assert_eq!(failure_line(&"y".repeat(5_000_000)).len(), 120);
+    }
+
+    /// npm before 10 prints `npm ERR!`: that names the error as much as `npm error` does.
+    #[test]
+    fn failure_line_takes_old_npm_err_lines_as_errors() {
+        let log = "npm ERR! code EACCES\nnpm ERR! syscall mkdir\nnpm ERR! A complete log of this run can be found in: C:\\x.log\n";
+        assert_eq!(failure_line(log), "npm ERR! code EACCES");
+    }
+
+    #[test]
+    fn the_user_path_script_quotes_every_odd_path() {
+        assert!(write_user_path_script("").contains("$k.SetValue('Path', '', "), "an empty PATH is a quoted empty string");
+        for odd in ["C:\\a'b", "C:\\\u{2019}x\u{2018}", "$(calc)", "C:\\x`;y", "C:\\a;\"b\";%TEMP%"] {
+            let script = write_user_path_script(odd);
+            assert!(script.contains(&crate::programs::powershell_quote(odd)), "{odd:?}: {script}");
+            if odd.contains(['\'', '\u{2018}', '\u{2019}']) {
+                assert!(!script.contains(&format!("'{odd}'")), "a quote never closes the string: {odd:?}");
+            }
+        }
+        assert!(READ_USER_PATH.contains("'h0x-expanded:'") && READ_USER_PATH.contains("ExpandEnvironmentVariables"));
     }
 }

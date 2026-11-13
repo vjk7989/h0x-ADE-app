@@ -2797,6 +2797,31 @@ fn welcome_shows_opencode_as_installed_and_never_installs_it_again(cx: &mut Test
     assert!(!calls.borrow().effects.iter().any(|(n, _)| n == "installOpenCode"), "{:?}", calls.borrow().effects);
 }
 
+// Next on page 3 and Done both ask to install: one install, however the person moves on.
+#[gpui::test]
+fn welcome_starts_opencode_once_across_next_done_and_flip_flops(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let installs = |calls: &Rc<RefCell<Calls>>| calls.borrow().effects.iter().filter(|(n, _)| n == "installOpenCode").count();
+    let run = |cx: &mut TestAppContext, press: &str| {
+        let values = fixture(true, props(), updates("current", "current"));
+        describe_pressing(cx, &staged, "frame/welcome", values, None, &welcome_opencode(press), 1)
+    };
+    // Next from page 3 (twice, as a double click would), then Done.
+    let (_, calls) = run(cx, "pick(true, cx); this.installOpenCodeIfWanted(); this.installOpenCodeIfWanted(); this.start();");
+    assert_eq!(installs(&calls), 1, "{:?}", calls.borrow().effects);
+    // Yes, No, Yes, then Done twice.
+    let (_, calls) = run(cx, "pick(true, cx); pick(false, cx); pick(true, cx); this.start(); this.start();");
+    assert_eq!(installs(&calls), 1, "{:?}", calls.borrow().effects);
+    // Found installed after Yes was picked: nothing to start.
+    let (_, calls) = run(cx, "pick(true, cx); this.openCodeInstalled = true; this.installOpenCodeIfWanted(); this.start();");
+    assert_eq!(installs(&calls), 0, "{:?}", calls.borrow().effects);
+    // Next with No chosen starts nothing, and onboarding still ends.
+    let (_, calls) = run(cx, "pick(false, cx); this.installOpenCodeIfWanted(); this.start();");
+    assert_eq!(installs(&calls), 0, "{:?}", calls.borrow().effects);
+    assert!(calls.borrow().effects.iter().any(|(n, _)| n == "closeOverlay"), "{:?}", calls.borrow().effects);
+}
+
 #[gpui::test]
 fn welcome_done_and_open_a_space_work_without_answering_how_you_found_hyperox(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
