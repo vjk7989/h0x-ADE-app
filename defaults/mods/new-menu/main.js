@@ -50,15 +50,17 @@ export default class NewMenu extends View {
   render() {
     const t = theme();
     const space = spaces().find(s => s.active);
-    // Installed built-ins and all the person's own agents; a few more built-ins are offered as not installed.
-    const shown = this.agents.filter(a => a.installed || a.custom);
-    const choices = [...shown, ...this.agents.filter(a => !a.installed && !a.custom).slice(0, 2)];
+    // Every slot (1-9), installed or not (dimmed), then the other agents that are installed.
+    const choices = [
+      ...this.agents.filter(a => a.slot).sort((a, b) => a.slot - b.slot),
+      ...this.agents.filter(a => !a.slot && a.installed),
+    ];
     return v_flex().min_h(0).w_full().h(Math.min(522, 198 + Math.max(1, choices.length) * 31)).bg(t.popover).p(5).text_size(12.8)
       .id("new-menu").track_focus(this.handle)
       .on_key_down((e) => {
         if (e.modifiers.control || e.modifiers.platform || e.modifiers.alt) return;
         // A digit is the agent's slot, as in its key.
-        const agent = /^[1-9]$/.test(e.key) ? shown.find(a => a.slot === Number(e.key) && a.installed) : null;
+        const agent = /^[1-9]$/.test(e.key) ? choices.find(a => a.slot === Number(e.key) && a.installed) : null;
         if (!agent) return;
         closeOverlay(props().overlay);
         run("tab.new", { name: agent.name, space: space?.id, argv: agent.run });
