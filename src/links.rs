@@ -112,14 +112,25 @@ pub enum Target {
 /// What a link opens. File paths count only when they exist here; relative
 /// ones need the terminal's folder.
 pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
+    resolve_with_line(link, cwd).map(|(target, _)| target)
+}
+
+/// `resolve`, and the line a `:12` or `:12:5` suffix names in the file (the column is dropped).
+/// A relative path missing from the folder is tried from the git root above it.
+pub fn resolve_with_line(link: &str, cwd: Option<&Path>) -> Option<(Target, Option<u32>)> {
     if link.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("file:")) {
-        return file_uri_path(link).and_then(|path| resolve(&path, cwd));
+        return file_uri_path(link).and_then(|path| resolve_with_line(&path, cwd));
     }
-    let scheme = link.split_once(':').is_some_and(|(s, _)| {
-        s.len() > 1 && s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    // `file.rs:12` looks like a scheme ("file.rs:") but is a file and a line: a dotted name is a
+    // scheme only before "//" (`com.example.app://x`).
+    let scheme = link.split_once(':').is_some_and(|(s, rest)| {
+        s.len() > 1
+            && s.starts_with(|c: char| c.is_ascii_alphabetic())
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+            && (!s.contains('.') || rest.starts_with("//"))
     });
     if scheme {
-        return Some(Target::Url(link.to_owned()));
+        return Some((Target::Url(link.to_owned()), None));
     }
     let home = std::env::home_dir();
     let expanded = if let Some(rest) = link.strip_prefix("~/") {
@@ -135,25 +146,99 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
     } else {
         PathBuf::from(link)
     };
-    let full = if expanded.is_absolute() { expanded } else { cwd?.join(expanded) };
+    let relative = !expanded.is_absolute();
+    let full = if relative { cwd?.join(&expanded) } else { expanded.clone() };
     // Checking a share path for existence already reaches out to that machine.
     if network(Path::new(link)) || network(&full) {
         tracing::warn!("refusing network path link {full:?}");
         return None;
     }
+    if let Some((path, line)) = existing(&full) {
+        return Some((Target::File(path), line));
+    }
+    if relative && let Some(root) = cwd.and_then(git_root) {
+        let full = root.join(&expanded);
+        if !network(&full) && let Some((path, line)) = existing(&full) {
+            return Some((Target::File(path), line));
+        }
+    }
+    None
+}
+
+/// `full` if it exists, else the path left after the period ending a sentence and a
+/// `:42` / `:42:7` naming a place in the file, with that line.
+fn existing(full: &Path) -> Option<(PathBuf, Option<u32>)> {
     // Windows ignores a trailing period when checking whether a path exists.
     if !(cfg!(windows) && full.extension().is_some_and(|ext| ext.is_empty())) && full.exists() {
-        return Some(Target::File(full));
+        return Some((full.to_path_buf(), None));
     }
-    // The period ending a sentence, or `:42` / `:42:7` naming a place in the file.
     let mut bare = full.to_str()?.strip_suffix('.').unwrap_or(full.to_str()?);
+    let mut line = None;
     for _ in 0..2 {
         match bare.rsplit_once(':') {
-            Some((head, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => bare = head,
+            Some((head, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
+                bare = head;
+                line = n.parse().ok();
+            }
             _ => break,
         }
     }
-    Path::new(bare).exists().then(|| Target::File(PathBuf::from(bare)))
+    Path::new(bare).exists().then(|| (PathBuf::from(bare), line))
+}
+
+/// The nearest folder above `cwd` (or itself) holding `.git`, a folder or a file. No git is run.
+fn git_root(cwd: &Path) -> Option<PathBuf> {
+    if network(cwd) {
+        return None;
+    }
+    cwd.ancestors().find(|a| a.join(".git").exists()).map(Path::to_path_buf)
+}
+
+/// Where a Windows drive path (`C:\a b\c.rs`, `C:/x/y.rs`) starts at or before byte `at`, and the
+/// ends it may have, longest first: the end of the text or just before a blank (a path may hold
+/// spaces, so the caller keeps the longest that exists). Not after a slash or `?`, which
+/// would make it the tail of a UNC, NT or device path.
+fn drive_path_ends(text: &str, at: usize) -> Option<(usize, Vec<usize>)> {
+    let b = text.as_bytes();
+    if b.len() < 3 {
+        return None;
+    }
+    let start = (0..=at.min(b.len().saturating_sub(3))).rev().find(|&i| {
+        b[i].is_ascii_alphabetic()
+            && b[i + 1] == b':'
+            && matches!(b[i + 2], b'\\' | b'/')
+            && (i == 0 || text[..i].chars().next_back().is_some_and(|c| c.is_whitespace() || "\"'`([<{=>|,;".contains(c)))
+    })?;
+    // Blanks end a candidate; at most this many words after the first.
+    const WORDS: usize = 8;
+    let mut ends: Vec<usize> = text[start..].match_indices(' ').map(|(i, _)| start + i).filter(|&e| e > at && !text[start..e].ends_with(' ')).take(WORDS).collect();
+    ends.push(text.trim_end().len());
+    ends.retain(|&e| e > at && e > start + 3);
+    ends.sort_unstable();
+    ends.dedup();
+    ends.reverse();
+    Some((start, ends))
+}
+
+/// A Windows drive path under byte `at` that exists: the longest of the words after the drive
+/// that names a file (a trailing `,` `)` and the like dropped, a `:12` line kept apart).
+pub fn drive_file(text: &str, at: usize, cwd: Option<&Path>) -> Option<(Range<usize>, Target, Option<u32>)> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let (start, ends) = drive_path_ends(text, at)?;
+    for end in ends {
+        let whole = &text[start..end];
+        let trimmed = whole.trim_end_matches([',', ';', ')', ']', '\'', '"', '`']);
+        for slice in [whole, trimmed] {
+            if slice.len() > 3
+                && let Some((target @ Target::File(_), line)) = resolve_with_line(slice, cwd)
+            {
+                return Some((start..start + slice.len(), target, line));
+            }
+        }
+    }
+    None
 }
 
 /// The local path a `file:` URI names: no host or `localhost`, percent-decoded.
@@ -424,6 +509,89 @@ mod tests {
 
     fn first(text: &str) -> Option<&str> {
         PATTERN.find(text).unwrap().map(|m| m.as_str())
+    }
+
+    #[test]
+    fn a_suffix_names_the_line() {
+        let dir = std::env::temp_dir().join(format!("h0x-links-line-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("file.rs");
+        std::fs::write(&file, "x\n").unwrap();
+        std::fs::write(dir.join("README.md"), "x\n").unwrap();
+        let line = |link: &str| resolve_with_line(link, Some(&dir)).map(|(t, l)| (t, l));
+        assert_eq!(line("file.rs:12"), Some((Target::File(file.clone()), Some(12))));
+        assert_eq!(line("file.rs:12:5"), Some((Target::File(file.clone()), Some(12))));
+        assert_eq!(line("file.rs:12."), Some((Target::File(file.clone()), Some(12))));
+        assert_eq!(line("file.rs"), Some((Target::File(file.clone()), None)));
+        assert_eq!(line("README.md"), Some((Target::File(dir.join("README.md")), None)));
+        assert_eq!(line("file.rs:").and_then(|(_, l)| l), None, "a colon alone names no line");
+        assert_eq!(line("file.rs:x"), None);
+        assert_eq!(resolve("file.rs:12", Some(&dir)), Some(Target::File(file.clone())), "resolve still drops the suffix");
+        if cfg!(windows) {
+            let abs = format!("{}:7", file.display());
+            assert_eq!(resolve_with_line(&abs, None), Some((Target::File(file.clone()), Some(7))), "a drive colon is no line");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_missing_relative_path_is_tried_from_the_git_root() {
+        let dir = std::env::temp_dir().join(format!("h0x-links-root-{}", std::process::id()));
+        let sub = dir.join("crates").join("app");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(dir.join(".git"), "gitdir: elsewhere\n").unwrap();
+        std::fs::write(dir.join("src").join("x.rs"), "x\n").unwrap();
+        std::fs::write(sub.join("near.rs"), "x\n").unwrap();
+        assert_eq!(git_root(&sub), Some(dir.clone()), ".git may be a file");
+        assert_eq!(resolve("src/x.rs", Some(&sub)), Some(Target::File(dir.join("src").join("x.rs"))));
+        assert_eq!(resolve_with_line("src/x.rs:3", Some(&sub)).and_then(|(_, l)| l), Some(3));
+        assert_eq!(resolve("near.rs", Some(&sub)), Some(Target::File(sub.join("near.rs"))), "the folder's own file wins");
+        assert_eq!(resolve("src/none.rs", Some(&sub)), None);
+        std::fs::remove_file(dir.join(".git")).unwrap();
+        std::fs::create_dir(dir.join(".git")).unwrap();
+        assert_eq!(git_root(&sub), Some(dir.clone()), ".git may be a folder");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn drive_paths_start_at_a_drive_and_never_inside_unc_or_nt_paths() {
+        let ends = |t: &str, at: usize| drive_path_ends(t, at);
+        let t = r"see C:\a b\c.rs now";
+        let (start, e) = ends(t, 5).unwrap();
+        assert_eq!(start, 4);
+        assert_eq!(e.iter().map(|&e| &t[start..e]).collect::<Vec<_>>(), [r"C:\a b\c.rs now", r"C:\a b\c.rs", r"C:\a"]);
+        // Hovering before the end of a shorter candidate drops the candidates left of it.
+        assert_eq!(ends(t, 12).unwrap().1.iter().map(|&e| &t[start..e]).collect::<Vec<_>>(), [r"C:\a b\c.rs now", r"C:\a b\c.rs"]);
+        let (start, e) = ends("C:/x/y.rs", 0).unwrap();
+        assert_eq!((start, e), (0, vec![9]));
+        assert_eq!(ends(r"open (D:\proj\file.md)", 12).unwrap().0, 6);
+        assert_eq!(ends(r"\\?\C:\x\y.rs", 5), None, "NT path");
+        assert_eq!(ends(r"\\host\share\C:\x", 15), None, "UNC");
+        assert_eq!(ends("//host/C:/x", 8), None);
+        assert_eq!(ends(r"\\.\C:\x", 5), None, "device path");
+        assert_eq!(ends(r"abC:\x", 3), None, "a drive letter is a letter on its own");
+        assert_eq!(ends("C:", 0), None);
+        assert_eq!(ends("plain text", 3), None);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_drive_path_with_spaces_is_found_when_it_exists() {
+        let dir = std::env::temp_dir().join(format!("h0x links drive {}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("c d.rs");
+        std::fs::write(&file, "x\n").unwrap();
+        let shown = format!("error in {}:12, see above", file.display());
+        let at = shown.find("links").unwrap();
+        let (range, target, line) = drive_file(&shown, at, None).unwrap();
+        assert_eq!(target, Target::File(file.clone()));
+        assert_eq!(line, Some(12));
+        assert_eq!(&shown[range], format!("{}:12", file.display()));
+        let slashes = format!("{}", file.display()).replace('\\', "/");
+        assert_eq!(drive_file(&slashes, 3, None).map(|(_, t, _)| t), Some(Target::File(file.clone())));
+        assert_eq!(drive_file(r"C:\no\such\file.rs", 3, None), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Ghostty's own cases (`src/config/url.zig`).

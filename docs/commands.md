@@ -288,6 +288,12 @@ Copy the focused terminal's selection. With nothing selected, that key goes to t
 
 No arguments.
 
+## `terminal.copy_screen`
+
+Copy the focused terminal's selection, or with nothing selected its visible screen, and show a Copied chip.
+
+No arguments.
+
 ## `terminal.scroll`
 
 Scroll a terminal's view of its history (default: the focused one). Give exactly one of: lines (a whole number; negative goes up, toward history), pages (a number, fractions allowed; one page is the terminal's rows), to: "top" (oldest history) or "bottom" (the live screen). This scrolls HyperOx's view, not the program.
