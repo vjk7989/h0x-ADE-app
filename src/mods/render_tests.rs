@@ -10310,15 +10310,39 @@ fn civil(z: i64) -> (i64, i64, i64) {
     (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
+// The activity graph is a retained nested view of its own (so Profile's render stays under the 50 ms budget): it is
+// described as its own entry, with `setup` run after its init.
+fn describe_graph(cx: &mut TestAppContext, staged: &Staged, record: Option<&str>, setup: &str) -> String {
+    let scenario = format!(
+        "import {{ ActivityGraph }} from './frame/settings/activity.js';\nexport default class Scenario extends ActivityGraph {{ init(props, cx) {{ super.init({{ shown: true }}, cx); {setup} }} }}\n"
+    );
+    describe_activity(cx, staged, fixture(true, props(), updates("current", "current")), record, Some(&scenario), None)
+}
+
+#[gpui::test]
+fn settings_profile_mounts_the_activity_graph_as_a_nested_view_and_stays_small(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (label, account) in [("signed in", account_value(&[("u1", "google.com", "vijay")], Some("u1"))), ("signed out", account_value(&[], None))] {
+        let tree = describe_activity(cx, &staged, profile_values(account), Some(&full_record()), None, None);
+        assert_eq!(tree.matches("\"st-prof-activity\"").count(), 1, "{label}: one slot for the graph: {tree}");
+        // The graph is not part of Profile's own description: its grid, labels and summary are the nested view's.
+        for text in ["st-prof-activity-grid", "st-prof-activity-summary", "st-prof-activity-empty", "last 12 months"] {
+            assert!(!tree.contains(text), "{label}: {text:?} belongs to the graph's own render: {tree}");
+        }
+        // Profile alone is about a hundred elements (it was two hundred with the graph inside it).
+        let elements = tree.lines().filter(|l| !l.trim_start().starts_with("text ")).count();
+        assert!(elements <= 140, "{label}: Profile is {elements} elements: {tree}");
+    }
+}
+
 #[gpui::test]
 fn settings_profile_draws_the_53_by_7_activity_grid_with_its_empty_state_and_no_tooltip(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    let two = account_value(&[("u1", "google.com", "vijay")], Some("u1"));
-    let signed_out = account_value(&[], None);
-    for (label, account) in [("signed in", two), ("signed out", signed_out)] {
-        let tree = describe_activity(cx, &staged, profile_values(account), None, None, None);
-        for text in ["st-prof-activity", "st-prof-activity-grid", "Agent activity \u{b7} this computer", "last 12 months", "Mon", "Wed", "Fri", "st-prof-activity-empty", "No agent activity recorded yet", " \u{b7} starts with your first agent session"] {
+    for label in ["no record"] {
+        let tree = describe_graph(cx, &staged, None, "");
+        for text in ["st-prof-activity-graph", "st-prof-activity-grid", "Agent activity \u{b7} this computer", "last 12 months", "Mon", "Wed", "Fri", "st-prof-activity-empty", "No agent activity recorded yet", " \u{b7} starts with your first agent session"] {
             assert!(tree.contains(text), "{label}: {text:?}: {tree}");
         }
         // An empty year is 53 one-run columns, six row gaps and the grid: 60 elements, not 371 (the 50 ms render budget).
@@ -10335,9 +10359,8 @@ fn settings_profile_draws_the_53_by_7_activity_grid_with_its_empty_state_and_no_
 fn settings_profile_activity_shows_the_summary_the_legend_and_a_tooltip_on_hover(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    let account = account_value(&[("u1", "google.com", "vijay")], Some("u1"));
     let record = full_record();
-    let tree = describe_activity(cx, &staged, profile_values(account.clone()), Some(&record), None, None);
+    let tree = describe_graph(cx, &staged, Some(&record), "");
     // Every day of the grid up to today (365 to 371 of them) has the record's 42 minutes, in one streak.
     let cells = number_before(&tree, "active days");
     assert!((365..=371).contains(&cells), "{cells} days: {tree}");
@@ -10352,7 +10375,7 @@ fn settings_profile_activity_shows_the_summary_the_legend_and_a_tooltip_on_hover
     assert!(!tree.contains("st-prof-activity-empty") && !tree.contains("No agent activity recorded yet") && !tree.contains("st-prof-activity-tip"), "{tree}");
     // Hovering today's cell (the last column, this weekday's row) shows its day.
     let hover = "const today = new Date(); this.activityHover = [52, today.getDay()];";
-    let tree = describe_activity(cx, &staged, profile_values(account), Some(&record), None, Some(hover));
+    let tree = describe_graph(cx, &staged, Some(&record), hover);
     for text in ["st-prof-activity-tip", "42 min", "3 sessions", "18.2k tokens"] {
         assert!(tree.contains(text), "{text:?}: {tree}");
     }
@@ -10362,9 +10385,8 @@ fn settings_profile_activity_shows_the_summary_the_legend_and_a_tooltip_on_hover
 fn settings_profile_activity_treats_a_damaged_or_foreign_file_as_no_record(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    let account = account_value(&[("u1", "google.com", "vijay")], Some("u1"));
     for record in ["{not json", "", "null", "[]", r#"{"version":2,"days":{"2026-11-03":{"seconds":600}}}"#, r#"{"version":1,"days":[]}"#, r#"{"version":1,"days":{"bad":{"seconds":600},"2026-11-03":5}}"#] {
-        let tree = describe_activity(cx, &staged, profile_values(account.clone()), Some(record), None, None);
+        let tree = describe_graph(cx, &staged, Some(record), "");
         assert!(tree.contains("No agent activity recorded yet") && tree.contains("st-prof-activity-grid"), "{record:?}: {tree}");
         assert!(!tree.contains("st-prof-activity-summary"), "{record:?}: {tree}");
     }

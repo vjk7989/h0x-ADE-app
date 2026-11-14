@@ -3,7 +3,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
 import { agentsInit, loadAgents, agentsPage } from "./agents.js";
-import { activityInit, loadActivity, activityBlock } from "./activity.js";
+import { ActivityGraph } from "./activity.js";
 import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, nextCommand, window, account, accountSignIn, accountCancelSignIn, accountSwitch, accountSignOut, accountRemove } from "h0x";
 
 const I = (name) => `frame/settings/${name}.svg`;
@@ -116,10 +116,8 @@ export default class Settings extends View {
     this.publicHost = InputState.new({ placeholder: "Public host, like vps.example.com" });
     this.tick = 0;
     agentsInit(this);
-    activityInit(this);
-    if (this.section === "profile") this.refreshActivity(cx);
-    // The record changes while Profile is open (an agent is working): read it again each minute.
-    cx.timer.every(60000, (cx) => { if (this.section === "profile") this.refreshActivity(cx); });
+    // The agent activity graph is a nested view of its own (see activity.js), kept for as long as this page is open.
+    this.graph = cx.new(ActivityGraph, { shown: this.section === "profile" });
     if (this.section === "agents") loadAgents(this, cx);
     this.handle = cx.focus_handle();
     this.handle.focus();
@@ -171,15 +169,8 @@ export default class Settings extends View {
     if (id === "machines") cx.spawn(async (cx) => { await this.loadMachines(); cx.notify(); });
     if (id === "remote") cx.spawn(async (cx) => { await this.loadRemote(); cx.notify(); });
     if (id === "agents") loadAgents(this, cx);
-    if (id === "profile") this.refreshActivity(cx);
+    this.graph.set_props({ shown: id === "profile" });
     cx.notify();
-  }
-
-  refreshActivity(cx) {
-    cx.spawn(async (cx) => {
-      await loadActivity(this);
-      cx.notify();
-    });
   }
 
   // After "Check now": follow the look (the answer comes from the app), then
@@ -1382,7 +1373,7 @@ export default class Settings extends View {
                 ]))
             // Accounts are saved but none is current: they can still be switched to.
             .when(acct.accounts.length > 0 && !this.signingIn, (el) => el.child(h_flex().pt(6).child(this.acctBusy ? busy : this.switchButton(t)))))))
-        .child(activityBlock(this, t))
+        .child(div().id("st-prof-activity").w_full().child(this.graph))
         .child(this.subheading(t, "Turned on when you sign in"))
         .children(FEATURES.map(([id, title, about, icon]) => this.profileRow(t, id, title, about, this.stateTag(t, false, "off"), icon)))
         .child(pairing(this.stateTag(t, false, "needs sign-in")));
@@ -1398,7 +1389,7 @@ export default class Settings extends View {
           .child(this.switchButton(t))
           .child(this.button(t, "st-acct-signout", "Sign out", (_e, cx) => this.accountDo(() => accountSignOut(cur.uid), cx), "log-out", "first"))))
       .when(this.signingIn, (el) => el.child(h_flex().w_full().pt(12).child(this.waitingLine(t)))))
-      .child(activityBlock(this, t))
+      .child(div().id("st-prof-activity").w_full().child(this.graph))
       .child(this.subheading(t, "Included with your account"))
       .children(FEATURES.map(([id, title, about, icon]) => this.profileRow(t, id, title, about, this.stateTag(t, true, "included"), icon)))
       .child(pairing(this.button(t, "st-prof-remote", "Set up in Remote", (_e, cx) => this.openSection("remote", cx), "arrow-right")))

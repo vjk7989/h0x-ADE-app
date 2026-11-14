@@ -2,9 +2,9 @@
 // <app home>/usage/activity.json (src/activity.rs writes it; it never leaves this computer).
 //   {"version":1,"days":{"YYYY-MM-DD":{"seconds":n,"sessions":n,"tokens":n}}}  (local dates)
 
-import { div } from "gpui-kit";
+import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { appHome, readTextFile } from "h0x";
+import { appHome, readTextFile, theme } from "h0x";
 
 const WEEKS = 53, CELL = 9, GAP = 2, LABELS = 53;
 const MIN_CELL = 6, MAX_CELL = 14, DEFAULT_WIDTH = 634; // the content column at the standard window
@@ -134,6 +134,38 @@ export function activityInit(view) {
   view.activityWidth = DEFAULT_WIDTH; // the row's measured width
 }
 
+// The graph is a retained nested view of its own: Settings > Profile draws it once and rebuilds it only when the
+// graph itself changes (data, hover, width, theme), not on every Profile render. A render has a 50 ms budget and
+// the graph is about half of Profile's work. The page tells it when Profile is shown with `set_props({ shown })`.
+export class ActivityGraph extends View {
+  init(props, cx) {
+    activityInit(this);
+    this.cx = cx;
+    this.shown = Boolean(props?.shown);
+    if (this.shown) this.refresh();
+    // The record changes while Profile is open (an agent is working): read it again each minute.
+    cx.timer.every(60000, () => { if (this.shown) this.refresh(); });
+  }
+
+  // Profile opens or closes: reading the record again when it opens.
+  update(props) {
+    const was = this.shown;
+    this.shown = Boolean(props?.shown);
+    if (this.shown && !was) this.refresh();
+  }
+
+  refresh() {
+    this.cx.spawn(async (cx) => {
+      await loadActivity(this);
+      cx.notify();
+    });
+  }
+
+  render() {
+    return activityBlock(this, theme());
+  }
+}
+
 export async function loadActivity(view) {
   let text = null;
   try { text = await readTextFile(`${appHome()}/usage/activity.json`); } catch {}
@@ -229,7 +261,7 @@ export function activityBlock(view, t) {
     .child(mono(div().text_size(10.5).text_color(t.dim)).child("less"))
     .child(h_flex().gap(1).children(colors.map((c, i) => div().id(`st-prof-activity-legend-${i}`).w(CELL).h(CELL).rounded(2).bg(c))))
     .child(mono(div().text_size(10.5).text_color(t.dim)).child("more"));
-  return v_flex().id("st-prof-activity").w_full().pb(16).border_b(1).border_color(t.border)
+  return v_flex().id("st-prof-activity-graph").w_full().pb(16).border_b(1).border_color(t.border)
     .child(h_flex().w_full().items_center().justify_between().pt(20).pb(6)
       .child(div().text_size(13).line_height("18px").font_semibold().text_color(t.foreground).child("Agent activity · this computer"))
       .child(mono(div().text_size(12).text_color(t.dim)).child("last 12 months")))
