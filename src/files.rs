@@ -408,6 +408,29 @@ fn deliver_pending(root: &Path, pending: HashSet<String>) -> bool {
     true
 }
 
+/// Files the app writes into a mod's folder when the mod loads (editor configuration and
+/// typings): never the mod's code, so never an edit. `rest` is the path inside the mod's folder.
+pub fn is_generated_helper(rest: &Path) -> bool {
+    let name = rest.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    name == "gpui-kit.d.ts" || (name == "jsconfig.json" && rest.components().count() == 1)
+}
+
+/// Whether a changed path (relative to the home folder) is an edit of a mod, as opposed to the app
+/// writing its own helper files. `known_mod`: the mod's folder already existed. A change of the
+/// folder itself is only news when the folder is new: for one that exists it is the helper files
+/// being added, which reload nothing.
+pub fn counts_as_edit(changed: &Path, known_mod: bool) -> bool {
+    let mut parts = changed.components();
+    if parts.next().is_none_or(|c| c.as_os_str() != "mods") || parts.next().is_none() {
+        return false;
+    }
+    let rest = parts.as_path();
+    if rest.as_os_str().is_empty() {
+        return !known_mod;
+    }
+    !is_generated_helper(rest)
+}
+
 /// The mod a changed path belongs to (`mods/<name>/...`).
 pub fn mod_of(rel: &Path) -> Option<String> {
     let mut parts = rel.components();
@@ -418,6 +441,31 @@ pub fn mod_of(rel: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_apps_own_helper_files_are_not_mod_edits() {
+        for helper in ["jsconfig.json", "gpui-kit.d.ts", "lib/gpui-kit.d.ts"] {
+            assert!(is_generated_helper(Path::new(helper)), "{helper}");
+            assert!(!counts_as_edit(&Path::new("mods/files").join(helper), true), "{helper}");
+            assert!(!counts_as_edit(&Path::new("mods/files").join(helper), false), "{helper}");
+        }
+        // A jsconfig.json deeper in a mod is the author's.
+        assert!(!is_generated_helper(Path::new("lib/jsconfig.json")));
+        assert!(counts_as_edit(Path::new("mods/files/lib/jsconfig.json"), true));
+        for code in ["main.js", "mod.json", "ui/panel.js", "icons/x.svg"] {
+            assert!(!is_generated_helper(Path::new(code)), "{code}");
+            assert!(counts_as_edit(&Path::new("mods/files").join(code), true), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_known_mod_folder_changing_is_no_edit_but_a_new_one_is() {
+        assert!(!counts_as_edit(Path::new("mods/files"), true), "its stub files were written");
+        assert!(counts_as_edit(Path::new("mods/brand-new"), false), "a mod folder appeared");
+        for other in ["mods", "layouts/main.json", "settings.json", ""] {
+            assert!(!counts_as_edit(Path::new(other), false), "{other:?}");
+        }
+    }
 
     #[test]
     fn source_revisions_survive_closed_copies_and_rescan_invalidates_all() {
