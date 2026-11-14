@@ -663,7 +663,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn powershell_finds_installed_commands() {
-        let out = crate::mods::run_here("powershell.exe", &installed_powershell(&["cmd.exe".into(), "h0x_missing_agent_440".into()])).unwrap();
+        // A cold PowerShell start on a busy CI runner can miss the exec limit now and then; the
+        // check itself is the same on every try.
+        let args = installed_powershell(&["cmd.exe".into(), "h0x_missing_agent_440".into()]);
+        let out = (0..3).find_map(|_| crate::mods::run_here("powershell.exe", &args)).expect("powershell answered within three tries");
         assert!(out.contains("h0x-has:cmd.exe"));
         assert!(!out.contains("h0x-has:h0x_missing_agent_440"));
     }

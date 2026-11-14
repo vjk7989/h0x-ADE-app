@@ -172,8 +172,26 @@ export default class Welcome extends View {
 
   // Pieces -------------------------------------------------------------
 
+  // A paragraph. The command name `h0x-core` (and `ls`, `attach t3` after it) is set in the mono font, so the
+  // text goes out word by word, wrapping like a line of text.
   para(t, text) {
-    return div().w_full().text_size(13).line_height("20px").text_color(t.muted).child(text);
+    const plain = div().w_full().text_size(13).line_height("20px").text_color(t.muted);
+    if (!text.includes("h0x-core")) return plain.child(text);
+    const words = text.split(" "), pieces = [];
+    for (let i = 0; i < words.length; i++) {
+      const m = /^(h0x-core)([.,;:]?)$/.exec(words[i]);
+      const space = i < words.length - 1 ? "\u00a0" : "";
+      if (!m) { pieces.push([words[i] + space, false]); continue; }
+      let code = m[1];
+      // `h0x-core ls` and `h0x-core attach t3` are whole commands.
+      if (words[i + 1] === "ls" && !m[2]) code += "\u00a0" + words[++i];
+      else if (words[i + 1] === "attach" && words[i + 2] === "t3" && !m[2]) { code += "\u00a0attach\u00a0t3"; i += 2; }
+      pieces.push([code, true]);
+      if (m[2] || space) pieces.push([m[2] + space, false]);
+    }
+    return plain.flex().flex_wrap().children(
+      pieces.map(([word, code]) => (code ? div().font_family(this.mono()).text_size(12).text_color(t.muted).child(word) : div().child(word))),
+    );
   }
 
   title(t, text, sub) {
