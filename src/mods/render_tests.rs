@@ -9877,7 +9877,7 @@ fn describe_activity(cx: &mut TestAppContext, staged: &Staged, values: BTreeMap<
 }
 
 // The elements of the graph itself (the grid and what is inside it, text nodes not counted): a render has a
-// 50 ms budget, so the 371 days are painted, not built one element each.
+// 50 ms budget, so days in a row with the same level are one element, not 371 elements.
 fn activity_graph_elements(tree: &str) -> usize {
     let lines: Vec<&str> = tree.lines().collect();
     let at = lines.iter().position(|l| l.contains(r#":id[Str("st-prof-activity-grid")]"#)).unwrap_or_else(|| panic!("no grid: {tree}"));
@@ -9934,9 +9934,9 @@ fn settings_profile_draws_the_53_by_7_activity_grid_with_its_empty_state_and_no_
         for text in ["st-prof-activity", "st-prof-activity-grid", "Agent activity \u{b7} this computer", "last 12 months", "Mon", "Wed", "Fri", "st-prof-activity-empty", "No agent activity recorded yet", " \u{b7} starts with your first agent session"] {
             assert!(tree.contains(text), "{label}: {text:?}: {tree}");
         }
-        // The 371 days are painted, not 371 elements (the Windows runner's 50 ms render budget).
+        // An empty year is 53 one-run columns, six row gaps and the grid: 113 elements, not 371 (the 50 ms render budget).
         let elements = activity_graph_elements(&tree);
-        assert!(elements <= 10, "{label}: the graph is {elements} elements: {tree}");
+        assert!(elements <= 130, "{label}: the graph is {elements} elements: {tree}");
         assert!(!tree.contains("st-prof-activity-cell-"), "{label}: {tree}");
         for text in ["st-prof-activity-summary", "st-prof-activity-legend-", "st-prof-activity-tip"] {
             assert!(!tree.contains(text), "{label}: the empty state has no {text:?}: {tree}");
@@ -9958,7 +9958,7 @@ fn settings_profile_activity_shows_the_summary_the_legend_and_a_tooltip_on_hover
         assert!(tree.contains(text.as_str()), "{i} {text:?}: {tree}");
     }
     let elements = activity_graph_elements(&tree);
-    assert!(elements <= 10, "the graph is {elements} elements: {tree}");
+    assert!(elements <= 130, "the graph is {elements} elements: {tree}");
     for text in ["st-prof-activity-summary", "st-prof-activity-legend-0", "st-prof-activity-legend-4", "less", "more"] {
         assert!(tree.contains(text), "{text:?}: {tree}");
     }
@@ -9988,7 +9988,7 @@ const ACTIVITY_PROBE: &str = r#"
 import Real from './frame/settings/main.js';
 import { div } from 'gpui-kit';
 import { theme } from 'h0x';
-import { tooltip, levelOf, levelColors, minutesOf, short, summarize, gridDays, parseActivity, geometry, cellAt, monthColumns } from './frame/settings/activity.js';
+import { tooltip, levelOf, levelColors, minutesOf, short, summarize, gridDays, parseActivity, geometry, cellAt, monthColumns, columnRuns } from './frame/settings/activity.js';
 export default class Scenario extends Real {
   render(cx) {
     const sat = new Date(2026, 10, 14);
@@ -10005,6 +10005,7 @@ export default class Scenario extends Real {
       slots: gridDays(sat).flat().length,
       real: gridDays(sat).flat().filter(Boolean).length,
       first: gridDays(sat)[0][0].toDateString(),
+      runs: columnRuns([[1, 1, 1, 1, 1, 1, 1], [1, 1, 1, null, null, null, null]].map((w) => w.map((x) => (x ? {} : null))), [[0, 0, 2, 2, 2, 0, 3], [1, 1, 1, 0, 0, 0, 0]]),
       geo: [geometry(634), geometry(700), geometry(NaN), geometry(10)].map((g) => ({ cell: +g.cell.toFixed(3), step: +g.step.toFixed(3), width: +g.width.toFixed(3) })),
       at: [[0, 0], [8.9, 8.9], [9.5, 3], [11, 0], [52 * 11 + 4, 6 * 11 + 4], [581, 0], [-1, 0], [26 * 11 + 2, 3 * 11 + 5], [3, 75], [NaN, 1], [2, 9.5]].map(([x, y]) => cellAt(x, y, geometry(634))),
       months: [monthColumns(gridDays(sat)).length, monthColumns(gridDays(sat))[0], monthColumns(gridDays(sat)).at(-1), monthColumns(gridDays(sat))[10]],
@@ -10042,6 +10043,8 @@ fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppCo
     assert_eq!((probe["slots"].clone(), probe["real"].clone()), (json!(371), json!(371)));
     assert_eq!(probe["first"], json!("Sun Nov 09 2025"));
     assert_eq!(probe["parsed"], json!([{}, {}, {}, {"2026-11-03": {"seconds": 5, "sessions": 0, "tokens": 0}}]));
+    // A column is runs of days in a row with the same level (days after today are not drawn).
+    assert_eq!(probe["runs"], json!([[[2, 0], [3, 2], [1, 0], [1, 3]], [[3, 1]]]));
     // One geometry: 9 px cells and a 2 px gap at the 634 px column; a wider row grows the cells to fill it
     // (700: 53 columns of 12.245 less one gap = 647 = 700 - 53); an unknown width is the standard one; a tiny one keeps the smallest cell.
     assert_eq!(probe["geo"], json!([

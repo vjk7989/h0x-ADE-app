@@ -2,7 +2,7 @@
 // <app home>/usage/activity.json (src/activity.rs writes it; it never leaves this computer).
 //   {"version":1,"days":{"YYYY-MM-DD":{"seconds":n,"sessions":n,"tokens":n}}}  (local dates)
 
-import { div, PathBuilder } from "gpui-kit";
+import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { appHome, readTextFile } from "h0x";
 
@@ -141,30 +141,28 @@ function model(view, t) {
   if (kept && kept.stamp === stamp && kept.record === view.activity) return kept;
   const weeks = gridDays(today), days = view.activity?.days ?? {};
   const levels = weeks.map((week) => week.map((d) => (d ? levelOf(minutesOf(days[key(d)])) : 0)));
-  return (view.activityModel = { stamp, record: view.activity, weeks, days, levels, colors: levelColors(t), sum: summarize(weeks, days), months: monthColumns(weeks), paths: null });
+  return (view.activityModel = { stamp, record: view.activity, weeks, days, levels, colors: levelColors(t), sum: summarize(weeks, days), months: monthColumns(weeks), runs: columnRuns(weeks, levels) });
 }
 
-// A cell with its corners cut a little (a radius-2 look from a polygon).
-const cut = (x, y, s, c) => [[x + c, y], [x + s - c, y], [x + s, y + c], [x + s, y + s - c], [x + s - c, y + s], [x + c, y + s], [x, y + s - c], [x, y + c]];
-
-// One path per level holding every cell of that level: the whole grid is painted as at most five elements,
-// built once per geometry and kept in the model. `null` for a level no day has.
-function levelPaths(m, g) {
-  const id = `${g.cell}|${g.step}`;
-  if (m.paths?.id === id) return m.paths.list;
-  const builders = m.colors.map(() => null);
-  m.weeks.forEach((week, w) => week.forEach((d, r) => {
-    if (!d) return;
-    const level = m.levels[w][r];
-    (builders[level] ??= PathBuilder.fill()).add_polygon(cut(w * g.step, r * g.step, g.cell, 0.8), true);
-  }));
-  m.paths = { id, list: builders.map((b) => (b ? b.build() : null)) };
-  return m.paths.list;
+// Each week's column as runs of days in a row with the same level: [[days, level], ...] from Sunday down.
+// A run is ONE element however many days it has (the row gaps are drawn over it), so a render builds
+// a few dozen elements for a quiet year rather than 371 (a render has a 50 ms budget).
+export function columnRuns(weeks, levels) {
+  return weeks.map((week, w) => {
+    const runs = [];
+    week.forEach((d, r) => {
+      if (!d) return;
+      const last = runs[runs.length - 1];
+      if (last && last[1] === levels[w][r]) last[0]++;
+      else runs.push([1, levels[w][r]]);
+    });
+    return runs;
+  });
 }
 
 export function activityBlock(view, t) {
   const m = model(view, t);
-  const { weeks, days, colors, months } = m;
+  const { weeks, days, colors, months, runs } = m;
   const { minutes, active, longest } = m.sum;
   const empty = active === 0;
   const hover = view.activityHover;
@@ -172,8 +170,8 @@ export function activityBlock(view, t) {
   const g = geometry(view.activityWidth);
   const num = (text) => mono(div()).text_color(t.foreground).child(text);
   const note = (text) => mono(div()).text_color(t.muted).child(text);
-  // A render has a 50 ms budget, so the 371 cells are not 371 elements: the grid is five painted paths (one per level),
-  // a single outline for the hovered day, and ONE handler on the grid that maps the pointer to its cell.
+  // A render has a 50 ms budget, so the 371 days are not 371 elements: each column is a few runs, the gaps between
+  // rows are six lines over them, the hovered day is one outline, and ONE handler on the grid maps the pointer to its day.
   // `local_position` is relative to the grid; scaled by the event's own bounds, so whatever units it comes in, it lands on the drawn cells.
   const at = (e) => {
     const b = e.bounds, kx = b?.width > 0 ? g.width / b.width : 1, ky = b?.height > 0 ? g.height / b.height : 1;
@@ -181,9 +179,10 @@ export function activityBlock(view, t) {
     return cellUnder && weeks[cellUnder[0]][cellUnder[1]] ? cellUnder : null;
   };
   const [hw, hr] = hover ?? [];
-  const painted = levelPaths(m, g).map((path, level) => (path ? window.paint_path(path, colors[level]).absolute().top(0).left(0).size_full() : null)).filter(Boolean);
   const outline = hovered ? div().absolute().left(hw * g.step).top(hr * g.step).size(g.cell).rounded(2).border_1().border_color(t.foreground) : null;
-  const grid = div().id("st-prof-activity-grid").relative().w(g.width).h(g.height).flex_none()
+  const rowGaps = [0, 1, 2, 3, 4, 5].map((r) => div().absolute().left(0).top(r * g.step + g.cell).w(g.width).h(GAP).bg(t.popover));
+  const columns = runs.map((col) => v_flex().w(g.cell).gap(GAP).children(col.map(([n, level]) => div().h(n * g.cell + (n - 1) * GAP).rounded(2).bg(colors[level]))));
+  const grid = h_flex().id("st-prof-activity-grid").relative().gap(GAP).items_start().w(g.width).h(g.height).flex_none()
     .on_mouse_move((e, cx) => {
       if (empty) return;
       const now = view.activityHover, next = at(e);
@@ -196,7 +195,7 @@ export function activityBlock(view, t) {
       view.activityHover = null;
       cx.notify();
     })
-    .children(outline ? [...painted, outline] : painted)
+    .children(outline ? [...columns, ...rowGaps, outline] : [...columns, ...rowGaps])
     .when(Boolean(hovered), (el) => {
       const [w, r] = hover;
       const parts = tooltip(hovered, days[key(hovered)]);
