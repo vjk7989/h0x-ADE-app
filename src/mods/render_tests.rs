@@ -6322,7 +6322,10 @@ fn workspaces_save_of_an_empty_space_saves_nothing(cx: &mut TestAppContext) {
         let mut values = sessions_values(Value::Null, "/fixture/project", "linux");
         values.insert("tree".into(), tree.clone());
         let host = sessions_host(&[("list", session_list())], &[]);
-        describe_ws(cx, &staged, values, &host, "this.save('Work', cx); cx.spawn(async (cx) => { await cx.sleep(100); this.save('', cx); });");
+        // A save that needs nothing from the core finishes in promise jobs alone, which the harness only runs when a
+        // timer wakes the script: so each save starts from a timer, the second waits for the first to be done, and a last timer lets the last one finish.
+        let setup = "cx.spawn(async (cx) => { await cx.sleep(50); this.save('Work', cx); await cx.sleep(100); this.save('', cx); await cx.sleep(100); });";
+        describe_ws(cx, &staged, values, &host, setup);
         assert!(!host.borrow().shared.contains_key("workspaces"), "{tree}");
         assert_eq!(toasts(&host), vec![json!("Nothing to save"); 2], "{tree}");
         assert!(host.borrow().cores.is_empty(), "nothing to look up: {:?}", host.borrow().cores);
@@ -6349,7 +6352,9 @@ fn workspaces_the_sixth_save_is_refused_and_writes_nothing(cx: &mut TestAppConte
     let five: Vec<Value> = (1..=5).map(|i| ws_item(&format!("w{i}"), &format!("Space {i}"), "/fixture/project", one_tab("/x"))).collect();
     let stored = ws_store(&five);
     let host = sessions_host(&[("list", session_list())], &[("workspaces", stored.clone())]);
-    let tree = describe_ws(cx, &staged, layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, "this.save('Sixth', cx);");
+    // Refused before any core call, so it too finishes in promise jobs alone: started from a timer (see the empty-space test).
+    let setup = "cx.spawn(async (cx) => { await cx.sleep(50); this.save('Sixth', cx); await cx.sleep(100); });";
+    let tree = describe_ws(cx, &staged, layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, setup);
     assert_eq!(host.borrow().shared["workspaces"], stored, "nothing written, none dropped");
     assert_eq!(toasts(&host), vec![json!("5 workspaces are saved")]);
     assert!(host.borrow().cores.is_empty(), "refused before looking anything up: {:?}", host.borrow().cores);
