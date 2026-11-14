@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.33] - 2026-11-14
+
+The activity graph lines up on every display. Bundles h0x-core 0.1.16.
+
+### Fixed
+- Settings > Profile: on displays scaled above 100%, hovering the activity graph showed a day up to two weeks earlier than the one under the pointer, the month names drifted past the grid, and today's square couldn't be hovered. Every square, label and hover now uses the same positions, hovering outside the grid shows nothing, and the day's details always stay inside the panel.
+
 ## [0.1.32] - 2026-11-14
 
 A new welcome, your activity at a glance, and a cleaner developer look. Bundles h0x-core 0.1.16.
