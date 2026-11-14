@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- A Workspaces button at the top right saves the space you're in (its tabs, panes, folders and running agents) and brings it back later. Keep up to 5.
+
 ## [0.1.33] - 2026-11-14
 
 The activity graph lines up on every display. Bundles h0x-core 0.1.16.

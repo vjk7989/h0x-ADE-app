@@ -5481,6 +5481,30 @@ impl SessionsHost {
                 self.focus = args["pane"].as_str().map(str::to_owned);
                 return;
             }
+            "space.select" => {
+                for space in self.live.get_mut("spaces").and_then(Value::as_array_mut).into_iter().flatten() {
+                    space["active"] = json!(space["id"] == args["id"]);
+                }
+                return;
+            }
+            // A new space is the active one, with a tab and its first pane.
+            "space.new" => {
+                if self.stuck {
+                    return;
+                }
+                self.made += 1;
+                let n = self.made;
+                let space = json!({"id":format!("rs{n}"), "index":9, "name":args["name"], "named":true, "folder":args["folder"], "machine":args["machine"], "branch":null, "active":true, "status":null, "tabs":[{"id":format!("rt{n}")}]});
+                let spaces = self.live.entry("spaces".into()).or_insert_with(|| json!([])).as_array_mut().unwrap();
+                for old in spaces.iter_mut() {
+                    old["active"] = json!(false);
+                }
+                spaces.push(space);
+                let pane = json!({"pane":format!("rp{n}"), "terminal":format!("ra{n}"), "tab":format!("rt{n}"), "cwd":args["folder"]});
+                self.live.entry("panes".into()).or_insert_with(|| json!([])).as_array_mut().unwrap().push(pane);
+                self.focus = Some(format!("rp{n}"));
+                return;
+            }
             "tab.new" => None,
             "terminal.open" if args["place"] != "tab" => {
                 let panes = self.live.get("panes").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -5544,7 +5568,7 @@ fn panel_layout(hidden: bool, active: &str) -> Value {
 
 fn sessions_module(mut values: BTreeMap<String, Value>, host: Rc<RefCell<SessionsHost>>) -> HostModule {
     let mut module = HostModule::new("h0x");
-    for name in ["panes", "terminals", "tree", "layout"] {
+    for name in ["panes", "terminals", "tree", "layout", "spaces"] {
         let value = values.remove(name).unwrap_or(Value::Null);
         host.borrow_mut().live.entry(name.into()).or_insert(value);
         let h = host.clone();
@@ -6186,16 +6210,6 @@ fn layout_values(machine: Value, folder: &str, platform: &str, cwd: &str) -> BTr
     values
 }
 
-fn saved_layout(cwd: &str) -> Value {
-    json!({"tabs":[
-        {"name":"Agents", "root":{"split":"right", "children":[
-            {"agent":"claude", "session":"a2", "argv":["claude"], "cwd":cwd},
-            {"split":"down", "children":[{"agent":"claude", "session":"a1", "argv":["claude", "--model", "opus"], "cwd":cwd}, {"cwd":"/fixture/project/web"}]}
-        ]}},
-        {"name":"", "root":{"cwd":null}}
-    ]})
-}
-
 fn session_list() -> Value {
     let now = now_ms();
     core_ok(json!({"sessions":[
@@ -6213,39 +6227,90 @@ fn toasts(host: &Rc<RefCell<SessionsHost>>) -> Vec<Value> {
     host.borrow().effects.iter().filter(|(n, _)| n == "notify").map(|(_, a)| a[0]["title"].clone()).collect()
 }
 
+// ---- Workspaces (0.1.34): the saved spaces of the tab bar's dialog, moved out of the Sessions panel ----
+
+// The saved tabs of space s1 in `layout_values`: "Agents" is t1 beside (t2 over t3); the second tab is t4. Each pane keeps
+// its core address; agent panes the agent, argv and newest unused session; shell panes their argv.
+fn saved_tabs(cwd: &str) -> Value {
+    json!([
+        {"name":"Agents", "root":{"split":"right", "children":[
+            {"agent":"claude", "session":"a2", "argv":["claude"], "cwd":cwd, "terminal":"t1"},
+            {"split":"down", "children":[
+                {"agent":"claude", "session":"a1", "argv":["claude", "--model", "opus"], "cwd":cwd, "terminal":"t2"},
+                {"cwd":"/fixture/project/web", "argv":["bash"], "terminal":"t3"}
+            ]}
+        ]}},
+        {"name":"", "root":{"cwd":null, "argv":["bash"], "terminal":"t4"}}
+    ])
+}
+
+// A workspace as the dialog stores it (and `open` takes it).
+fn ws_item(id: &str, name: &str, folder: &str, tabs: Value) -> Value {
+    json!({"id":id, "name":name, "created":1, "saved":1, "machine":null, "folder":folder, "space":"Here", "tabs":tabs})
+}
+
+fn ws_store(items: &[Value]) -> Value {
+    json!({"version":1, "items":items})
+}
+
+fn one_tab(cwd: &str) -> Value {
+    json!([{"name":"", "root":{"cwd":cwd}}])
+}
+
+fn describe_ws(cx: &mut TestAppContext, staged: &Staged, values: BTreeMap<String, Value>, host: &Rc<RefCell<SessionsHost>>, setup: &str) -> String {
+    describe_sessions(cx, staged, "mods/workspaces", values, host, setup)
+}
+
+fn run_names(host: &Rc<RefCell<SessionsHost>>) -> Vec<String> {
+    runs(host).iter().map(|r| r[0].as_str().unwrap_or_default().to_owned()).collect()
+}
+
+fn stored_items(host: &Rc<RefCell<SessionsHost>>) -> Vec<Value> {
+    host.borrow().shared.get("workspaces").and_then(|w| w["items"].as_array().cloned()).unwrap_or_default()
+}
+
+fn closed(host: &Rc<RefCell<SessionsHost>>) -> bool {
+    host.borrow().effects.iter().any(|(n, _)| n == "closeOverlay")
+}
+
 #[gpui::test]
-fn sessions_save_layout_keeps_tabs_splits_and_each_agents_newest_unused_session(cx: &mut TestAppContext) {
+fn workspaces_save_keeps_tabs_splits_and_each_agents_newest_unused_session(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let mark = json!({ json!([null, "/fixture/project", "claude", "a1"]).to_string(): {"pinned":true} });
+    // The second case is a Windows folder with a space, on another machine.
     for (machine, folder, platform, cwd, list) in [
         (Value::Null, "/fixture/project", "linux", "/fixture/project", vec!["session", "list", "--json", "--", "/fixture/project"]),
         (json!("cloud"), "", "windows", "C:\\Users\\me\\my project", vec!["session", "list", "--json", "--on", "cloud", "--", "C:\\Users\\me\\my project"]),
     ] {
         let host = sessions_host(&[("list", session_list())], &[("sessions", mark.clone())]);
-        describe_sessions(cx, &staged, "mods/sessions", layout_values(machine.clone(), folder, platform, cwd), &host, "this.named('Work', cx);");
+        describe_ws(cx, &staged, layout_values(machine.clone(), folder, platform, cwd), &host, "this.save('Work', cx);");
         let h = host.borrow();
-        let key = json!([machine, folder]).to_string();
-        let mut expected = mark.clone();
-        expected[&key] = json!({"layouts":{"Work":saved_layout(cwd)}});
-        assert_eq!(h.shared["sessions"], expected, "{machine}");
-        assert_eq!(h.cores.iter().filter(|a| **a == list).count(), 1 + usize::from(machine.is_null()), "one list per folder: {:?}", h.cores);
+        assert_eq!(h.shared["workspaces"]["version"], json!(1), "{machine}");
+        let items = h.shared["workspaces"]["items"].as_array().unwrap().clone();
+        assert_eq!(items.len(), 1, "{machine}");
+        let it = &items[0];
+        assert_eq!((it["name"].clone(), it["machine"].clone(), it["folder"].clone(), it["space"].clone()), (json!("Work"), machine.clone(), json!(folder), json!("Here")));
+        assert_eq!(it["tabs"], saved_tabs(cwd), "{machine}");
+        assert!(it["id"].as_str().is_some_and(|id| !id.is_empty()) && it["created"] == it["saved"] && it["saved"].as_f64().is_some_and(|t| t > 1.0), "{it}");
+        assert_eq!(h.shared["sessions"], mark, "the Sessions panel's own value is never written");
+        assert_eq!(h.cores.iter().filter(|a| **a == list).count(), 1, "one list per folder: {:?}", h.cores);
         assert!(h.cores.iter().all(|a| a[1] == "list"), "saving resumes nothing: {:?}", h.cores);
         drop(h);
-        assert_eq!(toasts(&host), vec![json!("Saved layout “Work”")]);
+        assert_eq!(toasts(&host), vec![json!("Saved “Work”")]);
     }
 
-    // An older core lists nothing: the layout is kept, its agents without sessions.
+    // An older core lists nothing: the workspace is kept, its agents without sessions.
     let host = sessions_host(&[("list", core_error("usage"))], &[]);
-    describe_sessions(cx, &staged, "mods/sessions", layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, "this.named('Work', cx);");
-    let mut expected = saved_layout("/fixture/project");
-    expected["tabs"][0]["root"]["children"][0]["session"] = Value::Null;
-    expected["tabs"][0]["root"]["children"][1]["children"][0]["session"] = Value::Null;
-    assert_eq!(host.borrow().shared["sessions"][json!([null, "/fixture/project"]).to_string()]["layouts"]["Work"], expected);
+    describe_ws(cx, &staged, layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, "this.save('Work', cx);");
+    let mut expected = saved_tabs("/fixture/project");
+    expected[0]["root"]["children"][0]["session"] = Value::Null;
+    expected[0]["root"]["children"][1]["children"][0]["session"] = Value::Null;
+    assert_eq!(stored_items(&host)[0]["tabs"], expected);
 }
 
 #[gpui::test]
-fn sessions_save_layout_of_an_empty_space_saves_nothing(cx: &mut TestAppContext) {
+fn workspaces_save_of_an_empty_space_saves_nothing(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     for tree in [
@@ -6257,33 +6322,502 @@ fn sessions_save_layout_of_an_empty_space_saves_nothing(cx: &mut TestAppContext)
         let mut values = sessions_values(Value::Null, "/fixture/project", "linux");
         values.insert("tree".into(), tree.clone());
         let host = sessions_host(&[("list", session_list())], &[]);
-        describe_sessions(cx, &staged, "mods/sessions", values, &host, "this.named('Work', cx); this.named('', cx);");
-        assert!(!host.borrow().shared.contains_key("sessions"), "{tree}");
-        let expected = if tree.is_null() { vec![] } else { vec![json!("Nothing to save")] };
-        assert_eq!(toasts(&host), expected, "{tree}");
+        // A save that needs nothing from the core finishes in promise jobs alone, which the harness only runs when a
+        // timer wakes the script: so each save starts from a timer, the second waits for the first to be done, and a last timer lets the last one finish.
+        let setup = "cx.spawn(async (cx) => { await cx.sleep(50); this.save('Work', cx); await cx.sleep(100); this.save('', cx); await cx.sleep(100); });";
+        describe_ws(cx, &staged, values, &host, setup);
+        assert!(!host.borrow().shared.contains_key("workspaces"), "{tree}");
+        assert_eq!(toasts(&host), vec![json!("Nothing to save"); 2], "{tree}");
+        assert!(host.borrow().cores.is_empty(), "nothing to look up: {:?}", host.borrow().cores);
     }
 }
 
 #[gpui::test]
-fn sessions_save_layout_under_a_taken_name_asks_before_replacing(cx: &mut TestAppContext) {
+fn workspaces_a_save_without_a_name_takes_the_space_name_and_new_ones_go_first(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    let key = json!([null, "/fixture/project"]).to_string();
-    let old = json!({ key.clone(): {"layouts":{"Work":{"tabs":[]}, "Other":{"tabs":[]}}} });
-    let host = sessions_host(&[("list", session_list())], &[("sessions", old.clone())]);
-    describe_sessions(cx, &staged, "mods/sessions", layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, "this.named('Work', cx);");
-    let h = host.borrow();
-    assert_eq!(h.shared["sessions"], old, "nothing replaced before the answer");
-    let (_, open) = h.effects.iter().find(|(n, _)| n == "openOverlay").expect("the confirm dialog");
-    assert_eq!(open[0]["mod"], "confirm");
-    assert_eq!(open[0]["props"]["command"], json!({"name":"sessions.overwrite"}));
-    drop(h);
+    let old = [ws_item("w1", "Older", "/fixture/project", one_tab("/a")), ws_item("w2", "Oldest", "/fixture/project", one_tab("/b"))];
+    let host = sessions_host(&[("list", session_list())], &[("workspaces", ws_store(&old))]);
+    describe_ws(cx, &staged, layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, "this.save('  ', cx);");
+    let items = stored_items(&host);
+    let names: Vec<_> = items.iter().map(|i| i["name"].clone()).collect();
+    assert_eq!(names, vec![json!("Here"), json!("Older"), json!("Oldest")], "newest first, the blank name is the space's");
+    assert_eq!(&items[1..], &old[..], "the others are as they were");
+}
 
-    let host = sessions_host(&[("list", session_list())], &[("sessions", old.clone())]);
-    describe_sessions(cx, &staged, "mods/sessions", layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, "this.named('Work', cx); this.command('overwrite', cx); this.command('overwrite', cx);");
-    let expected = json!({ key: {"layouts":{"Work":saved_layout("/fixture/project"), "Other":{"tabs":[]}}} });
-    assert_eq!(host.borrow().shared["sessions"], expected);
-    assert_eq!(toasts(&host).len(), 1, "a second overwrite without a name does nothing: {:?}", toasts(&host));
+#[gpui::test]
+fn workspaces_the_sixth_save_is_refused_and_writes_nothing(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let five: Vec<Value> = (1..=5).map(|i| ws_item(&format!("w{i}"), &format!("Space {i}"), "/fixture/project", one_tab("/x"))).collect();
+    let stored = ws_store(&five);
+    let host = sessions_host(&[("list", session_list())], &[("workspaces", stored.clone())]);
+    // Refused before any core call, so it too finishes in promise jobs alone: started from a timer (see the empty-space test).
+    let setup = "cx.spawn(async (cx) => { await cx.sleep(50); this.save('Sixth', cx); await cx.sleep(100); });";
+    let tree = describe_ws(cx, &staged, layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, setup);
+    assert_eq!(host.borrow().shared["workspaces"], stored, "nothing written, none dropped");
+    assert_eq!(toasts(&host), vec![json!("5 workspaces are saved")]);
+    assert!(host.borrow().cores.is_empty(), "refused before looking anything up: {:?}", host.borrow().cores);
+    assert!(tree.contains("ws-full") && tree.contains("5 saved: delete one or save over one") && !tree.contains("ws-new"), "{tree}");
+    assert_eq!(tree.matches("ws-row-").count(), 5, "{tree}");
+
+    // Four saved: the fifth goes in; a stored list of seven shows five.
+    let host = sessions_host(&[("list", session_list())], &[("workspaces", ws_store(&five[..4]))]);
+    let tree = describe_ws(cx, &staged, layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, "this.save('Fifth', cx);");
+    assert_eq!(stored_items(&host).len(), 5);
+    assert!(tree.contains("ws-full"), "{tree}");
+    let seven: Vec<Value> = (1..=7).map(|i| ws_item(&format!("w{i}"), &format!("Space {i}"), "/fixture/project", one_tab("/x"))).collect();
+    let host = sessions_host(&[], &[("workspaces", ws_store(&seven))]);
+    let tree = describe_ws(cx, &staged, sessions_values(Value::Null, "/fixture/project", "linux"), &host, "");
+    assert_eq!(tree.matches("ws-row-").count(), 5, "{tree}");
+    assert!(tree.contains("ws-row-w5") && !tree.contains("ws-row-w6"), "the first five: {tree}");
+}
+
+#[gpui::test]
+fn workspaces_save_over_and_delete_need_a_second_click(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let items = [ws_item("w1", "Work", "/fixture/project", one_tab("/old")), ws_item("w2", "Other", "/fixture/project", one_tab("/older"))];
+    let stored = ws_store(&items);
+    let values = || layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project");
+    let try_setup = |setup: &str, cx: &mut TestAppContext| {
+        let host = sessions_host(&[("list", session_list())], &[("workspaces", stored.clone()), ("sessions", json!({"keep":1}))]);
+        let tree = describe_ws(cx, &staged, values(), &host, setup);
+        (host, tree)
+    };
+    // One click: asks in the row (no dialog), changes nothing.
+    for (setup, word) in [("this.ask('over', 'w1', cx);", "Replace?"), ("this.ask('delete', 'w1', cx);", "Delete?")] {
+        let (host, tree) = try_setup(setup, cx);
+        assert_eq!(host.borrow().shared["workspaces"], stored, "{setup}");
+        assert!(tree.contains(word), "{setup}: {tree}");
+        assert!(!host.borrow().effects.iter().any(|(n, _)| n == "openOverlay" || n == "notify"), "{setup}: {:?}", host.borrow().effects);
+    }
+    // Two clicks on "Save over": that workspace gets the shown space's tabs, keeps its id, name and creation, and moves up.
+    let (host, _) = try_setup("this.ask('over', 'w2', cx); this.ask('over', 'w2', cx); this.ask('over', 'w2', cx);", cx);
+    let saved = stored_items(&host);
+    assert_eq!(saved.iter().map(|i| i["id"].clone()).collect::<Vec<_>>(), vec![json!("w2"), json!("w1")]);
+    assert_eq!((saved[0]["name"].clone(), saved[0]["created"].clone(), saved[0]["tabs"].clone()), (json!("Other"), json!(1), saved_tabs("/fixture/project")));
+    assert!(saved[0]["saved"].as_f64().is_some_and(|t| t > 1.0), "{}", saved[0]);
+    assert_eq!(saved[1], items[0], "the other is as it was");
+    assert_eq!(toasts(&host), vec![json!("Saved “Other”")], "a third click while saving does nothing");
+    assert_eq!(host.borrow().shared["sessions"], json!({"keep":1}));
+    // Two clicks on the bin remove it; a click elsewhere in between starts the question again.
+    let (host, _) = try_setup("this.ask('delete', 'w1', cx); this.ask('delete', 'w1', cx);", cx);
+    assert_eq!(host.borrow().shared["workspaces"], ws_store(&items[1..]));
+    let (host, _) = try_setup("this.ask('delete', 'w1', cx); this.ask('delete', 'w2', cx); this.ask('over', 'w2', cx);", cx);
+    assert_eq!(host.borrow().shared["workspaces"], stored, "each click changed what was being asked");
+    let (host, _) = try_setup("this.ask('delete', 'gone', cx); this.ask('delete', 'gone', cx);", cx);
+    assert_eq!(host.borrow().shared["workspaces"], stored, "a workspace that is not there is not asked about");
+    // Deleting the last one leaves an empty list and says how to start.
+    let one = ws_store(&items[..1]);
+    let host = sessions_host(&[], &[("workspaces", one)]);
+    let tree = describe_ws(cx, &staged, values(), &host, "this.ask('delete', 'w1', cx); this.ask('delete', 'w1', cx);");
+    assert_eq!(host.borrow().shared["workspaces"], ws_store(&[]));
+    assert!(tree.contains("No workspaces yet") && tree.contains("ws-new"), "{tree}");
+}
+
+#[gpui::test]
+fn workspaces_dialog_lists_names_counts_and_asks_nothing_of_the_core_while_drawing(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let items = [ws_item("w1", "Work", "/fixture/project", saved_tabs("/fixture/project")), ws_item("w2", "One pane", "/fixture/project", one_tab("/x"))];
+    let host = sessions_host(&[], &[("workspaces", ws_store(&items))]);
+    let tree = describe_ws(cx, &staged, sessions_values(Value::Null, "/fixture/project", "linux"), &host, "");
+    for text in ["Workspaces", "ws-row-w1", "Work", "2 tabs \u{b7} 4 panes", "ws-row-w2", "One pane", "1 tab \u{b7} 1 pane", "ws-over-w1", "Save over", "ws-del-w2", "ws-new", "New\u{2026}"] {
+        assert!(tree.contains(text), "{text:?}: {tree}");
+    }
+    for line in tree.lines().filter(|l| l.contains("\"ws-row-")) {
+        assert!(line.contains(":on_click(fn)"), "a click on a row restores it: {line}");
+    }
+    let h = host.borrow();
+    assert!(h.cores.is_empty() && h.execs.is_empty(), "drawing asks the core nothing: {:?} {:?}", h.cores, h.execs);
+    assert!(!h.effects.iter().any(|(n, _)| n == "run"), "{:?}", h.effects);
+    assert_eq!(h.shared["workspaces"], ws_store(&items), "drawing writes nothing back");
+}
+
+#[gpui::test]
+fn workspaces_naming_a_new_one_asks_for_a_name_and_a_busy_dialog_turns_its_buttons_off(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = sessions_host(&[], &[("workspaces", ws_store(&[ws_item("w1", "Work", "/fixture/project", one_tab("/x"))]))]);
+    let tree = describe_ws(cx, &staged, sessions_values(Value::Null, "/fixture/project", "linux"), &host, "this.askName();");
+    assert!(tree.contains("ws-name-save") && tree.contains("ws-name-cancel") && !tree.contains("\"ws-new\""), "{tree}");
+    // While it restores, nothing can be pressed: the row, Save over and the bin are gone and the footer says so.
+    let host = sessions_host(&[], &[("workspaces", ws_store(&[ws_item("w1", "Work", "/fixture/project", one_tab("/x"))]))]);
+    host.borrow_mut().stuck = true;
+    let setup = format!("this.open({}, cx);", ws_item("w1", "Work", "/fixture/project", one_tab("/x")));
+    let (window, mut session) = load_sessions(cx, &staged, "mods/workspaces", sessions_values(Value::Null, "/fixture/project", "linux"), &host, &setup);
+    advance(cx, 100);
+    let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+    assert!(tree.contains("Restoring\u{2026}") && tree.contains("ws-busy"), "{tree}");
+    assert!(!tree.contains("ws-over-w1") && !tree.contains("ws-del-w1") && !tree.contains("ws-new"), "{tree}");
+    assert!(!tree.lines().any(|l| l.contains("\"ws-row-w1\"") && l.contains(":on_click(fn)")), "{tree}");
+    advance(cx, 11_000);
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+}
+
+#[gpui::test]
+fn workspaces_restore_into_the_open_space_selects_it_and_resumes_each_session_once(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut tabs = saved_tabs("/fixture/project");
+    // Both agents saved with one session: the second starts fresh.
+    tabs[0]["root"]["children"][1]["children"][0]["session"] = json!("a2");
+    // The saved panes' core addresses are not running here, so nothing counts as open.
+    let item = ws_item("w1", "Work", "/fixture/project", tabs);
+    let argv = json!(["claude", "--resume", "a2"]);
+    let host = sessions_host(&[("list", session_list()), ("resume", core_ok(json!({"argv":argv})))], &[("workspaces", ws_store(&[item.clone()]))]);
+    let setup = format!("this.open({item}, cx);");
+    let tree = describe_ws(cx, &staged, sessions_values(Value::Null, "/fixture/project", "linux"), &host, &setup);
+    assert_eq!(runs(&host), vec![
+        json!(["space.select", {"id":"s1"}]),
+        json!(["tab.new", {"space":"s1", "name":"Agents", "folder":"/fixture/project", "argv":argv}]),
+        json!(["pane.focus", {"pane":"rp1"}]),
+        json!(["terminal.open", {"folder":"/fixture/project", "argv":["claude", "--model", "opus"], "place":"right"}]),
+        json!(["pane.focus", {"pane":"rp2"}]),
+        json!(["terminal.open", {"folder":"/fixture/project/web", "place":"down"}]),
+        json!(["tab.new", {"space":"s1", "folder":"/fixture/project"}]),
+    ]);
+    let h = host.borrow();
+    assert_eq!(h.cores.iter().filter(|a| a[1] == "resume").cloned().collect::<Vec<_>>(), vec![vec!["session", "resume", "--json", "--", "claude", "a2"]]);
+    assert!(h.effects.iter().all(|(n, _)| n != "notify"), "{:?}", h.effects);
+    assert!(tree.contains("ws-row-w1") && tree.contains("Work"), "{tree}");
+    drop(h);
+    assert!(closed(&host), "the dialog closes when it is done");
+}
+
+#[gpui::test]
+fn workspaces_restore_skips_tabs_whose_panes_are_still_there_and_runs_the_same_program(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tabs = json!([
+        {"name":"Agents", "root":{"agent":"claude", "session":null, "argv":["claude"], "cwd":"/fixture/project", "terminal":"t1"}},
+        {"name":"", "root":{"cwd":null, "argv":["bash"], "terminal":"t4"}}
+    ]);
+    let item = ws_item("w1", "Work", "/fixture/project", tabs);
+    let values = |change: &dyn Fn(&mut Value)| {
+        let mut values = layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project");
+        values.insert("spaces".into(), json!([{"id":"s1","index":1,"name":"Here","named":true,"folder":"/fixture/project","machine":null,"branch":null,"active":true,"status":null,"tabs":[{"id":"tb1"}, {"id":"tb2"}]}]));
+        change(values.get_mut("terminals").unwrap());
+        values
+    };
+    let setup = format!("this.open({item}, cx);");
+    let tab_two = json!(["tab.new", {"space":"s1", "folder":"/fixture/project"}]);
+    let tab_one = json!(["tab.new", {"space":"s1", "name":"Agents", "folder":"/fixture/project", "argv":["claude"]}]);
+    let cases: Vec<(&str, Box<dyn Fn(&mut Value)>, Vec<Value>, Vec<Value>)> = vec![
+        // Both panes live, shown in this space, same program: nothing starts.
+        ("both open", Box::new(|_: &mut Value| {}), vec![json!(["space.select", {"id":"s1"}])], vec![json!("Already open")]),
+        // The address is reused by another program (after a reboot): that tab starts fresh.
+        ("reused address", Box::new(|t: &mut Value| t[3]["argv"] = json!(["zsh"])), vec![json!(["space.select", {"id":"s1"}]), tab_two.clone()], vec![]),
+        ("finished", Box::new(|t: &mut Value| t[3]["state"] = json!("finished")), vec![json!(["space.select", {"id":"s1"}]), tab_two.clone()], vec![]),
+        // The agent in the pane is another one.
+        ("another agent", Box::new(|t: &mut Value| t[0]["labels"] = json!({"h0x.agent":"codex"})), vec![json!(["space.select", {"id":"s1"}]), tab_one.clone()], vec![]),
+    ];
+    for (label, change, expected, toast) in cases {
+        let host = sessions_host(&[("list", session_list())], &[("workspaces", ws_store(&[item.clone()]))]);
+        describe_ws(cx, &staged, values(&*change), &host, &setup);
+        assert_eq!(runs(&host), expected, "{label}");
+        assert_eq!(toasts(&host), toast, "{label}");
+        assert!(closed(&host), "{label}");
+    }
+}
+
+#[gpui::test]
+fn workspaces_restore_makes_a_new_space_for_a_folder_that_has_none_and_adds_the_other_tabs(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tabs = json!([
+        {"name":"Main", "root":{"split":"right", "children":[
+            {"agent":"claude", "session":"a2", "argv":["claude"], "cwd":"/other", "terminal":"x1"},
+            {"cwd":"/other/web", "argv":["bash"], "terminal":"x2"}
+        ]}},
+        {"name":"", "root":{"agent":"claude", "session":"a2", "argv":["claude"], "cwd":"/other", "terminal":"x3"}}
+    ]);
+    let mut item = ws_item("w1", "Work", "/other", tabs);
+    item["space"] = json!("Other");
+    let argv = json!(["claude", "--resume", "a2"]);
+    let host = sessions_host(&[("list", session_list()), ("resume", core_ok(json!({"argv":argv})))], &[("workspaces", ws_store(&[item.clone()]))]);
+    describe_ws(cx, &staged, sessions_values(Value::Null, "/fixture/project", "linux"), &host, &format!("this.open({item}, cx);"));
+    assert_eq!(runs(&host), vec![
+        json!(["space.new", {"name":"Other", "folder":"/other", "tab":"Main", "argv":argv}]),
+        json!(["pane.focus", {"pane":"rp1"}]),
+        json!(["terminal.open", {"folder":"/other/web", "place":"right"}]),
+        json!(["tab.new", {"space":"rs1", "folder":"/other", "argv":["claude"]}]),
+    ], "the first tab makes the space, its splits grow, the rest are added; a session resumes once");
+    assert_eq!(host.borrow().cores.iter().filter(|a| a[1] == "resume").count(), 1);
+    assert!(toasts(&host).is_empty() && closed(&host));
+
+    // Another machine: the space is made there, and the session is asked of it.
+    let mut item = ws_item("w1", "Work", "", json!([{"name":"", "root":{"agent":"codex", "session":"c1", "argv":["codex"], "cwd":null, "terminal":"x1"}}]));
+    item["machine"] = json!("cloud");
+    let argv = json!(["codex", "resume", "c1"]);
+    let host = sessions_host(&[("list", session_list()), ("resume", core_ok(json!({"argv":argv})))], &[]);
+    describe_ws(cx, &staged, sessions_values(Value::Null, "/fixture/project", "linux"), &host, &format!("this.open({item}, cx);"));
+    assert_eq!(runs(&host), vec![json!(["space.new", {"name":"Here", "machine":"cloud", "argv":argv}])]);
+    assert!(host.borrow().cores.contains(&vec!["session".into(), "resume".into(), "--json".into(), "--on".into(), "cloud".into(), "--".into(), "codex".into(), "c1".into()]));
+}
+
+#[gpui::test]
+fn workspaces_restore_starts_a_missing_session_from_its_saved_command_and_never_stops(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tabs = json!([{"name":"", "root":{"split":"right", "children":[
+        {"agent":"claude", "session":"gone", "argv":["claude"], "cwd":"/fixture/project"}, {"cwd":"/fixture/project"}
+    ]}}]);
+    let item = ws_item("w1", "Work", "/fixture/project", tabs);
+    let plain = json!({"code":2, "stdout":"", "stderr":"error: unrecognized subcommand 'session'\n"});
+    for answer in [core_error("not_found"), core_error("usage"), plain] {
+        let host = sessions_host(&[("list", session_list()), ("resume", answer.clone())], &[]);
+        describe_ws(cx, &staged, sessions_values(Value::Null, "/fixture/project", "linux"), &host, &format!("this.open({item}, cx);"));
+        assert_eq!(runs(&host), vec![
+            json!(["space.select", {"id":"s1"}]),
+            json!(["tab.new", {"space":"s1", "folder":"/fixture/project", "argv":["claude"]}]),
+            json!(["pane.focus", {"pane":"rp1"}]),
+            json!(["terminal.open", {"folder":"/fixture/project", "place":"right"}]),
+        ], "{answer}");
+        assert!(toasts(&host).is_empty(), "{answer}");
+    }
+}
+
+#[gpui::test]
+fn workspaces_restore_that_never_sees_its_pane_stops_with_a_toast_and_frees_the_dialog(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let item = ws_item("w1", "Work", "/fixture/project", saved_tabs("/fixture/project"));
+    // In the open space, and in a space made for it: the app never shows what is asked.
+    for (folder, expected) in [("/fixture/project", vec!["space.select", "tab.new"]), ("/other", vec!["space.new"])] {
+        let mut item = item.clone();
+        item["folder"] = json!(folder);
+        let host = sessions_host(&[("list", session_list())], &[]);
+        host.borrow_mut().stuck = true;
+        describe_ws(cx, &staged, sessions_values(Value::Null, "/fixture/project", "linux"), &host, &format!("this.open({item}, cx); this.open({item}, cx);"));
+        assert_eq!(run_names(&host), expected, "one restore at a time, and none past a missing pane ({folder})");
+        assert_eq!(toasts(&host), vec![json!("Couldn't finish restoring")], "{folder}");
+        assert!(closed(&host), "{folder}: the dialog is not left busy");
+    }
+}
+
+#[gpui::test]
+fn workspaces_restore_passes_windows_spaced_and_dash_paths_and_ids_as_is(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let argv = json!(["claude", "--resume", "-a1"]);
+    for (machine, folder, platform) in [(Value::Null, "C:\\Users\\me\\my project", "windows"), (json!("cloud"), "/srv/my app", "linux")] {
+        let tabs = json!([{"name":"", "root":{"split":"right", "children":[
+            {"agent":"claude", "session":"-a1", "argv":["claude"], "cwd":folder}, {"cwd":"-odd dir"}
+        ]}}]);
+        let mut item = ws_item("w1", "Work", folder, tabs);
+        item["machine"] = machine.clone();
+        let host = sessions_host(&[("list", session_list()), ("resume", core_ok(json!({"argv":argv})))], &[]);
+        describe_ws(cx, &staged, sessions_values(machine.clone(), folder, platform), &host, &format!("this.open({item}, cx);"));
+        assert_eq!(runs(&host), vec![
+            json!(["space.select", {"id":"s1"}]),
+            json!(["tab.new", {"space":"s1", "folder":folder, "argv":argv}]),
+            json!(["pane.focus", {"pane":"rp1"}]),
+            json!(["terminal.open", {"folder":"-odd dir", "place":"right"}]),
+        ], "{machine}");
+        let on: Vec<String> = machine.as_str().map(|m| vec!["--on".into(), m.into()]).unwrap_or_default();
+        let resume = [vec!["session".to_string(), "resume".into(), "--json".into()], on, vec!["--".into(), "claude".into(), "-a1".into()]].concat();
+        assert_eq!(host.borrow().cores.iter().filter(|a| a[1] == "resume").cloned().collect::<Vec<_>>(), vec![resume], "{machine}");
+    }
+    // A Windows folder is the same folder in any case and with either slash.
+    let mut item = ws_item("w1", "Work", "c:/users/me/my project/", one_tab("c:/users/me/my project"));
+    item["machine"] = Value::Null;
+    let host = sessions_host(&[], &[]);
+    describe_ws(cx, &staged, sessions_values(Value::Null, "C:\\Users\\me\\my project", "windows"), &host, &format!("this.open({item}, cx);"));
+    assert_eq!(run_names(&host), vec!["space.select", "tab.new"], "found the space, not made another: {:?}", runs(&host));
+}
+
+#[gpui::test]
+fn workspaces_list_drops_what_it_cannot_restore_and_restores_the_rest(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mixed = json!([null, 5, {"name":7, "root":{"split":"down", "children":[null, {"cwd":"/a"}, "x"]}}, {"root":{"agent":5, "cwd":7, "argv":"claude"}}]);
+    let good = ws_item("mixed", "Mixed", "/fixture/project", mixed);
+    // What the dialog hands to a restore after reading it: the parts it can use.
+    let usable = ws_item("mixed", "Mixed", "/fixture/project", json!([{"name":"", "root":{"cwd":"/a"}}, {"name":"", "root":{"cwd":null}}]));
+    let stored = json!({"version":1, "items":[
+        ws_item("empty", "Empty", "/fixture/project", json!([])),
+        ws_item("null", "Null", "/fixture/project", json!([{"name":"", "root":null}])),
+        ws_item("text", "Text", "/fixture/project", json!("x")),
+        "junk", null, 5,
+        {"id":"noname", "name":"  ", "tabs":one_tab("/x")},
+        {"id":7, "name":"Seven", "tabs":one_tab("/x")},
+        good.clone()
+    ]});
+    let host = sessions_host(&[("list", session_list())], &[("workspaces", stored)]);
+    let tree = describe_ws(cx, &staged, sessions_values(Value::Null, "/fixture/project", "linux"), &host, &format!("this.open({usable}, cx);"));
+    assert_eq!(tree.matches("ws-row-").count(), 1, "{tree}");
+    assert!(tree.contains("ws-row-mixed") && tree.contains("Mixed"), "{tree}");
+    assert_eq!(runs(&host), vec![
+        json!(["space.select", {"id":"s1"}]),
+        json!(["tab.new", {"space":"s1", "folder":"/a"}]),
+        json!(["tab.new", {"space":"s1", "folder":"/fixture/project"}]),
+    ]);
+    assert!(toasts(&host).is_empty(), "{:?}", host.borrow().effects);
+    assert!(host.borrow().cores.iter().all(|a| a[1] == "list"), "{:?}", host.borrow().cores);
+}
+
+#[gpui::test]
+fn workspaces_saving_over_unusable_stored_values_keeps_no_junk(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let valid = ws_item("w1", "Keep", "/x", one_tab("/x"));
+    let tabs = one_tab("/x");
+    for (stored, kept) in [
+        (json!("text"), vec![]),
+        (json!([1, 2]), vec![]),
+        (json!(42), vec![]),
+        (Value::Null, vec![]),
+        (json!({"items":"x"}), vec![]),
+        (json!({"items":{"w1":{}}}), vec![]),
+        (json!({"version":1, "items":[null, 5, "x", {}, {"id":"", "name":"A", "tabs":tabs}, {"id":"a", "name":" ", "tabs":tabs}, {"id":"a", "name":"A", "tabs":[]}]}), vec![]),
+        // One good one among the junk stays; a repeated id keeps the first.
+        (json!({"version":1, "items":[null, valid.clone(), {"id":"w1", "name":"Twice", "tabs":tabs}]}), vec![valid.clone()]),
+    ] {
+        let host = sessions_host(&[("list", session_list())], &[("workspaces", stored.clone())]);
+        let tree = describe_ws(cx, &staged, layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, "this.save('New', cx);");
+        let items = stored_items(&host);
+        assert_eq!(&items[1..], &kept[..], "{stored}");
+        assert_eq!((items[0]["name"].clone(), items[0]["tabs"].clone()), (json!("New"), saved_tabs("/fixture/project")), "{stored}");
+        assert_eq!(host.borrow().shared["workspaces"]["version"], json!(1), "{stored}");
+        assert_eq!(tree.matches("ws-row-").count(), 1 + kept.len(), "{stored}: {tree}");
+    }
+    // What nobody saved yet reads as none: the way to start is said, and no row is drawn.
+    let host = sessions_host(&[], &[("workspaces", json!({"items":"x"}))]);
+    let tree = describe_ws(cx, &staged, sessions_values(Value::Null, "/fixture/project", "linux"), &host, "");
+    assert!(tree.contains("No workspaces yet") && !tree.contains("ws-row-"), "{tree}");
+}
+
+#[gpui::test]
+fn workspaces_named_like_unicode_quotes_or_prototype_members_round_trip(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let name = "Wörk \"α\" 'β' ✓ 日本";
+    let host = sessions_host(&[("list", session_list())], &[]);
+    let tree = describe_ws(cx, &staged, layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, &format!("this.save({}, cx);", json!(name)));
+    let items = stored_items(&host);
+    assert_eq!((items[0]["name"].clone(), items[0]["tabs"].clone()), (json!(name), saved_tabs("/fixture/project")));
+    assert_eq!(toasts(&host), vec![json!(format!("Saved “{name}”"))]);
+    assert!(tree.contains("日本") && tree.contains("ws-row-"), "{tree}");
+
+    // Names (and ids) that objects already have: saved without asking, listed, restored and deleted as themselves.
+    for word in ["constructor", "toString", "__proto__"] {
+        let host = sessions_host(&[("list", session_list())], &[]);
+        describe_ws(cx, &staged, layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, &format!("this.save({}, cx);", json!(word)));
+        assert!(!host.borrow().effects.iter().any(|(n, _)| n == "openOverlay"), "{word}: {:?}", host.borrow().effects);
+        assert_eq!(stored_items(&host)[0]["name"], json!(word));
+    }
+    let named: Vec<Value> = ["constructor", "toString", "__proto__"].iter().map(|w| ws_item(w, w, "/fixture/project", one_tab("/fixture/project"))).collect();
+    let host = sessions_host(&[], &[("workspaces", ws_store(&named))]);
+    let setup = format!("this.ask('delete', 'toString', cx); this.ask('delete', 'toString', cx); this.open({}, cx);", named[2]);
+    let tree = describe_ws(cx, &staged, sessions_values(Value::Null, "/fixture/project", "linux"), &host, &setup);
+    assert!(tree.contains("ws-row-constructor") && tree.contains("ws-row-__proto__") && !tree.contains("ws-row-toString"), "{tree}");
+    assert_eq!(host.borrow().shared["workspaces"], ws_store(&[named[0].clone(), named[2].clone()]));
+    assert_eq!(runs(&host), vec![json!(["space.select", {"id":"s1"}]), json!(["tab.new", {"space":"s1", "folder":"/fixture/project"}])]);
+}
+
+#[gpui::test]
+fn workspaces_import_the_sessions_panels_saved_layouts_once_up_to_the_limit(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let layout = json!({"tabs":[{"name":"", "root":{"cwd":"/x"}}]});
+    let local = json!([null, "/fixture/project"]).to_string();
+    let cloud = json!(["cloud", "/srv/app"]).to_string();
+    let mark = json!([null, "/fixture/project", "claude", "a1"]).to_string();
+    let old = json!({
+        local.clone(): {"layouts":{"L1":layout, "L2":layout, "L3":layout}},
+        cloud.clone(): {"layouts":{"C1":layout, "C2":layout, "C3":layout, "C4":layout}},
+        mark: {"pinned":true}, "not json": {"layouts":{"X":layout}}, "[1]": {"layouts":{"Y":layout}}
+    });
+    let values = || sessions_values(Value::Null, "/fixture/project", "linux");
+
+    // Seven layouts, five kept: one warning for the two left; the old value is untouched; it is done for good.
+    let host = sessions_host(&[], &[("sessions", old.clone())]);
+    let tree = describe_ws(cx, &staged, values(), &host, "");
+    let items = stored_items(&host);
+    assert_eq!(items.len(), 5, "{items:?}");
+    for it in &items {
+        let name = it["name"].as_str().unwrap();
+        let (machine, folder, space) = if name.starts_with('C') { (json!("cloud"), "/srv/app", "app") } else { (Value::Null, "/fixture/project", "project") };
+        assert_eq!((it["machine"].clone(), it["folder"].clone(), it["space"].clone(), it["tabs"].clone()), (machine, json!(folder), json!(space), one_tab("/x")), "{name}");
+        assert!(it["id"].as_str().is_some_and(|id| !id.is_empty()), "{it}");
+    }
+    let mut ids: Vec<_> = items.iter().map(|i| i["id"].as_str().unwrap().to_owned()).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 5, "every id is its own");
+    assert_eq!(host.borrow().shared["sessions"], old, "the old value is left as it was");
+    assert_eq!(host.borrow().shared["workspaces.imported"], json!(true));
+    assert_eq!(toasts(&host), vec![json!("2 saved layouts not imported")]);
+    assert_eq!(tree.matches("ws-row-").count(), 5, "{tree}");
+
+    // Done once: a second load adds nothing, even with layouts left.
+    let host = sessions_host(&[], &[("sessions", old.clone()), ("workspaces.imported", json!(true))]);
+    describe_ws(cx, &staged, values(), &host, "");
+    assert!(!host.borrow().shared.contains_key("workspaces") && toasts(&host).is_empty());
+
+    // The ones already saved count against the five.
+    let four: Vec<Value> = (1..=4).map(|i| ws_item(&format!("w{i}"), &format!("Space {i}"), "/fixture/project", one_tab("/x"))).collect();
+    let host = sessions_host(&[], &[("sessions", old.clone()), ("workspaces", ws_store(&four))]);
+    describe_ws(cx, &staged, values(), &host, "");
+    assert_eq!(stored_items(&host).len(), 5);
+    assert_eq!(&stored_items(&host)[..4], &four[..], "the saved ones stay first, as they were");
+    assert_eq!(toasts(&host), vec![json!("6 saved layouts not imported")]);
+
+    // One layout, no warning; nothing to import marks it done and writes no list.
+    let host = sessions_host(&[], &[("sessions", json!({ local: {"layouts":{"Only":layout}} }))]);
+    describe_ws(cx, &staged, values(), &host, "");
+    assert_eq!(stored_items(&host).len(), 1);
+    assert!(toasts(&host).is_empty());
+    let host = sessions_host(&[], &[("sessions", json!({ mark_key(): {"pinned":true} }))]);
+    describe_ws(cx, &staged, values(), &host, "");
+    assert!(!host.borrow().shared.contains_key("workspaces") && host.borrow().shared["workspaces.imported"] == json!(true));
+}
+
+fn mark_key() -> String {
+    json!([null, "/fixture/project", "claude", "a1"]).to_string()
+}
+
+#[gpui::test]
+fn the_tab_bar_has_one_workspaces_button_between_new_and_the_panels_that_opens_a_modal_dialog(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let host = sessions_host(&[], &[]);
+    let tree = describe_sessions(cx, &staged, "mods/tabs", fixture(true, props(), updates("current", "current")), &host, "");
+    assert_eq!(tree.matches("\"workspaces\"").count(), 1, "one button: {tree}");
+    let (new, button, files) = (tree.find("\"tab-new\""), tree.find("\"workspaces\""), tree.find("\"panel-files\""));
+    assert!(new.is_some() && button.is_some() && files.is_some() && new < button && button < files, "between + and Files: {tree}");
+    let line = tree.lines().find(|l| l.contains("\"workspaces\"")).unwrap();
+    assert!(line.contains(":on_click(fn)") && line.contains(".w[Number(26.0)]") && line.contains(".h[Number(26.0)]") && line.contains(":tooltip[Str(\"Workspaces\")]"), "{line}");
+    assert!(tree.contains("mods/workspaces/save.svg"), "{tree}");
+    // A click opens exactly this, once: a modal dialog 420 wide (the handler is a closure of the render, so it is read here).
+    let source = include_str!("../../defaults/mods/tabs/main.js");
+    let call = r#"openOverlay({ mod: "workspaces", kind: "dialog", modal: true, width: 420 })"#;
+    assert_eq!(source.matches(call).count(), 1);
+    assert_eq!(source.matches("mod: \"workspaces\"").count(), 1);
+    assert!(host.borrow().effects.iter().all(|(n, _)| n != "openOverlay"), "drawing opens nothing: {:?}", host.borrow().effects);
+}
+
+#[gpui::test]
+fn sessions_panel_has_no_save_layout_row_and_offers_resume_all_only_when_an_agent_stopped(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let agent = json!({"key":"claude", "agent":true, "shell":false});
+    let shell = json!({"key":"shell", "agent":false, "shell":true});
+    let mut values = sessions_values(Value::Null, "/fixture/project", "linux");
+    values.insert("spaces".into(), json!([{"id":"s1","index":1,"name":"Here","named":true,"folder":"/fixture/project","machine":null,"branch":null,"active":true,"status":null,"tabs":[{"id":"tb1"}]}]));
+    values.insert("panes".into(), json!([{"pane":"p1", "terminal":"t1", "tab":"tb1", "cwd":"/fixture/project"}]));
+    for (state, program, offered) in [("exited", &shell, true), ("live", &agent, false)] {
+        values.insert("terminals".into(), json!([{"address":"t1", "argv":["claude"], "labels":{"h0x.agent":"claude"}, "state":state, "program":program}]));
+        let host = sessions_host(&[("list", one_session())], &[]);
+        let tree = describe_sessions(cx, &staged, "mods/sessions", values.clone(), &host, "");
+        assert_eq!(tree.contains("Resume all agents") && tree.contains("sessions-resume-all"), offered, "{state}: {tree}");
+        assert!(tree.contains("Fix the build"), "{tree}");
+        for gone in ["Save layout", "sessions-save-layout", "layout-0"] {
+            assert!(!tree.contains(gone), "{gone}: {tree}");
+        }
+    }
 }
 
 #[gpui::test]
@@ -6299,106 +6833,6 @@ fn sessions_confirm_dialogs_keep_their_own_size_now_that_the_default_one_fits_it
     assert_eq!((open[0]["kind"].clone(), open[0]["width"].clone(), open[0]["height"].clone()), (json!("dialog"), json!(460), json!(210)), "{open:?}");
     assert_eq!(open[0]["props"]["buttons"].as_array().map(Vec::len), Some(2), "{open:?}");
     drop(h);
-
-    let key = json!([null, "/fixture/project"]).to_string();
-    let host = sessions_host(&[("list", session_list())], &[("sessions", json!({ key: {"layouts":{"Work":{"tabs":[]}}} }))]);
-    describe_sessions(cx, &staged, "mods/sessions", layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, "this.named('Work', cx);");
-    let h = host.borrow();
-    let (_, open) = h.effects.iter().find(|(n, _)| n == "openOverlay").expect("the replace dialog");
-    assert_eq!((open[0]["width"].clone(), open[0]["height"].clone()), (json!(420), json!(180)), "{open:?}");
-    assert!(open[0]["props"].get("buttons").is_none(), "Replace keeps the default Confirm: {open:?}");
-}
-
-#[gpui::test]
-fn sessions_layout_restore_rebuilds_tabs_and_splits_resuming_each_session_once(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
-    let staged = Staged::new();
-    let key = json!([null, "/fixture/project"]).to_string();
-    let mut layout = saved_layout("/fixture/project");
-    // Both agents saved with one session: the second starts fresh.
-    layout["tabs"][0]["root"]["children"][1]["children"][0]["session"] = json!("a2");
-    let argv = json!(["claude", "--resume", "a2"]);
-    let host = sessions_host(&[("list", session_list()), ("resume", core_ok(json!({"argv":argv})))], &[("sessions", json!({ key: {"layouts":{"Work":layout}} }))]);
-    let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "this.restore('Work', cx);");
-    assert_eq!(runs(&host), vec![
-        json!(["tab.new", {"space":"s1", "name":"Agents", "folder":"/fixture/project", "argv":argv}]),
-        json!(["pane.focus", {"pane":"rp1"}]),
-        json!(["terminal.open", {"folder":"/fixture/project", "argv":["claude", "--model", "opus"], "place":"right"}]),
-        json!(["pane.focus", {"pane":"rp2"}]),
-        json!(["terminal.open", {"folder":"/fixture/project/web", "place":"down"}]),
-        json!(["tab.new", {"space":"s1", "folder":"/fixture/project"}]),
-    ]);
-    let h = host.borrow();
-    assert_eq!(h.cores.iter().filter(|a| a[1] == "resume").cloned().collect::<Vec<_>>(), vec![vec!["session", "resume", "--json", "--", "claude", "a2"]]);
-    assert!(toasts(&host).is_empty(), "{:?}", h.effects);
-    assert!(tree.contains("Save layout…") && tree.contains("layout-0") && tree.contains("Work"), "{tree}");
-}
-
-#[gpui::test]
-fn sessions_layout_restore_starts_a_missing_session_fresh_and_never_stops(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
-    let staged = Staged::new();
-    let key = json!([null, "/fixture/project"]).to_string();
-    let layout = json!({"tabs":[{"name":"", "root":{"split":"right", "children":[
-        {"agent":"claude", "session":"gone", "argv":["claude"], "cwd":"/fixture/project"}, {"cwd":"/fixture/project"}
-    ]}}]});
-    let plain = json!({"code":2, "stdout":"", "stderr":"error: unrecognized subcommand 'session'\n"});
-    for answer in [core_error("not_found"), core_error("usage"), plain] {
-        let host = sessions_host(&[("list", session_list()), ("resume", answer.clone())], &[("sessions", json!({ key.clone(): {"layouts":{"Work":layout.clone()}} }))]);
-        describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "this.restore('Work', cx);");
-        assert_eq!(runs(&host), vec![
-            json!(["tab.new", {"space":"s1", "folder":"/fixture/project", "argv":["claude"]}]),
-            json!(["pane.focus", {"pane":"rp1"}]),
-            json!(["terminal.open", {"folder":"/fixture/project", "place":"right"}]),
-        ], "{answer}");
-        assert!(toasts(&host).is_empty(), "{answer}");
-    }
-}
-
-#[gpui::test]
-fn sessions_layout_restore_on_another_machine_asks_it_and_starts_at_its_home(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
-    let staged = Staged::new();
-    let key = json!(["cloud", ""]).to_string();
-    let layout = json!({"tabs":[{"name":"", "root":{"agent":"codex", "session":"c1", "argv":["codex"], "cwd":null}}]});
-    let argv = json!(["codex", "resume", "c1"]);
-    let host = sessions_host(&[("list", session_list()), ("resume", core_ok(json!({"argv":argv})))], &[("sessions", json!({ key: {"layouts":{"Work":layout}} }))]);
-    describe_sessions(cx, &staged, "mods/sessions", sessions_values(json!("cloud"), "", "linux"), &host, "this.restore('Work', cx);");
-    assert_eq!(runs(&host), vec![json!(["tab.new", {"space":"s1", "argv":argv}])]);
-    assert!(host.borrow().cores.contains(&vec!["session".into(), "resume".into(), "--json".into(), "--on".into(), "cloud".into(), "--".into(), "codex".into(), "c1".into()]));
-}
-
-#[gpui::test]
-fn sessions_layout_restore_that_never_sees_its_pane_stops_with_a_toast(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
-    let staged = Staged::new();
-    let key = json!([null, "/fixture/project"]).to_string();
-    let host = sessions_host(&[("list", session_list())], &[("sessions", json!({ key: {"layouts":{"Work":saved_layout("/fixture/project")}} }))]);
-    host.borrow_mut().stuck = true;
-    describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, "this.restore('Work', cx); this.restore('Work', cx);");
-    let runs = runs(&host);
-    assert_eq!(runs.len(), 1, "one restore at a time, and none past a missing pane: {runs:?}");
-    assert_eq!(toasts(&host), vec![json!("Couldn't restore the layout")]);
-}
-
-#[gpui::test]
-fn sessions_layout_delete_forgets_only_that_layout(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
-    let staged = Staged::new();
-    let key = json!([null, "/fixture/project"]).to_string();
-    let other = json!(["cloud", "/fixture/project"]).to_string();
-    let mark = json!([null, "/fixture/project", "claude", "a1"]).to_string();
-    let all = json!({ key.clone(): {"layouts":{"Work":{"tabs":[]}, "Old":{"tabs":[]}}}, other.clone(): {"layouts":{"Old":{"tabs":[]}}}, mark.clone(): {"pinned":true} });
-    for (forget, expected) in [
-        ("this.forget('Old');", json!({ key.clone(): {"layouts":{"Work":{"tabs":[]}}}, other.clone(): {"layouts":{"Old":{"tabs":[]}}}, mark.clone(): {"pinned":true} })),
-        ("this.forget('Old'); this.forget('Work');", json!({ other.clone(): {"layouts":{"Old":{"tabs":[]}}}, mark.clone(): {"pinned":true} })),
-        ("this.forget('Missing');", all.clone()),
-    ] {
-        let host = sessions_host(&[("list", session_list())], &[("sessions", all.clone())]);
-        let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, forget);
-        assert_eq!(host.borrow().shared["sessions"], expected, "{forget}");
-        assert!(tree.contains("layout-delete-0") || forget.contains("Work"), "{tree}");
-    }
 }
 
 #[gpui::test]
@@ -6558,7 +6992,7 @@ fn sessions_panel_survives_corrupt_shared_marks_layouts_and_counts(cx: &mut Test
         let host = sessions_host(&[("list", one_session())], &[("sessions", corrupt.clone()), ("sessions.count", corrupt.clone())]);
         let setup = format!("{} this.command('pin', cx);", session_target(None, "/fixture/project", "claude", "a1", "/p/a1.jsonl"));
         let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, &setup);
-        assert!(tree.contains("Fix the build") && tree.contains("Save layout…"), "{corrupt}: {tree}");
+        assert!(tree.contains("Fix the build") && !tree.contains("Save layout"), "{corrupt}: {tree}");
         let h = host.borrow();
         assert_eq!(h.shared["sessions"][&mark]["pinned"], json!(true), "{corrupt}");
         assert_eq!(h.shared["sessions.count"][&key], json!(1), "{corrupt}");
@@ -6699,78 +7133,6 @@ fn terminal_menu_offers_pane_items_only_for_a_pane_in_a_tab_and_never_on_a_sessi
 }
 
 #[gpui::test]
-fn sessions_save_layout_keeps_a_unicode_name_with_quotes_and_restores_it(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
-    let staged = Staged::new();
-    let name = "Wörk \"α\" 'β' ✓ 日本";
-    let key = json!([null, "/fixture/project"]).to_string();
-    let host = sessions_host(&[("list", session_list())], &[]);
-    let setup = format!("this.named({}, cx);", json!(name));
-    let tree = describe_sessions(cx, &staged, "mods/sessions", layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, &setup);
-    assert_eq!(host.borrow().shared["sessions"][&key]["layouts"][name], saved_layout("/fixture/project"));
-    assert_eq!(toasts(&host), vec![json!(format!("Saved layout “{name}”"))]);
-    assert!(tree.contains("日本") && tree.contains("layout-0"), "{tree}");
-
-    let layout = json!({"tabs":[{"name":name, "root":{"cwd":"/fixture/project"}}]});
-    let host = sessions_host(&[("list", session_list())], &[("sessions", json!({ key: {"layouts":{ name: layout }} }))]);
-    let setup = format!("this.restore({}, cx);", json!(name));
-    describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, &setup);
-    assert_eq!(runs(&host), vec![json!(["tab.new", {"space":"s1", "name":name, "folder":"/fixture/project"}])]);
-}
-
-#[gpui::test]
-fn sessions_save_layout_under_a_new_name_that_objects_already_have_saves_without_asking(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
-    let staged = Staged::new();
-    let key = json!([null, "/fixture/project"]).to_string();
-    for name in ["constructor", "toString", "__proto__"] {
-        let host = sessions_host(&[("list", session_list())], &[]);
-        let setup = format!("this.named({}, cx);", json!(name));
-        describe_sessions(cx, &staged, "mods/sessions", layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, &setup);
-        let h = host.borrow();
-        assert!(!h.effects.iter().any(|(n, _)| n == "openOverlay"), "{name} is not saved here yet: {:?}", h.effects);
-        assert_eq!(h.shared.get("sessions").map(|s| s[&key]["layouts"][name].clone()), Some(saved_layout("/fixture/project")), "{name}");
-    }
-}
-
-#[gpui::test]
-fn sessions_layout_restore_of_an_empty_layout_runs_nothing_and_frees_the_next_restore(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
-    let staged = Staged::new();
-    let key = json!([null, "/fixture/project"]).to_string();
-    let layouts = json!({"Empty":{"tabs":[]}, "Bare":{}, "Work":{"tabs":[{"name":"", "root":{"cwd":"/fixture/project"}}]}});
-    let host = sessions_host(&[("list", session_list())], &[("sessions", json!({ key: {"layouts":layouts} }))]);
-    let setup = "this.restore('Empty', cx); this.restore('Missing', cx); cx.spawn(async (cx) => { await cx.sleep(100); this.restore('Bare', cx); await cx.sleep(100); this.restore('Work', cx); });";
-    describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, setup);
-    assert_eq!(runs(&host), vec![json!(["tab.new", {"space":"s1", "folder":"/fixture/project"}])]);
-    assert!(toasts(&host).is_empty(), "{:?}", host.borrow().effects);
-    assert!(host.borrow().cores.iter().all(|a| a[1] == "list"), "{:?}", host.borrow().cores);
-}
-
-#[gpui::test]
-fn sessions_layout_restore_passes_windows_spaced_and_dash_paths_and_ids_as_is(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
-    let staged = Staged::new();
-    let argv = json!(["claude", "--resume", "-a1"]);
-    for (machine, folder, platform) in [(Value::Null, "C:\\Users\\me\\my project", "windows"), (json!("cloud"), "/srv/my app", "linux")] {
-        let key = json!([machine, folder]).to_string();
-        let layout = json!({"tabs":[{"name":"", "root":{"split":"right", "children":[
-            {"agent":"claude", "session":"-a1", "argv":["claude"], "cwd":folder}, {"cwd":"-odd dir"}
-        ]}}]});
-        let host = sessions_host(&[("list", session_list()), ("resume", core_ok(json!({"argv":argv})))], &[("sessions", json!({ key: {"layouts":{"Work":layout}} }))]);
-        describe_sessions(cx, &staged, "mods/sessions", sessions_values(machine.clone(), folder, platform), &host, "this.restore('Work', cx);");
-        assert_eq!(runs(&host), vec![
-            json!(["tab.new", {"space":"s1", "folder":folder, "argv":argv}]),
-            json!(["pane.focus", {"pane":"rp1"}]),
-            json!(["terminal.open", {"folder":"-odd dir", "place":"right"}]),
-        ], "{machine}");
-        let on: Vec<String> = machine.as_str().map(|m| vec!["--on".into(), m.into()]).unwrap_or_default();
-        let resume = [vec!["session".to_string(), "resume".into(), "--json".into()], on, vec!["--".into(), "claude".into(), "-a1".into()]].concat();
-        assert_eq!(host.borrow().cores.iter().filter(|a| a[1] == "resume").cloned().collect::<Vec<_>>(), vec![resume], "{machine}");
-    }
-}
-
-#[gpui::test]
 fn sessions_resume_all_agents_ignores_panes_without_an_agent_label(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
@@ -6831,68 +7193,7 @@ fn sessions_panel_beyond_its_row_limit_offers_the_rest_and_keeps_pins(cx: &mut T
     assert_eq!(host.borrow().shared["sessions.count"], json!({ json!([null, "/fixture/project"]).to_string(): 103 }), "the count is every shown session");
 }
 
-#[gpui::test]
-fn sessions_layout_restore_skips_malformed_parts_and_frees_the_next_restore(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
-    let staged = Staged::new();
-    let key = json!([null, "/fixture/project"]).to_string();
-    let layouts = json!({
-        "Null":{"tabs":[{"name":"", "root":null}]},
-        "Text":{"tabs":"x"},
-        "Junk":"x",
-        "Mixed":{"tabs":[null, 5, {"name":7, "root":{"split":"down", "children":[null, {"cwd":"/a"}, "x"]}}, {"root":{"agent":5, "cwd":7, "argv":"claude"}}]}
-    });
-    let host = sessions_host(&[("list", session_list())], &[("sessions", json!({ key: {"layouts":layouts} }))]);
-    let setup = "this.restore('Null', cx); cx.spawn(async (cx) => { await cx.sleep(100); this.restore('Text', cx); this.restore('Junk', cx); await cx.sleep(100); this.restore('Mixed', cx); });";
-    describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, setup);
-    assert_eq!(runs(&host), vec![
-        json!(["tab.new", {"space":"s1", "folder":"/a"}]),
-        json!(["tab.new", {"space":"s1", "folder":"/fixture/project"}]),
-    ]);
-    assert!(toasts(&host).is_empty(), "{:?}", host.borrow().effects);
-    assert!(host.borrow().cores.iter().all(|a| a[1] == "list"), "{:?}", host.borrow().cores);
-}
-
-#[gpui::test]
-fn sessions_save_layout_over_non_object_stored_values_keeps_no_junk(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
-    let staged = Staged::new();
-    let key = json!([null, "/fixture/project"]).to_string();
-    let other = json!(["cloud", "/srv"]).to_string();
-    for (stored, kept) in [
-        (json!("text"), json!({})),
-        (json!([1, 2]), json!({})),
-        (json!(42), json!({})),
-        (json!({ key.clone(): "x", other.clone(): {"layouts":{"Old":{"tabs":[]}}} }), json!({ other.clone(): {"layouts":{"Old":{"tabs":[]}}} })),
-        (json!({ key.clone(): {"layouts":"x"} }), json!({})),
-        (json!({ key.clone(): {"layouts":[{"tabs":[]}]} }), json!({})),
-    ] {
-        let host = sessions_host(&[("list", session_list())], &[("sessions", stored.clone())]);
-        describe_sessions(cx, &staged, "mods/sessions", layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project"), &host, "this.named('Work', cx);");
-        let mut expected = kept;
-        expected[&key] = json!({"layouts":{"Work":saved_layout("/fixture/project")}});
-        assert_eq!(host.borrow().shared["sessions"], expected, "{stored}");
-    }
-}
-
 // ADR-056: a stored map whose keys are named like Object.prototype members reaches a mod as own keys.
-#[gpui::test]
-fn sessions_layouts_named_like_prototype_members_round_trip(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
-    let staged = Staged::new();
-    let key = json!([null, "/fixture/project"]).to_string();
-    let layout = json!({"tabs":[{"name":"", "root":{"cwd":"/fixture/project"}}]});
-    let stored = json!({ key.clone(): {"layouts":{"constructor":layout, "toString":layout, "__proto__":layout}} });
-    let host = sessions_host(&[("list", session_list())], &[("sessions", stored.clone())]);
-    let setup = "this.forget('toString'); this.restore('__proto__', cx);";
-    let tree = describe_sessions(cx, &staged, "mods/sessions", sessions_values(Value::Null, "/fixture/project", "linux"), &host, setup);
-    assert!(tree.contains("constructor") && tree.contains("__proto__") && !tree.contains("toString") && tree.contains("layout-1"), "{tree}");
-    let mut expected = stored;
-    expected[&key]["layouts"].as_object_mut().unwrap().remove("toString");
-    assert_eq!(host.borrow().shared["sessions"], expected);
-    assert_eq!(runs(&host), vec![json!(["tab.new", {"space":"s1", "folder":"/fixture/project"}])]);
-}
-
 #[gpui::test]
 fn sessions_count_badge_needs_a_finite_number(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
