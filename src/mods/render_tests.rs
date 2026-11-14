@@ -9988,7 +9988,7 @@ const ACTIVITY_PROBE: &str = r#"
 import Real from './frame/settings/main.js';
 import { div } from 'gpui-kit';
 import { theme } from 'h0x';
-import { tooltip, levelOf, levelColors, minutesOf, short, summarize, gridDays, parseActivity, geometry, cellAt, monthColumns, columnRuns } from './frame/settings/activity.js';
+import { tooltip, levelOf, levelColors, minutesOf, short, summarize, gridDays, parseActivity, geometry, cellAt, monthColumns, columnRuns, tipSide, tipWidth } from './frame/settings/activity.js';
 export default class Scenario extends Real {
   render(cx) {
     const sat = new Date(2026, 10, 14);
@@ -10006,7 +10006,13 @@ export default class Scenario extends Real {
       real: gridDays(sat).flat().filter(Boolean).length,
       first: gridDays(sat)[0][0].toDateString(),
       runs: columnRuns([[1, 1, 1, 1, 1, 1, 1], [1, 1, 1, null, null, null, null]].map((w) => w.map((x) => (x ? {} : null))), [[0, 0, 2, 2, 2, 0, 3], [1, 1, 1, 0, 0, 0, 0]]),
-      geo: [geometry(634), geometry(700), geometry(NaN), geometry(10)].map((g) => ({ cell: +g.cell.toFixed(3), step: +g.step.toFixed(3), width: +g.width.toFixed(3) })),
+      fit: [634, 900, 1260].map((row) => {
+        const g = geometry(row), last = 52 * g.step;
+        const months = monthColumns(gridDays(sat));
+        return { lastEnd: last + g.cell <= g.width, centre: cellAt(last + g.cell / 2, g.cell / 2, g), lastMonthX: months.at(-1)[0] * g.step <= last, whole: Number.isInteger(g.cell) && Number.isInteger(g.step) };
+      }),
+      tip: [tipSide(0, geometry(634), 260, 634), tipSide(52, geometry(634), 260, 634), tipSide(26, geometry(634), 260, 634), tipSide(10, geometry(634), 300, 634), tipSide(2, geometry(634), 900, 634), tipWidth(['Tue 3 Nov 2026', '42 min', '3 sessions', '18.2k tokens']) > 200],
+      geo: [geometry(634), geometry(700), geometry(900), geometry(1260), geometry(NaN), geometry(10)].map((g) => ({ cell: +g.cell.toFixed(3), step: +g.step.toFixed(3), width: +g.width.toFixed(3) })),
       at: [[0, 0], [8.9, 8.9], [9.5, 3], [11, 0], [52 * 11 + 4, 6 * 11 + 4], [581, 0], [-1, 0], [26 * 11 + 2, 3 * 11 + 5], [3, 75], [NaN, 1], [2, 9.5]].map(([x, y]) => cellAt(x, y, geometry(634))),
       months: [monthColumns(gridDays(sat)).length, monthColumns(gridDays(sat))[0], monthColumns(gridDays(sat)).at(-1), monthColumns(gridDays(sat))[10]],
       parsed: [parseActivity(null), parseActivity('{not json'), parseActivity('{"version":2,"days":{}}'),
@@ -10045,14 +10051,22 @@ fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppCo
     assert_eq!(probe["parsed"], json!([{}, {}, {}, {"2026-11-03": {"seconds": 5, "sessions": 0, "tokens": 0}}]));
     // A column is runs of days in a row with the same level (days after today are not drawn).
     assert_eq!(probe["runs"], json!([[[2, 0], [3, 2], [1, 0], [1, 3]], [[3, 1]]]));
-    // One geometry: 9 px cells and a 2 px gap at the 634 px column; a wider row grows the cells to fill it
-    // (700: 53 columns of 12.245 less one gap = 647 = 700 - 53); an unknown width is the standard one; a tiny one keeps the smallest cell.
+    // One geometry, in whole pixels (a fractional size is cut when drawn): 9 px cells and a 2 px gap at the 634 px column;
+    // a wider row grows the cells (700: 10 px, the grid 634 wide, left-aligned); the clamp stops at 14 px; an unknown
+    // width is the standard one; a tiny one keeps the smallest cell.
     assert_eq!(probe["geo"], json!([
         {"cell": 9, "step": 11, "width": 581},
-        {"cell": 10.245, "step": 12.245, "width": 647},
+        {"cell": 10, "step": 12, "width": 634},
+        {"cell": 14, "step": 16, "width": 846},
+        {"cell": 14, "step": 16, "width": 846},
         {"cell": 9, "step": 11, "width": 581},
         {"cell": 6, "step": 8, "width": 422},
     ]));
+    // Whatever the width, the last column ends inside the grid, its centre is week 52, and the last month's label is not past it.
+    let fit = json!({"lastEnd": true, "centre": [52, 0], "lastMonthX": true, "whole": true});
+    assert_eq!(probe["fit"], json!([fit, fit, fit]));
+    // The tooltip goes left of the cell when it fits there, else right, else to the roomier side.
+    assert_eq!(probe["tip"], json!(["right", "left", "left", "right", "right", true]));
     // The pointer maps to the drawn cell: first, middle and last columns, rows, gaps and outside.
     assert_eq!(probe["at"], json!([[0, 0], [0, 0], null, [1, 0], [52, 6], null, null, [26, 3], null, null, null]));
     // Each month's label is over the column holding its 1st: Dec 2025 in week 3 ... Nov 2026 in week 51 (Oct in week 46).
