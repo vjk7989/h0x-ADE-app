@@ -8,7 +8,7 @@
 use crate::mods::Request;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -17,14 +17,20 @@ use std::time::Duration;
 /// The HyperOx mark, the same asset the workspace chrome ships.
 const MARK: &[u8] = include_bytes!("../defaults/mods/workspace-chrome/hyperox-mark.svg");
 // Lucide, stroke 1.5 (cook/SPEC.md section 9).
-const EXTERNAL_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>"##;
-const ERROR_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>"##;
-const GAUGE_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>"##;
-const ACTIVITY_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></svg>"##;
-const SHIELD_CHECK_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>"##;
-const GLOBE_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>"##;
-const SHIELD_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>"##;
-const ARROW_UP_RIGHT_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg>"##;
+// Duotone icons (cook/SPEC-v2.md section 5): a soft fill layer and a line layer, painted in two tints.
+const TOKENS_FILL: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000"><rect x="3" y="4" width="18" height="4.5" rx="2.25"/></svg>"##;
+const TOKENS_LINE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4.5" rx="2.25"/><rect x="5.5" y="10.25" width="13" height="4.5" rx="2.25"/><rect x="8.5" y="16.5" width="7" height="4.5" rx="2.25"/></svg>"##;
+const OBSERVE_FILL: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000"><rect x="3" y="4.5" width="18" height="15" rx="3.5"/></svg>"##;
+const OBSERVE_LINE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="3.5"/><path d="M6.5 14h2.5l1.75-4 2.5 7 1.75-3H17.5"/><circle cx="17.5" cy="14" r="1.25" fill="#000" stroke="none"/></svg>"##;
+const PII_FILL: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000"><path d="M12 3 5 5.8v5.4c0 4.6 2.9 8.1 7 9.8 4.1-1.7 7-5.2 7-9.8V5.8z"/></svg>"##;
+const PII_LINE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 5.8v5.4c0 4.6 2.9 8.1 7 9.8 4.1-1.7 7-5.2 7-9.8V5.8z"/><path d="M9.5 15.5h5"/><circle cx="9" cy="11.5" r="1.1" fill="#000" stroke="none"/><circle cx="12" cy="11.5" r="1.1" fill="#000" stroke="none"/><circle cx="15" cy="11.5" r="1.1" fill="#000" stroke="none"/></svg>"##;
+const GLOBE_FILL: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000"><circle cx="12" cy="12" r="9"/></svg>"##;
+const GLOBE_LINE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.6 2.5 3.9 5.5 3.9 9s-1.3 6.5-3.9 9c-2.6-2.5-3.9-5.5-3.9-9S9.4 5.5 12 3z"/></svg>"##;
+const CHAIN_FILL: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000"><path d="M8 3.5 13 6.3v5.6L8 14.7 3 11.9V6.3z"/></svg>"##;
+const CHAIN_LINE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3.5 13 6.3v5.6L8 14.7 3 11.9V6.3z"/><path d="M3 6.3 8 9.1l5-2.8M8 9.1v5.6"/><path d="M16 11.2 21 14v5.6l-5 2.8-5-2.8V17"/><path d="M16 16.8l5-2.8M16 16.8v5.6"/></svg>"##;
+const OPEN_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>"##;
+const ARROW_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg>"##;
+const ALERT_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4.5"/><circle cx="12" cy="16" r="1" fill="#000" stroke="none"/></svg>"##;
 /// An arc of 270 degrees.
 const SPIN_ARC: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round"><path d="M12 3a9 9 0 1 1-9 9"/></svg>"##;
 
@@ -32,8 +38,10 @@ const TAGLINE: &str = "Your one-stop ADE for development, security and observabi
 const SIGN_IN: &str = "Sign in with your browser";
 const TRY_AGAIN: &str = "Try again";
 const PERKS_LEAD: &str = "Signing in turns on";
-const PERKS: [(&[u8], &str); 3] =
-    [(GAUGE_ICON, "Token saving"), (ACTIVITY_ICON, "Observability engine"), (SHIELD_CHECK_ICON, "Blockchain security for PII masking")];
+/// The line layer of each perk's icon and its name; `PERK_FILLS` holds the fill layers, `PERK_IDS` the tile ids.
+const PERKS: [(&[u8], &str); 3] = [(TOKENS_LINE, "Token saving"), (OBSERVE_LINE, "Observability engine"), (PII_LINE, "Blockchain security for PII masking")];
+const PERK_FILLS: [&[u8]; 3] = [TOKENS_FILL, OBSERVE_FILL, PII_FILL];
+const PERK_IDS: [&str; 3] = ["feat-tokens", "feat-observe", "feat-pii"];
 /// One line under each perk (the owner has seen them), in the same order.
 const BENEFITS: [&str; 3] =
     ["Leaner prompts, so agent sessions use fewer tokens.", "See what each agent ran, changed and spent.", "Personal data is masked before it leaves this computer."];
@@ -103,19 +111,23 @@ pub struct SignIn {
     skip_focus: FocusHandle,
     /// Code-texture ticks since the window opened (it only moves while `rain_runs`).
     frame: u64,
-    /// The card's bounds from the last paint: the texture keeps clear of it.
-    card: Rc<Cell<Option<Bounds<Pixels>>>>,
     rain: Rc<RefCell<RainPaint>>,
 }
 
-/// The window height: 640, or less on a short screen (visible height minus 80, never below 460).
+/// The window height: 760, or less on a short screen (visible height minus 80, never below 460).
 fn window_height(visible: Option<f32>) -> f32 {
-    visible.filter(|h| !h.is_nan()).map_or(640.0, |h| (h - 80.0).clamp(460.0, 640.0))
+    visible.filter(|h| !h.is_nan()).map_or(760.0, |h| (h - 80.0).clamp(460.0, 760.0))
 }
 
-/// The window's size: 760 wide, `window_height` high.
-fn window_size(height: f32) -> Size<Pixels> {
-    size(px(760.0), px(height))
+/// The window width: 1040, or less on a narrow screen (visible width minus 80, never below 620).
+/// From 900 wide and 680 high the screen shows the regular grid, below that the compact one.
+fn window_width(visible: Option<f32>) -> f32 {
+    visible.filter(|w| !w.is_nan()).map_or(1040.0, |w| (w - 80.0).clamp(620.0, 1040.0))
+}
+
+/// The window's size on a screen with `visible` room (width, height).
+fn window_size(visible: Option<(f32, f32)>) -> Size<Pixels> {
+    size(px(window_width(visible.map(|v| v.0))), px(window_height(visible.map(|v| v.1))))
 }
 
 /// Not resizable: that also takes away the maximize box, the double-click and Win+Up maximize.
@@ -143,10 +155,10 @@ pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver
     let person = crate::settings::load_person().unwrap_or_default();
     let system_dark = matches!(cx.window_appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark);
     crate::settings::set(theme_settings(&person, system_dark));
-    let height = window_height(cx.primary_display().map(|d| f32::from(d.visible_bounds().size.height)));
+    let visible = cx.primary_display().map(|d| (f32::from(d.visible_bounds().size.width), f32::from(d.visible_bounds().size.height)));
     // The operating system's reduced-motion setting, for the code texture.
     gpui_base::apply_system_reduce_motion(cx);
-    let options = window_options(WindowBounds::Windowed(Bounds::centered(None, window_size(height), cx)));
+    let options = window_options(WindowBounds::Windowed(Bounds::centered(None, window_size(visible), cx)));
     cx.open_window(options, |window, cx| {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -159,7 +171,6 @@ pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver
             focus,
             skip_focus,
             frame: 0,
-            card: Rc::new(Cell::new(None)),
             rain: Rc::new(RefCell::new(RainPaint::default())),
         });
         view.update(cx, |_, cx| {
@@ -332,29 +343,61 @@ fn hints(state: State) -> [(&'static str, &'static str); 2] {
 
 // ---- layout ---------------------------------------------------------------------------------
 
-/// How the screen is arranged at a window size (cook/SPEC.md "Large sizes").
+/// The grid of tiles at a window size (cook/SPEC-v2.md section 1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Mode {
+    /// 3 columns of 288, the hero over two of them.
+    Regular,
+    /// One narrow column of tiles, no mark and no code band.
+    Compact,
+}
+
 #[derive(Debug, PartialEq)]
 struct Layout {
+    mode: Mode,
+    /// Every size, radius, font size and gap is multiplied by this (1.12 from 1600 x 950).
+    scale: f32,
     /// Height of the code band.
     band: f32,
-    /// The side column (mark and links) and the code texture show from 700 wide.
-    side: bool,
+    /// The code texture draws only in the regular layout: in the compact one the tiles cover it.
     rain: bool,
-    /// Taller than 700: the card group sits in the middle above the band, else at the top.
-    centered: bool,
-    /// Left padding of the footer, in line with the group's left edge.
-    footer_left: f32,
 }
 
 fn layout(width: f32, height: f32) -> Layout {
-    let k = if height <= 700.0 { 0.40 } else { 0.22 };
+    let mode = if width >= 900.0 && height >= 680.0 { Mode::Regular } else { Mode::Compact };
+    let k = if height <= 700.0 { 0.40 } else { 0.24 };
     Layout {
+        mode,
+        scale: if mode == Mode::Regular && width >= 1600.0 && height >= 950.0 { 1.12 } else { 1.0 },
         band: ((height - 44.0) * k).round().clamp(120.0, 260.0),
-        side: width >= 700.0,
-        rain: width >= 700.0,
-        centered: height > 700.0,
-        footer_left: 28.0_f32.max((width - 920.0) / 2.0 + 28.0),
+        rain: mode == Mode::Regular,
     }
+}
+
+/// The regular grid, in px at scale 1: three columns, the hero 312 high, the lead line, the feature row.
+const COL: f32 = 288.0;
+const GAP: f32 = 12.0;
+const HERO_H: f32 = 312.0;
+const LEAD_H: f32 = 16.0;
+const FEATURE_H: f32 = 148.0;
+const GRID_W: f32 = 3.0 * COL + 2.0 * GAP;
+const GRID_H: f32 = HERO_H + GAP + LEAD_H + GAP + FEATURE_H;
+
+/// The five tiles of the regular grid in window coordinates as (left, top, right, bottom): hero, mark,
+/// then the three features. The grid is centred, 3% of the window height below the middle.
+fn tile_rects(width: f32, height: f32, scale: f32) -> [(f32, f32, f32, f32); 5] {
+    let (x0, y0) = ((width - GRID_W * scale) / 2.0, height / 2.0 + 0.03 * height - GRID_H * scale / 2.0);
+    let rect = |col: f32, row_top: f32, cols: f32, h: f32| {
+        let (left, top) = (x0 + col * (COL + GAP) * scale, y0 + row_top * scale);
+        (left, top, left + (cols * COL + (cols - 1.0) * GAP) * scale, top + h * scale)
+    };
+    let features = HERO_H + GAP + LEAD_H + GAP;
+    [rect(0.0, 0.0, 2.0, HERO_H), rect(2.0, 0.0, 1.0, HERO_H), rect(0.0, features, 1.0, FEATURE_H), rect(1.0, features, 1.0, FEATURE_H), rect(2.0, features, 1.0, FEATURE_H)]
+}
+
+/// The compact grid's width: 712, or the window less 16 on each side.
+fn compact_width(window_width: f32) -> f32 {
+    712.0_f32.min(window_width - 32.0)
 }
 
 // ---- the code texture ------------------------------------------------------------------------
@@ -482,7 +525,7 @@ struct RainPaint {
     cell_w: Option<f32>,
 }
 
-fn paint_rain(state: &Rc<RefCell<RainPaint>>, card: Option<Bounds<Pixels>>, light: bool, frame: u64, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+fn paint_rain(state: &Rc<RefCell<RainPaint>>, tiles: &[(f32, f32, f32, f32)], light: bool, frame: u64, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
     let mut guard = state.borrow_mut();
     let s = &mut *guard;
     let size_px = px(GLYPH_SIZE);
@@ -495,13 +538,12 @@ fn paint_rain(state: &Rc<RefCell<RainPaint>>, card: Option<Bounds<Pixels>>, ligh
     if s.rain.as_ref().is_none_or(|(k, _)| *k != (cols, rows)) {
         s.rain = Some(((cols, rows), Rain::new(cols, rows)));
     }
-    let card = card.map(|b| (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.origin.x + b.size.width), f32::from(b.origin.y + b.size.height)));
     let (left, top) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
     for c in 0..cols {
         for r in 0..rows {
             let Some((glyph, strength)) = s.rain.as_ref().and_then(|(_, rain)| rain.cell(c, r, frame)) else { continue };
             let (x, y) = (c as f32 * cell_w + 1.0, r as f32 * CELL_H);
-            let distance = card.map_or(f32::MAX, |card| card_distance((left + x, top + y, cell_w, CELL_H), card));
+            let distance = tiles.iter().map(|tile| card_distance((left + x, top + y, cell_w, CELL_H), *tile)).fold(f32::MAX, f32::min);
             let alpha = strength * cell_weight(y, band, distance, light);
             let level = (alpha * 100.0).round() as u8;
             if level == 0 {
@@ -518,12 +560,12 @@ fn paint_rain(state: &Rc<RefCell<RainPaint>>, card: Option<Bounds<Pixels>>, ligh
 
 // ---- the dot-matrix mark ---------------------------------------------------------------------
 
-const DOT_BOX: (f32, f32) = (96.0, 113.0);
-const DOT_STEP: f32 = 4.0;
-const DOT_RADIUS: f32 = 1.35;
+const DOT_BOX: (f32, f32) = (120.0, 141.0);
+const DOT_STEP: f32 = 5.0;
+const DOT_RADIUS: f32 = 1.6;
 
 /// The centres of the dots that draw the mark: its outline (read from the shipped SVG, straight
-/// lines only) sampled on a 4 px grid in a 96 x 113 box, every point inside it (even-odd).
+/// lines only) sampled on a 5 px grid in a 120 x 141 box, every point inside it (even-odd).
 fn mark_dots() -> &'static [(f32, f32)] {
     static DOTS: std::sync::OnceLock<Vec<(f32, f32)>> = std::sync::OnceLock::new();
     DOTS.get_or_init(|| dots_in(std::str::from_utf8(MARK).unwrap_or_default()))
@@ -610,88 +652,160 @@ fn ring() -> Vec<BoxShadow> {
     vec![BoxShadow::new(px(0.0), px(0.0), c("ring")).spread_radius(px(4.0)), BoxShadow::new(px(0.0), px(0.0), c("background")).spread_radius(px(2.0))]
 }
 
-/// A 34px button with a focus ring while it has focus (not `focus_visible`: the ring must not hide after a mouse move).
-fn button(id: &'static str, label: &'static str, primary: bool, icon: Option<&'static [u8]>) -> Stateful<Div> {
-    let ring = ring();
-    let ink = if primary { c("solid_foreground") } else { c("foreground") };
+/// A size at the layout's scale.
+fn z(v: f32, s: f32) -> Pixels {
+    px(v * s)
+}
+
+/// A veil over the glass: white at `dark` on dark themes, black at `lite` on light ones.
+fn veil(light: bool, dark: f32, lite: f32) -> Hsla {
+    if light { black().opacity(lite) } else { white().opacity(dark) }
+}
+
+/// A layer filling its parent, with the parent's corners.
+fn inset(radius: Pixels) -> Div {
+    div().absolute().top(px(0.0)).left(px(0.0)).right(px(0.0)).bottom(px(0.0)).rounded(radius)
+}
+
+/// A glass tile: no backdrop blur in GPUI, so a translucent fill over the wash and the code band, a sheen,
+/// a hairline edge, a highlight along the top and a soft drop shadow (cook/SPEC-v2.md section 2).
+fn glass(id: &'static str, radius: f32, s: f32, light: bool) -> Stateful<Div> {
+    let r = z(radius, s);
+    let mut tile = div().id(id).relative().rounded(r).border_1().border_color(veil(light, 0.10, 0.07));
+    tile.style().box_shadow = Some(if light {
+        vec![
+            BoxShadow::new(px(0.0), z(24.0, s), black().opacity(0.20)).blur_radius(z(60.0, s)).spread_radius(z(-28.0, s)),
+            BoxShadow::new(px(0.0), z(1.0, s), black().opacity(0.06)).blur_radius(z(2.0, s)),
+        ]
+    } else {
+        vec![
+            BoxShadow::new(px(0.0), z(24.0, s), black().opacity(0.70)).blur_radius(z(60.0, s)).spread_radius(z(-24.0, s)),
+            BoxShadow::new(px(0.0), z(1.0, s), black().opacity(0.30)).blur_radius(z(2.0, s)),
+        ]
+    });
+    let (top, bottom) = if light { (0.80, 0.55) } else { (0.075, 0.030) };
+    tile.when(!light, |d| d.child(inset(r).bg(c("raised").opacity(0.55))))
+        .child(inset(r).bg(linear_gradient(180.0, linear_color_stop(white().opacity(top), 0.0), linear_color_stop(white().opacity(bottom), 1.0))))
+        .child(div().absolute().top(px(0.0)).left(r).right(r).h(px(1.0)).bg(if light { white() } else { white().opacity(0.20) }))
+}
+
+/// A duotone icon: its soft fill layer under its line layer, one tint at two strengths.
+fn duo(fill: &'static [u8], line: &'static [u8], size: Pixels, color: Hsla) -> Div {
     div()
-        .id(id)
-        .tab_index(0)
-        .h(px(34.0))
-        .px(px(14.0))
-        .flex()
+        .relative()
         .flex_none()
-        .items_center()
-        .gap(px(6.0))
-        .rounded(px(9.0))
-        .border_1()
-        .cursor_pointer()
-        .text_size(px(13.0))
-        .font_weight(FontWeight::MEDIUM)
-        .when(primary, |d| d.bg(c("solid")).border_color(c("solid")).text_color(c("solid_foreground")).hover(|s| s.opacity(0.9)))
-        .when(!primary, |d| {
-            d.bg(c("foreground").opacity(0.06)).border_color(c("foreground").opacity(0.12)).text_color(c("foreground")).hover(|s| s.bg(c("foreground").opacity(0.10)))
-        })
-        .focus(move |mut s| {
-            s.box_shadow = Some(ring);
-            s
-        })
-        .child(label)
-        .when_some(icon, |d, icon| d.child(svg().data(icon).size(px(14.0)).flex_none().text_color(ink)))
+        .size(size)
+        .child(svg().data(fill).absolute().size_full().text_color(color.opacity(0.18)))
+        .child(svg().data(line).absolute().size_full().text_color(color))
 }
 
 fn open_url(url: &'static str) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
     move |_, _, _| crate::links::open(&crate::links::Target::Url(url.to_string()))
 }
 
-/// A footer credit (a narrow window has no side column): the domain, underlined.
-fn credit(id: &'static str, domain: &'static str, url: &'static str) -> Stateful<Div> {
-    div()
+/// The main action: a solid button with a lit top edge and a soft lift, and the focus ring while it has focus
+/// (not `focus_visible`: the ring must not hide after a mouse move).
+fn primary_button(id: &'static str, label: &'static str, s: f32) -> Stateful<Div> {
+    let lift = BoxShadow::new(px(0.0), z(8.0, s), c("solid").opacity(0.7)).blur_radius(z(20.0, s)).spread_radius(z(-10.0, s));
+    let mut focused = ring();
+    focused.push(lift.clone());
+    let mut button = div()
         .id(id)
         .tab_index(0)
+        .relative()
+        .h(z(40.0, s))
+        .px(z(18.0, s))
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(z(7.0, s))
+        .rounded(z(12.0, s))
+        .border_1()
+        .border_color(c("solid"))
+        .bg(c("solid"))
+        .text_color(c("solid_foreground"))
         .cursor_pointer()
-        .font_family(crate::settings::DEFAULT_FONT)
-        .text_color(c("foreground"))
-        .underline()
-        .focus(|mut s| {
-            s.box_shadow = Some(ring());
-            s
-        })
-        .on_click(open_url(url))
-        .child(domain)
+        .text_size(z(14.0, s))
+        .font_weight(FontWeight::MEDIUM)
+        .hover(|d| d.opacity(0.92))
+        .focus(move |mut d| {
+            d.box_shadow = Some(focused);
+            d
+        });
+    button.style().box_shadow = Some(vec![lift]);
+    button
+        .child(div().absolute().top(px(0.0)).left(z(12.0, s)).right(z(12.0, s)).h(px(1.0)).bg(white().opacity(0.25)))
+        .child(label)
+        .child(svg().data(OPEN_ICON).size(z(15.0, s)).flex_none().text_color(c("solid_foreground")))
 }
 
-/// A hairline row of the side column: icon, the domain over what it is, an arrow.
-fn link_row(id: &'static str, icon: &'static [u8], domain: &'static str, note: &'static str, url: &'static str) -> Stateful<Div> {
+/// Cancel and Skip: a quiet glass button.
+fn quiet_button(id: &'static str, label: &'static str, s: f32, light: bool) -> Stateful<Div> {
+    let ring = ring();
     div()
         .id(id)
         .tab_index(0)
-        .self_stretch()
+        .h(z(34.0, s))
+        .px(z(14.0, s))
+        .flex()
+        .flex_none()
+        .items_center()
+        .rounded(z(10.0, s))
+        .border_1()
+        .border_color(veil(light, 0.12, 0.10))
+        .bg(veil(light, 0.06, 0.04))
+        .text_color(c("foreground"))
+        .cursor_pointer()
+        .text_size(z(13.0, s))
+        .font_weight(FontWeight::MEDIUM)
+        .hover(move |d| d.bg(veil(light, 0.10, 0.07)))
+        .focus(move |mut d| {
+            d.box_shadow = Some(ring);
+            d
+        })
+        .child(label)
+}
+
+/// A link of the mark tile: an icon box, the domain over what it is, an arrow.
+#[allow(clippy::too_many_arguments)]
+fn link_row(id: &'static str, fill: &'static [u8], line: &'static [u8], domain: &'static str, note: &'static str, url: &'static str, s: f32, light: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .tab_index(0)
+        .h(z(52.0, s))
+        .px(z(8.0, s))
         .flex()
         .items_center()
-        .gap(px(10.0))
-        .px(px(2.0))
-        .py(px(9.0))
+        .gap(z(10.0, s))
+        .rounded(z(14.0, s))
         .cursor_pointer()
-        .hover(|s| s.bg(c("foreground").opacity(0.04)))
-        .focus(|mut s| {
-            s.box_shadow = Some(ring());
-            s
+        .hover(move |d| d.bg(veil(light, 0.05, 0.04)))
+        .focus(|mut d| {
+            d.box_shadow = Some(ring());
+            d
         })
         .on_click(open_url(url))
-        .child(svg().data(icon).size(px(15.0)).flex_none().text_color(c("muted")))
+        .child(
+            div()
+                .size(z(34.0, s))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(z(10.0, s))
+                .border_1()
+                .border_color(veil(light, 0.08, 0.07))
+                .bg(veil(light, 0.05, 0.03))
+                .child(duo(fill, line, z(18.0, s), c("muted"))),
+        )
         .child(
             div()
                 .flex_1()
                 .min_w(px(0.0))
-                .child(div().font_family(crate::settings::DEFAULT_FONT).text_size(px(12.0)).line_height(px(16.0)).text_color(c("foreground")).child(domain))
-                .child(div().text_size(px(11.5)).line_height(px(16.0)).text_color(c("muted")).child(note)),
+                .child(div().font_family(crate::settings::DEFAULT_FONT).text_size(z(12.5, s)).line_height(z(16.0, s)).text_color(c("foreground")).child(domain))
+                .child(div().text_size(z(11.5, s)).line_height(z(15.0, s)).text_color(c("muted")).child(note)),
         )
-        .child(svg().data(ARROW_UP_RIGHT_ICON).size(px(13.0)).flex_none().text_color(c("dim")))
-}
-
-fn rule() -> Div {
-    div().h(px(1.0)).self_stretch().bg(c("foreground").opacity(0.09))
+        .child(svg().data(ARROW_ICON).size(z(14.0, s)).flex_none().text_color(c("dim")))
 }
 
 fn spinner() -> Div {
@@ -702,20 +816,47 @@ fn spinner() -> Div {
     ))
 }
 
-/// The soft tint behind the card: ten stacked ellipses, each a tenth of the peak, from the full size down to a tenth.
-fn wash(tint: Hsla, peak: f32) -> Div {
-    let (w, h) = (620.0_f32, 520.0_f32);
-    div().absolute().left(px(-60.0)).top(px(-40.0)).w(px(w)).h(px(h)).children((0..10).map(move |i| {
+/// The soft tint behind the grid: ten stacked ellipses centred on (`cx`, `cy`), each a tenth of the peak, from the full size down to a tenth.
+fn wash(tint: Hsla, peak: f32, cx: f32, cy: f32, w: f32, h: f32) -> Div {
+    div().absolute().left(px(cx - w / 2.0)).top(px(cy - h / 2.0)).w(px(w)).h(px(h)).children((0..10).map(move |i| {
         let k = 1.0 - i as f32 * 0.1;
         let (lw, lh) = (w * k, h * k);
         div().absolute().left(px((w - lw) / 2.0)).top(px((h - lh) / 2.0)).w(px(lw)).h(px(lh)).rounded(px(999.0)).bg(tint.opacity(peak / 10.0))
     }))
 }
 
+/// A feature tile: a tinted icon box, then the name and what it does at the bottom.
+fn feature(i: usize, s: f32, compact: bool, tint: Hsla, light: bool) -> Stateful<Div> {
+    let (pad, icon_box, icon, name, name_lh, benefit, benefit_lh) = if compact { (14.0, 32.0, 20.0, 13.0, 17.0, 11.5, 15.0) } else { (18.0, 44.0, 24.0, 14.0, 19.0, 12.5, 17.0) };
+    glass(PERK_IDS[i], 22.0, s, light)
+        .flex()
+        .flex_col()
+        .px(z(pad, s))
+        .pt(z(pad, s))
+        .pb(z(pad - 2.0, s))
+        .child(
+            div()
+                .size(z(icon_box, s))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(z(if compact { 10.0 } else { 12.0 }, s))
+                .bg(tint.opacity(0.10))
+                .border_1()
+                .border_color(tint.opacity(0.22))
+                .child(duo(PERK_FILLS[i], PERKS[i].0, z(icon, s), tint)),
+        )
+        .child(div().flex_1())
+        .child(div().text_size(z(name, s)).line_height(z(name_lh, s)).font_weight(FontWeight::SEMIBOLD).text_color(c("foreground")).child(PERKS[i].1))
+        .child(div().mt(z(3.0, s)).text_size(z(benefit, s)).line_height(z(benefit_lh, s)).text_color(c("muted")).child(BENEFITS[i]))
+}
+
 impl Render for SignIn {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (width, height) = (f32::from(window.viewport_size().width), f32::from(window.viewport_size().height));
         let lay = layout(width, height);
+        let (s, compact) = (lay.scale, lay.mode == Mode::Compact);
         let (light, tint) = (light(), tint());
         let view = content(self.state);
         let idle = matches!(self.state, State::Idle);
@@ -726,14 +867,13 @@ impl Render for SignIn {
             };
             let lead = match status {
                 Status::Waiting => spinner().into_any_element(),
-                Status::Error(_) => svg().data(ERROR_ICON).flex_none().size(px(14.0)).mt(px(3.0)).text_color(c("blocked")).into_any_element(),
+                Status::Error(_) => svg().data(ALERT_ICON).flex_none().size(px(15.0)).mt(px(2.0)).text_color(c("blocked")).into_any_element(),
             };
             div()
                 .self_stretch()
-                .mb(px(6.0))
                 .px(px(12.0))
                 .py(px(10.0))
-                .rounded(px(10.0))
+                .rounded(px(12.0))
                 .flex()
                 .gap(px(10.0))
                 .items_start()
@@ -752,177 +892,152 @@ impl Render for SignIn {
                         .when_some(body, |d, body| d.child(div().text_size(px(13.0)).line_height(px(20.0)).text_color(c("muted")).child(body))),
                 )
         });
-        let narrow = !lay.side;
-        let perks = PERKS.iter().zip(BENEFITS).map(|((icon, label), benefit)| {
-            div()
-                .flex()
-                .gap(px(12.0))
-                .when(narrow, |d| d.items_center())
-                .when(!narrow, |d| d.items_start())
-                .child(
-                    div()
-                        .size(px(if narrow { 26.0 } else { 30.0 }))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(tint.opacity(0.30))
-                        .child(svg().data(*icon).size(px(16.0)).text_color(tint)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(div().text_size(px(13.5)).line_height(px(18.0)).font_weight(FontWeight::SEMIBOLD).text_color(c("foreground")).child(*label))
-                        .when(!narrow, |d| d.child(div().text_size(px(12.5)).line_height(px(17.0)).text_color(c("muted")).child(benefit))),
-                )
-        });
-        let card_bounds = self.card.clone();
-        let mut card = div()
-            .id("signin-card")
-            .relative()
-            .w(px(440.0))
-            .flex_none()
-            .max_h(px(height - 36.0 - 28.0))
-            .overflow_y_scroll()
-            .px(px(24.0))
-            .pt(px(22.0))
-            .pb(px(20.0))
+
+        // The hero: title, what the app is, the sign-in action and, until a sign-in is under way, Skip.
+        let (pad_x, pad_top, pad_bottom, title, title_lh) = if compact { (26.0, 24.0, 20.0, 26.0, 32.0) } else { (32.0, 30.0, 26.0, 32.0, 38.0) };
+        let hero = glass("signin-card", if compact { 22.0 } else { 26.0 }, s, light)
             .flex()
             .flex_col()
-            .rounded(px(18.0))
-            .border_1()
-            .border_color(c("foreground").opacity(0.20));
-        card.style().box_shadow = Some(vec![
-            BoxShadow::new(px(0.0), px(30.0), black().opacity(if light { 0.22 } else { 0.65 })).blur_radius(px(60.0)).spread_radius(px(-20.0)),
-            BoxShadow::new(px(0.0), px(2.0), black().opacity(if light { 0.08 } else { 0.30 })).blur_radius(px(8.0)),
-        ]);
-        let card = card
-            // The frost: a translucent fill with a sheen on top, then the highlight line.
-            .child(div().absolute().top(px(0.0)).left(px(0.0)).right(px(0.0)).bottom(px(0.0)).rounded(px(18.0)).bg(c("raised").opacity(if light { 0.70 } else { 0.58 })))
-            .when(!light, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .top(px(0.0))
-                        .left(px(0.0))
-                        .right(px(0.0))
-                        .bottom(px(0.0))
-                        .rounded(px(18.0))
-                        .bg(linear_gradient(180.0, linear_color_stop(white().opacity(0.09), 0.0), linear_color_stop(white().opacity(0.0), 0.4))),
-                )
-            })
-            .child(div().absolute().top(px(0.0)).left(px(14.0)).right(px(14.0)).h(px(1.0)).bg(white().opacity(if light { 0.9 } else { 0.32 })))
-            .child(canvas(
-                |bounds, _, _| bounds,
-                move |_, bounds, window, _| {
-                    // The texture keeps clear of the card: when it moved or resized, paint once more.
-                    if card_bounds.get() != Some(bounds) {
-                        card_bounds.set(Some(bounds));
-                        window.refresh();
-                    }
-                },
-            )
-            .absolute()
-            .top(px(0.0))
-            .left(px(0.0))
-            .right(px(0.0))
-            .bottom(px(0.0)))
-            .child(div().text_size(px(26.0)).line_height(px(32.0)).font_weight(FontWeight::SEMIBOLD).text_color(c("foreground")).child("Welcome to HyperOx"))
-            .child(div().mt(px(6.0)).text_size(px(13.5)).line_height(px(20.0)).whitespace_nowrap().text_color(c("muted")).child(TAGLINE))
+            .px(z(pad_x, s))
+            .pt(z(pad_top, s))
+            .pb(z(pad_bottom, s))
+            .when(compact, |d| d.w_full())
+            .when(!compact, |d| d.flex_none().w(z(2.0 * COL + GAP, s)).h(z(HERO_H, s)))
+            .child(div().text_size(z(title, s)).line_height(z(title_lh, s)).font_weight(FontWeight::SEMIBOLD).text_color(c("foreground")).child("Welcome to HyperOx"))
+            .child(div().mt(z(8.0, s)).max_w(z(470.0, s)).text_size(z(14.5, s)).line_height(z(22.0, s)).text_color(c("muted")).child(TAGLINE))
             .child(
                 div()
-                    .id("signin-perks")
-                    .mt(px(18.0))
-                    .flex()
-                    .flex_col()
-                    .child(div().text_size(px(12.0)).line_height(px(16.0)).text_color(c("muted")).child(PERKS_LEAD))
-                    .child(div().mt(px(10.0)).flex().flex_col().gap(px(10.0)).children(perks)),
-            )
-            .child(
-                div()
-                    .mt(px(18.0))
+                    .mt(z(26.0, s))
                     .flex()
                     .flex_col()
                     .items_start()
-                    .gap(px(8.0))
-                    .when_some(status, |d, s| d.child(s))
+                    .gap(z(10.0, s))
+                    .when_some(status, |d, st| d.child(st))
                     .when_some(view.primary, |d, label| {
                         let id = if idle { "signin" } else { "retry" };
-                        d.child(button(id, label, true, Some(EXTERNAL_ICON)).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
+                        d.child(primary_button(id, label, s).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
                     })
-                    .when_some(view.secondary, |d, label| d.child(button("cancel", label, false, None).on_click(cx.listener(|this, _, w, cx| this.cancel(w, cx)))))
+                    .when_some(view.secondary, |d, label| d.child(quiet_button("cancel", label, s, light).on_click(cx.listener(|this, _, w, cx| this.cancel(w, cx)))))
                     .when_some(view.note, |d, note| {
-                        let row = div().flex().text_size(px(12.5)).line_height(px(18.0)).text_color(c("muted"));
+                        let row = div().flex().text_size(z(12.5, s)).line_height(z(18.0, s)).text_color(c("muted"));
                         d.child(match note.split_once(TEAM_DOMAIN) {
                             Some((before, after)) => row
                                 .child(before)
-                                .child(div().font_family(crate::settings::DEFAULT_FONT).text_size(px(11.5)).child(TEAM_DOMAIN))
+                                .child(div().font_family(crate::settings::DEFAULT_FONT).text_size(z(11.5, s)).child(TEAM_DOMAIN))
                                 .child(after),
                             None => row.child(note),
                         })
                     }),
             )
+            .when(view.skip && !compact, |d| d.child(div().flex_1()))
             .when(view.skip, |d| {
-                d.child(div().mt(px(16.0)).self_stretch().child(rule())).child(
+                d.child(
                     div()
-                        .mt(px(14.0))
+                        .self_stretch()
+                        .when(compact, |d| d.mt(px(16.0)))
                         .flex()
-                        .items_center()
-                        .gap(px(14.0))
-                        .child(button("signin-skip", SKIP, false, None).track_focus(&self.skip_focus).on_click(cx.listener(|this, _, w, cx| this.skip(w, cx))))
-                        .child(div().id("signin-skip-note").text_size(px(12.5)).line_height(px(18.0)).text_color(c("muted")).children(SKIP_NOTE.map(|line| div().child(line)))),
+                        .flex_col()
+                        .child(div().h(px(1.0)).self_stretch().bg(veil(light, 0.08, 0.07)))
+                        .child(
+                            div()
+                                .pt(z(16.0, s))
+                                .flex()
+                                .items_center()
+                                .gap(z(14.0, s))
+                                .child(quiet_button("signin-skip", SKIP, s, light).track_focus(&self.skip_focus).on_click(cx.listener(|this, _, w, cx| this.skip(w, cx))))
+                                .child(div().id("signin-skip-note").text_size(z(12.5, s)).line_height(z(18.0, s)).text_color(c("muted")).children(SKIP_NOTE.map(|line| div().child(line)))),
+                        ),
                 )
             });
 
-        let side = lay.side.then(|| {
-            div()
-                .id("signin-side")
-                .flex_1()
-                .min_w(px(0.0))
+        // The mark and the two links. Compact: only the links, side by side, in a row.
+        let team = link_row("team", GLOBE_FILL, GLOBE_LINE, TEAM_DOMAIN, TEAM_NOTE, TEAM_URL, s, light);
+        let partner = link_row("partner", CHAIN_FILL, CHAIN_LINE, PARTNER_DOMAIN, PARTNER_NOTE, PARTNER_URL, s, light);
+        let mark = if compact {
+            glass("signin-mark", 22.0, s, light)
+                .w_full()
+                .h(px(56.0))
+                .flex()
+                .items_center()
+                .child(team.flex_1().min_w(px(0.0)))
+                .child(div().w(px(1.0)).h(px(32.0)).flex_none().bg(veil(light, 0.07, 0.06)))
+                .child(partner.flex_1().min_w(px(0.0)))
+        } else {
+            glass("signin-mark", 22.0, s, light)
+                .flex_none()
+                .w(z(COL, s))
+                .h(z(HERO_H, s))
                 .flex()
                 .flex_col()
                 .items_center()
-                .self_start()
-                .pt(px(96.0))
-                .child(canvas(
-                    |bounds, _, _| bounds,
-                    move |_, bounds, window, _| {
-                        for (x, y) in mark_dots() {
-                            let at = bounds.origin + point(px(x - DOT_RADIUS), px(y - DOT_RADIUS));
-                            window.paint_quad(fill(Bounds::new(at, size(px(DOT_RADIUS * 2.0), px(DOT_RADIUS * 2.0))), tint.opacity(0.95)).corner_radii(px(DOT_RADIUS)));
-                        }
-                    },
+                .pt(z(26.0, s))
+                .px(z(12.0, s))
+                .pb(z(10.0, s))
+                .child(
+                    canvas(
+                        |bounds, _, _| bounds,
+                        move |_, bounds, window, _| {
+                            for (x, y) in mark_dots() {
+                                let at = bounds.origin + point(px((x - DOT_RADIUS) * s), px((y - DOT_RADIUS) * s));
+                                let d = px(DOT_RADIUS * 2.0 * s);
+                                window.paint_quad(fill(Bounds::new(at, size(d, d)), tint.opacity(0.95)).corner_radii(px(DOT_RADIUS * s)));
+                            }
+                        },
+                    )
+                    .w(z(DOT_BOX.0, s))
+                    .h(z(DOT_BOX.1, s))
+                    .flex_none(),
                 )
-                .w(px(DOT_BOX.0))
-                .h(px(DOT_BOX.1))
-                .flex_none())
+                .child(div().flex_1())
                 .child(
                     div()
-                        .mt(px(110.0))
                         .self_stretch()
                         .flex()
                         .flex_col()
-                        .child(rule())
-                        .child(link_row("team", GLOBE_ICON, TEAM_DOMAIN, TEAM_NOTE, TEAM_URL))
-                        .child(rule())
-                        .child(link_row("partner", SHIELD_ICON, PARTNER_DOMAIN, PARTNER_NOTE, PARTNER_URL))
-                        .child(rule()),
+                        .child(team.self_stretch())
+                        .child(div().h(px(1.0)).self_stretch().bg(veil(light, 0.07, 0.06)))
+                        .child(partner.self_stretch()),
                 )
-        });
+        };
 
-        let group = div()
-            .relative()
-            .w_full()
-            .max_w(px(920.0))
-            .px(px(28.0))
+        // "Signing in turns on" and the three features.
+        let features = (0..3).map(|i| {
+            let tile = feature(i, s, compact, tint, light);
+            if compact { tile.flex_1().min_w(px(0.0)).h(px(122.0)) } else { tile.flex_none().w(z(COL, s)).h(z(FEATURE_H, s)) }
+        });
+        let gap = if compact { 10.0 } else { GAP };
+        let perks = div()
+            .id("signin-perks")
             .flex()
-            .gap(px(28.0))
-            .child(wash(tint, if light { 0.05 } else { 0.24 }))
-            .child(card)
-            .children(side);
+            .flex_col()
+            .gap(z(gap, s))
+            .child(div().h(z(LEAD_H, s)).pl(z(4.0, s)).text_size(z(12.0, s)).line_height(z(LEAD_H, s)).text_color(c("muted")).child(PERKS_LEAD))
+            .child(div().flex().gap(z(gap, s)).children(features));
+
+        // The grid, centred as one piece: 3% of the height below the middle, or 8 above it when compact.
+        let grid = if compact {
+            let w = compact_width(width);
+            div()
+                .relative()
+                .w(px(w))
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .child(wash(tint, if light { 0.07 } else { 0.16 }, w / 2.0, 100.0, w * 1.5, 361.0))
+                .child(hero)
+                .child(perks)
+                .child(mark)
+        } else {
+            div()
+                .relative()
+                .w(z(GRID_W, s))
+                .flex()
+                .flex_col()
+                .gap(z(GAP, s))
+                .child(wash(tint, if light { 0.07 } else { 0.16 }, (2.0 * COL + GAP) * s / 2.0, HERO_H * s / 2.0, 1.5 * (2.0 * COL + GAP) * s, 1.9 * HERO_H * s))
+                .child(div().flex().gap(z(GAP, s)).child(hero).child(mark))
+                .child(perks)
+        };
 
         let hint_line = div().flex().items_center().gap(px(8.0)).font_family(crate::settings::DEFAULT_FONT).text_size(px(11.5)).children(hints(self.state).into_iter().enumerate().flat_map(
             |(i, (key, verb))| {
@@ -931,37 +1046,12 @@ impl Render for SignIn {
                 sep.into_iter().chain(std::iter::once(item.into_any_element()))
             },
         ));
-        let footer = div()
-            .absolute()
-            .bottom(px(0.0))
-            .left(px(0.0))
-            .right(px(0.0))
-            .h(px(36.0))
-            .pl(px(lay.footer_left))
-            .pr(px(28.0))
-            .flex()
-            .items_center()
-            .gap(px(14.0))
-            .when(narrow, |d| {
-                d.justify_between().child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .font_family(crate::settings::DEFAULT_FONT)
-                        .text_size(px(11.5))
-                        .text_color(c("muted"))
-                        .child(credit("team", TEAM_DOMAIN, TEAM_URL))
-                        .child(" Team Pavii \u{b7} ")
-                        .child(credit("partner", PARTNER_DOMAIN, PARTNER_URL))
-                        .child(" partner"),
-                )
-            })
-            .child(hint_line);
+        let footer = div().absolute().bottom(px(0.0)).left(px(0.0)).right(px(0.0)).h(px(36.0)).flex().items_center().justify_center().child(hint_line);
 
         let animating = rain_runs(cx.reduce_motion(), window.is_window_active(), lay.rain);
         let frame = shown_frame(self.frame, animating);
-        let (card_now, rain_state) = (self.card.clone(), self.rain.clone());
+        let rain_state = self.rain.clone();
+        let tiles = tile_rects(width, height, s).to_vec();
         let band = lay.band;
 
         div()
@@ -979,7 +1069,7 @@ impl Render for SignIn {
                     div().id("signin-rain").absolute().left(px(0.0)).right(px(0.0)).bottom(px(44.0)).h(px(band)).child(
                         canvas(
                             |bounds, _, _| bounds,
-                            move |_, bounds, window, cx| paint_rain(&rain_state, card_now.get(), light, frame, bounds, window, cx),
+                            move |_, bounds, window, cx| paint_rain(&rain_state, &tiles, light, frame, bounds, window, cx),
                         )
                         .size_full(),
                     ),
@@ -991,13 +1081,14 @@ impl Render for SignIn {
                     .top(px(0.0))
                     .left(px(0.0))
                     .right(px(0.0))
-                    .bottom(px(36.0))
+                    .bottom(px(0.0))
                     .flex()
-                    .flex_col()
                     .items_center()
-                    .when(lay.centered, |d| d.justify_center().pb(px(band * 0.6)))
-                    .when(!lay.centered, |d| d.pt(px(28.0)))
-                    .child(group),
+                    .justify_center()
+                    // Twice the offset of the centre: the box is centred in what the padding leaves.
+                    .when(!compact, |d| d.pt(px(0.06 * height)))
+                    .when(compact, |d| d.pb(px(16.0)))
+                    .child(grid),
             )
             .child(footer)
     }
@@ -1008,7 +1099,7 @@ mod tests {
     // Not `super::*`: that brings in `gpui::test`, which `#[test]` would then expand forever.
     use super::{
         Action, BENEFITS, CANCELLED, OTHER, PERKS, PERKS_LEAD, REJECTED, SIGN_IN, SIGN_IN_NOTE, SKIP_NOTE, State, Status, TIMEOUT, TRY_AGAIN, UNREACHABLE, content, decide,
-        enter_action, friendly, ring, window_height,
+        enter_action, friendly, ring, window_height, window_width,
     };
 
     #[test]
@@ -1023,34 +1114,111 @@ mod tests {
     #[test]
     fn the_window_cannot_be_maximized_and_keeps_its_size_limits() {
         use gpui::{Bounds, WindowBounds, point, px, size};
-        let bounds = WindowBounds::Windowed(Bounds::new(point(px(0.0), px(0.0)), super::window_size(640.0)));
+        let bounds = WindowBounds::Windowed(Bounds::new(point(px(0.0), px(0.0)), super::window_size(None)));
         let options = super::window_options(bounds);
         assert!(!options.is_resizable, "no maximize box, no double-click or Win+Up maximize");
         assert!(options.is_minimizable);
         assert_eq!(options.window_min_size, Some(size(px(620.0), px(460.0))));
         assert!(options.window_bounds.is_some());
         assert_eq!(options.titlebar.and_then(|t| t.title).as_deref(), Some("HyperOx"));
-        for (visible, high) in [(None, 640.0), (Some(1040.0), 640.0), (Some(500.0), 460.0)] {
-            let s = super::window_size(window_height(visible));
-            assert_eq!((f32::from(s.width), f32::from(s.height)), (760.0, high));
+        let dims = |visible| {
+            let s = super::window_size(visible);
+            (f32::from(s.width), f32::from(s.height))
+        };
+        assert_eq!(dims(None), (1040.0, 760.0));
+        assert_eq!(dims(Some((1920.0, 1040.0))), (1040.0, 760.0));
+        assert_eq!(dims(Some((1366.0, 728.0))), (1040.0, 648.0), "a short laptop screen");
+        assert_eq!(dims(Some((500.0, 500.0))), (620.0, 460.0));
+        // The window's own size picks the grid: regular on a normal screen, compact on a small one.
+        for (visible, regular) in [(None, true), (Some((1920.0, 1080.0)), true), (Some((1366.0, 768.0)), true), (Some((1024.0, 700.0)), false), (Some((979.0, 1000.0)), false), (Some((980.0, 1000.0)), true)] {
+            let (w, h) = dims(visible);
+            assert_eq!(super::layout(w, h).mode == super::Mode::Regular, regular, "{visible:?} gives {w}x{h}");
         }
     }
 
     #[test]
     fn the_layout_follows_the_window_size() {
-        use super::{Layout, layout};
-        assert_eq!(layout(760.0, 640.0), Layout { band: 238.0, side: true, rain: true, centered: false, footer_left: 28.0 });
-        assert_eq!(layout(620.0, 460.0), Layout { band: 166.0, side: false, rain: false, centered: false, footer_left: 28.0 });
-        assert_eq!(layout(699.0, 700.0).side, false);
-        assert_eq!(layout(700.0, 700.0).side, true);
-        assert!(!layout(1000.0, 700.0).centered && layout(1000.0, 701.0).centered, "taller than 700 centres the group");
-        // The band: 40% of the room up to 700 high, 22% above, never under 120 or over 260.
-        assert_eq!(layout(1000.0, 760.0).band, (716.0_f32 * 0.22).round());
-        assert_eq!(layout(1920.0, 1080.0).band, 228.0);
+        use super::{Layout, Mode, layout};
+        // A small window (760 x 640) is the compact grid: no code band, tiles in one column.
+        assert_eq!(layout(760.0, 640.0), Layout { mode: Mode::Compact, scale: 1.0, band: 238.0, rain: false });
+        assert_eq!(layout(620.0, 460.0), Layout { mode: Mode::Compact, scale: 1.0, band: 166.0, rain: false });
+        assert_eq!(layout(1280.0, 800.0).mode, Mode::Regular);
+        assert!(layout(1280.0, 800.0).rain);
+        // The band: 40% of the room up to 700 high, 24% above, never under 120 or over 260.
+        assert_eq!(layout(1280.0, 800.0).band, (756.0_f32 * 0.24).round());
+        assert_eq!(layout(1280.0, 700.0).band, (656.0_f32 * 0.40).round().clamp(120.0, 260.0));
+        assert_eq!(layout(1920.0, 1080.0).band, (1036.0_f32 * 0.24).round().min(260.0));
         assert_eq!(layout(1920.0, 3000.0).band, 260.0);
-        assert_eq!(layout(800.0, 200.0).band, 120.0);
-        assert_eq!(layout(1920.0, 1080.0).footer_left, 28.0_f32.max((1920.0 - 920.0) / 2.0 + 28.0));
-        assert_eq!(layout(1000.0, 760.0).footer_left, 68.0);
+        assert_eq!(layout(900.0, 680.0).band, (636.0_f32 * 0.40).round().clamp(120.0, 260.0));
+    }
+
+    #[test]
+    fn the_compact_grid_replaces_the_regular_one_below_900_by_680() {
+        use super::{Mode, compact_width, layout};
+        assert_eq!(layout(900.0, 680.0).mode, Mode::Regular, "both limits met");
+        assert_eq!(layout(899.0, 680.0).mode, Mode::Compact, "too narrow");
+        assert_eq!(layout(900.0, 679.0).mode, Mode::Compact, "too short");
+        assert_eq!(layout(760.0, 640.0).mode, Mode::Compact);
+        assert_eq!(layout(2560.0, 1440.0).mode, Mode::Regular);
+        // No code band in the compact grid: the tiles would cover it.
+        assert!(!layout(760.0, 640.0).rain && !layout(899.0, 1200.0).rain && layout(1280.0, 800.0).rain);
+        // 712 wide, or the window less 16 each side.
+        assert_eq!(compact_width(760.0), 712.0);
+        assert_eq!(compact_width(740.0), 708.0);
+        assert_eq!(compact_width(620.0), 588.0);
+        assert_eq!(compact_width(899.0), 712.0);
+    }
+
+    #[test]
+    fn the_whole_grid_grows_by_112_percent_from_1600_by_950() {
+        use super::layout;
+        assert_eq!(layout(1600.0, 950.0).scale, 1.12);
+        assert_eq!(layout(1920.0, 1080.0).scale, 1.12);
+        assert_eq!(layout(1599.0, 1080.0).scale, 1.0);
+        assert_eq!(layout(1920.0, 949.0).scale, 1.0);
+        assert_eq!(layout(1280.0, 800.0).scale, 1.0);
+        assert_eq!(layout(760.0, 640.0).scale, 1.0, "compact never scales");
+    }
+
+    #[test]
+    fn the_tiles_sit_in_a_grid_centred_three_percent_below_the_middle() {
+        use super::{GRID_H, GRID_W, tile_rects};
+        let [hero, mark, a, b, c] = tile_rects(1280.0, 800.0, 1.0);
+        // The 1280 x 800 still: the hero at (196, 174), 588 x 312, the mark tile beside it, the features at 526.
+        assert_eq!(hero, (196.0, 174.0, 784.0, 486.0));
+        assert_eq!(mark, (796.0, 174.0, 1084.0, 486.0));
+        assert_eq!((a, b, c), ((196.0, 526.0, 484.0, 674.0), (496.0, 526.0, 784.0, 674.0), (796.0, 526.0, 1084.0, 674.0)));
+        assert_eq!((GRID_W, GRID_H), (888.0, 500.0));
+        // Centred as a unit: 3% of the height below the middle, at any size and scale.
+        for (w, h, s) in [(1280.0, 800.0, 1.0), (1920.0, 1080.0, 1.12), (900.0, 680.0, 1.0)] {
+            let rects = tile_rects(w, h, s);
+            let (left, top) = (rects[0].0, rects[0].1);
+            let (right, bottom) = (rects[1].2, rects[4].3);
+            assert!(((left + right) / 2.0 - w / 2.0).abs() < 0.01, "{w}x{h}");
+            assert!(((top + bottom) / 2.0 - (h / 2.0 + 0.03 * h)).abs() < 0.01, "{w}x{h}");
+            assert!((right - left - GRID_W * s).abs() < 0.01 && (bottom - top - GRID_H * s).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn the_icons_are_duotone_pairs_a_soft_fill_and_a_line() {
+        use super::{ALERT_ICON, ARROW_ICON, CHAIN_FILL, CHAIN_LINE, GLOBE_FILL, GLOBE_LINE, OBSERVE_FILL, OBSERVE_LINE, OPEN_ICON, PERK_FILLS, PERKS, PII_FILL, PII_LINE, TOKENS_FILL, TOKENS_LINE};
+        let text = |b: &[u8]| std::str::from_utf8(b).unwrap().to_owned();
+        for (fill, line) in [(TOKENS_FILL, TOKENS_LINE), (OBSERVE_FILL, OBSERVE_LINE), (PII_FILL, PII_LINE), (GLOBE_FILL, GLOBE_LINE), (CHAIN_FILL, CHAIN_LINE)] {
+            let (fill, line) = (text(fill), text(line));
+            assert!(fill.contains("viewBox=\"0 0 24 24\"") && fill.contains("fill=\"#000\"") && !fill.contains("stroke"), "{fill}");
+            assert!(line.contains("viewBox=\"0 0 24 24\"") && line.contains("stroke-width=\"1.5\"") && line.contains("fill=\"none\""), "{line}");
+            // Both layers draw the same shape.
+            let shape = fill.split_once('>').unwrap().1.trim_end_matches("</svg>").to_owned();
+            assert!(line.contains(&shape), "the line layer holds the fill layer's shape: {shape}");
+        }
+        for single in [OPEN_ICON, ARROW_ICON, ALERT_ICON] {
+            assert!(text(single).contains("stroke-width=\"1.5\""));
+        }
+        assert_eq!(PERK_FILLS.len(), PERKS.len());
+        assert_eq!(PERK_FILLS[0], TOKENS_FILL);
+        assert_eq!(PERKS[1].0, OBSERVE_LINE);
+        assert_eq!(PERKS[2].0, PII_LINE);
     }
 
     #[test]
@@ -1167,14 +1335,14 @@ mod tests {
     fn the_mark_is_drawn_as_a_few_hundred_dots_inside_its_box() {
         let dots = super::mark_dots();
         assert!((200..=700).contains(&dots.len()), "{}", dots.len());
-        assert!(dots.iter().all(|(x, y)| (0.0..96.0).contains(x) && (0.0..113.0).contains(y)));
+        assert!(dots.iter().all(|(x, y)| (0.0..120.0).contains(x) && (0.0..141.0).contains(y)));
         assert_eq!(super::dots_in(std::str::from_utf8(super::MARK).unwrap()), dots, "the same every time");
         assert!(super::dots_in("<svg/>").is_empty());
         // A square outline with a square hole (even-odd) leaves a ring.
         let ring = super::dots_in(r#"<svg viewBox="0 0 715 842"><path d="M0 0 715 0 715 842 0 842ZM170 200 545 200 545 640 170 640Z"/></svg>"#);
         let full = super::dots_in(r#"<svg viewBox="0 0 715 842"><path d="M0 0 715 0 715 842 0 842Z"/></svg>"#);
         assert!(ring.len() < full.len() && !ring.is_empty());
-        assert!(!ring.contains(&(46.0, 58.0)), "the hole is empty");
+        assert!(!ring.contains(&(47.5, 57.5)), "the hole is empty");
     }
 
     #[test]
@@ -1191,7 +1359,7 @@ mod tests {
         assert_eq!((super::PARTNER_URL, super::PARTNER_DOMAIN, super::PARTNER_NOTE), ("https://buckleson.com", "buckleson.com", "Blockchain & security partner"));
         // Only the screen's own code counts, not this list.
         let source = include_str!("signin.rs").split("#[cfg(test)]").next().unwrap();
-        for id in ["signin-root", "signin-card", "signin-perks", "\"signin\"", "\"retry\"", "\"cancel\"", "\"signin-skip\"", "signin-skip-note", "\"team\"", "\"partner\"", "signin-rain", "signin-side"] {
+        for id in ["signin-root", "signin-card", "signin-perks", "\"signin\"", "\"retry\"", "\"cancel\"", "\"signin-skip\"", "signin-skip-note", "\"team\"", "\"partner\"", "signin-rain", "signin-mark", "feat-tokens", "feat-observe", "feat-pii"] {
             assert!(source.contains(id), "{id}");
         }
         assert_eq!(BENEFITS.len(), PERKS.len());
@@ -1261,13 +1429,43 @@ mod tests {
     }
 
     #[test]
-    fn the_window_is_640_high_and_shrinks_on_a_short_screen_but_never_below_460() {
-        assert_eq!(window_height(None), 640.0);
-        assert_eq!(window_height(Some(1040.0)), 640.0);
-        assert_eq!(window_height(Some(728.0)), 640.0);
+    fn the_window_is_760_high_and_shrinks_on_a_short_screen_but_never_below_460() {
+        assert_eq!(window_height(None), 760.0);
+        assert_eq!(window_height(Some(1040.0)), 760.0);
+        assert_eq!(window_height(Some(840.0)), 760.0);
+        assert_eq!(window_height(Some(768.0)), 688.0);
         assert_eq!(window_height(Some(700.0)), 620.0);
         assert_eq!(window_height(Some(500.0)), 460.0);
         assert_eq!(window_height(Some(0.0)), 460.0);
+    }
+
+    #[test]
+    fn the_window_is_1040_wide_and_shrinks_on_a_narrow_screen_but_never_below_620() {
+        assert_eq!(window_width(None), 1040.0);
+        assert_eq!(window_width(Some(1920.0)), 1040.0);
+        assert_eq!(window_width(Some(1120.0)), 1040.0);
+        assert_eq!(window_width(Some(1366.0)), 1040.0);
+        assert_eq!(window_width(Some(1024.0)), 944.0);
+        assert_eq!(window_width(Some(700.0)), 620.0);
+        assert_eq!(window_width(Some(0.0)), 620.0);
+        for (visible, want) in [(699.0, 620.0), (700.0, 620.0), (701.0, 621.0), (1119.0, 1039.0), (1121.0, 1040.0), (f32::MAX, 1040.0), (f32::INFINITY, 1040.0), (f32::NEG_INFINITY, 620.0), (f32::MIN, 620.0)] {
+            assert_eq!(window_width(Some(visible)), want, "{visible}");
+        }
+        let w = window_width(Some(f32::NAN));
+        assert!(w.is_finite() && (620.0..=1040.0).contains(&w), "{w}");
+    }
+
+    #[test]
+    fn the_regular_grid_fits_the_window_with_margins_and_stays_centred_below_the_middle() {
+        use super::{GRID_W, layout, tile_rects};
+        let (w, h) = (1040.0, 760.0);
+        assert_eq!(layout(w, h).mode, super::Mode::Regular);
+        let [hero, mark, a, _, c] = tile_rects(w, h, 1.0);
+        assert_eq!(hero, (76.0, 0.03 * h + h / 2.0 - 250.0, 664.0, 0.03 * h + h / 2.0 - 250.0 + 312.0));
+        assert!(hero.0 >= 40.0 && w - mark.2 >= 40.0, "margins of 40 px or more at the sides: {} / {}", hero.0, w - mark.2);
+        assert_eq!(w - GRID_W, 152.0);
+        assert!(a.1 > hero.3 && c.3 + 36.0 <= h, "the grid sits above the footer line");
+        assert!(hero.1 >= 0.0, "and below the top edge");
     }
 
     #[test]
@@ -1328,31 +1526,31 @@ mod tests {
 
     #[test]
     fn the_window_height_at_and_around_each_limit() {
-        // 460 + 80 = 540 and 640 + 80 = 720 are the two corners.
+        // 460 + 80 = 540 and 760 + 80 = 840 are the two corners.
         for (visible, want) in [
             (539.0, 460.0),
             (540.0, 460.0),
             (541.0, 461.0),
-            (719.0, 639.0),
-            (720.0, 640.0),
-            (721.0, 640.0),
+            (839.0, 759.0),
+            (840.0, 760.0),
+            (841.0, 760.0),
             (80.0, 460.0),
             (-0.0, 460.0),
             (-500.0, 460.0),
             (f32::MIN, 460.0),
             (f32::NEG_INFINITY, 460.0),
-            (f32::MAX, 640.0),
-            (f32::INFINITY, 640.0),
+            (f32::MAX, 760.0),
+            (f32::INFINITY, 760.0),
             (f32::MIN_POSITIVE, 460.0),
         ] {
             assert_eq!(window_height(Some(visible)), want, "{visible}");
         }
-        assert_eq!(window_height(None), 640.0);
+        assert_eq!(window_height(None), 760.0);
     }
 
     #[test]
-    fn a_display_that_reports_no_usable_height_still_gets_a_window_between_460_and_640() {
+    fn a_display_that_reports_no_usable_height_still_gets_a_window_between_460_and_760() {
         let h = window_height(Some(f32::NAN));
-        assert!(h.is_finite() && (460.0..=640.0).contains(&h), "{h}");
+        assert!(h.is_finite() && (460.0..=760.0).contains(&h), "{h}");
     }
 }
