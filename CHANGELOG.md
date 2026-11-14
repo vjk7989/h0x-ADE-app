@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.1.34] - 2026-11-14
+
+Save your workspaces and a new welcome. Bundles h0x-core 0.1.16.
+
 ### Added
 - A Workspaces button at the top right saves the space you're in (its tabs, panes, folders and running agents) and brings it back later. Keep up to 5.
 
