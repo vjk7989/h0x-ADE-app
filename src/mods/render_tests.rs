@@ -9972,7 +9972,7 @@ const ACTIVITY_PROBE: &str = r#"
 import Real from './frame/settings/main.js';
 import { div } from 'gpui-kit';
 import { theme } from 'h0x';
-import { tooltip, levelOf, levelColors, minutesOf, short, summarize, gridDays, parseActivity } from './frame/settings/activity.js';
+import { tooltip, levelOf, levelColors, minutesOf, short, summarize, gridDays, parseActivity, geometry, cellAt, monthColumns } from './frame/settings/activity.js';
 export default class Scenario extends Real {
   render(cx) {
     const sat = new Date(2026, 10, 14);
@@ -9989,6 +9989,9 @@ export default class Scenario extends Real {
       slots: gridDays(sat).flat().length,
       real: gridDays(sat).flat().filter(Boolean).length,
       first: gridDays(sat)[0][0].toDateString(),
+      geo: [geometry(634), geometry(700), geometry(NaN), geometry(10)].map((g) => ({ cell: +g.cell.toFixed(3), step: +g.step.toFixed(3), width: +g.width.toFixed(3) })),
+      at: [[0, 0], [8.9, 8.9], [9.5, 3], [11, 0], [52 * 11 + 4, 6 * 11 + 4], [581, 0], [-1, 0], [26 * 11 + 2, 3 * 11 + 5], [3, 75], [NaN, 1], [2, 9.5]].map(([x, y]) => cellAt(x, y, geometry(634))),
+      months: [monthColumns(gridDays(sat)).length, monthColumns(gridDays(sat))[0], monthColumns(gridDays(sat)).at(-1), monthColumns(gridDays(sat))[10]],
       parsed: [parseActivity(null), parseActivity('{not json'), parseActivity('{"version":2,"days":{}}'),
         parseActivity('{"version":1,"days":{"2026-11-03":{"seconds":5,"sessions":-1,"tokens":"x"},"bad":{"seconds":9}}}')],
     };
@@ -10023,6 +10026,18 @@ fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppCo
     assert_eq!((probe["slots"].clone(), probe["real"].clone()), (json!(371), json!(371)));
     assert_eq!(probe["first"], json!("Sun Nov 09 2025"));
     assert_eq!(probe["parsed"], json!([{}, {}, {}, {"2026-11-03": {"seconds": 5, "sessions": 0, "tokens": 0}}]));
+    // One geometry: 9 px cells and a 2 px gap at the 634 px column; a wider row grows the cells to fill it
+    // (700: 53 columns of 12.245 less one gap = 647 = 700 - 53); an unknown width is the standard one; a tiny one keeps the smallest cell.
+    assert_eq!(probe["geo"], json!([
+        {"cell": 9, "step": 11, "width": 581},
+        {"cell": 10.245, "step": 12.245, "width": 647},
+        {"cell": 9, "step": 11, "width": 581},
+        {"cell": 6, "step": 8, "width": 422},
+    ]));
+    // The pointer maps to the drawn cell: first, middle and last columns, rows, gaps and outside.
+    assert_eq!(probe["at"], json!([[0, 0], [0, 0], null, [1, 0], [52, 6], null, null, [26, 3], null, null, null]));
+    // Each month's label is over the column holding its 1st: Dec 2025 in week 3 ... Nov 2026 in week 51 (Oct in week 46).
+    assert_eq!(probe["months"], json!([12, [3, "Dec"], [51, "Nov"], [46, "Oct"]]));
     // Level 0 is the border, level 4 the accent, 1-3 the accent mixed over the popover (40%, 62%, 82%).
     let hex = |name: &str| {
         let v = colors[name].as_str().unwrap().to_owned();

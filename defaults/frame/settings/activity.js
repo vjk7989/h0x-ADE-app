@@ -6,7 +6,8 @@ import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { appHome, readTextFile } from "h0x";
 
-const WEEKS = 53, CELL = 9, GAP = 2, STEP = CELL + GAP, LABELS = 53;
+const WEEKS = 53, CELL = 9, GAP = 2, LABELS = 53;
+const MIN_CELL = 6, MAX_CELL = 14, DEFAULT_WIDTH = 634; // the content column at the standard window
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 // Minutes of agent time a day -> level 0..4; the share of the accent mixed over the background.
@@ -91,10 +92,38 @@ export function mix(accent, bg, share) {
 // level 0 is the border; 1-4 climb from the background to the accent.
 export const levelColors = (t) => LEVELS.map((_, i) => (i === 0 ? t.border : mix(t.accent, t.popover, SHARE[i])));
 
+// The grid's one geometry: cell, step (cell + gap) and drawn width, from the width of the whole row
+// (the 53 px weekday labels and the grid). It fills the row: about 9 px cells and a 2 px gap at 634 px.
+// The cells, the month labels and the hover all use these numbers and nothing else.
+export function geometry(avail) {
+  const row = Number.isFinite(avail) && avail > 0 ? avail : DEFAULT_WIDTH;
+  const grid = Math.max(row - LABELS, WEEKS * (MIN_CELL + GAP) - GAP);
+  const cell = Math.min(MAX_CELL, Math.max(MIN_CELL, (grid + GAP) / WEEKS - GAP));
+  const step = cell + GAP;
+  return { cell, step, width: WEEKS * step - GAP, height: 7 * step - GAP };
+}
+
+// The [week, day] under a point of the grid (0, 0 is its top-left corner), or null in a gap or outside.
+export function cellAt(x, y, g) {
+  if (!(x >= 0 && y >= 0)) return null;
+  const w = Math.floor(x / g.step), r = Math.floor(y / g.step);
+  if (w >= WEEKS || r >= 7 || x - w * g.step >= g.cell || y - r * g.step >= g.cell) return null;
+  return [w, r];
+}
+
+// [week, name] for each month whose 1st is in the grid: its label sits over that week's column.
+export function monthColumns(weeks) {
+  return weeks.map((week, w) => {
+    const first = week.find((d) => d && d.getDate() === 1);
+    return first ? [w, MONTHS[first.getMonth()]] : null;
+  }).filter(Boolean);
+}
+
 export function activityInit(view) {
   view.activity = null; // { days } once read; null before
   view.activityHover = null; // [week, row]
   view.activityModel = null;
+  view.activityWidth = DEFAULT_WIDTH; // the row's measured width
 }
 
 export async function loadActivity(view) {
@@ -121,24 +150,27 @@ export function activityBlock(view, t) {
   const empty = active === 0;
   const hover = view.activityHover;
   const hovered = !empty && hover ? weeks[hover[0]]?.[hover[1]] : null;
+  const g = geometry(view.activityWidth);
   const num = (text) => mono(div()).text_color(t.foreground).child(text);
   const note = (text) => mono(div()).text_color(t.muted).child(text);
   // A render has a 50 ms budget, and the grid is 371 cells: each is five calls (no closure, no `when`),
   // and ONE handler on the grid maps the pointer to its cell.
   const cell = (w, r) => {
     const d = weeks[w][r];
-    if (!d) return div().id(`st-prof-activity-gap-${w}-${r}`).size(CELL);
-    const c = div().id(`st-prof-activity-cell-${w}-${r}`).size(CELL).rounded(2).bg(colors[levels[w][r]]);
+    if (!d) return div().id(`st-prof-activity-gap-${w}-${r}`).size(g.cell);
+    const c = div().id(`st-prof-activity-cell-${w}-${r}`).size(g.cell).rounded(2).bg(colors[levels[w][r]]);
     return hover?.[0] === w && hover?.[1] === r && !empty ? c.border_1().border_color(t.foreground) : c;
   };
-  const at = (x, y) => {
-    const w = Math.floor(x / STEP), r = Math.floor(y / STEP);
-    return x >= 0 && y >= 0 && x % STEP < CELL && y % STEP < CELL && weeks[w]?.[r] ? [w, r] : null;
+  // `local_position` is relative to the grid; scaled by the event's own bounds, so whatever units it comes in, it lands on the drawn cells.
+  const at = (e) => {
+    const b = e.bounds, kx = b?.width > 0 ? g.width / b.width : 1, ky = b?.height > 0 ? g.height / b.height : 1;
+    const cellUnder = cellAt(e.local_position.x * kx, e.local_position.y * ky, g);
+    return cellUnder && weeks[cellUnder[0]][cellUnder[1]] ? cellUnder : null;
   };
   const grid = h_flex().id("st-prof-activity-grid").relative().gap(GAP).flex_none()
     .on_mouse_move((e, cx) => {
       if (empty) return;
-      const now = view.activityHover, next = at(e.local_position.x, e.local_position.y);
+      const now = view.activityHover, next = at(e);
       if (now?.[0] === next?.[0] && now?.[1] === next?.[1]) return;
       view.activityHover = next;
       cx.notify();
@@ -153,21 +185,17 @@ export function activityBlock(view, t) {
       const [w, r] = hover;
       const parts = tooltip(hovered, days[key(hovered)]);
       // Left of the cell; the first columns have no room there, so the tip goes right.
-      const place = w < 30 ? (tip) => tip.left(w * STEP + STEP + 6) : (tip) => tip.right(WEEKS * STEP - GAP - w * STEP + 6);
-      return el.child(place(div().id("st-prof-activity-tip").absolute().top(r * STEP + CELL / 2 - 13)).flex().items_center().px(8).py(5).rounded(5).border_1().border_color(t.input).bg(t.raised)
+      const place = w < 30 ? (tip) => tip.left(w * g.step + g.step + 6) : (tip) => tip.right(g.width - w * g.step + 6);
+      return el.child(place(div().id("st-prof-activity-tip").absolute().top(r * g.step + g.cell / 2 - 13)).flex().items_center().px(8).py(5).rounded(5).border_1().border_color(t.input).bg(t.raised)
         .child(mono(h_flex().gap(6).text_size(11).line_height("15px").text_color(t.foreground))
           .children(parts.flatMap((p, i) => (i ? [div().text_color(t.muted).child("·"), div().child(p)] : [div().child(p)])))));
     });
   // "Mon" on row 2, "Wed" on row 4, "Fri" on row 6; each right-aligned in its 53 px column.
   const dayLabels = v_flex().w(LABELS).flex_none().gap(GAP).pr(8)
-    .children(DAY_NAMES.map((n, r) => mono(div().h(CELL).flex().items_center().justify_end().text_size(10).line_height("9px").text_color(t.dim)).child(r % 2 === 1 ? n : "")));
+    .children(DAY_NAMES.map((n, r) => mono(div().h(g.cell).flex().items_center().justify_end().text_size(10).line_height("9px").text_color(t.dim)).child(r % 2 === 1 ? n : "")));
   // A month's name sits over the first week whose column holds its 1st.
-  const months = weeks.map((week, w) => {
-    const first = week.find((d) => d && d.getDate() === 1);
-    return first ? [w, MONTHS[first.getMonth()]] : null;
-  }).filter(Boolean);
-  const monthRow = div().relative().h(14).ml(LABELS).w(WEEKS * STEP - GAP).flex_none()
-    .children(months.map(([w, name]) => mono(div().absolute().left(w * STEP).top(0).text_size(10).line_height("14px").text_color(t.dim)).child(name)));
+  const monthRow = div().relative().h(14).ml(LABELS).w(g.width).flex_none()
+    .children(monthColumns(weeks).map(([w, name]) => mono(div().absolute().left(w * g.step).top(0).text_size(10).line_height("14px").text_color(t.dim)).child(name)));
   const legend = h_flex().gap(6).items_center().flex_none()
     .child(mono(div().text_size(10.5).text_color(t.dim)).child("less"))
     .child(h_flex().gap(1).children(colors.map((c, i) => div().id(`st-prof-activity-legend-${i}`).w(CELL).h(CELL).rounded(2).bg(c))))
@@ -176,7 +204,13 @@ export function activityBlock(view, t) {
     .child(h_flex().w_full().items_center().justify_between().pt(20).pb(6)
       .child(div().text_size(13).line_height("18px").font_semibold().text_color(t.foreground).child("Agent activity · this computer"))
       .child(mono(div().text_size(12).text_color(t.dim)).child("last 12 months")))
-    .child(v_flex().w_full().child(monthRow).child(h_flex().items_start().child(dayLabels).child(grid)))
+    .child(v_flex().w_full().child(monthRow).child(h_flex().id("st-prof-activity-body").w_full().items_start()
+      .on_size_change((size, cx) => {
+        if (!Number.isFinite(size?.width) || Math.abs(size.width - view.activityWidth) < 1) return;
+        view.activityWidth = size.width;
+        cx.notify();
+      })
+      .child(dayLabels).child(grid)))
     .child(h_flex().w_full().mt(10).items_center().justify_between()
       .child(empty
         ? mono(h_flex().id("st-prof-activity-empty").text_size(11)).child(note("No agent activity recorded yet")).child(mono(div().text_color(t.dim)).child(" · starts with your first agent session"))

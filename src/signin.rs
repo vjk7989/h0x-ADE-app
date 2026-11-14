@@ -132,7 +132,17 @@ fn window_options(bounds: WindowBounds) -> WindowOptions {
     }
 }
 
+/// The settings the main window will start with, as far as the theme goes: settings.json's
+/// appearance (the system's when it says so), then its light or dark theme, else darkmatter or paper.
+fn theme_settings(person: &crate::settings::Person, system_dark: bool) -> crate::settings::Settings {
+    crate::settings::Settings::compose(person, &crate::layout::Look::default(), system_dark)
+}
+
 pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver<Request>, cx: &mut App) {
+    // This screen opens before the main window loads settings and themes: until then the colors are the built-in graphite.
+    let person = crate::settings::load_person().unwrap_or_default();
+    let system_dark = matches!(cx.window_appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark);
+    crate::settings::set(theme_settings(&person, system_dark));
     let height = window_height(cx.primary_display().map(|d| f32::from(d.visible_bounds().size.height)));
     // The operating system's reduced-motion setting, for the code texture.
     gpui_base::apply_system_reduce_motion(cx);
@@ -195,6 +205,8 @@ impl SignIn {
         self.attempt += 1;
         let attempt = self.attempt;
         self.state = State::Waiting;
+        // The button that was clicked is gone now: the keys (Esc, Tab) go to the screen again.
+        window.focus(&self.focus, cx);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -216,6 +228,7 @@ impl SignIn {
                     }
                     Err(e) => {
                         this.state = State::Failed(friendly(&e));
+                        window.focus(&this.focus, cx);
                         cx.notify();
                     }
                 }
@@ -239,7 +252,7 @@ impl SignIn {
         crate::open_main(core, requests, cx);
     }
 
-    fn cancel(&mut self, cx: &mut Context<Self>) {
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Only a wait can be cancelled (Esc is also pressed in the other states).
         if !matches!(self.state, State::Waiting) {
             return;
@@ -247,6 +260,7 @@ impl SignIn {
         crate::auth::cancel_sign_in();
         self.attempt += 1;
         self.state = State::Failed(CANCELLED);
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 
@@ -258,7 +272,7 @@ impl SignIn {
                 Action::Start if self.focus.is_focused(window) => self.start(window, cx),
                 Action::Start | Action::None => {}
             },
-            "escape" => self.cancel(cx),
+            "escape" => self.cancel(window, cx),
             "tab" if ev.keystroke.modifiers.shift => window.focus_prev(cx),
             "tab" => window.focus_next(cx),
             _ => {}
@@ -599,6 +613,7 @@ fn ring() -> Vec<BoxShadow> {
 /// A 34px button with a focus ring while it has focus (not `focus_visible`: the ring must not hide after a mouse move).
 fn button(id: &'static str, label: &'static str, primary: bool, icon: Option<&'static [u8]>) -> Stateful<Div> {
     let ring = ring();
+    let ink = if primary { c("solid_foreground") } else { c("foreground") };
     div()
         .id(id)
         .tab_index(0)
@@ -622,7 +637,7 @@ fn button(id: &'static str, label: &'static str, primary: bool, icon: Option<&'s
             s
         })
         .child(label)
-        .when_some(icon, |d, icon| d.child(svg().data(icon).size(px(14.0)).flex_none()))
+        .when_some(icon, |d, icon| d.child(svg().data(icon).size(px(14.0)).flex_none().text_color(ink)))
 }
 
 fn open_url(url: &'static str) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
@@ -816,7 +831,7 @@ impl Render for SignIn {
             .right(px(0.0))
             .bottom(px(0.0)))
             .child(div().text_size(px(26.0)).line_height(px(32.0)).font_weight(FontWeight::SEMIBOLD).text_color(c("foreground")).child("Welcome to HyperOx"))
-            .child(div().mt(px(6.0)).text_size(px(13.5)).line_height(px(20.0)).text_color(c("muted")).child(TAGLINE))
+            .child(div().mt(px(6.0)).text_size(px(13.5)).line_height(px(20.0)).whitespace_nowrap().text_color(c("muted")).child(TAGLINE))
             .child(
                 div()
                     .id("signin-perks")
@@ -838,7 +853,7 @@ impl Render for SignIn {
                         let id = if idle { "signin" } else { "retry" };
                         d.child(button(id, label, true, Some(EXTERNAL_ICON)).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
                     })
-                    .when_some(view.secondary, |d, label| d.child(button("cancel", label, false, None).on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))))
+                    .when_some(view.secondary, |d, label| d.child(button("cancel", label, false, None).on_click(cx.listener(|this, _, w, cx| this.cancel(w, cx)))))
                     .when_some(view.note, |d, note| {
                         let row = div().flex().text_size(px(12.5)).line_height(px(18.0)).text_color(c("muted"));
                         d.child(match note.split_once(TEAM_DOMAIN) {
@@ -956,7 +971,7 @@ impl Render for SignIn {
             .relative()
             .size_full()
             .overflow_hidden()
-            .font_family("Geist")
+            .font_family(crate::settings::get().ui_font_family.clone())
             .text_color(c("foreground"))
             .bg(c("background"))
             .when(lay.rain, |d| {
@@ -1036,6 +1051,25 @@ mod tests {
         assert_eq!(layout(800.0, 200.0).band, 120.0);
         assert_eq!(layout(1920.0, 1080.0).footer_left, 28.0_f32.max((1920.0 - 920.0) / 2.0 + 28.0));
         assert_eq!(layout(1000.0, 760.0).footer_left, 68.0);
+    }
+
+    #[test]
+    fn the_screen_takes_the_theme_the_main_window_will_use() {
+        use crate::settings::{Appearance, Person, color, parse_hex, set};
+        let dark = |system_dark, appearance| {
+            set(super::theme_settings(&Person { appearance, ..Default::default() }, system_dark));
+            (color("accent"), color("background"))
+        };
+        let (accent, background) = dark(false, Appearance::Dark);
+        assert_eq!(accent, parse_hex("#e78a53").unwrap(), "a dark settings file: darkmatter's orange");
+        assert_eq!(background, parse_hex("#121113").unwrap());
+        let (_, background) = dark(true, Appearance::Light);
+        assert_eq!(background, parse_hex("#ffffff").unwrap(), "a light settings file: paper");
+        // The system's mode counts only when the person did not choose.
+        assert_eq!(dark(true, Appearance::System).1, parse_hex("#121113").unwrap());
+        assert_eq!(dark(false, Appearance::System).1, parse_hex("#ffffff").unwrap());
+        assert_eq!(super::theme_settings(&Person::default(), true).theme, "darkmatter");
+        assert_eq!(super::theme_settings(&Person::default(), false).theme, "paper");
     }
 
     #[test]
