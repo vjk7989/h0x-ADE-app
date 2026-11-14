@@ -4510,6 +4510,15 @@ fn files_module(values: BTreeMap<String, Value>, disk: Rc<RefCell<FilesDisk>>) -
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     }
     module = module.async_function("exec", |_| Ok(std::future::ready(Ok(to_host(&json!({"code":0,"stdout":"","stderr":""}))))));
+    // Shared values (the panel keeps its linked file there across a reload), in memory per panel.
+    let store: Rc<RefCell<BTreeMap<String, Value>>> = Rc::new(RefCell::new(BTreeMap::new()));
+    let read = store.clone();
+    module = module.function("shared", move |a| Ok(read.borrow().get(a.string(0)?).map(to_host).unwrap_or(HostValue::Null)));
+    let write = store.clone();
+    module = module.function("setShared", move |a| {
+        write.borrow_mut().insert(a.string(0)?.into(), from_host(a.value(1)?));
+        Ok(HostValue::Null)
+    });
     // The host decides like a terminal click: programs are shown in their folder, the rest opened.
     let opens = disk.clone();
     module = module.function("openFile", move |a| {
