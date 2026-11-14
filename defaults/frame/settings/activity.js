@@ -92,15 +92,30 @@ export function mix(accent, bg, share) {
 // level 0 is the border; 1-4 climb from the background to the accent.
 export const levelColors = (t) => LEVELS.map((_, i) => (i === 0 ? t.border : mix(t.accent, t.popover, SHARE[i])));
 
-// The grid's one geometry: cell, step (cell + gap) and drawn width, from the width of the whole row
-// (the 53 px weekday labels and the grid). It fills the row: about 9 px cells and a 2 px gap at 634 px.
-// The cells, the month labels and the hover all use these numbers and nothing else.
+// The grid's one geometry, from the width of the whole row (the weekday labels and the grid): WHOLE pixels
+// (a fractional size is cut down when drawn, which would put the labels and the hover off the cells), the clamp
+// applied here. About 9 px cells and a 2 px gap at 634 px. The grid is as wide as the cells make it and sits
+// left-aligned after the labels, even when that leaves some of the row empty. Cells, month labels, hover and
+// tooltip all use these numbers and nothing else.
 export function geometry(avail) {
   const row = Number.isFinite(avail) && avail > 0 ? avail : DEFAULT_WIDTH;
   const grid = Math.max(row - LABELS, WEEKS * (MIN_CELL + GAP) - GAP);
-  const cell = Math.min(MAX_CELL, Math.max(MIN_CELL, (grid + GAP) / WEEKS - GAP));
+  const cell = Math.min(MAX_CELL, Math.max(MIN_CELL, Math.floor((grid + GAP) / WEEKS - GAP)));
   const step = cell + GAP;
-  return { cell, step, width: WEEKS * step - GAP, height: 7 * step - GAP };
+  return { cell, step, left: LABELS, width: WEEKS * step - GAP, height: 7 * step - GAP };
+}
+
+// The tooltip's width, about: 11 px mono text, the dots between its parts, padding and border.
+export const tipWidth = (parts) => 18 + parts.join("").length * 6.7 + (parts.length - 1) * 18.7;
+
+// "left" or "right" of the hovered cell: left when it fits there, else right when it fits, else the roomier side.
+// `row` is the width of the whole row, `left` of the grid is where the labels end.
+export function tipSide(w, g, tip, row) {
+  const roomLeft = g.left + w * g.step - 6;
+  const roomRight = row - (g.left + w * g.step + g.cell) - 6;
+  if (roomLeft >= tip) return "left";
+  if (roomRight >= tip) return "right";
+  return roomLeft >= roomRight ? "left" : "right";
 }
 
 // The [week, day] under a point of the grid (0, 0 is its top-left corner), or null in a gap or outside.
@@ -200,16 +215,16 @@ export function activityBlock(view, t) {
       const [w, r] = hover;
       const parts = tooltip(hovered, days[key(hovered)]);
       // Left of the cell; the first columns have no room there, so the tip goes right.
-      const place = w < 30 ? (tip) => tip.left(w * g.step + g.step + 6) : (tip) => tip.right(g.width - w * g.step + 6);
+      const place = tipSide(w, g, tipWidth(parts), view.activityWidth) === "right" ? (tip) => tip.left(w * g.step + g.cell + 6) : (tip) => tip.right(g.width - w * g.step + 6);
       return el.child(place(div().id("st-prof-activity-tip").absolute().top(r * g.step + g.cell / 2 - 13)).flex().items_center().px(8).py(5).rounded(5).border_1().border_color(t.input).bg(t.raised)
         .child(mono(h_flex().gap(6).text_size(11).line_height("15px").text_color(t.foreground))
           .children(parts.flatMap((p, i) => (i ? [div().text_color(t.muted).child("·"), div().child(p)] : [div().child(p)])))));
     });
   // "Mon" on row 2, "Wed" on row 4, "Fri" on row 6; each right-aligned in its 53 px column.
-  const dayLabels = v_flex().w(LABELS).flex_none().gap(GAP).pr(8)
+  const dayLabels = v_flex().w(g.left).flex_none().gap(GAP).pr(8)
     .children(DAY_NAMES.map((n, r) => mono(div().h(g.cell).flex().items_center().justify_end().text_size(10).line_height("9px").text_color(t.dim)).child(r % 2 === 1 ? n : "")));
   // A month's name sits over the first week whose column holds its 1st.
-  const monthRow = div().relative().h(14).ml(LABELS).w(g.width).flex_none()
+  const monthRow = div().relative().h(14).ml(g.left).w(g.width).flex_none()
     .children(months.map(([w, name]) => mono(div().absolute().left(w * g.step).top(0).text_size(10).line_height("14px").text_color(t.dim)).child(name)));
   const legend = h_flex().gap(6).items_center().flex_none()
     .child(mono(div().text_size(10.5).text_color(t.dim)).child("less"))
