@@ -9984,59 +9984,82 @@ fn settings_profile_activity_treats_a_damaged_or_foreign_file_as_no_record(cx: &
 }
 
 // The graph's pure parts, asked of the mod's own module through a probe scenario.
-const ACTIVITY_PROBE: &str = r#"
+// Each probe is its own scenario, so its own render: a render has a 50 ms budget (the Windows runner is slow), and
+// the date work of the grid alone is hundreds of Date objects. `{body}` is the object literal the scenario reports.
+fn activity_probe(body: &str) -> String {
+    format!(
+        r#"
 import Real from './frame/settings/main.js';
-import { div } from 'gpui-kit';
-import { theme } from 'h0x';
-import { tooltip, levelOf, levelColors, minutesOf, short, summarize, gridDays, parseActivity, geometry, cellAt, monthColumns, columnRuns, tipLeft, tipWidth } from './frame/settings/activity.js';
-export default class Scenario extends Real {
-  render(cx) {
-    const sat = new Date(2026, 10, 14);
-    const day = { seconds: 2520, sessions: 3, tokens: 18200 };
-    const probe = {
-      tip: tooltip(new Date(2026, 10, 3), day),
-      tipOne: tooltip(new Date(2026, 10, 3), { seconds: 60, sessions: 1, tokens: 0 }),
-      tipNone: tooltip(new Date(2026, 10, 3), undefined),
-      levels: [0, 1, 14, 15, 59, 60, 179, 180, 1000].map(levelOf),
-      minutes: [0, 1, 89, 90, 3600].map((seconds) => minutesOf({ seconds })),
-      colors: levelColors(theme()),
-      short: [999, 1000, 18200, 999999, 1000000, 1250000].map(short),
-      summary: summarize(gridDays(sat), { '2026-11-14': { seconds: 3600 }, '2026-11-13': { seconds: 600 }, '2026-11-12': { seconds: 60 }, '2026-11-10': { seconds: 120 } }),
-      slots: gridDays(sat).flat().length,
-      real: gridDays(sat).flat().filter(Boolean).length,
-      first: gridDays(sat)[0][0].toDateString(),
-      runs: columnRuns([[1, 1, 1, 1, 1, 1, 1], [1, 1, 1, null, null, null, null]].map((w) => w.map((x) => (x ? {} : null))), [[0, 0, 2, 2, 2, 0, 3], [1, 1, 1, 0, 0, 0, 0]]),
-      fit: [634, 900, 1260].map((row) => {
-        const g = geometry(row), last = 52 * g.step;
-        const months = monthColumns(gridDays(sat));
-        return { lastEnd: last + g.cell <= g.width + 1e-9, centre: cellAt(last + g.cell / 2, g.cell / 2, g), lastMonthX: months.at(-1)[0] * g.step <= last };
-      }),
-      // Whatever the step (10, 12.5 and 13.64 px): every week's column maps back to itself, the last is week 52,
-      // and the edge of the grid and below it are nothing.
-      round: [10, 12.5, 13.64].map((step) => {
-        const g = { cell: step - 2, step, width: 53 * step - 2, height: 7 * step - 2 };
-        return {
-          weeks: [...Array(53).keys()].every((w) => cellAt(w * step + g.cell / 2, g.cell / 2, g)?.[0] === w),
-          last: cellAt(52 * step + g.cell / 2, 3, g)?.[0],
-          edge: [cellAt(g.width, 3, g), cellAt(g.width + 5, 3, g), cellAt(3, g.height, g), cellAt(-1, 3, g)],
-        };
-      }),
-      // The tooltip is centred on its column and always inside the grid.
-      tips: (() => {
-        const g = geometry(634), tip = tipWidth(['Tue 3 Nov 2026', '42 min', '3 sessions', '18.2k tokens']);
-        const lefts = [...Array(53).keys()].map((w) => tipLeft(w, g, tip));
-        return { inside: lefts.every((l) => l >= 0 && l + tip <= g.width + 1e-9), first: lefts[0], centred: Math.abs(lefts[26] - (26 * g.step + g.step / 2 - tip / 2)) < 1e-9, last: Math.abs(lefts[52] - (g.width - tip)) < 1e-9, wide: tip > 250 && tip < 450 };
-      })(),
-      geo: [geometry(634), geometry(700), geometry(900), geometry(1260), geometry(NaN), geometry(10)].map((g) => ({ cell: +g.cell.toFixed(3), step: +g.step.toFixed(3), width: +g.width.toFixed(3) })),
-      at: [[0, 0], [8.9, 8.9], [9.5, 3], [11, 0], [52 * 11 + 4, 6 * 11 + 4], [581, 0], [-1, 0], [26 * 11 + 2, 3 * 11 + 5], [3, 75], [NaN, 1], [2, 9.5]].map(([x, y]) => cellAt(x, y, geometry(634))),
-      months: [monthColumns(gridDays(sat)).length, monthColumns(gridDays(sat))[0], monthColumns(gridDays(sat)).at(-1), monthColumns(gridDays(sat))[10]],
-      parsed: [parseActivity(null), parseActivity('{not json'), parseActivity('{"version":2,"days":{}}'),
-        parseActivity('{"version":1,"days":{"2026-11-03":{"seconds":5,"sessions":-1,"tokens":"x"},"bad":{"seconds":9}}}')],
-    };
+import {{ div }} from 'gpui-kit';
+import {{ theme }} from 'h0x';
+import {{ tooltip, levelOf, levelColors, minutesOf, short, summarize, gridDays, parseActivity, geometry, cellAt, monthColumns, columnRuns, tipLeft, tipWidth }} from './frame/settings/activity.js';
+export default class Scenario extends Real {{
+  render(cx) {{
+    const probe = {body};
     return super.render(cx).child(div().child('PROBE ' + JSON.stringify(probe) + ' END'));
-  }
+  }}
+}}
+"#
+    )
 }
-"#;
+
+// The grid's days: one gridDays call, everything about the 371 days.
+const ACTIVITY_PROBE_GRID: &str = r#"(() => {
+      const sat = new Date(2026, 10, 14), grid = gridDays(sat), months = monthColumns(grid);
+      return {
+        summary: summarize(grid, { '2026-11-14': { seconds: 3600 }, '2026-11-13': { seconds: 600 }, '2026-11-12': { seconds: 60 }, '2026-11-10': { seconds: 120 } }),
+        slots: grid.flat().length,
+        real: grid.flat().filter(Boolean).length,
+        first: grid[0][0].toDateString(),
+        months: [months.length, months[0], months.at(-1), months[10]],
+        fit: [634, 900, 1260].map((row) => {
+          const g = geometry(row), last = 52 * g.step;
+          return { lastEnd: last + g.cell <= g.width + 1e-9, centre: cellAt(last + g.cell / 2, g.cell / 2, g), lastMonthX: months.at(-1)[0] * g.step <= last };
+        }),
+      };
+    })()"#;
+
+// The geometry: the cell step, hit-testing, the tooltip's place and a column's runs. No dates.
+const ACTIVITY_PROBE_GEOMETRY: &str = r#"(() => {
+      const g634 = geometry(634);
+      return {
+        runs: columnRuns([[1, 1, 1, 1, 1, 1, 1], [1, 1, 1, null, null, null, null]].map((w) => w.map((x) => (x ? {} : null))), [[0, 0, 2, 2, 2, 0, 3], [1, 1, 1, 0, 0, 0, 0]]),
+        // Whatever the step (10, 12.5 and 13.64 px): every week's column maps back to itself, the last is week 52,
+        // and the edge of the grid and below it are nothing.
+        round: [10, 12.5, 13.64].map((step) => {
+          const g = { cell: step - 2, step, width: 53 * step - 2, height: 7 * step - 2 };
+          return {
+            weeks: [...Array(53).keys()].every((w) => cellAt(w * step + g.cell / 2, g.cell / 2, g)?.[0] === w),
+            last: cellAt(52 * step + g.cell / 2, 3, g)?.[0],
+            edge: [cellAt(g.width, 3, g), cellAt(g.width + 5, 3, g), cellAt(3, g.height, g), cellAt(-1, 3, g)],
+          };
+        }),
+        // The tooltip is centred on its column and always inside the grid.
+        tips: (() => {
+          const tip = tipWidth(['Tue 3 Nov 2026', '42 min', '3 sessions', '18.2k tokens']);
+          const lefts = [...Array(53).keys()].map((w) => tipLeft(w, g634, tip));
+          return { inside: lefts.every((l) => l >= 0 && l + tip <= g634.width + 1e-9), first: lefts[0], centred: Math.abs(lefts[26] - (26 * g634.step + g634.step / 2 - tip / 2)) < 1e-9, last: Math.abs(lefts[52] - (g634.width - tip)) < 1e-9, wide: tip > 250 && tip < 450 };
+        })(),
+        geo: [g634, geometry(700), geometry(900), geometry(1260), geometry(NaN), geometry(10)].map((g) => ({ cell: +g.cell.toFixed(3), step: +g.step.toFixed(3), width: +g.width.toFixed(3) })),
+        at: [[0, 0], [8.9, 8.9], [9.5, 3], [11, 0], [52 * 11 + 4, 6 * 11 + 4], [581, 0], [-1, 0], [26 * 11 + 2, 3 * 11 + 5], [3, 75], [NaN, 1], [2, 9.5]].map(([x, y]) => cellAt(x, y, g634)),
+      };
+    })()"#;
+
+// The values: tooltip text, levels, minutes, colours, short numbers and parsing.
+const ACTIVITY_PROBE_VALUES: &str = r#"(() => {
+      const day = { seconds: 2520, sessions: 3, tokens: 18200 };
+      return {
+        tip: tooltip(new Date(2026, 10, 3), day),
+        tipOne: tooltip(new Date(2026, 10, 3), { seconds: 60, sessions: 1, tokens: 0 }),
+        tipNone: tooltip(new Date(2026, 10, 3), undefined),
+        levels: [0, 1, 14, 15, 59, 60, 179, 180, 1000].map(levelOf),
+        minutes: [0, 1, 89, 90, 3600].map((seconds) => minutesOf({ seconds })),
+        colors: levelColors(theme()),
+        short: [999, 1000, 18200, 999999, 1000000, 1250000].map(short),
+        parsed: [parseActivity(null), parseActivity('{not json'), parseActivity('{"version":2,"days":{}}'),
+          parseActivity('{"version":1,"days":{"2026-11-03":{"seconds":5,"sessions":-1,"tokens":"x"},"bad":{"seconds":9}}}')],
+      };
+    })()"#;
 
 #[gpui::test]
 fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppContext) {
@@ -10047,11 +10070,17 @@ fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppCo
     p["section"] = json!("info");
     let values = fixture(true, p, updates("current", "current"));
     let colors = values["theme"].clone();
-    let tree = describe_activity(cx, &staged, values, None, Some(ACTIVITY_PROBE), None);
-    let probe = tree.split("PROBE ").nth(1).and_then(|t| t.split(" END").next()).unwrap_or_else(|| panic!("{tree}"));
-    // The tree prints a text node as a Rust debug string: undo its escapes (\" and \\) to get the JSON back.
-    let probe = serde_json::from_str::<String>(&format!("\"{probe}\"")).unwrap_or_else(|e| panic!("{e}: {probe}"));
-    let probe: Value = serde_json::from_str(&probe).unwrap_or_else(|e| panic!("{e}: {probe}"));
+    // Three scenarios, three renders; their reports are one object for the assertions below.
+    let mut probe = serde_json::Map::new();
+    for body in [ACTIVITY_PROBE_GRID, ACTIVITY_PROBE_GEOMETRY, ACTIVITY_PROBE_VALUES] {
+        let tree = describe_activity(cx, &staged, values.clone(), None, Some(&activity_probe(body)), None);
+        let report = tree.split("PROBE ").nth(1).and_then(|t| t.split(" END").next()).unwrap_or_else(|| panic!("{tree}"));
+        // The tree prints a text node as a Rust debug string: undo its escapes (\" and \\) to get the JSON back.
+        let report = serde_json::from_str::<String>(&format!("\"{report}\"")).unwrap_or_else(|e| panic!("{e}: {report}"));
+        let report: Value = serde_json::from_str(&report).unwrap_or_else(|e| panic!("{e}: {report}"));
+        probe.extend(report.as_object().unwrap().clone());
+    }
+    let probe = Value::Object(probe);
     assert_eq!(probe["tip"], json!(["Tue 3 Nov 2026", "42 min", "3 sessions", "18.2k tokens"]));
     assert_eq!(probe["tipOne"], json!(["Tue 3 Nov 2026", "1 min", "1 session"]), "tokens are left out when 0");
     assert_eq!(probe["tipNone"], json!(["Tue 3 Nov 2026", "0 min", "0 sessions"]));
