@@ -382,8 +382,6 @@ pub struct AppWindow {
     overlays: Vec<Overlay>,
     /// A text file clicked in a terminal, waiting for the files panel to show.
     pending_open: Option<(PathBuf, Option<u32>)>,
-    /// The last file a terminal link opened in the Files panel, and when: a panel started again soon after gets it back.
-    last_link_open: Option<(PathBuf, Option<u32>, Instant, u32)>,
     folders: BTreeMap<String, Found>,
     /// Mods placed once; later the layout decides where (or whether) they show.
     seen: BTreeSet<String>,
@@ -506,7 +504,6 @@ impl AppWindow {
             copies: HashMap::new(),
             overlays: Vec::new(),
             pending_open: None,
-            last_link_open: None,
             folders: mods::scan().into_iter().map(|f| (f.id.clone(), f)).collect(),
             seen,
             bounds: Default::default(),
@@ -1453,19 +1450,6 @@ impl AppWindow {
         let want: HashMap<String, Instance> = mods_visible.into_iter().collect();
         for (slot, inst) in want {
             if !self.copies.contains_key(&slot) {
-                // A Files panel that starts again soon after a link opened a file in the one before
-                // (its state went with it) gets the file and line back.
-                // The panel the click itself brings up (`due`) is not that: it gets the open the usual way.
-                if inst.name == "files"
-                    && let Some((path, line, at, due)) = self.last_link_open.as_mut()
-                {
-                    if *due > 0 {
-                        *due -= 1;
-                    } else if reopens_after_remount(Some(at.elapsed()), self.pending_open.is_some()) {
-                        let (path, line) = (path.clone(), *line);
-                        self.deliver_open(path, line, cx);
-                    }
-                }
                 let copy = self.load(inst, window, cx);
                 if slot.starts_with("float:")
                     && let Some(root) = &copy.root
@@ -3827,9 +3811,6 @@ impl AppWindow {
             crate::links::open_text_elsewhere(&path);
             return;
         }
-        // With no Files panel yet, the first one started from here is the one this open is for.
-        let due = u32::from(!self.copies.values().any(|c| c.inst.name == "files" && c.root.is_some()));
-        self.last_link_open = Some((path.clone(), line, Instant::now(), due));
         if send_open("files", &path, line) {
             return;
         }
@@ -4152,7 +4133,13 @@ impl AppWindow {
         if changed.iter().any(|p| top(p) == "layouts") {
             self.check_layout_file(window, cx);
         }
-        let edited: BTreeSet<String> = changed.iter().filter_map(|p| crate::files::mod_of(p)).collect();
+        // A mod's own folder changing is not an edit of an existing mod: its stub files being written
+        // (jsconfig.json, gpui-kit.d.ts) touch the folder, and the file watcher reports that late.
+        let edited: BTreeSet<String> = changed
+            .iter()
+            .filter(|p| crate::files::counts_as_edit(p, crate::files::mod_of(p).is_some_and(|m| self.folders.contains_key(&m))))
+            .filter_map(|p| crate::files::mod_of(p))
+            .collect();
         if edited.is_empty() {
             return;
         }
@@ -4945,15 +4932,6 @@ fn send_open(panel: &str, path: &std::path::Path, line: Option<u32>) -> bool {
 /// The toast for an agent that isn't installed: "Can't start Codex", "Codex is not installed on this computer."
 fn agent_missing(name: &str, machine: Option<&str>) -> (String, String) {
     (format!("Can't start {name}"), format!("{name} is not installed on {}.", machine.unwrap_or("this computer")))
-}
-
-/// How soon after a link opened a file a new Files panel is the old one come back.
-const REOPEN_WITHIN: Duration = Duration::from_secs(30);
-
-/// Whether a Files panel being started now should be handed the file a link opened `since` ago:
-/// not while that very open is still waiting for the panel (`opening_now`).
-fn reopens_after_remount(since: Option<Duration>, opening_now: bool) -> bool {
-    !opening_now && since.is_some_and(|d| d < REOPEN_WITHIN)
 }
 
 fn needs_model_pane(name: &str, args: &Value) -> bool {
@@ -6537,18 +6515,6 @@ export default class SystemToast extends View {
         for id in ["frame-welcome", "toast", "", "frame-whatsnew2"] {
             assert!(!super::hides_update_pill(id), "{id}");
         }
-    }
-
-    #[test]
-    fn a_files_panel_started_again_soon_after_a_link_click_reopens_the_file() {
-        use super::reopens_after_remount as reopens;
-        use std::time::Duration;
-        let soon = Some(Duration::from_secs(8));
-        assert!(reopens(soon, false), "a new panel a few seconds after the click");
-        assert!(!reopens(soon, true), "the open already waiting is the one delivered");
-        assert!(!reopens(None, false), "no link was clicked");
-        assert!(!reopens(Some(Duration::from_secs(31)), false), "long after, it is just a new panel");
-        assert!(reopens(Some(Duration::ZERO), false));
     }
 
     #[test]

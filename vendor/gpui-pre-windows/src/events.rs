@@ -1603,7 +1603,12 @@ fn parse_normal_key(
     lparam: LPARAM,
     mut modifiers: Modifiers,
 ) -> Option<(Keystroke, bool)> {
-    let (key_char, prefer_character_input) = process_key(vkey, lparam.hiword());
+    let (mut key_char, mut prefer_character_input) = process_key(vkey, lparam.hiword());
+    // HyperOx: Ctrl+Shift+<digit> dispatches as the binding `ctrl-shift-4`: no character preferred, none typed.
+    if is_digit_chord(vkey.0, &modifiers) {
+        key_char = None;
+        prefer_character_input = false;
+    }
 
     let key = parse_immutable(vkey).or_else(|| {
         let scan_code = lparam.hiword() & 0xFF;
