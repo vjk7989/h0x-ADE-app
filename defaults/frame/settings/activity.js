@@ -2,7 +2,7 @@
 // <app home>/usage/activity.json (src/activity.rs writes it; it never leaves this computer).
 //   {"version":1,"days":{"YYYY-MM-DD":{"seconds":n,"sessions":n,"tokens":n}}}  (local dates)
 
-import { div } from "gpui-kit";
+import { div, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { appHome, readTextFile } from "h0x";
 
@@ -141,33 +141,49 @@ function model(view, t) {
   if (kept && kept.stamp === stamp && kept.record === view.activity) return kept;
   const weeks = gridDays(today), days = view.activity?.days ?? {};
   const levels = weeks.map((week) => week.map((d) => (d ? levelOf(minutesOf(days[key(d)])) : 0)));
-  return (view.activityModel = { stamp, record: view.activity, weeks, days, levels, colors: levelColors(t), sum: summarize(weeks, days) });
+  return (view.activityModel = { stamp, record: view.activity, weeks, days, levels, colors: levelColors(t), sum: summarize(weeks, days), months: monthColumns(weeks), paths: null });
+}
+
+// A cell with its corners cut a little (a radius-2 look from a polygon).
+const cut = (x, y, s, c) => [[x + c, y], [x + s - c, y], [x + s, y + c], [x + s, y + s - c], [x + s - c, y + s], [x + c, y + s], [x, y + s - c], [x, y + c]];
+
+// One path per level holding every cell of that level: the whole grid is painted as at most five elements,
+// built once per geometry and kept in the model. `null` for a level no day has.
+function levelPaths(m, g) {
+  const id = `${g.cell}|${g.step}`;
+  if (m.paths?.id === id) return m.paths.list;
+  const builders = m.colors.map(() => null);
+  m.weeks.forEach((week, w) => week.forEach((d, r) => {
+    if (!d) return;
+    const level = m.levels[w][r];
+    (builders[level] ??= PathBuilder.fill()).add_polygon(cut(w * g.step, r * g.step, g.cell, 0.8), true);
+  }));
+  m.paths = { id, list: builders.map((b) => (b ? b.build() : null)) };
+  return m.paths.list;
 }
 
 export function activityBlock(view, t) {
-  const { weeks, days, levels, colors, sum } = model(view, t);
-  const { minutes, active, longest } = sum;
+  const m = model(view, t);
+  const { weeks, days, colors, months } = m;
+  const { minutes, active, longest } = m.sum;
   const empty = active === 0;
   const hover = view.activityHover;
   const hovered = !empty && hover ? weeks[hover[0]]?.[hover[1]] : null;
   const g = geometry(view.activityWidth);
   const num = (text) => mono(div()).text_color(t.foreground).child(text);
   const note = (text) => mono(div()).text_color(t.muted).child(text);
-  // A render has a 50 ms budget, and the grid is 371 cells: each is five calls (no closure, no `when`),
-  // and ONE handler on the grid maps the pointer to its cell.
-  const cell = (w, r) => {
-    const d = weeks[w][r];
-    if (!d) return div().id(`st-prof-activity-gap-${w}-${r}`).size(g.cell);
-    const c = div().id(`st-prof-activity-cell-${w}-${r}`).size(g.cell).rounded(2).bg(colors[levels[w][r]]);
-    return hover?.[0] === w && hover?.[1] === r && !empty ? c.border_1().border_color(t.foreground) : c;
-  };
+  // A render has a 50 ms budget, so the 371 cells are not 371 elements: the grid is five painted paths (one per level),
+  // a single outline for the hovered day, and ONE handler on the grid that maps the pointer to its cell.
   // `local_position` is relative to the grid; scaled by the event's own bounds, so whatever units it comes in, it lands on the drawn cells.
   const at = (e) => {
     const b = e.bounds, kx = b?.width > 0 ? g.width / b.width : 1, ky = b?.height > 0 ? g.height / b.height : 1;
     const cellUnder = cellAt(e.local_position.x * kx, e.local_position.y * ky, g);
     return cellUnder && weeks[cellUnder[0]][cellUnder[1]] ? cellUnder : null;
   };
-  const grid = h_flex().id("st-prof-activity-grid").relative().gap(GAP).flex_none()
+  const [hw, hr] = hover ?? [];
+  const painted = levelPaths(m, g).map((path, level) => (path ? window.paint_path(path, colors[level]).absolute().top(0).left(0).size_full() : null)).filter(Boolean);
+  const outline = hovered ? div().absolute().left(hw * g.step).top(hr * g.step).size(g.cell).rounded(2).border_1().border_color(t.foreground) : null;
+  const grid = div().id("st-prof-activity-grid").relative().w(g.width).h(g.height).flex_none()
     .on_mouse_move((e, cx) => {
       if (empty) return;
       const now = view.activityHover, next = at(e);
@@ -180,7 +196,7 @@ export function activityBlock(view, t) {
       view.activityHover = null;
       cx.notify();
     })
-    .children(weeks.map((week, w) => v_flex().gap(GAP).children(week.map((_, r) => cell(w, r)))))
+    .children(outline ? [...painted, outline] : painted)
     .when(Boolean(hovered), (el) => {
       const [w, r] = hover;
       const parts = tooltip(hovered, days[key(hovered)]);
@@ -195,7 +211,7 @@ export function activityBlock(view, t) {
     .children(DAY_NAMES.map((n, r) => mono(div().h(g.cell).flex().items_center().justify_end().text_size(10).line_height("9px").text_color(t.dim)).child(r % 2 === 1 ? n : "")));
   // A month's name sits over the first week whose column holds its 1st.
   const monthRow = div().relative().h(14).ml(LABELS).w(g.width).flex_none()
-    .children(monthColumns(weeks).map(([w, name]) => mono(div().absolute().left(w * g.step).top(0).text_size(10).line_height("14px").text_color(t.dim)).child(name)));
+    .children(months.map(([w, name]) => mono(div().absolute().left(w * g.step).top(0).text_size(10).line_height("14px").text_color(t.dim)).child(name)));
   const legend = h_flex().gap(6).items_center().flex_none()
     .child(mono(div().text_size(10.5).text_color(t.dim)).child("less"))
     .child(h_flex().gap(1).children(colors.map((c, i) => div().id(`st-prof-activity-legend-${i}`).w(CELL).h(CELL).rounded(2).bg(c))))

@@ -9876,8 +9876,21 @@ fn describe_activity(cx: &mut TestAppContext, staged: &Staged, values: BTreeMap<
     tree
 }
 
-fn activity_cells(tree: &str) -> (usize, usize) {
-    (tree.matches("st-prof-activity-cell-").count(), tree.matches("st-prof-activity-gap-").count())
+// The elements of the graph itself (the grid and what is inside it, text nodes not counted): a render has a
+// 50 ms budget, so the 371 days are painted, not built one element each.
+fn activity_graph_elements(tree: &str) -> usize {
+    let lines: Vec<&str> = tree.lines().collect();
+    let at = lines.iter().position(|l| l.contains(r#":id[Str("st-prof-activity-grid")]"#)).unwrap_or_else(|| panic!("no grid: {tree}"));
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let depth = indent(lines[at]);
+    1 + lines[at + 1..].iter().take_while(|l| indent(l) > depth).filter(|l| !l.trim_start().starts_with("text ")).count()
+}
+
+// The number in front of "<word>" in the tree's text, as the summary line writes it ("371 active days").
+fn number_before(tree: &str, word: &str) -> usize {
+    let end = tree.find(&format!(" {word}\"")).unwrap_or_else(|| panic!("no {word:?}: {tree}"));
+    let digits: String = tree[..end].chars().rev().take_while(|c| c.is_ascii_digit() || *c == ',').collect::<Vec<_>>().into_iter().rev().filter(|c| *c != ',').collect();
+    digits.parse().unwrap_or_else(|_| panic!("no number before {word:?}: {tree}"))
 }
 
 fn grouped(n: usize) -> String {
@@ -9921,10 +9934,10 @@ fn settings_profile_draws_the_53_by_7_activity_grid_with_its_empty_state_and_no_
         for text in ["st-prof-activity", "st-prof-activity-grid", "Agent activity \u{b7} this computer", "last 12 months", "Mon", "Wed", "Fri", "st-prof-activity-empty", "No agent activity recorded yet", " \u{b7} starts with your first agent session"] {
             assert!(tree.contains(text), "{label}: {text:?}: {tree}");
         }
-        // 53 weeks of 7 rows: a cell for every day up to today, a blank slot for the rest of this week.
-        let (cells, gaps) = activity_cells(&tree);
-        assert_eq!(cells + gaps, 371, "{label}: {tree}");
-        assert!((365..=371).contains(&cells), "{label}: {cells} days");
+        // The 371 days are painted, not 371 elements (the Windows runner's 50 ms render budget).
+        let elements = activity_graph_elements(&tree);
+        assert!(elements <= 10, "{label}: the graph is {elements} elements: {tree}");
+        assert!(!tree.contains("st-prof-activity-cell-"), "{label}: {tree}");
         for text in ["st-prof-activity-summary", "st-prof-activity-legend-", "st-prof-activity-tip"] {
             assert!(!tree.contains(text), "{label}: the empty state has no {text:?}: {tree}");
         }
@@ -9938,11 +9951,14 @@ fn settings_profile_activity_shows_the_summary_the_legend_and_a_tooltip_on_hover
     let account = account_value(&[("u1", "google.com", "vijay")], Some("u1"));
     let record = full_record();
     let tree = describe_activity(cx, &staged, profile_values(account.clone()), Some(&record), None, None);
-    let (cells, gaps) = activity_cells(&tree);
-    assert_eq!(cells + gaps, 371, "{tree}");
-    for (i, text) in [format!("{} min", grouped(cells * 42)), format!("{cells} active days"), "longest streak".to_owned(), format!("{cells} days")].iter().enumerate() {
+    // Every day of the grid up to today (365 to 371 of them) has the record's 42 minutes, in one streak.
+    let cells = number_before(&tree, "active days");
+    assert!((365..=371).contains(&cells), "{cells} days: {tree}");
+    for (i, text) in [format!("{} min", grouped(cells * 42)), "longest streak".to_owned(), format!("{cells} days")].iter().enumerate() {
         assert!(tree.contains(text.as_str()), "{i} {text:?}: {tree}");
     }
+    let elements = activity_graph_elements(&tree);
+    assert!(elements <= 10, "the graph is {elements} elements: {tree}");
     for text in ["st-prof-activity-summary", "st-prof-activity-legend-0", "st-prof-activity-legend-4", "less", "more"] {
         assert!(tree.contains(text), "{text:?}: {tree}");
     }
