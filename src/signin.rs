@@ -108,7 +108,11 @@ pub struct SignIn {
     core: Option<Arc<crate::core_link::Core>>,
     requests: Option<async_channel::Receiver<Request>>,
     focus: FocusHandle,
+    /// The main button (Sign in, Try again): it has focus whenever it is shown, so Enter and Tab start from it.
+    primary_focus: FocusHandle,
     skip_focus: FocusHandle,
+    /// Requests that came in while this screen was up (the main window answers them once it opens).
+    held: Vec<Request>,
     /// Code-texture ticks since the window opened (it only moves while `rain_runs`).
     frame: u64,
     rain: Rc<RefCell<RainPaint>>,
@@ -161,7 +165,8 @@ pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver
     let options = window_options(WindowBounds::Windowed(Bounds::centered(None, window_size(visible), cx)));
     cx.open_window(options, |window, cx| {
         let focus = cx.focus_handle();
-        window.focus(&focus, cx);
+        let primary_focus = cx.focus_handle().tab_stop(true);
+        window.focus(&primary_focus, cx);
         let skip_focus = cx.focus_handle().tab_stop(true);
         let view = cx.new(|_| SignIn {
             state: State::Idle,
@@ -169,7 +174,9 @@ pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver
             core: Some(core),
             requests: Some(requests),
             focus,
+            primary_focus,
             skip_focus,
+            held: Vec::new(),
             frame: 0,
             rain: Rc::new(RefCell::new(RainPaint::default())),
         });
@@ -179,6 +186,7 @@ pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver
                 loop {
                     cx.background_executor().timer(TICK).await;
                     let open = this.update_in(cx, |this, window, cx| {
+                        this.serve_requests(cx);
                         let wide = layout(f32::from(window.viewport_size().width), f32::from(window.viewport_size().height)).rain;
                         if rain_runs(cx.reduce_motion(), window.is_window_active(), wide) {
                             this.frame += 1;
@@ -217,7 +225,7 @@ impl SignIn {
         let attempt = self.attempt;
         self.state = State::Waiting;
         // The button that was clicked is gone now: the keys (Esc, Tab) go to the screen again.
-        window.focus(&self.focus, cx);
+        self.focus_main(window, cx);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -232,6 +240,7 @@ impl SignIn {
                     Ok(account) => {
                         crate::analytics::identify(Some(&account));
                         let (Some(core), Some(requests)) = (this.core.take(), this.requests.take()) else { return };
+                        this.hand_over();
                         // Done: closing the window must not cancel anything.
                         this.state = State::Idle;
                         window.remove_window();
@@ -239,7 +248,7 @@ impl SignIn {
                     }
                     Err(e) => {
                         this.state = State::Failed(friendly(&e));
-                        window.focus(&this.focus, cx);
+                        this.focus_main(window, cx);
                         cx.notify();
                     }
                 }
@@ -255,12 +264,44 @@ impl SignIn {
             return;
         }
         let (Some(core), Some(requests)) = (self.core.take(), self.requests.take()) else { return };
+        self.hand_over();
         if let Err(e) = crate::auth::skip_screen() {
             tracing::warn!("sign-in skip not remembered: {e}");
         }
         crate::analytics::event("signin_skipped", serde_json::json!({}));
         window.remove_window();
         crate::open_main(core, requests, cx);
+    }
+
+    /// Gives the keys to what the state shows: the main button, or the bare screen while it is not shown.
+    fn focus_main(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match focus_target(self.state) {
+            FocusTarget::Primary => window.focus(&self.primary_focus, cx),
+            FocusTarget::Root => window.focus(&self.focus, cx),
+        }
+    }
+
+    /// `h0x-ade do app.quit` and the like reach the window that owns the request channel: this one,
+    /// until the main window opens. Quit quits; anything else waits for the main window.
+    fn serve_requests(&mut self, cx: &mut Context<Self>) {
+        let Some(requests) = &self.requests else { return };
+        while let Ok(request) = requests.try_recv() {
+            if is_quit(&request) {
+                if let Request::Control { reply, .. } = request {
+                    let _ = reply.send(serde_json::json!({ "ok": true }));
+                }
+                cx.quit();
+                return;
+            }
+            self.held.push(request);
+        }
+    }
+
+    /// What came in meanwhile goes back on the channel, for the main window.
+    fn hand_over(&mut self) {
+        for request in self.held.drain(..) {
+            crate::mods::request(request);
+        }
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -271,7 +312,7 @@ impl SignIn {
         crate::auth::cancel_sign_in();
         self.attempt += 1;
         self.state = State::Failed(CANCELLED);
-        window.focus(&self.focus, cx);
+        self.focus_main(window, cx);
         cx.notify();
     }
 
@@ -279,8 +320,8 @@ impl SignIn {
         match ev.keystroke.key.as_str() {
             "enter" => match enter_action(self.state, self.skip_focus.is_focused(window)) {
                 Action::Skip => self.skip(window, cx),
-                // A focused button or link activates itself; only the bare root signs in.
-                Action::Start if self.focus.is_focused(window) => self.start(window, cx),
+                // A focused link activates itself; the bare screen and the main button sign in (a second start is ignored).
+                Action::Start if self.focus.is_focused(window) || self.primary_focus.is_focused(window) => self.start(window, cx),
                 Action::Start | Action::None => {}
             },
             "escape" => self.cancel(window, cx),
@@ -304,6 +345,26 @@ fn enter_action(state: State, skip_focused: bool) -> Action {
         State::Waiting => Action::None,
         _ if skip_focused => Action::Skip,
         _ => Action::Start,
+    }
+}
+
+/// Where the keys go when the screen opens and after a state change: the main button when one is shown.
+#[derive(Debug, PartialEq)]
+enum FocusTarget {
+    Primary,
+    Root,
+}
+
+fn focus_target(state: State) -> FocusTarget {
+    if content(state).primary.is_some() { FocusTarget::Primary } else { FocusTarget::Root }
+}
+
+/// Whether a request is asking the app to quit (`h0x-ade do app.quit`, or a mod running it).
+fn is_quit(request: &Request) -> bool {
+    match request {
+        Request::Run { name, .. } => name == "app.quit",
+        Request::Control { cmd, .. } => cmd.get("do").and_then(serde_json::Value::as_str) == Some("app.quit"),
+        _ => false,
     }
 }
 
@@ -671,7 +732,7 @@ fn inset(radius: Pixels) -> Div {
 /// a hairline edge, a highlight along the top and a soft drop shadow (cook/SPEC-v2.md section 2).
 fn glass(id: &'static str, radius: f32, s: f32, light: bool) -> Stateful<Div> {
     let r = z(radius, s);
-    let mut tile = div().id(id).relative().rounded(r).border_1().border_color(veil(light, 0.10, 0.07));
+    let mut tile = div().id(id).relative().rounded(r).border_1().border_color(veil(light, 0.16, 0.07));
     tile.style().box_shadow = Some(if light {
         vec![
             BoxShadow::new(px(0.0), z(24.0, s), black().opacity(0.20)).blur_radius(z(60.0, s)).spread_radius(z(-28.0, s)),
@@ -684,7 +745,10 @@ fn glass(id: &'static str, radius: f32, s: f32, light: bool) -> Stateful<Div> {
         ]
     });
     let (top, bottom) = if light { (0.80, 0.55) } else { (0.075, 0.030) };
-    tile.when(!light, |d| d.child(inset(r).bg(c("raised").opacity(0.55))))
+    // A shadow paints under the whole tile in GPUI, not only outside it: light tiles sit on the page's own
+    // color first, so the shadow does not grey them (dark ones get their body from the raised fill).
+    tile.when(light, |d| d.child(inset(r).bg(c("background"))))
+        .when(!light, |d| d.child(inset(r).bg(c("raised").opacity(0.55))))
         .child(inset(r).bg(linear_gradient(180.0, linear_color_stop(white().opacity(top), 0.0), linear_color_stop(white().opacity(bottom), 1.0))))
         .child(div().absolute().top(px(0.0)).left(r).right(r).h(px(1.0)).bg(if light { white() } else { white().opacity(0.20) }))
 }
@@ -903,7 +967,8 @@ impl Render for SignIn {
             .pb(z(pad_bottom, s))
             .when(compact, |d| d.w_full())
             .when(!compact, |d| d.flex_none().w(z(2.0 * COL + GAP, s)).h(z(HERO_H, s)))
-            .child(div().text_size(z(title, s)).line_height(z(title_lh, s)).font_weight(FontWeight::SEMIBOLD).text_color(c("foreground")).child("Welcome to HyperOx"))
+            // 650: GPUI has no letter spacing, and a touch more weight keeps the large title as dense as the mock-up's.
+            .child(div().text_size(z(title, s)).line_height(z(title_lh, s)).font_weight(FontWeight(650.0)).text_color(c("foreground")).child("Welcome to HyperOx"))
             .child(div().mt(z(8.0, s)).max_w(z(470.0, s)).text_size(z(14.5, s)).line_height(z(22.0, s)).text_color(c("muted")).child(TAGLINE))
             .child(
                 div()
@@ -915,7 +980,7 @@ impl Render for SignIn {
                     .when_some(status, |d, st| d.child(st))
                     .when_some(view.primary, |d, label| {
                         let id = if idle { "signin" } else { "retry" };
-                        d.child(primary_button(id, label, s).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
+                        d.child(primary_button(id, label, s).track_focus(&self.primary_focus).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
                     })
                     .when_some(view.secondary, |d, label| d.child(quiet_button("cancel", label, s, light).on_click(cx.listener(|this, _, w, cx| this.cancel(w, cx)))))
                     .when_some(view.note, |d, note| {
@@ -1023,7 +1088,7 @@ impl Render for SignIn {
                 .flex()
                 .flex_col()
                 .gap(px(10.0))
-                .child(wash(tint, if light { 0.07 } else { 0.16 }, w / 2.0, 100.0, w * 1.5, 361.0))
+                .child(wash(tint, if light { 0.02 } else { 0.16 }, w / 2.0, 100.0, w * 1.5, 361.0))
                 .child(hero)
                 .child(perks)
                 .child(mark)
@@ -1034,7 +1099,7 @@ impl Render for SignIn {
                 .flex()
                 .flex_col()
                 .gap(z(GAP, s))
-                .child(wash(tint, if light { 0.07 } else { 0.16 }, (2.0 * COL + GAP) * s / 2.0, HERO_H * s / 2.0, 1.5 * (2.0 * COL + GAP) * s, 1.9 * HERO_H * s))
+                .child(wash(tint, if light { 0.02 } else { 0.16 }, (2.0 * COL + GAP) * s / 2.0, HERO_H * s / 2.0, 1.5 * (2.0 * COL + GAP) * s, 1.9 * HERO_H * s))
                 .child(div().flex().gap(z(GAP, s)).child(hero).child(mark))
                 .child(perks)
         };
@@ -1343,6 +1408,33 @@ mod tests {
         let full = super::dots_in(r#"<svg viewBox="0 0 715 842"><path d="M0 0 715 0 715 842 0 842Z"/></svg>"#);
         assert!(ring.len() < full.len() && !ring.is_empty());
         assert!(!ring.contains(&(47.5, 57.5)), "the hole is empty");
+    }
+
+    #[test]
+    fn the_keys_start_on_the_main_button_whenever_one_is_shown() {
+        use super::{FocusTarget, focus_target};
+        assert_eq!(focus_target(State::Idle), FocusTarget::Primary, "on open: Sign in has focus");
+        assert_eq!(focus_target(State::Failed(CANCELLED)), FocusTarget::Primary, "Try again after a failure or a cancel");
+        assert_eq!(focus_target(State::Failed(UNREACHABLE)), FocusTarget::Primary);
+        assert_eq!(focus_target(State::Waiting), FocusTarget::Root, "no main button while waiting: Esc and Tab go to the screen");
+        for state in [State::Idle, State::Waiting, State::Failed(OTHER)] {
+            assert_eq!(focus_target(state) == FocusTarget::Primary, content(state).primary.is_some());
+        }
+    }
+
+    #[test]
+    fn only_a_quit_request_is_served_by_the_sign_in_window() {
+        use super::is_quit;
+        use crate::mods::Request;
+        use serde_json::json;
+        let (reply, _) = std::sync::mpsc::channel();
+        assert!(is_quit(&Request::Control { cmd: json!({ "do": "app.quit" }), reply: reply.clone() }));
+        assert!(is_quit(&Request::Run { name: "app.quit".into(), args: json!({}) }));
+        assert!(!is_quit(&Request::Control { cmd: json!({ "do": "tab.new" }), reply: reply.clone() }));
+        assert!(!is_quit(&Request::Control { cmd: json!({ "shot": "x.png" }), reply }));
+        assert!(!is_quit(&Request::Run { name: "app.quit_all".into(), args: json!({}) }));
+        assert!(!is_quit(&Request::Refresh));
+        assert!(!is_quit(&Request::CloseOverlay { id: "app.quit".into() }));
     }
 
     #[test]
