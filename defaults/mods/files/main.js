@@ -2,10 +2,7 @@
 // themselves (VS Code-style auto-save); remote and truncated files are read-only previews.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { spaces, panes, focused, agents, core, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, windowVisible, layout, nextCommand, openFile, debugLog } from "h0x";
-// Temporary (files_dbg): what this panel does, in the app log.
-const dbg = (...a) => { try { debugLog(a.map(x => typeof x === "string" ? x : JSON.stringify(x)).join(" ")); } catch (_e) {} };
-const caller = () => { try { return new Error().stack.split("\n").slice(2, 5).map(l => l.trim()).join(" < "); } catch (_e) { return "?"; } };
+import { spaces, panes, focused, agents, core, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, windowVisible, layout, nextCommand, openFile, shared, setShared } from "h0x";
 
 // Whether the layout shows this panel (as the sessions panel asks): no hidden
 // node on the way, and the selected child of each stack. Not in the layout: shown.
@@ -39,6 +36,9 @@ const nonText = path => {
 // What the card says about a file the system was handed (anything else is an error string).
 const HOW = { opened: "Opened in its default app", revealed: "Shown in its folder" };
 const PER_FOLDER = 500, TOTAL = 5000;
+// The file a terminal link opened, kept in shared state: editing this mod reloads it, and the new
+// instance opens that file again (at its line) instead of the folder. Only for a few minutes.
+const LAST_LINK = "files.last-link", LAST_LINK_MS = 5 * 60 * 1000;
 // Saves of one file this close together are one edit; a note lists at most LISTED files.
 const BURST = 30000, LISTED = 5;
 // A file name goes into text typed at an agent: control characters (a newline would
@@ -78,10 +78,10 @@ async function directory(path, on) {
 
 export default class Files extends View {
   init(_props, cx) {
-    this.dbgId = Math.random().toString(36).slice(2, 6);
-    dbg(`[${this.dbgId}] INIT new Files instance`);
     this.saved = new Map(); this.drafts = new Map(); this.edits = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
+    const last = shared(LAST_LINK);
+    if (last?.full && Date.now() - last.at < LAST_LINK_MS) this.link = { full: last.full, line: last.line ?? null };
     this.refresh(cx);
     cx.timer.every(1000, cx => this.tick(cx));
     // `files.open:<path>` from a terminal link click.
@@ -90,7 +90,6 @@ export default class Files extends View {
       let opened = false;
       for (;;) {
         const c = await nextCommand();
-        dbg(`[${this.dbgId}] command ${c} file=${this.file} link=${JSON.stringify(this.link)}`);
         // One bad command never ends the loop: the panel keeps opening files.
         try {
           if (c.startsWith("open:")) { this.openFile(c.slice(5), cx); opened = true; continue; }
@@ -140,7 +139,6 @@ export default class Files extends View {
   refresh(cx) {
     const { cwd, on, space } = location(), next = key();
     if (next !== this.context?.key) {
-      dbg(`[${this.dbgId}] refresh: key ${this.context?.key} -> ${next}; link kept=${Boolean(this.link)} file=${this.file}`);
       if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file });
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on, space }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
@@ -211,15 +209,20 @@ export default class Files extends View {
     const path = full.replaceAll("\\", "/"), root = this.root?.replaceAll("\\", "/");
     this.show(root && !this.on && path.startsWith(root + "/") ? path.slice(root.length + 1) : path, cx, true);
     this.link = { full, line: null };
+    this.remember();
     cx.notify();
   }
 
   // `files.line:<n>`: the line to show once the file just opened is loaded (and again if it is reopened).
   setLine(n) {
-    if (this.link) this.link.line = n;
+    if (this.link) { this.link.line = n; this.remember(); }
     if (!n) return;
     this.line = n;
     this.reveal();
+  }
+
+  remember() {
+    if (this.link) setShared(LAST_LINK, { full: this.link.full, line: this.link.line, at: Date.now() });
   }
 
   // Once the opened file is loaded: the pending line (clamped to the last one) is scrolled to.
@@ -234,9 +237,8 @@ export default class Files extends View {
   // `restoring`: the folder's last file comes back by itself, not by a click. The system hands a file to its app
   // only for a click, a link or "Open again" (the card's buttons call the host themselves): a restored one shows its card.
   show(path, cx, local, restoring) {
-    dbg(`[${this.dbgId}] show(${JSON.stringify(path)}, local=${local}, restoring=${restoring}) was=${this.file} link=${JSON.stringify(this.link)} by ${caller()}`);
     this.line = null;
-    if (!local) this.link = null;
+    if (!local) { this.link = null; if (shared(LAST_LINK)) setShared(LAST_LINK, null); }
     const prev = this.doc;
     if (prev && cx) {
       // Leaving a file saves it; edits held back by a disk conflict wait for its reopening.
