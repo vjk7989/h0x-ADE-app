@@ -10011,7 +10011,7 @@ export default class Scenario extends Real {
         const months = monthColumns(gridDays(sat));
         return { lastEnd: last + g.cell <= g.width, centre: cellAt(last + g.cell / 2, g.cell / 2, g), lastMonthX: months.at(-1)[0] * g.step <= last, whole: Number.isInteger(g.cell) && Number.isInteger(g.step) };
       }),
-      tip: [tipSide(0, geometry(634), 260, 634), tipSide(52, geometry(634), 260, 634), tipSide(26, geometry(634), 260, 634), tipSide(10, geometry(634), 300, 634), tipSide(2, geometry(634), 900, 634), tipWidth(['Tue 3 Nov 2026', '42 min', '3 sessions', '18.2k tokens']) > 200],
+      tipSides: [tipSide(0, geometry(634), 260, 634), tipSide(52, geometry(634), 260, 634), tipSide(26, geometry(634), 260, 634), tipSide(10, geometry(634), 300, 634), tipSide(2, geometry(634), 900, 634), tipWidth(['Tue 3 Nov 2026', '42 min', '3 sessions', '18.2k tokens']) > 200],
       geo: [geometry(634), geometry(700), geometry(900), geometry(1260), geometry(NaN), geometry(10)].map((g) => ({ cell: +g.cell.toFixed(3), step: +g.step.toFixed(3), width: +g.width.toFixed(3) })),
       at: [[0, 0], [8.9, 8.9], [9.5, 3], [11, 0], [52 * 11 + 4, 6 * 11 + 4], [581, 0], [-1, 0], [26 * 11 + 2, 3 * 11 + 5], [3, 75], [NaN, 1], [2, 9.5]].map(([x, y]) => cellAt(x, y, geometry(634))),
       months: [monthColumns(gridDays(sat)).length, monthColumns(gridDays(sat))[0], monthColumns(gridDays(sat)).at(-1), monthColumns(gridDays(sat))[10]],
@@ -10066,7 +10066,7 @@ fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppCo
     let fit = json!({"lastEnd": true, "centre": [52, 0], "lastMonthX": true, "whole": true});
     assert_eq!(probe["fit"], json!([fit, fit, fit]));
     // The tooltip goes left of the cell when it fits there, else right, else to the roomier side.
-    assert_eq!(probe["tip"], json!(["right", "left", "left", "right", "right", true]));
+    assert_eq!(probe["tipSides"], json!(["right", "left", "left", "right", "right", true]));
     // The pointer maps to the drawn cell: first, middle and last columns, rows, gaps and outside.
     assert_eq!(probe["at"], json!([[0, 0], [0, 0], null, [1, 0], [52, 6], null, null, [26, 3], null, null, null]));
     // Each month's label is over the column holding its 1st: Dec 2025 in week 3 ... Nov 2026 in week 51 (Oct in week 46).
