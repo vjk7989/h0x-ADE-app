@@ -125,6 +125,11 @@ export default class Tabs extends View {
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
+      // Workspaces: the saved snapshots of a space, in a modal dialog (one per click: it blocks the bar until closed).
+      .child(h_flex().id("workspaces").w(26).h(26).flex_none().items_center().justify_center().rounded(6).text_color(t.muted)
+        .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Workspaces").on_mouse_down("left", stop)
+        .on_click(() => openOverlay({ mod: "workspaces", kind: "dialog", modal: true, width: 420 }))
+        .child(svg("mods/workspaces/save.svg").size(14)))
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
       .when(enabled.includes("todo"), el => el.child(panelButton("todo", "To-do", "mods/workspace-chrome/circle-check.svg")))

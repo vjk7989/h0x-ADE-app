@@ -204,6 +204,17 @@ Keep mine). Remote and over-400,000-character files stay read-only.
 After you save, agents in this space are told which files you edited
 (one note per file per burst of saves, once each agent is idle).
 
+A Workspaces button in the tab bar (mod `workspaces`, a dialog) saves the
+shown space under a name: its tabs, split panes, folders and running agents
+with their sessions. At most 5 are kept, newest first, in shared
+`"workspaces"` (`{ version: 1, items: [{ id, name, created, saved, machine,
+folder, space, tabs }] }`); a sixth save is refused until one is deleted or
+saved over (each asks a second click). Restoring a workspace adds its tabs
+alongside what is open and never closes anything: a tab that is already open
+is skipped, each agent resumes in its session, and one without a session
+starts again from its command. The saved layouts the Sessions panel used to
+keep per space are imported once; shared `"sessions"` is left as it was.
+
 **HyperOx's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,
 sounds), where the layout leaves them unset. HyperOx (main) has no look of
