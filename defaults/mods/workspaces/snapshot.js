@@ -61,6 +61,8 @@ function sound(node) {
     return { split: node.split === "down" ? "down" : "right", children };
   }
   const leaf = { cwd: typeof node.cwd === "string" ? node.cwd : null };
+  // Only a program that is not a plain shell is marked: an older save without it restarts as a shell.
+  if (node.shell === false) leaf.shell = false;
   if (Array.isArray(node.argv) && node.argv.every((w) => typeof w === "string")) leaf.argv = node.argv.slice();
   if (typeof node.terminal === "string" && node.terminal) leaf.terminal = node.terminal;
   if (typeof node.agent === "string" && node.agent) {
@@ -132,7 +134,9 @@ export function capture() {
     const r = ts.find((x) => x.address === address);
     const agent = r?.labels?.["h0x.agent"];
     const argv = Array.isArray(r?.argv) ? r.argv : [];
-    return agent ? { agent, session: null, argv, cwd, terminal: address } : { cwd, argv, terminal: address };
+    if (agent) return { agent, session: null, argv, cwd, terminal: address };
+    // `program.shell` is false for a program started by itself (vim, a server): it starts again from its argv.
+    return r?.program && !r.program.shell ? { cwd, argv, terminal: address, shell: false } : { cwd, argv, terminal: address };
   };
   const tabs = (t.tabs ?? []).map((x) => ({ name: x.name ?? "", root: shape(x.root, leaf) })).filter((x) => x.root);
   if (!tabs.length) return null;
@@ -166,6 +170,12 @@ async function launch(on, item, fresh, started) {
     if (!r.error && Array.isArray(r.argv) && r.argv.length) return r.argv;
   }
   return fresh?.length ? fresh : undefined;
+}
+
+// The command a saved program pane starts: the app runs a program in the person's shell (`zsh -ic '"$@"; exec "$0" -i'
+// zsh <cmd>...`), so the core's argv is that wrapper; the command inside is started again (the app wraps it anew).
+function command(argv) {
+  return argv.length > 4 && argv[1].startsWith("-") && argv[1].endsWith("c") && argv[2].includes('"$@"') ? argv.slice(4) : argv;
 }
 
 // A snapshot with each agent pane's session found (asks the core: never call while drawing).
@@ -331,7 +341,8 @@ export async function restore(cx, item) {
   const start = async (leaf) => {
     const folder = leaf.cwd || item.folder;
     const fresh = leaf.argv?.length ? leaf.argv : known.find((p) => p.key === leaf.agent)?.run;
-    const argv = leaf.agent ? await launch(on, leaf, fresh, started) : undefined;
+    // An agent resumes or restarts; a program that is not a shell starts from its argv; a plain shell is the default one.
+    const argv = leaf.agent ? await launch(on, leaf, fresh, started) : leaf.shell === false && leaf.argv?.length ? command(leaf.argv) : undefined;
     return { ...(folder ? { folder } : {}), ...(argv ? { argv } : {}) };
   };
   const target = spaces().find((s) => (s.machine ?? null) === on && norm(s.folder) === norm(item.folder));
