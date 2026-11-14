@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.1.31] - 2026-11-14
+
+Agents one key away, three new themes, and files that open in their own app. Bundles h0x-core 0.1.16.
+
+### Added
+- Ctrl+Shift+1-9 open a new session of an agent in its own tab: 1 Claude Code, 2 Codex, 3 OpenCode, 4 Gemini CLI, then your own. They work on every keyboard layout.
+- Settings > Agents: add, edit or remove your own agents and command-line tools. The + menu and the command palette list them with their keys.
+- Three dark themes: Sodium, Voltage and Phosphor.
+- HyperOx keeps a private record of your daily agent activity on this computer (never sent anywhere), ready for the activity graph.
+
+### Changed
+- New installs start with the darkmatter theme in dark mode.
+
+### Fixed
+- Clicking a video, image, PDF or other non-text file in the Files panel opens it in its default app; programs are only shown in their folder, never run.
+- Ctrl+click on a file name keeps the file open at its line, even right after a fresh install.
+- The welcome pages always open at the top.
+- Clearer notices when an agent isn't installed, and the update notice no longer covers What's new.
+
 ## [0.1.30] - 2026-11-14
 
 Signing in finishes on pavii.tech, and a round of polish. Bundles h0x-core 0.1.16.
