@@ -753,24 +753,6 @@ fn glass(id: &'static str, radius: f32, s: f32, light: bool) -> Stateful<Div> {
         .child(div().absolute().top(px(0.0)).left(r).right(r).h(px(1.0)).bg(if light { white() } else { white().opacity(0.20) }))
 }
 
-/// How far the second strike of `faux_bold` sits from the first, in em.
-const FAUX_BOLD_EM: f32 = 1.0 / 40.0;
-
-/// The offset of the second strike for text of this size (about 0.8 px at 32 px).
-fn faux_bold_offset(size: f32) -> f32 {
-    size * FAUX_BOLD_EM
-}
-
-/// Semibold text. The UI font (Geist.ttf) ships only a Regular face, so a weight asks for nothing and the text
-/// stays regular. A browser fakes the bold of such a font by thickening the glyphs; this does the same by
-/// printing the text twice, the second a hair to the right. `style` gives the text its size, line height and color.
-fn faux_bold(style: impl Fn(Div) -> Div, size: Pixels, label: &'static str) -> Div {
-    div()
-        .relative()
-        .child(style(div()).child(label))
-        .child(style(div()).absolute().top(px(0.0)).left(px(faux_bold_offset(f32::from(size)))).child(label))
-}
-
 /// A duotone icon: its soft fill layer under its line layer, one tint at two strengths.
 fn duo(fill: &'static [u8], line: &'static [u8], size: Pixels, color: Hsla) -> Div {
     div()
@@ -930,7 +912,7 @@ fn feature(i: usize, s: f32, compact: bool, tint: Hsla, light: bool) -> Stateful
                 .child(duo(PERK_FILLS[i], PERKS[i].0, z(icon, s), tint)),
         )
         .child(div().flex_1())
-        .child(faux_bold(|d| d.text_size(z(name, s)).line_height(z(name_lh, s)).text_color(c("foreground")), z(name, s), PERKS[i].1))
+        .child(div().text_size(z(name, s)).line_height(z(name_lh, s)).font_weight(FontWeight::SEMIBOLD).text_color(c("foreground")).child(PERKS[i].1))
         .child(div().mt(z(3.0, s)).text_size(z(benefit, s)).line_height(z(benefit_lh, s)).text_color(c("muted")).child(BENEFITS[i]))
 }
 
@@ -985,7 +967,8 @@ impl Render for SignIn {
             .pb(z(pad_bottom, s))
             .when(compact, |d| d.w_full())
             .when(!compact, |d| d.flex_none().w(z(2.0 * COL + GAP, s)).h(z(HERO_H, s)))
-            .child(faux_bold(|d| d.text_size(z(title, s)).line_height(z(title_lh, s)).text_color(c("foreground")), z(title, s), "Welcome to HyperOx"))
+            // 650: GPUI has no letter spacing, and a touch more weight keeps the large title as dense as the mock-up's.
+            .child(div().text_size(z(title, s)).line_height(z(title_lh, s)).font_weight(FontWeight(650.0)).text_color(c("foreground")).child("Welcome to HyperOx"))
             .child(div().mt(z(8.0, s)).max_w(z(470.0, s)).text_size(z(14.5, s)).line_height(z(22.0, s)).text_color(c("muted")).child(TAGLINE))
             .child(
                 div()
@@ -1425,22 +1408,6 @@ mod tests {
         let full = super::dots_in(r#"<svg viewBox="0 0 715 842"><path d="M0 0 715 0 715 842 0 842Z"/></svg>"#);
         assert!(ring.len() < full.len() && !ring.is_empty());
         assert!(!ring.contains(&(47.5, 57.5)), "the hole is empty");
-    }
-
-    #[test]
-    fn the_ui_font_has_only_a_regular_face_so_semibold_text_is_struck_twice() {
-        // Geist.ttf is one static Regular face: no variable axis, so no weight changes how it draws.
-        let font = include_bytes!("../assets/fonts/Geist.ttf");
-        let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
-        let names: Vec<&[u8]> = (0..tables).map(|i| &font[12 + 16 * i..16 + 16 * i]).collect();
-        assert!(!names.contains(&&b"fvar"[..]), "if the font gains a weight axis, drop faux_bold and use font_weight again");
-        let os2 = (0..tables).find(|i| &font[12 + 16 * i..16 + 16 * i] == b"OS/2").unwrap();
-        let at = u32::from_be_bytes(font[20 + 16 * os2..24 + 16 * os2].try_into().unwrap()) as usize;
-        assert_eq!(u16::from_be_bytes([font[at + 4], font[at + 5]]), 400, "a Regular face");
-        // The second strike moves about a 40th of the size: 0.8 px for the title, a third of a pixel for small names.
-        assert!((super::faux_bold_offset(32.0) - 0.8).abs() < 1e-5);
-        assert!((super::faux_bold_offset(14.0) - 0.35).abs() < 1e-6);
-        assert_eq!(super::faux_bold_offset(0.0), 0.0);
     }
 
     #[test]
