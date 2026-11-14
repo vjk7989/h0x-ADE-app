@@ -6528,6 +6528,35 @@ fn workspaces_restore_starts_a_program_pane_from_its_saved_argv_and_a_plain_shel
 }
 
 #[gpui::test]
+fn workspaces_restore_unwraps_the_windows_shell_wrapper_to_the_program_inside(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // The exact line src/programs.rs powershell_line builds for ping -t "a b" (an argument with a space is quoted twice).
+    let line = format!(
+        "{}{}{}",
+        "& { $PSNativeCommandArgumentPassing = 'Legacy'; $p = 'ping'; $a = @('-t', '\"a b\"'",
+        r"); if ((Get-Command $p -ErrorAction Ignore | Select-Object -First 1).Extension -in '.cmd', '.bat') { $a = $a -replace '\r?\n', ' ' }; & $p @a }",
+        ""
+    );
+    let wrapped = json!(["pwsh.exe", "-NoExit", "-Command", line]);
+    // Anything else of that length is not this wrapper: it is started as it is.
+    let other = json!(["pwsh.exe", "-NoExit", "-Command", "ping -t"]);
+    let tabs = json!([
+        {"name":"Ping", "root":{"cwd":"C:\\Users\\me\\my project", "argv":wrapped, "terminal":"x1", "shell":false}},
+        {"name":"Other", "root":{"cwd":"C:\\Users\\me", "argv":other, "terminal":"x2", "shell":false}}
+    ]);
+    let item = ws_item("w1", "Work", "C:\\Users\\me\\my project", tabs);
+    let host = sessions_host(&[], &[("workspaces", ws_store(&[item.clone()]))]);
+    let setup = format!("this.open({item}, cx);");
+    describe_ws(cx, &staged, sessions_values(Value::Null, "C:\\Users\\me\\my project", "windows"), &host, &setup);
+    assert_eq!(runs(&host), vec![
+        json!(["space.select", {"id":"s1"}]),
+        json!(["tab.new", {"space":"s1", "name":"Ping", "folder":"C:\\Users\\me\\my project", "argv":["ping", "-t", "a b"]}]),
+        json!(["tab.new", {"space":"s1", "name":"Other", "folder":"C:\\Users\\me", "argv":other}]),
+    ]);
+}
+
+#[gpui::test]
 fn workspaces_dialog_is_as_tall_as_its_rows_and_shows_its_empty_text(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();

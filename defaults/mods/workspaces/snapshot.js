@@ -172,10 +172,74 @@ async function launch(on, item, fresh, started) {
   return fresh?.length ? fresh : undefined;
 }
 
-// The command a saved program pane starts: the app runs a program in the person's shell (`zsh -ic '"$@"; exec "$0" -i'
-// zsh <cmd>...`), so the core's argv is that wrapper; the command inside is started again (the app wraps it anew).
+// The app runs a program in the person's shell, so the core's argv is a wrapper (src/programs.rs resolve() reads the
+// same two forms): `zsh -ic '"$@"; exec "$0" -i' zsh <cmd>...` (fish: `command $argv[2..]; exec $argv[1] -i`), and on
+// Windows `pwsh -NoExit -Command <line>` with the line `powershell_line` builds. The command inside is started again
+// (the app wraps it anew); anything that is not exactly one of these forms is returned as it is.
+const PS_QUOTES = ["'", "‘", "’", "‚", "‛"];
+const PS_START = "& { $PSNativeCommandArgumentPassing = 'Legacy'; $p = ";
+const PS_END = "); if ((Get-Command $p -ErrorAction Ignore | Select-Object -First 1).Extension -in '.cmd', '.bat') { $a = $a -replace '\\r?\\n', ' ' }; & $p @a }";
+const SHELLS = ["zsh", "bash", "fish", "sh", "dash", "nu", "pwsh", "powershell", "cmd", "elvish", "xonsh", "tcsh", "csh", "ksh", "ion"];
+const stem = (p) => p.split(/[\\/]/).pop().replace(/\.exe$/i, "").toLowerCase();
+
+// The quoted word `s` starts with, and what follows it: [word, rest] or null.
+function psWord(s) {
+  const chars = [...s];
+  if (!PS_QUOTES.includes(chars[0])) return null;
+  let word = "";
+  for (let i = 1; i < chars.length; i++) {
+    if (PS_QUOTES.includes(chars[i])) {
+      if (PS_QUOTES.includes(chars[i + 1])) { word += chars[i + 1]; i += 1; continue; }
+      return [word, chars.slice(i + 1).join("")];
+    }
+    word += chars[i];
+  }
+  return null;
+}
+
+// One argument back from its Windows command line form (C runtimes' rules, as the app writes them).
+function windowsUnquote(arg) {
+  let out = "", quoted = false, slashes = 0;
+  const chars = [...arg];
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    if (ch === "\\") { slashes += 1; continue; }
+    if (ch === '"') {
+      out += "\\".repeat(Math.floor(slashes / 2));
+      if (slashes % 2 === 1) out += '"';
+      else if (quoted && chars[i + 1] === '"') { out += '"'; i += 1; }
+      else quoted = !quoted;
+    } else out += "\\".repeat(slashes) + ch;
+    slashes = 0;
+  }
+  return out + "\\".repeat(slashes);
+}
+
+// The words of a `powershell_line`, or null.
+function psWords(line) {
+  if (!line.startsWith(PS_START) || !line.endsWith(PS_END)) return null;
+  const first = psWord(line.slice(PS_START.length, line.length - PS_END.length));
+  if (!first || !first[1].startsWith("; $a = @(")) return null;
+  const words = [first[0]];
+  let rest = first[1].slice("; $a = @(".length);
+  while (rest) {
+    if (words.length > 1) {
+      if (!rest.startsWith(", ")) return null;
+      rest = rest.slice(2);
+    }
+    const next = psWord(rest);
+    if (!next) return null;
+    words.push(windowsUnquote(next[0]));
+    rest = next[1];
+  }
+  return words;
+}
+
 function command(argv) {
-  return argv.length > 4 && argv[1].startsWith("-") && argv[1].endsWith("c") && argv[2].includes('"$@"') ? argv.slice(4) : argv;
+  if (argv.length > 4 && SHELLS.includes(stem(argv[0])) && argv[1].startsWith("-") && argv[1].endsWith("c") && argv[3] === argv[0]
+    && (argv[2].includes('"$@"') || argv[2].startsWith("command $argv[2..]"))) return argv.slice(4);
+  if (argv.length === 4 && SHELLS.includes(stem(argv[0])) && argv[1] === "-NoExit" && argv[2] === "-Command") return psWords(argv[3]) ?? argv;
+  return argv;
 }
 
 // A snapshot with each agent pane's session found (asks the core: never call while drawing).
