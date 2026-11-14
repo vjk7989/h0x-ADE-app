@@ -9934,9 +9934,9 @@ fn settings_profile_draws_the_53_by_7_activity_grid_with_its_empty_state_and_no_
         for text in ["st-prof-activity", "st-prof-activity-grid", "Agent activity \u{b7} this computer", "last 12 months", "Mon", "Wed", "Fri", "st-prof-activity-empty", "No agent activity recorded yet", " \u{b7} starts with your first agent session"] {
             assert!(tree.contains(text), "{label}: {text:?}: {tree}");
         }
-        // An empty year is 53 one-run columns, six row gaps and the grid: 113 elements, not 371 (the 50 ms render budget).
+        // An empty year is 53 one-run columns, six row gaps and the grid: 60 elements, not 371 (the 50 ms render budget).
         let elements = activity_graph_elements(&tree);
-        assert!(elements <= 130, "{label}: the graph is {elements} elements: {tree}");
+        assert!(elements <= 80, "{label}: the graph is {elements} elements: {tree}");
         assert!(!tree.contains("st-prof-activity-cell-"), "{label}: {tree}");
         for text in ["st-prof-activity-summary", "st-prof-activity-legend-", "st-prof-activity-tip"] {
             assert!(!tree.contains(text), "{label}: the empty state has no {text:?}: {tree}");
@@ -9958,7 +9958,7 @@ fn settings_profile_activity_shows_the_summary_the_legend_and_a_tooltip_on_hover
         assert!(tree.contains(text.as_str()), "{i} {text:?}: {tree}");
     }
     let elements = activity_graph_elements(&tree);
-    assert!(elements <= 130, "the graph is {elements} elements: {tree}");
+    assert!(elements <= 80, "the graph is {elements} elements: {tree}");
     for text in ["st-prof-activity-summary", "st-prof-activity-legend-0", "st-prof-activity-legend-4", "less", "more"] {
         assert!(tree.contains(text), "{text:?}: {tree}");
     }
@@ -9984,44 +9984,82 @@ fn settings_profile_activity_treats_a_damaged_or_foreign_file_as_no_record(cx: &
 }
 
 // The graph's pure parts, asked of the mod's own module through a probe scenario.
-const ACTIVITY_PROBE: &str = r#"
+// Each probe is its own scenario, so its own render: a render has a 50 ms budget (the Windows runner is slow), and
+// the date work of the grid alone is hundreds of Date objects. `{body}` is the object literal the scenario reports.
+fn activity_probe(body: &str) -> String {
+    format!(
+        r#"
 import Real from './frame/settings/main.js';
-import { div } from 'gpui-kit';
-import { theme } from 'h0x';
-import { tooltip, levelOf, levelColors, minutesOf, short, summarize, gridDays, parseActivity, geometry, cellAt, monthColumns, columnRuns, tipSide, tipWidth } from './frame/settings/activity.js';
-export default class Scenario extends Real {
-  render(cx) {
-    const sat = new Date(2026, 10, 14);
-    const day = { seconds: 2520, sessions: 3, tokens: 18200 };
-    const probe = {
-      tip: tooltip(new Date(2026, 10, 3), day),
-      tipOne: tooltip(new Date(2026, 10, 3), { seconds: 60, sessions: 1, tokens: 0 }),
-      tipNone: tooltip(new Date(2026, 10, 3), undefined),
-      levels: [0, 1, 14, 15, 59, 60, 179, 180, 1000].map(levelOf),
-      minutes: [0, 1, 89, 90, 3600].map((seconds) => minutesOf({ seconds })),
-      colors: levelColors(theme()),
-      short: [999, 1000, 18200, 999999, 1000000, 1250000].map(short),
-      summary: summarize(gridDays(sat), { '2026-11-14': { seconds: 3600 }, '2026-11-13': { seconds: 600 }, '2026-11-12': { seconds: 60 }, '2026-11-10': { seconds: 120 } }),
-      slots: gridDays(sat).flat().length,
-      real: gridDays(sat).flat().filter(Boolean).length,
-      first: gridDays(sat)[0][0].toDateString(),
-      runs: columnRuns([[1, 1, 1, 1, 1, 1, 1], [1, 1, 1, null, null, null, null]].map((w) => w.map((x) => (x ? {} : null))), [[0, 0, 2, 2, 2, 0, 3], [1, 1, 1, 0, 0, 0, 0]]),
-      fit: [634, 900, 1260].map((row) => {
-        const g = geometry(row), last = 52 * g.step;
-        const months = monthColumns(gridDays(sat));
-        return { lastEnd: last + g.cell <= g.width, centre: cellAt(last + g.cell / 2, g.cell / 2, g), lastMonthX: months.at(-1)[0] * g.step <= last, whole: Number.isInteger(g.cell) && Number.isInteger(g.step) };
-      }),
-      tipSides: [tipSide(0, geometry(634), 260, 634), tipSide(52, geometry(634), 260, 634), tipSide(26, geometry(634), 260, 634), tipSide(10, geometry(634), 300, 634), tipSide(2, geometry(634), 900, 634), tipWidth(['Tue 3 Nov 2026', '42 min', '3 sessions', '18.2k tokens']) > 200],
-      geo: [geometry(634), geometry(700), geometry(900), geometry(1260), geometry(NaN), geometry(10)].map((g) => ({ cell: +g.cell.toFixed(3), step: +g.step.toFixed(3), width: +g.width.toFixed(3) })),
-      at: [[0, 0], [8.9, 8.9], [9.5, 3], [11, 0], [52 * 11 + 4, 6 * 11 + 4], [581, 0], [-1, 0], [26 * 11 + 2, 3 * 11 + 5], [3, 75], [NaN, 1], [2, 9.5]].map(([x, y]) => cellAt(x, y, geometry(634))),
-      months: [monthColumns(gridDays(sat)).length, monthColumns(gridDays(sat))[0], monthColumns(gridDays(sat)).at(-1), monthColumns(gridDays(sat))[10]],
-      parsed: [parseActivity(null), parseActivity('{not json'), parseActivity('{"version":2,"days":{}}'),
-        parseActivity('{"version":1,"days":{"2026-11-03":{"seconds":5,"sessions":-1,"tokens":"x"},"bad":{"seconds":9}}}')],
-    };
+import {{ div }} from 'gpui-kit';
+import {{ theme }} from 'h0x';
+import {{ tooltip, levelOf, levelColors, minutesOf, short, summarize, gridDays, parseActivity, geometry, cellAt, monthColumns, columnRuns, tipLeft, tipWidth }} from './frame/settings/activity.js';
+export default class Scenario extends Real {{
+  render(cx) {{
+    const probe = {body};
     return super.render(cx).child(div().child('PROBE ' + JSON.stringify(probe) + ' END'));
-  }
+  }}
+}}
+"#
+    )
 }
-"#;
+
+// The grid's days: one gridDays call, everything about the 371 days.
+const ACTIVITY_PROBE_GRID: &str = r#"(() => {
+      const sat = new Date(2026, 10, 14), grid = gridDays(sat), months = monthColumns(grid);
+      return {
+        summary: summarize(grid, { '2026-11-14': { seconds: 3600 }, '2026-11-13': { seconds: 600 }, '2026-11-12': { seconds: 60 }, '2026-11-10': { seconds: 120 } }),
+        slots: grid.flat().length,
+        real: grid.flat().filter(Boolean).length,
+        first: grid[0][0].toDateString(),
+        months: [months.length, months[0], months.at(-1), months[10]],
+        fit: [634, 900, 1260].map((row) => {
+          const g = geometry(row), last = 52 * g.step;
+          return { lastEnd: last + g.cell <= g.width + 1e-9, centre: cellAt(last + g.cell / 2, g.cell / 2, g), lastMonthX: months.at(-1)[0] * g.step <= last };
+        }),
+      };
+    })()"#;
+
+// The geometry: the cell step, hit-testing, the tooltip's place and a column's runs. No dates.
+const ACTIVITY_PROBE_GEOMETRY: &str = r#"(() => {
+      const g634 = geometry(634);
+      return {
+        runs: columnRuns([[1, 1, 1, 1, 1, 1, 1], [1, 1, 1, null, null, null, null]].map((w) => w.map((x) => (x ? {} : null))), [[0, 0, 2, 2, 2, 0, 3], [1, 1, 1, 0, 0, 0, 0]]),
+        // Whatever the step (10, 12.5 and 13.64 px): every week's column maps back to itself, the last is week 52,
+        // and the edge of the grid and below it are nothing.
+        round: [10, 12.5, 13.64].map((step) => {
+          const g = { cell: step - 2, step, width: 53 * step - 2, height: 7 * step - 2 };
+          return {
+            weeks: [...Array(53).keys()].every((w) => cellAt(w * step + g.cell / 2, g.cell / 2, g)?.[0] === w),
+            last: cellAt(52 * step + g.cell / 2, 3, g)?.[0],
+            edge: [cellAt(g.width, 3, g), cellAt(g.width + 5, 3, g), cellAt(3, g.height, g), cellAt(-1, 3, g)],
+          };
+        }),
+        // The tooltip is centred on its column and always inside the grid.
+        tips: (() => {
+          const tip = tipWidth(['Tue 3 Nov 2026', '42 min', '3 sessions', '18.2k tokens']);
+          const lefts = [...Array(53).keys()].map((w) => tipLeft(w, g634, tip));
+          return { inside: lefts.every((l) => l >= 0 && l + tip <= g634.width + 1e-9), first: lefts[0], centred: Math.abs(lefts[26] - (26 * g634.step + g634.step / 2 - tip / 2)) < 1e-9, last: Math.abs(lefts[52] - (g634.width - tip)) < 1e-9, wide: tip > 250 && tip < 450 };
+        })(),
+        geo: [g634, geometry(700), geometry(900), geometry(1260), geometry(NaN), geometry(10)].map((g) => ({ cell: +g.cell.toFixed(3), step: +g.step.toFixed(3), width: +g.width.toFixed(3) })),
+        at: [[0, 0], [8.9, 8.9], [9.5, 3], [11, 0], [52 * 11 + 4, 6 * 11 + 4], [581, 0], [-1, 0], [26 * 11 + 2, 3 * 11 + 5], [3, 75], [NaN, 1], [2, 9.5]].map(([x, y]) => cellAt(x, y, g634)),
+      };
+    })()"#;
+
+// The values: tooltip text, levels, minutes, colours, short numbers and parsing.
+const ACTIVITY_PROBE_VALUES: &str = r#"(() => {
+      const day = { seconds: 2520, sessions: 3, tokens: 18200 };
+      return {
+        tip: tooltip(new Date(2026, 10, 3), day),
+        tipOne: tooltip(new Date(2026, 10, 3), { seconds: 60, sessions: 1, tokens: 0 }),
+        tipNone: tooltip(new Date(2026, 10, 3), undefined),
+        levels: [0, 1, 14, 15, 59, 60, 179, 180, 1000].map(levelOf),
+        minutes: [0, 1, 89, 90, 3600].map((seconds) => minutesOf({ seconds })),
+        colors: levelColors(theme()),
+        short: [999, 1000, 18200, 999999, 1000000, 1250000].map(short),
+        parsed: [parseActivity(null), parseActivity('{not json'), parseActivity('{"version":2,"days":{}}'),
+          parseActivity('{"version":1,"days":{"2026-11-03":{"seconds":5,"sessions":-1,"tokens":"x"},"bad":{"seconds":9}}}')],
+      };
+    })()"#;
 
 #[gpui::test]
 fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppContext) {
@@ -10032,11 +10070,17 @@ fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppCo
     p["section"] = json!("info");
     let values = fixture(true, p, updates("current", "current"));
     let colors = values["theme"].clone();
-    let tree = describe_activity(cx, &staged, values, None, Some(ACTIVITY_PROBE), None);
-    let probe = tree.split("PROBE ").nth(1).and_then(|t| t.split(" END").next()).unwrap_or_else(|| panic!("{tree}"));
-    // The tree prints a text node as a Rust debug string: undo its escapes (\" and \\) to get the JSON back.
-    let probe = serde_json::from_str::<String>(&format!("\"{probe}\"")).unwrap_or_else(|e| panic!("{e}: {probe}"));
-    let probe: Value = serde_json::from_str(&probe).unwrap_or_else(|e| panic!("{e}: {probe}"));
+    // Three scenarios, three renders; their reports are one object for the assertions below.
+    let mut probe = serde_json::Map::new();
+    for body in [ACTIVITY_PROBE_GRID, ACTIVITY_PROBE_GEOMETRY, ACTIVITY_PROBE_VALUES] {
+        let tree = describe_activity(cx, &staged, values.clone(), None, Some(&activity_probe(body)), None);
+        let report = tree.split("PROBE ").nth(1).and_then(|t| t.split(" END").next()).unwrap_or_else(|| panic!("{tree}"));
+        // The tree prints a text node as a Rust debug string: undo its escapes (\" and \\) to get the JSON back.
+        let report = serde_json::from_str::<String>(&format!("\"{report}\"")).unwrap_or_else(|e| panic!("{e}: {report}"));
+        let report: Value = serde_json::from_str(&report).unwrap_or_else(|e| panic!("{e}: {report}"));
+        probe.extend(report.as_object().unwrap().clone());
+    }
+    let probe = Value::Object(probe);
     assert_eq!(probe["tip"], json!(["Tue 3 Nov 2026", "42 min", "3 sessions", "18.2k tokens"]));
     assert_eq!(probe["tipOne"], json!(["Tue 3 Nov 2026", "1 min", "1 session"]), "tokens are left out when 0");
     assert_eq!(probe["tipNone"], json!(["Tue 3 Nov 2026", "0 min", "0 sessions"]));
@@ -10051,22 +10095,25 @@ fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppCo
     assert_eq!(probe["parsed"], json!([{}, {}, {}, {"2026-11-03": {"seconds": 5, "sessions": 0, "tokens": 0}}]));
     // A column is runs of days in a row with the same level (days after today are not drawn).
     assert_eq!(probe["runs"], json!([[[2, 0], [3, 2], [1, 0], [1, 3]], [[3, 1]]]));
-    // One geometry, in whole pixels (a fractional size is cut when drawn): 9 px cells and a 2 px gap at the 634 px column;
-    // a wider row grows the cells (700: 10 px, the grid 634 wide, left-aligned); the clamp stops at 14 px; an unknown
-    // width is the standard one; a tiny one keeps the smallest cell.
+    // One geometry: 9 px cells and a 2 px gap at the 634 px column; a wider row grows the cells to fill it (700: 53 columns
+    // of 12.245 less one gap = 647 = 700 - 53); the clamp stops at 14 px (left-aligned); an unknown width is the
+    // standard one; a tiny one keeps the smallest cell.
     assert_eq!(probe["geo"], json!([
         {"cell": 9, "step": 11, "width": 581},
-        {"cell": 10, "step": 12, "width": 634},
+        {"cell": 10.245, "step": 12.245, "width": 647},
         {"cell": 14, "step": 16, "width": 846},
         {"cell": 14, "step": 16, "width": 846},
         {"cell": 9, "step": 11, "width": 581},
         {"cell": 6, "step": 8, "width": 422},
     ]));
     // Whatever the width, the last column ends inside the grid, its centre is week 52, and the last month's label is not past it.
-    let fit = json!({"lastEnd": true, "centre": [52, 0], "lastMonthX": true, "whole": true});
+    let fit = json!({"lastEnd": true, "centre": [52, 0], "lastMonthX": true});
     assert_eq!(probe["fit"], json!([fit, fit, fit]));
-    // The tooltip goes left of the cell when it fits there, else right, else to the roomier side.
-    assert_eq!(probe["tipSides"], json!(["right", "left", "left", "right", "right", true]));
+    // Placed by week * step, so every step round-trips: each column to itself, the last to week 52, and the grid's edge to nothing.
+    let round = json!({"weeks": true, "last": 52, "edge": [null, null, null, null]});
+    assert_eq!(probe["round"], json!([round, round, round]));
+    // The tooltip is centred on its column and always inside the grid (the first and last columns are held at its edges).
+    assert_eq!(probe["tips"], json!({"inside": true, "first": 0, "centred": true, "last": true, "wide": true}));
     // The pointer maps to the drawn cell: first, middle and last columns, rows, gaps and outside.
     assert_eq!(probe["at"], json!([[0, 0], [0, 0], null, [1, 0], [52, 6], null, null, [26, 3], null, null, null]));
     // Each month's label is over the column holding its 1st: Dec 2025 in week 3 ... Nov 2026 in week 51 (Oct in week 46).
