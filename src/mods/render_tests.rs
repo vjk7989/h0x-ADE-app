@@ -6487,6 +6487,92 @@ fn workspaces_restore_into_the_open_space_selects_it_and_resumes_each_session_on
 }
 
 #[gpui::test]
+fn workspaces_save_marks_a_program_pane_so_it_starts_again_and_leaves_a_plain_shell_unmarked(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let wrapped = json!(["zsh", "-ic", "\"$@\"; exec \"$0\" -i", "zsh", "nvim", "a.txt"]);
+    let mut values = layout_values(Value::Null, "/fixture/project", "linux", "/fixture/project");
+    let terminals = values.get_mut("terminals").unwrap().as_array_mut().unwrap();
+    terminals[2] = json!({"address":"t3", "argv":wrapped, "labels":{}, "state":"live", "program":{"key":"nvim", "shell":false, "agent":false}});
+    terminals[3] = json!({"address":"t4", "argv":["bash"], "labels":{}, "state":"live", "program":{"key":"shell", "shell":true, "agent":false}});
+    let host = sessions_host(&[("list", session_list())], &[]);
+    describe_ws(cx, &staged, values, &host, "this.save('Work', cx);");
+    let tabs = stored_items(&host)[0]["tabs"].clone();
+    assert_eq!(tabs[0]["root"]["children"][1]["children"][1], json!({"cwd":"/fixture/project/web", "argv":wrapped, "terminal":"t3", "shell":false}));
+    assert_eq!(tabs[1]["root"], json!({"cwd":null, "argv":["bash"], "terminal":"t4"}), "a plain shell carries no mark");
+}
+
+#[gpui::test]
+fn workspaces_restore_starts_a_program_pane_from_its_saved_argv_and_a_plain_shell_by_default(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let wrapped = json!(["zsh", "-ic", "\"$@\"; exec \"$0\" -i", "zsh", "nvim", "a.txt"]);
+    let tabs = json!([
+        {"name":"Edit", "root":{"split":"right", "children":[
+            {"cwd":"/fixture/project/src", "argv":wrapped, "terminal":"x1", "shell":false},
+            {"cwd":"/fixture/project/web", "argv":["htop"], "terminal":"x2", "shell":false}
+        ]}},
+        {"name":"", "root":{"cwd":"/fixture/project", "argv":["bash"], "terminal":"x3"}}
+    ]);
+    let item = ws_item("w1", "Work", "/fixture/project", tabs);
+    let host = sessions_host(&[], &[("workspaces", ws_store(&[item.clone()]))]);
+    let setup = format!("this.open({item}, cx);");
+    describe_ws(cx, &staged, sessions_values(Value::Null, "/fixture/project", "linux"), &host, &setup);
+    assert_eq!(runs(&host), vec![
+        json!(["space.select", {"id":"s1"}]),
+        json!(["tab.new", {"space":"s1", "name":"Edit", "folder":"/fixture/project/src", "argv":["nvim", "a.txt"]}]),
+        json!(["pane.focus", {"pane":"rp1"}]),
+        json!(["terminal.open", {"folder":"/fixture/project/web", "argv":["htop"], "place":"right"}]),
+        json!(["tab.new", {"space":"s1", "folder":"/fixture/project"}]),
+    ]);
+}
+
+#[gpui::test]
+fn workspaces_restore_unwraps_the_windows_shell_wrapper_to_the_program_inside(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // The exact line src/programs.rs powershell_line builds for ping -t "a b" (an argument with a space is quoted twice).
+    let line = format!(
+        "{}{}{}",
+        "& { $PSNativeCommandArgumentPassing = 'Legacy'; $p = 'ping'; $a = @('-t', '\"a b\"'",
+        r"); if ((Get-Command $p -ErrorAction Ignore | Select-Object -First 1).Extension -in '.cmd', '.bat') { $a = $a -replace '\r?\n', ' ' }; & $p @a }",
+        ""
+    );
+    let wrapped = json!(["pwsh.exe", "-NoExit", "-Command", line]);
+    // Anything else of that length is not this wrapper: it is started as it is.
+    let other = json!(["pwsh.exe", "-NoExit", "-Command", "ping -t"]);
+    let tabs = json!([
+        {"name":"Ping", "root":{"cwd":"C:\\Users\\me\\my project", "argv":wrapped, "terminal":"x1", "shell":false}},
+        {"name":"Other", "root":{"cwd":"C:\\Users\\me", "argv":other, "terminal":"x2", "shell":false}}
+    ]);
+    let item = ws_item("w1", "Work", "C:\\Users\\me\\my project", tabs);
+    let host = sessions_host(&[], &[("workspaces", ws_store(&[item.clone()]))]);
+    let setup = format!("this.open({item}, cx);");
+    describe_ws(cx, &staged, sessions_values(Value::Null, "C:\\Users\\me\\my project", "windows"), &host, &setup);
+    assert_eq!(runs(&host), vec![
+        json!(["space.select", {"id":"s1"}]),
+        json!(["tab.new", {"space":"s1", "name":"Ping", "folder":"C:\\Users\\me\\my project", "argv":["ping", "-t", "a b"]}]),
+        json!(["tab.new", {"space":"s1", "name":"Other", "folder":"C:\\Users\\me", "argv":other}]),
+    ]);
+}
+
+#[gpui::test]
+fn workspaces_dialog_is_as_tall_as_its_rows_and_shows_its_empty_text(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // The dialog opens with no height, so it fits its content: nothing in it may be flex_1 (that collapses to nothing).
+    for stored in [vec![], vec![ws_item("w1", "Work", "/fixture/project", one_tab("/x"))]] {
+        let host = sessions_host(&[], &[("workspaces", ws_store(&stored))]);
+        let tree = describe_ws(cx, &staged, sessions_values(Value::Null, "/fixture/project", "linux"), &host, "");
+        assert!(tree.contains(if stored.is_empty() { "No workspaces yet" } else { "ws-row-w1" }), "{tree}");
+        let root = tree.lines().find(|l| l.contains(":id[Str(\"workspaces\")]")).unwrap();
+        assert!(root.contains(".w_full") && !root.contains(".size_full") && !root.contains(".h_full"), "{root}");
+        let list = tree.lines().find(|l| l.contains(".overflow_y") || l.contains(":overflow_y")).unwrap();
+        assert!(list.contains(".max_h[Number(300.0)]") && !list.contains(".flex_1"), "{list}");
+    }
+}
+
+#[gpui::test]
 fn workspaces_restore_skips_tabs_whose_panes_are_still_there_and_runs_the_same_program(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
