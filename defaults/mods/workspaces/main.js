@@ -144,7 +144,8 @@ export default class Workspaces extends View {
         this.handle.focus();
         cx.notify();
       })
-      .size_full()
+      // The dialog is as tall as what is in it (it has no height): nothing here may be flex_1 or it collapses.
+      .w_full()
       .min_h(0)
       .p(16)
       .gap(10)
@@ -153,7 +154,7 @@ export default class Workspaces extends View {
       .text_size(13)
       .child(h_flex().items_center().child(div().flex_1().text_size(15).font_semibold().text_color(t.foreground).child("Workspaces")).child(div().text_size(11).text_color(t.dim).child(this.busy ?? "Esc")))
       .child(
-        v_flex().flex_1().min_h(0).overflow_y_scrollbar().border_t(1).border_color(t.border)
+        v_flex().max_h(300).overflow_y_scrollbar().border_t(1).border_color(t.border)
           .children(items.map(row))
           .when(items.length === 0, (el) => el.child(div().py(14).px(10).text_size(12.5).line_height("18px").text_color(t.muted).child("No workspaces yet. New… saves the shown space: its tabs, splits and each agent's session."))),
       )
