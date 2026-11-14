@@ -5,7 +5,6 @@ import { v_flex, h_flex, Scrollbar } from "gpui-base";
 import { spaces, run, theme, props, closeOverlay, setShared, shared, core, appHome, home, readTextFile, writeTextFile, settings, layout, keys, knownAgents, installOpenCode } from "h0x";
 
 const I = (name) => `frame/welcome/${name}.svg`;
-const W = (name) => `mods/workspace-chrome/${name}.svg`;
 const PAGES = 4;
 // The guide sits in the app's own folder (HYPEROX_HOME may move it): shown with ~ when it is under the home folder.
 function askText() {
@@ -20,10 +19,10 @@ const APPEARANCES = [
 ];
 // The panels the layout offers (its "panel-body" stack), as the tab bar's buttons.
 const PANELS = [
-  { id: "files", icon: "files", title: "Files", about: "The folder you're in as a tree. Open a file to read it, highlighted." },
+  { id: "files", icon: "folder-tree", title: "Files", about: "The folder you're in as a tree. Open a file to read it, highlighted." },
   { id: "changes", icon: "git-compare", title: "Changes", about: "What your agents changed: every file with its diff, and a commit box." },
-  { id: "sessions", icon: "clock", title: "Sessions", about: "Your agents' past sessions in this folder. Resume, pin, rename or delete one." },
-  { id: "todo", icon: "circle-check", title: "To-do", about: "Your to-do lists, kept as Markdown files. Tick tasks off with Space." },
+  { id: "sessions", icon: "history", title: "Sessions", about: "Your agents' past sessions in this folder. Resume, pin, rename or delete one." },
+  { id: "todo", icon: "list-checks", title: "To-do", about: "Your to-do lists, kept as Markdown files. Tick tasks off with Space." },
 ];
 
 // The key bound to a command, as people press it: "Ctrl+Shift+P".
@@ -47,6 +46,7 @@ export default class Welcome extends View {
     this.page = 1;
     this.machines = [];
     this.copied = null;
+    this.fold = false; // "Coming from h0x?" open
     this.appearance = null;
     this.foundVia = true; // settings.json found_via; null (not yet asked) shows the question
     this.openCodeInstalled = false;
@@ -183,16 +183,43 @@ export default class Welcome extends View {
       .when(Boolean(sub), (el) => el.child(this.para(t, sub)));
   }
 
+  mono() {
+    return settings().font_family;
+  }
+
+  // [word]: brackets in dim. A toggle (`on`/`off`) takes the accent when on; a status (`info`) is plain text.
+  stateTag(t, kind, word) {
+    const color = kind === "on" ? t.accent : kind === "off" ? t.muted : kind === "gone" ? t.muted : t.foreground;
+    return h_flex()
+      .flex_none()
+      .font_family(this.mono())
+      .text_size(12)
+      .line_height("18px")
+      .child(div().text_color(t.dim).child("["))
+      .child(div().text_color(color).when(kind === "on" || kind === "off", (el) => el.font_medium()).child(word))
+      .child(div().text_color(t.dim).child("]"));
+  }
+
+  // A key cap.
+  kbd(t, label) {
+    return div().flex_none().h(18).px(5).flex().items_center().rounded(4).border_1().border_color(t.border).border_b(2).bg(t.background)
+      .font_family(this.mono()).text_size(10.5).text_color(t.muted).child(label);
+  }
+
+  hint(t, key, word) {
+    return h_flex().gap(6).items_center().child(this.kbd(t, key)).child(div().font_family(this.mono()).text_size(11).text_color(t.muted).child(word));
+  }
+
   button(t, id, label, primary, onClick, icon) {
     return h_flex()
       .id(id)
-      .h(34)
-      .px(14)
-      .gap(8)
+      .h(30)
+      .px(12)
+      .gap(6)
       .items_center()
-      .rounded(9)
+      .rounded(6)
       .cursor_pointer()
-      .text_size(13)
+      .text_size(12.5)
       .font_medium()
       .when(primary, (el) => el.bg(t.solid).text_color(t.solid_foreground).hover((s) => s.opacity(0.88)))
       .when(!primary, (el) => el.text_color(t.muted).hover((s) => s.text_color(t.foreground).bg(t.hover)))
@@ -206,7 +233,7 @@ export default class Welcome extends View {
     return h_flex()
       .p(2)
       .gap(2)
-      .rounded(8)
+      .rounded(7)
       .border_1()
       .border_color(t.border)
       .bg(t.chrome)
@@ -216,10 +243,10 @@ export default class Welcome extends View {
             .id(`w-seg-${label}`)
             .px(11)
             .py(4)
-            .rounded(6)
+            .rounded(5)
             .text_size(12.5)
             .cursor_pointer()
-            .when(now === value, (el) => el.bg(t.popover).text_color(t.foreground).border_1().border_color(t.border).shadow_sm())
+            .when(now === value, (el) => el.bg(t.popover).text_color(t.foreground).border_1().border_color(t.border))
             .when(now !== value, (el) => el.text_color(t.muted).hover((s) => s.text_color(t.foreground)))
             .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
             .on_click((_e, cx) => onPick(value, cx))
@@ -249,12 +276,12 @@ export default class Welcome extends View {
       .p(2)
       .gap(2)
       .items_center()
-      .rounded(8)
+      .rounded(7)
       .border_1()
       .border_color(t.border)
       .bg(t.chrome)
       .child(step("w-zoom-out", "\u2212", "app.zoom_out"))
-      .child(div().w(44).text_size(12.5).text_color(t.foreground).flex().justify_center().child(`${Math.round((settings().zoom ?? 1) * 100)}%`))
+      .child(div().w(44).font_family(this.mono()).text_size(12).text_color(t.foreground).flex().justify_center().child(`${Math.round((settings().zoom ?? 1) * 100)}%`))
       .child(step("w-zoom-in", "+", "app.zoom_in"));
   }
 
@@ -262,8 +289,8 @@ export default class Welcome extends View {
     return h_flex()
       .gap(12)
       .items_start()
-      .child(div().flex_none().w(32).h(32).rounded(9).bg(t.raised).border_1().border_color(t.border).flex().items_center().justify_center().child(svg(I(icon)).size(16).text_color(t.accent)))
-      .child(v_flex().flex_1().min_w(0).gap(3).child(div().text_size(13.5).font_semibold().text_color(t.foreground).child(title)).child(this.para(t, body)));
+      .child(div().flex_none().w(16).h(20).flex().items_center().child(svg(I(icon)).size(16).text_color(t.accent)))
+      .child(v_flex().flex_1().min_w(0).gap(3).child(div().text_size(13.5).line_height("20px").font_semibold().text_color(t.foreground).child(title)).child(this.para(t, body)));
   }
 
   copyLine(t, text, id = "w-copy") {
@@ -271,7 +298,7 @@ export default class Welcome extends View {
     return v_flex()
       .gap(10)
       .p(12)
-      .rounded(10)
+      .rounded(6)
       .bg(t.background)
       .border_1()
       .border_color(t.input)
@@ -282,7 +309,7 @@ export default class Welcome extends View {
             .id(id)
             .px(12)
             .py(5)
-            .rounded(7)
+            .rounded(6)
             .cursor_pointer()
             .text_size(12.5)
             .font_medium()
@@ -304,23 +331,35 @@ export default class Welcome extends View {
 
   comingFromH0x(t) {
     return v_flex()
-      .gap(12)
-      .p(16)
-      .rounded(12)
-      .border_1()
-      .border_color(t.border)
-      .bg(t.raised)
       .child(
         h_flex()
-          .gap(10)
+          .id("w-coming")
+          .py(10)
+          .gap(8)
           .items_center()
-          .child(svg(I("terminal")).size(16).text_color(t.muted))
+          .border_t(1)
+          .when(!this.fold, (el) => el.border_b(1))
+          .border_color(t.border)
+          .cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => { this.fold = !this.fold; cx.notify(); })
+          .child(svg(I(this.fold ? "chevron-down" : "chevron-right")).size(14).text_color(t.muted))
           .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("Coming from h0x?")),
       )
-      .child(this.para(t, "This is a new app on a new core. Your h0x workspaces stay where they are; nothing moves over."))
-      .child(this.para(t, "Same idea as before: spaces, tabs and terminals."))
-      .child(this.para(t, "Want your keybinds and settings carried over? Give your agent this line:"))
-      .child(this.copyLine(t, MIGRATE, "w-migrate-copy"));
+      .when(this.fold, (el) =>
+        el.child(
+          v_flex()
+            .gap(12)
+            .pb(14)
+            .border_b(1)
+            .border_color(t.border)
+            .child(this.para(t, "This is a new app on a new core. Your h0x workspaces stay where they are; nothing moves over."))
+            .child(this.para(t, "Same idea as before: spaces, tabs and terminals."))
+            .child(this.para(t, "Want your keybinds and settings carried over? Give your agent this line:"))
+            .child(this.copyLine(t, MIGRATE, "w-migrate-copy")),
+        ),
+      );
   }
 
   // Pages ---------------------------------------------------------------
@@ -330,26 +369,25 @@ export default class Welcome extends View {
       .gap(18)
       .child(this.title(t, "HyperOx runs your terminals in the background", "The terminals and agents you open here don't live in this window. They run in h0x-core, a small background program on your computer. Close HyperOx, update it, or let it crash, and your agents keep working. Open it again and everything is where you left it, as long as the computer is on."))
       .child(this.feature(t, "bot", "Agents tell you when they need you", "A ring while one works, \u201cNeeds you\u201d when it asks something, a sound when it finishes."))
-      .child(this.feature(t, "messages", "Agents can start helpers", "They show up under the agent that started them. Click one to watch it."))
-      .child(this.feature(t, "layers", "Your other machines, in the same window", "A server or a Mac mini runs its own h0x-core, so its agents keep going even while this laptop sleeps."))
+      .child(this.feature(t, "git-fork", "Agents can start helpers", "They show up under the agent that started them. Click one to watch it."))
+      .child(this.feature(t, "server", "Your other machines, in the same window", "A server or a Mac mini runs its own h0x-core, so its agents keep going even while this laptop sleeps."))
       .child(div().h(1).bg(t.border))
       .child(h_flex().gap(10).items_center().child(div().w(84).text_size(13).text_color(t.muted).child("Appearance")).child(this.segment(t, APPEARANCES, this.appearance, (v, cx) => this.setAppearance(v, cx))))
-      .child(h_flex().gap(10).items_center().child(div().w(84).text_size(13).text_color(t.muted).child("Size")).child(this.sizeControl(t)))
+      .child(h_flex().gap(10).items_center().child(div().w(84).text_size(13).text_color(t.muted).child("Size")).child(this.sizeControl(t)).child(div().ml(6).font_family(this.mono()).text_size(11).text_color(t.muted).child("ctrl +/\u2212")))
       .child(this.comingFromH0x(t));
   }
 
   machineRow(t, icon, name, note, ok) {
     return h_flex()
-      .h(42)
+      .h(40)
       .px(12)
       .gap(10)
       .items_center()
       .border_b(1)
       .border_color(t.border)
-      .child(svg(W(icon)).size(15).text_color(t.muted))
+      .child(svg(I(icon)).size(15).text_color(t.muted))
       .child(div().flex_1().min_w(0).truncate().text_size(13).text_color(t.foreground).child(name))
-      .child(div().text_size(12).text_color(t.dim).child(note))
-      .child(div().w(8).h(8).rounded(4).bg(ok ? t.ansi2 : t.dim));
+      .child(this.stateTag(t, ok ? "info" : "gone", note));
   }
 
   pageTwo(t) {
@@ -358,7 +396,7 @@ export default class Welcome extends View {
       .child(this.title(t, "Add your other machines", "Pick a host from your ssh config. HyperOx connects, installs h0x-core there if it's missing, and lists that machine in the sidebar with its own spaces."))
       .child(
         v_flex()
-          .rounded(12)
+          .rounded(6)
           .border_1()
           .border_color(t.border)
           .bg(t.background)
@@ -368,7 +406,7 @@ export default class Welcome extends View {
           .child(
             h_flex()
               .id("w-add-machine")
-              .h(42)
+              .h(40)
               .px(12)
               .gap(10)
               .items_center()
@@ -378,58 +416,51 @@ export default class Welcome extends View {
               .hover((s) => s.bg(t.hover))
               .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
               .on_click(() => run("mod.open", { name: "machine-add" }))
-              .child(svg(W("plus")).size(15))
+              .child(svg(I("plus")).size(15))
               .child("Add a machine"),
           ),
       )
       .child(this.para(t, "Not now? Add machine is at the bottom of the sidebar too."));
   }
 
-  panelCard(t, p) {
+  panelCard(t, p, last) {
     const on = this.panels().includes(p.id);
     return h_flex()
       .id(`w-panel-${p.id}`)
-      .p(12)
-      .gap(12)
-      .items_start()
-      .rounded(12)
-      .border_1()
-      .border_color(on ? t.accent : t.input)
-      .when(on, (el) => el.bg(t.accent + "10"))
+      .items_stretch()
+      .when(!last, (el) => el.border_b(1).border_color(t.border))
       .cursor_pointer()
-      .hover((s) => s.border_color(on ? t.accent : t.ring))
+      .hover((s) => s.bg(t.hover))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => {
         this.togglePanel(p.id);
         cx.notify();
       })
-      .child(div().flex_none().w(32).h(32).rounded(9).bg(t.raised).border_1().border_color(t.border).flex().items_center().justify_center().child(svg(W(p.icon)).size(16).text_color(t.foreground)))
+      // The 2 px rule on the left edge of a row that is on.
+      .child(div().flex_none().w(2).h_full().bg(on ? t.accent : "#00000000"))
       .child(
-        v_flex()
+        h_flex()
           .flex_1()
           .min_w(0)
-          .gap(4)
+          .p(11)
+          .gap(12)
+          .items_start()
+          .child(div().flex_none().mt(2).child(svg(I(p.icon)).size(16).text_color(on ? t.accent : t.muted)))
           .child(
-            h_flex()
-              .gap(8)
-              .items_center()
-              .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child(p.title))
-              .child(div().px(6).py(0.5).rounded(5).bg(t.hover).text_size(11).text_color(t.dim).child(`mods/${p.id}`)),
+            v_flex()
+              .flex_1()
+              .min_w(0)
+              .gap(2)
+              .child(
+                h_flex()
+                  .gap(8)
+                  .items_center()
+                  .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child(p.title))
+                  .child(div().font_family(this.mono()).text_size(11).text_color(t.dim).child(`mods/${p.id}`)),
+              )
+              .child(div().w_full().text_size(12.5).line_height("18px").text_color(t.muted).child(p.about)),
           )
-          .child(this.para(t, p.about)),
-      )
-      .child(
-        div()
-          .flex_none()
-          .mt(4)
-          .w(34)
-          .h(20)
-          .rounded(10)
-          .p(2)
-          .bg(on ? t.accent : t.input)
-          .flex()
-          .when(on, (el) => el.justify_end())
-          .child(div().w(16).h(16).rounded(8).bg(on ? t.accent_foreground : t.muted)),
+          .child(v_flex().flex_none().h_full().justify_center().child(this.stateTag(t, on ? "on" : "off", on ? "on" : "off"))),
       );
   }
 
@@ -437,35 +468,48 @@ export default class Welcome extends View {
     const yes = shared("welcome.opencode") === true;
     return v_flex()
       .id("w-opencode")
-      .p(12)
-      .gap(8)
-      .rounded(12)
+      .rounded(6)
       .border_1()
-      .border_color(yes ? t.accent : t.input)
-      .when(yes, (el) => el.bg(t.accent + "10"))
+      .border_color(t.border)
       .child(
         h_flex()
-          .gap(8)
-          .items_center()
-          .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("OpenCode CLI (free)"))
-          .when(this.openCodeInstalled, (el) => el.child(div().text_size(12).text_color(t.muted).child("Installed ✓"))),
-      )
-      .child(this.para(t, "A free coding agent for your terminal: pick one of its free models, or bring your own keys. HyperOx installs it in the background."))
-      .when(!this.openCodeInstalled, (el) =>
-        el.child(
-          this.segment(
-            t,
-            [
-              [false, "No"],
-              [true, "Yes"],
-            ],
-            yes,
-            (v, cx) => {
-              setShared("welcome.opencode", v);
-              cx.notify();
-            },
+          .p(11)
+          .gap(12)
+          .items_start()
+          .child(div().flex_none().mt(2).child(svg(I("square-terminal")).size(16).text_color(t.muted)))
+          .child(
+            v_flex()
+              .flex_1()
+              .min_w(0)
+              .gap(2)
+              .child(
+                h_flex()
+                  .gap(6)
+                  .items_center()
+                  .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("OpenCode CLI"))
+                  .child(div().text_size(13.5).text_color(t.muted).child("(free)"))
+                  .child(div().ml(2).font_family(this.mono()).text_size(11).text_color(t.dim).child("opencode")),
+              )
+              .child(div().w_full().text_size(12.5).line_height("18px").text_color(t.muted).child("A free coding agent for your terminal: pick one of its free models, or bring your own keys. HyperOx installs it in the background.")),
+          )
+          .child(
+            v_flex().flex_none().h_full().justify_center().child(
+              this.openCodeInstalled
+                ? this.stateTag(t, "info", "installed")
+                : this.segment(
+                    t,
+                    [
+                      [false, "No"],
+                      [true, "Yes"],
+                    ],
+                    yes,
+                    (v, cx) => {
+                      setShared("welcome.opencode", v);
+                      cx.notify();
+                    },
+                  ),
+            ),
           ),
-        ),
       );
   }
 
@@ -473,17 +517,17 @@ export default class Welcome extends View {
     return v_flex()
       .gap(14)
       .child(this.title(t, "Choose your panels", "HyperOx comes with a couple of panels. Turn one on and it appears beside your terminals. Drag this window aside to see it. Later, the buttons in the tab bar open and close them."))
-      .children(PANELS.map((p) => this.panelCard(t, p)))
-      .child(this.openCodeCard(t))
       .child(
-        h_flex()
-          .gap(10)
-          .items_start()
-          .p(12)
-          .rounded(10)
-          .bg(t.raised)
-          .child(this.para(t, "Ask your agent for a board of your agents, your pull requests, a cost meter, or the sidebar on the right. Not sure what's possible? Ask it that too.")),
-      );
+        v_flex()
+          .rounded(6)
+          .border_1()
+          .border_color(t.border)
+          .bg(t.background)
+          .overflow_hidden()
+          .children(PANELS.map((p, i) => this.panelCard(t, p, i === PANELS.length - 1))),
+      )
+      .child(this.openCodeCard(t))
+      .child(div().w_full().text_size(13).line_height("20px").text_color(t.dim).child("Ask your agent for a board of your agents, your pull requests, a cost meter, or the sidebar on the right. Not sure what's possible? Ask it that too."));
   }
 
   pageFour(t) {
@@ -564,8 +608,10 @@ export default class Welcome extends View {
       this.page = Math.max(1, Math.min(PAGES, page));
       cx.notify();
     };
+    // The primary button's label, also the word in the Enter hint.
+    const next = this.page < PAGES ? (this.page === 2 && !this.machines.length ? "Not now" : "Next") : spaces().length ? "Done" : "Open a space";
     const dots = h_flex()
-      .gap(5)
+      .gap(4)
       .children([...Array(PAGES)].map((_, i) => i + 1).map((p) => div().w(p === this.page ? 16 : 6).h(6).rounded(3).bg(p === this.page ? t.foreground : t.input)));
     return v_flex()
       .id("welcome")
@@ -587,26 +633,26 @@ export default class Welcome extends View {
       .child(
         h_flex()
           .flex_none()
-          .h(52)
+          .h(48)
           // Only the header drags the window, and only it shows the grab hand.
           .cursor_grab()
-          .pl(20)
+          .pl(18)
           .pr(12)
           .gap(10)
           .items_center()
           .border_b(1)
           .border_color(t.border)
-          .child(image("frame/welcome/hyperox.png").w(24).h(24).rounded(6).flex_none())
-          .child(div().text_size(14).font_semibold().text_color(t.foreground).child("Welcome to HyperOx"))
-          .child(div().px(6).py(0.5).rounded(5).border_1().border_color(t.input).text_color(t.muted).text_size(10.5).font_semibold().child("BETA"))
+          .child(image("frame/welcome/hyperox.png").w(22).h(22).rounded(5).flex_none())
+          .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("Welcome to HyperOx"))
+          .child(div().px(5).h(18).flex().items_center().rounded(4).border_1().border_color(t.input).text_color(t.muted).font_family(this.mono()).text_size(10.5).child("beta"))
           .child(div().flex_1())
-          .child(div().text_size(11.5).text_color(t.dim).child("Drag to move"))
+          .child(div().text_size(11).text_color(t.dim).child("Drag to move"))
           .child(
             div()
               .id("w-close")
               .w(26)
               .h(26)
-              .rounded(7)
+              .rounded(6)
               .flex()
               .items_center()
               .justify_center()
@@ -615,7 +661,7 @@ export default class Welcome extends View {
               .hover((s) => s.bg(t.hover).text_color(t.foreground))
               .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
               .on_click(() => this.done("skipped"))
-              .child(svg(W("x")).size(14)),
+              .child(svg(I("x")).size(14)),
           ),
       )
       // A bar that always shows: a page taller than the window should look it.
@@ -639,23 +685,25 @@ export default class Welcome extends View {
       .child(
         h_flex()
           .flex_none()
-          .px(16)
-          .py(12)
+          .h(54)
+          .pl(20)
+          .pr(14)
           .gap(6)
           .items_center()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .border_t(1)
           .border_color(t.border)
-          .child(div().pl(6).child(dots))
+          .child(dots)
           .child(div().flex_1())
+          .child(h_flex().gap(14).mr(12).child(this.hint(t, "Enter", next.toLowerCase())).child(this.hint(t, "Esc", "close")))
           .when(this.page > 1, (el) => el.child(this.button(t, "w-back", "Back", false, (_e, cx) => go(this.page - 1, cx))))
           .child(
             this.page < PAGES
-              ? this.button(t, "w-next", this.page === 2 && !this.machines.length ? "Not now" : "Next", true, (_e, cx) => {
+              ? this.button(t, "w-next", next, true, (_e, cx) => {
                 if (this.page === 3) this.installOpenCodeIfWanted();
                 go(this.page + 1, cx);
               }, "arrow-right")
-              : this.button(t, "w-start", spaces().length ? "Done" : "Open a space", true, () => this.start(), "arrow-right"),
+              : this.button(t, "w-start", next, true, () => this.start(), "arrow-right"),
           ),
       );
   }
