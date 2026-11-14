@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.1.32] - 2026-11-14
+
+A new welcome, your activity at a glance, and a cleaner developer look. Bundles h0x-core 0.1.16.
+
+### Added
+- Settings > Profile shows your agent activity on this computer as a graph of the last year, one square per day in your theme's colours. Hover a day for its minutes, sessions and tokens.
+
+### Changed
+- A new sign-in screen: a frosted card in your theme, what signing in turns on, the Pavii and Buckleson links, and a calm band of falling code at the bottom (still when your system asks for less motion). The window can't be maximised.
+- Profile, Info and the welcome pages have a cleaner developer-tool look: short state tags, key hints and one set of line icons.
+
+### Fixed
+- The sign-in screen follows your light or dark theme, and its keys keep working after you click a button.
+
 ## [0.1.31] - 2026-11-14
 
 Agents one key away, three new themes, and files that open in their own app. Bundles h0x-core 0.1.16.
