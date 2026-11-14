@@ -92,35 +92,28 @@ export function mix(accent, bg, share) {
 // level 0 is the border; 1-4 climb from the background to the accent.
 export const levelColors = (t) => LEVELS.map((_, i) => (i === 0 ? t.border : mix(t.accent, t.popover, SHARE[i])));
 
-// The grid's one geometry, from the width of the whole row (the weekday labels and the grid): WHOLE pixels
-// (a fractional size is cut down when drawn, which would put the labels and the hover off the cells), the clamp
-// applied here. About 9 px cells and a 2 px gap at 634 px. The grid is as wide as the cells make it and sits
-// left-aligned after the labels, even when that leaves some of the row empty. Cells, month labels, hover and
-// tooltip all use these numbers and nothing else.
+// The grid's one geometry, from the width of the whole row (the weekday labels and the grid), the clamp applied here:
+// about 9 px cells and a 2 px gap at 634 px, growing to fill a wider row up to 14 px cells (then left-aligned).
+// Every element of the graph is placed at `week * step` and `day * step` from the grid's corner, never by a flex row
+// with a gap: the layout rounds each element to the device's pixels on its own, so positions cannot drift apart as
+// they add up across 53 columns. Cells, month labels, hover and tooltip use these numbers and nothing else.
 export function geometry(avail) {
   const row = Number.isFinite(avail) && avail > 0 ? avail : DEFAULT_WIDTH;
   const grid = Math.max(row - LABELS, WEEKS * (MIN_CELL + GAP) - GAP);
-  const cell = Math.min(MAX_CELL, Math.max(MIN_CELL, Math.floor((grid + GAP) / WEEKS - GAP)));
+  const cell = Math.min(MAX_CELL, Math.max(MIN_CELL, (grid + GAP) / WEEKS - GAP));
   const step = cell + GAP;
   return { cell, step, left: LABELS, width: WEEKS * step - GAP, height: 7 * step - GAP };
 }
 
-// The tooltip's width, about: 11 px mono text, the dots between its parts, padding and border.
-export const tipWidth = (parts) => 18 + parts.join("").length * 6.7 + (parts.length - 1) * 18.7;
+// The tooltip's width: an upper bound (11 px mono text, the dots between its parts, padding and border).
+export const tipWidth = (parts) => Math.ceil((18 + parts.join("").length * 6.6 + (parts.length - 1) * 18.6) * 1.1);
 
-// "left" or "right" of the hovered cell: left when it fits there, else right when it fits, else the roomier side.
-// `row` is the width of the whole row, `left` of the grid is where the labels end.
-export function tipSide(w, g, tip, row) {
-  const roomLeft = g.left + w * g.step - 6;
-  const roomRight = row - (g.left + w * g.step + g.cell) - 6;
-  if (roomLeft >= tip) return "left";
-  if (roomRight >= tip) return "right";
-  return roomLeft >= roomRight ? "left" : "right";
-}
+// Where the tooltip's left edge goes: centred on the column, kept inside the grid (0 .. width - tip).
+export const tipLeft = (week, g, tip) => Math.max(0, Math.min(week * g.step + g.step / 2 - tip / 2, g.width - tip));
 
 // The [week, day] under a point of the grid (0, 0 is its top-left corner), or null in a gap or outside.
 export function cellAt(x, y, g) {
-  if (!(x >= 0 && y >= 0)) return null;
+  if (!(x >= 0 && y >= 0 && x < g.width && y < g.height)) return null;
   const w = Math.floor(x / g.step), r = Math.floor(y / g.step);
   if (w >= WEEKS || r >= 7 || x - w * g.step >= g.cell || y - r * g.step >= g.cell) return null;
   return [w, r];
@@ -185,19 +178,25 @@ export function activityBlock(view, t) {
   const g = geometry(view.activityWidth);
   const num = (text) => mono(div()).text_color(t.foreground).child(text);
   const note = (text) => mono(div()).text_color(t.muted).child(text);
-  // A render has a 50 ms budget, so the 371 days are not 371 elements: each column is a few runs, the gaps between
-  // rows are six lines over them, the hovered day is one outline, and ONE handler on the grid maps the pointer to its day.
-  // `local_position` is relative to the grid; scaled by the event's own bounds, so whatever units it comes in, it lands on the drawn cells.
+  // A render has a 50 ms budget, so the 371 days are not 371 elements: days in a row with one level are a single run,
+  // the gaps between rows are six lines over them, the hovered day is one outline, and ONE handler on the grid maps
+  // the pointer (`local_position`, relative to the grid) to its day.
   const at = (e) => {
-    const b = e.bounds, kx = b?.width > 0 ? g.width / b.width : 1, ky = b?.height > 0 ? g.height / b.height : 1;
-    const cellUnder = cellAt(e.local_position.x * kx, e.local_position.y * ky, g);
+    const cellUnder = cellAt(e.local_position.x, e.local_position.y, g);
     return cellUnder && weeks[cellUnder[0]][cellUnder[1]] ? cellUnder : null;
   };
   const [hw, hr] = hover ?? [];
   const outline = hovered ? div().absolute().left(hw * g.step).top(hr * g.step).size(g.cell).rounded(2).border_1().border_color(t.foreground) : null;
   const rowGaps = [0, 1, 2, 3, 4, 5].map((r) => div().absolute().left(0).top(r * g.step + g.cell).w(g.width).h(GAP).bg(t.popover));
-  const columns = runs.map((col) => v_flex().w(g.cell).gap(GAP).children(col.map(([n, level]) => div().h(n * g.cell + (n - 1) * GAP).rounded(2).bg(colors[level]))));
-  const grid = h_flex().id("st-prof-activity-grid").relative().gap(GAP).items_start().w(g.width).h(g.height).flex_none()
+  const cells = runs.flatMap((col, w) => {
+    let day = 0;
+    return col.map(([n, level]) => {
+      const top = day * g.step;
+      day += n;
+      return div().absolute().left(w * g.step).top(top).w(g.cell).h(n * g.step - GAP).rounded(2).bg(colors[level]);
+    });
+  });
+  const grid = div().id("st-prof-activity-grid").relative().w(g.width).h(g.height).flex_none()
     .on_mouse_move((e, cx) => {
       if (empty) return;
       const now = view.activityHover, next = at(e);
@@ -210,19 +209,19 @@ export function activityBlock(view, t) {
       view.activityHover = null;
       cx.notify();
     })
-    .children(outline ? [...columns, ...rowGaps, outline] : [...columns, ...rowGaps])
+    .children(outline ? [...cells, ...rowGaps, outline] : [...cells, ...rowGaps])
     .when(Boolean(hovered), (el) => {
       const [w, r] = hover;
       const parts = tooltip(hovered, days[key(hovered)]);
-      // Left of the cell; the first columns have no room there, so the tip goes right.
-      const place = tipSide(w, g, tipWidth(parts), view.activityWidth) === "right" ? (tip) => tip.left(w * g.step + g.cell + 6) : (tip) => tip.right(g.width - w * g.step + 6);
-      return el.child(place(div().id("st-prof-activity-tip").absolute().top(r * g.step + g.cell / 2 - 13)).flex().items_center().px(8).py(5).rounded(5).border_1().border_color(t.input).bg(t.raised)
+      // Centred on the column and kept inside the grid; below the top rows, above the others.
+      const top = r < 3 ? r * g.step + g.cell + 6 : r * g.step - 33;
+      return el.child(div().id("st-prof-activity-tip").absolute().left(tipLeft(w, g, tipWidth(parts))).top(top).flex().items_center().px(8).py(5).rounded(5).border_1().border_color(t.input).bg(t.raised)
         .child(mono(h_flex().gap(6).text_size(11).line_height("15px").text_color(t.foreground))
           .children(parts.flatMap((p, i) => (i ? [div().text_color(t.muted).child("·"), div().child(p)] : [div().child(p)])))));
     });
   // "Mon" on row 2, "Wed" on row 4, "Fri" on row 6; each right-aligned in its 53 px column.
-  const dayLabels = v_flex().w(g.left).flex_none().gap(GAP).pr(8)
-    .children(DAY_NAMES.map((n, r) => mono(div().h(g.cell).flex().items_center().justify_end().text_size(10).line_height("9px").text_color(t.dim)).child(r % 2 === 1 ? n : "")));
+  const dayLabels = div().relative().w(g.left).h(g.height).flex_none()
+    .children([1, 3, 5].map((r) => mono(div().absolute().left(0).top(r * g.step).w(g.left - 8).h(g.cell).flex().items_center().justify_end().text_size(10).line_height("9px").text_color(t.dim)).child(DAY_NAMES[r])));
   // A month's name sits over the first week whose column holds its 1st.
   const monthRow = div().relative().h(14).ml(g.left).w(g.width).flex_none()
     .children(months.map(([w, name]) => mono(div().absolute().left(w * g.step).top(0).text_size(10).line_height("14px").text_color(t.dim)).child(name)));
