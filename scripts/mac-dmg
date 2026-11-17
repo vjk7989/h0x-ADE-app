@@ -1,5 +1,7 @@
 #!/bin/bash
-# A notarized download, independent of the tarballs used by app updates.
+# A DMG download, independent of the tarballs used by app updates. Notarized
+# when the Apple secrets are set; otherwise ad hoc signed only (users run the
+# self-sign command from the README once).
 # Requires create-dmg (brew install create-dmg), jq, and Apple's command line tools.
 # Uses the same APPLE_CERTIFICATE_* and APPLE_API_* secrets as mac-sign/notary-test.
 set -euo pipefail
@@ -9,11 +11,14 @@ out=${2:?usage: mac-dmg signed-HyperOx.app output.dmg}
 [[ $(uname -s) == Darwin ]] || { echo 'mac-dmg requires macOS' >&2; exit 1; }
 [[ $(basename "$app") == HyperOx.app && -d $app ]] || { echo 'expected a signed HyperOx.app' >&2; exit 1; }
 [[ $out == *.dmg && ! -e $out ]] || { echo 'output must be a new .dmg file' >&2; exit 1; }
-: "${APPLE_CERTIFICATE_P12:?missing certificate}"
-: "${APPLE_CERTIFICATE_PASSWORD:?missing certificate password}"
-: "${APPLE_API_KEY:?missing notary API private key}"
-: "${APPLE_API_KEY_ID:?missing notary API key ID}"
-: "${APPLE_API_ISSUER:?missing notary API issuer}"
+# Without the certificate and notary key there is no signing or notarizing.
+signed=0
+if [[ -n ${APPLE_CERTIFICATE_P12:-} && -n ${APPLE_API_KEY:-} ]]; then
+  signed=1
+  : "${APPLE_CERTIFICATE_PASSWORD:?missing certificate password}"
+  : "${APPLE_API_KEY_ID:?missing notary API key ID}"
+  : "${APPLE_API_ISSUER:?missing notary API issuer}"
+fi
 for tool in create-dmg jq tiffutil xcrun; do command -v "$tool" >/dev/null; done
 root=$(cd "$(dirname "$0")/.." && pwd)
 umask 077
@@ -46,8 +51,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 codesign --verify --deep --strict "$app"
-signature=$(codesign -dvv "$app" 2>&1)
-[[ $signature == *"Authority=Developer ID Application:"* ]] || { echo 'DMG requires a Developer ID signed app' >&2; exit 1; }
+if [[ $signed == 1 ]]; then
+  signature=$(codesign -dvv "$app" 2>&1)
+  [[ $signature == *"Authority=Developer ID Application:"* ]] || { echo 'DMG requires a Developer ID signed app' >&2; exit 1; }
+fi
 mkdir "$work/source"
 ditto "$app" "$work/source/HyperOx.app"
 tiffutil -cathidpicheck "$root/distribution/macos/dmg/background.png" \
@@ -58,6 +65,14 @@ create-dmg --volname HyperOx --volicon "$root/assets/icons/HyperOx.icns" \
   --window-size 660 400 --background "$work/background.tiff" \
   --icon-size 128 --icon HyperOx.app 165 190 --hide-extension HyperOx.app \
   --app-drop-link 495 190 "$work/HyperOx.dmg" "$work/source"
+if [[ $signed == 0 ]]; then
+  # The app inside is ad hoc signed by scripts/package; so is the image.
+  codesign --force --sign - "$work/HyperOx.dmg"
+  mkdir -p "$(dirname "$out")"
+  mv "$work/HyperOx.dmg" "$out"
+  echo "mac-dmg: $out (ad hoc signed, not notarized)"
+  exit 0
+fi
 "$root/scripts/mac-sign" "$work/HyperOx.dmg"
 build_seconds=$((SECONDS - started))
 printf '%s' "$APPLE_API_KEY" > "$work/key.p8"

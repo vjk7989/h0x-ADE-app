@@ -174,10 +174,23 @@ jobs:
         with:
           path: *cache-paths
           key: release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+      # The one-file Windows download. Unsigned (no Authenticode certificate):
+      # SmartScreen warns. iscc ships on the windows runner images.
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tar -xzf dist/h0x-ade-windows-x86_64.tar.gz -C dist
+          iscc=$(command -v iscc || ls "/c/Program Files (x86)/Inno Setup 6/ISCC.exe")
+          MSYS2_ARG_CONV_EXCL='*' "$iscc" "/DAppVersion=$version" "/DSourceDir=$(cygpath -w "$PWD/dist/h0x-ade")" distribution/windows/h0x-ade.iss
+          test -s dist/HyperOx-Setup-x64.exe
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: h0x-ade-${{ matrix.target }}
-          path: dist/h0x-ade-${{ matrix.target }}.tar.gz
+          path: |
+            dist/h0x-ade-${{ matrix.target }}.tar.gz
+            dist/HyperOx-Setup-x64.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -207,11 +220,11 @@ jobs:
           done
 
   # A website download, never a dependency of update publishing below.
-  # scripts/mac-dmg signs and notarizes, so without the Apple secrets
-  # (unsigned releases) it is skipped and the release ships without a DMG.
+  # scripts/mac-dmg signs and notarizes with the Apple secrets; without them
+  # it makes an ad hoc signed, unnotarized DMG. Also runs on manual builds.
   mac-dmg:
     needs: [build, ci-passed]
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    if: always() && needs.build.result == 'success' && (github.event_name != 'push' || needs.ci-passed.result == 'success')
     environment: release
     runs-on: macos-15
     timeout-minutes: 40
@@ -226,7 +239,7 @@ jobs:
           path: dist
       - name: Install DMG tools
         run: brew install create-dmg jq
-      - name: Build, sign, notarize and verify DMG
+      - name: Build the DMG (signed and notarized if the Apple secrets are set)
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -234,17 +247,13 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
-          if [ -z "$APPLE_CERTIFICATE_P12" ] || [ -z "$APPLE_API_KEY" ]; then
-            echo "no Apple signing secrets: DMG skipped"
-            exit 0
-          fi
           tar -xzf dist/h0x-ade-macos-aarch64.tar.gz -C dist
-          scripts/mac-dmg dist/HyperOx.app dist/HyperOx.dmg
+          scripts/mac-dmg dist/HyperOx.app dist/HyperOx-macos-aarch64.dmg
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: HyperOx-dmg
-          path: dist/HyperOx.dmg
-          if-no-files-found: ignore
+          path: dist/HyperOx-macos-aarch64.dmg
+          if-no-files-found: error
           retention-days: 7
 
   # Tarballs and installers first, latest.json last: the updater and the
@@ -302,8 +311,10 @@ jobs:
           [ -n "$MINISIGN_SECRET_KEY" ] || { echo "MINISIGN_SECRET_KEY is not set" >&2; exit 1; }
           (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key")
           files=(dist/h0x-ade-*.tar.gz distribution/install.sh distribution/install.ps1 dist/changelog.md dist/latest.json)
-          # The DMG exists only when the Apple secrets are set.
-          if [ -f dist/HyperOx.dmg ]; then files+=(dist/HyperOx.dmg); fi
+          # The DMG job may have failed (it does not gate the release).
+          for f in dist/HyperOx-Setup-x64.exe dist/HyperOx-macos-aarch64.dmg; do
+            if [ -f "$f" ]; then files+=("$f"); fi
+          done
           # The key has no password; an empty line answers a prompt if one comes.
           for f in "${files[@]}"; do
             printf '\n' | minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$f"
@@ -317,7 +328,8 @@ jobs:
           body_path: RELEASE_NOTES.md
           files: |
             dist/h0x-ade-*.tar.gz
-            dist/HyperOx.dmg
+            dist/HyperOx-Setup-x64.exe
+            dist/HyperOx-macos-aarch64.dmg
             distribution/install.sh
             distribution/install.ps1
             dist/changelog.md

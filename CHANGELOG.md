@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- Downloads for the website: `HyperOx-Setup-x64.exe` (Windows installer, no admin) and `HyperOx-macos-aarch64.dmg`. The installers now point at the public releases page.
+
 ## [0.1.34] - 2026-11-14
 
 Save your workspaces and a new welcome. Bundles h0x-core 0.1.16.

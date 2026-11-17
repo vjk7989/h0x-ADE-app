@@ -1,6 +1,6 @@
 # Installs the HyperOx app on Windows, and h0x-core if there's none yet:
 #
-#   powershell -c "irm https://github.com/vjk7989/h0x-ADE-app/releases/latest/download/install.ps1 | iex"
+#   powershell -c "irm https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/install.ps1 | iex"
 #
 # The app into %LOCALAPPDATA%\Programs\h0x-ade (added to your PATH for
 # `h0x-ade`), HyperOx in the Start menu. The core, with its own installer,
@@ -21,7 +21,7 @@ $ProgressPreference = "SilentlyContinue"
 # throw, not exit: under `irm | iex`, exit would close the person's window.
 function Fail($why) { throw "h0x-ade: $why" }
 
-$releases = if ($env:H0X_ADE_RELEASES_URL) { $env:H0X_ADE_RELEASES_URL.TrimEnd("/") } else { "https://github.com/vjk7989/h0x-ADE-app/releases" }
+$releases = if ($env:H0X_ADE_RELEASES_URL) { $env:H0X_ADE_RELEASES_URL.TrimEnd("/") } else { "https://github.com/buckleson/h0x-ADE-Releases/releases" }
 $coreReleases = if ($env:H0X_CORE_RELEASES_URL) { $env:H0X_CORE_RELEASES_URL.TrimEnd("/") } else { "https://github.com/vjk7989/h0x-ADE-core/releases" }
 # https only, and the downloads on GitHub; a site set by H0X_ADE_RELEASES_URL or
 # H0X_CORE_RELEASES_URL (tests) is trusted as it is, unsigned.
