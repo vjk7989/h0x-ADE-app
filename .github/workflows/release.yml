@@ -174,10 +174,84 @@ jobs:
         with:
           path: *cache-paths
           key: release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+      # The one-file Windows download. Unsigned (no Authenticode certificate):
+      # SmartScreen warns. iscc ships on the windows runner images.
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # The core this release pins, fetched as install.ps1 does: the
+          # release's manifest, its checksum, then the release key's signature,
+          # checked by the downloaded h0x-core itself (trust on first use, as
+          # a first install.ps1 run does).
+          core=$(tr -d '[:space:]' < distribution/core-version)
+          base="https://github.com/vjk7989/h0x-ADE-core/releases/download/v$core"
+          mkdir -p dist/core-dl dist/h0x-core
+          curl -fsSL --proto '=https' "$base/manifest.json" -o dist/core-dl/manifest.json
+          read -r url sha < <(python -c "import json;t=json.load(open('dist/core-dl/manifest.json'))['targets']['windows-x86_64'];print(t['url'],t['sha256'])" | tr -d '\r')
+          case "$url" in https://github.com/*) ;; *) echo "unexpected core url $url" >&2; exit 1 ;; esac
+          zip="dist/core-dl/${url##*/}"
+          curl -fsSL --proto '=https' "$url" -o "$zip"
+          curl -fsSL --proto '=https' "$url.minisig" -o "$zip.minisig"
+          echo "$sha  $zip" | sha256sum -c -
+          "$SYSTEMROOT/System32/tar.exe" -xf "$(cygpath -w "$zip")" -C "$(cygpath -w "$PWD/dist/h0x-core")"
+          test -s dist/h0x-core/conpty/conpty.dll
+          dist/h0x-core/h0x-core.exe update --from "$(cygpath -w "$PWD/$zip")" --check
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tar -xzf dist/h0x-ade-windows-x86_64.tar.gz -C dist
+          iscc=$(command -v iscc || ls "/c/Program Files (x86)/Inno Setup 6/ISCC.exe")
+          MSYS2_ARG_CONV_EXCL='*' "$iscc" "/DAppVersion=$version" "/DSourceDir=$(cygpath -w "$PWD/dist/h0x-ade")" "/DCoreDir=$(cygpath -w "$PWD/dist/h0x-core")" distribution/windows/h0x-ade.iss
+          test -s dist/HyperOx-Setup-x64.exe
+      # On the throwaway runner: install, check, upgrade over itself, uninstall.
+      # The app is never launched (silent setup skips the launch checkbox).
+      - name: Smoke-test the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = (Resolve-Path dist/HyperOx-Setup-x64.exe).Path
+          $ade = Join-Path $env:LOCALAPPDATA 'Programs\h0x-ade'
+          $core = Join-Path $env:LOCALAPPDATA 'Programs\h0x-core'
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $pin = (Get-Content distribution/core-version -Raw).Trim()
+          function Assert($ok, $what) { if (-not $ok) { throw "smoke test failed: $what" } }
+          function Install { Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$PWD\setup.log" -Wait }
+          function UserPath { ([string](Get-ItemProperty HKCU:\Environment).Path) -split ';' | ForEach-Object { $_.TrimEnd('\') } }
+          Install
+          Assert (Test-Path "$ade\h0x-ade.exe") 'h0x-ade.exe installed'
+          Assert (Test-Path "$core\h0x-core.exe") 'h0x-core.exe installed'
+          Assert (Test-Path "$core\conpty\conpty.dll") 'conpty installed'
+          # h0x-ade is a GUI-subsystem exe: PowerShell's & closes its stdout, so capture it through a file.
+          Start-Process -FilePath "$ade\h0x-ade.exe" -ArgumentList '--version' -NoNewWindow -Wait -RedirectStandardOutput "$env:RUNNER_TEMP\ade-version.txt"
+          Assert ((Get-Content "$env:RUNNER_TEMP\ade-version.txt" -Raw).Trim() -eq "h0x-ade $version") 'h0x-ade --version'
+          Assert ((& "$core\h0x-core.exe" --version) -eq "h0x-core $pin") 'h0x-core --version'
+          Assert ((UserPath) -contains $ade) 'app dir on the user PATH'
+          Assert ((UserPath) -contains $core) 'core dir on the user PATH'
+          Assert (Test-Path (Join-Path ([Environment]::GetFolderPath('Programs')) 'HyperOx.lnk')) 'Start menu shortcut'
+          $uninstall = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+          Assert (@(Get-ChildItem $uninstall | Where-Object { $_.PSChildName -like 'h0x-ade*' }).Count -eq 1) 'uninstall entry'
+          Install
+          Assert (Test-Path "$ade\h0x-ade.exe") 'h0x-ade.exe after upgrade'
+          Assert (Test-Path "$core\h0x-core.exe") 'h0x-core.exe after upgrade'
+          Start-Process "$ade\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES' -Wait
+          # The uninstaller hands over to a temporary copy of itself: wait for it.
+          for ($i = 0; $i -lt 60 -and ((Test-Path $ade) -or (Test-Path $core)); $i++) { Start-Sleep 1 }
+          Assert (-not (Test-Path $ade)) 'app dir removed'
+          Assert (-not (Test-Path $core)) 'core dir removed'
+          Assert (-not ((UserPath) -contains $ade) -and -not ((UserPath) -contains $core)) 'PATH cleaned'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure() && runner.os == 'Windows'
+        with:
+          name: installer-setup-log
+          path: setup.log
+          if-no-files-found: ignore
+          retention-days: 7
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: h0x-ade-${{ matrix.target }}
-          path: dist/h0x-ade-${{ matrix.target }}.tar.gz
+          path: |
+            dist/h0x-ade-${{ matrix.target }}.tar.gz
+            dist/HyperOx-Setup-x64.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -207,11 +281,11 @@ jobs:
           done
 
   # A website download, never a dependency of update publishing below.
-  # scripts/mac-dmg signs and notarizes, so without the Apple secrets
-  # (unsigned releases) it is skipped and the release ships without a DMG.
+  # scripts/mac-dmg signs and notarizes with the Apple secrets; without them
+  # it makes an ad hoc signed, unnotarized DMG. Also runs on manual builds.
   mac-dmg:
     needs: [build, ci-passed]
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    if: always() && needs.build.result == 'success' && (github.event_name != 'push' || needs.ci-passed.result == 'success')
     environment: release
     runs-on: macos-15
     timeout-minutes: 40
@@ -226,7 +300,7 @@ jobs:
           path: dist
       - name: Install DMG tools
         run: brew install create-dmg jq
-      - name: Build, sign, notarize and verify DMG
+      - name: Build the DMG (signed and notarized if the Apple secrets are set)
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -234,17 +308,13 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
-          if [ -z "$APPLE_CERTIFICATE_P12" ] || [ -z "$APPLE_API_KEY" ]; then
-            echo "no Apple signing secrets: DMG skipped"
-            exit 0
-          fi
           tar -xzf dist/h0x-ade-macos-aarch64.tar.gz -C dist
-          scripts/mac-dmg dist/HyperOx.app dist/HyperOx.dmg
+          scripts/mac-dmg dist/HyperOx.app dist/HyperOx-macos-aarch64.dmg
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: HyperOx-dmg
-          path: dist/HyperOx.dmg
-          if-no-files-found: ignore
+          path: dist/HyperOx-macos-aarch64.dmg
+          if-no-files-found: error
           retention-days: 7
 
   # Tarballs and installers first, latest.json last: the updater and the
@@ -302,8 +372,10 @@ jobs:
           [ -n "$MINISIGN_SECRET_KEY" ] || { echo "MINISIGN_SECRET_KEY is not set" >&2; exit 1; }
           (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key")
           files=(dist/h0x-ade-*.tar.gz distribution/install.sh distribution/install.ps1 dist/changelog.md dist/latest.json)
-          # The DMG exists only when the Apple secrets are set.
-          if [ -f dist/HyperOx.dmg ]; then files+=(dist/HyperOx.dmg); fi
+          # The DMG job may have failed (it does not gate the release).
+          for f in dist/HyperOx-Setup-x64.exe dist/HyperOx-macos-aarch64.dmg; do
+            if [ -f "$f" ]; then files+=("$f"); fi
+          done
           # The key has no password; an empty line answers a prompt if one comes.
           for f in "${files[@]}"; do
             printf '\n' | minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$f"
@@ -317,7 +389,8 @@ jobs:
           body_path: RELEASE_NOTES.md
           files: |
             dist/h0x-ade-*.tar.gz
-            dist/HyperOx.dmg
+            dist/HyperOx-Setup-x64.exe
+            dist/HyperOx-macos-aarch64.dmg
             distribution/install.sh
             distribution/install.ps1
             dist/changelog.md
