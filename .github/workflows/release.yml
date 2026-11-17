@@ -188,7 +188,7 @@ jobs:
           base="https://github.com/vjk7989/h0x-ADE-core/releases/download/v$core"
           mkdir -p dist/core-dl dist/h0x-core
           curl -fsSL --proto '=https' "$base/manifest.json" -o dist/core-dl/manifest.json
-          read -r url sha < <(python -c "import json;t=json.load(open('dist/core-dl/manifest.json'))['targets']['windows-x86_64'];print(t['url'],t['sha256'])")
+          read -r url sha < <(python -c "import json;t=json.load(open('dist/core-dl/manifest.json'))['targets']['windows-x86_64'];print(t['url'],t['sha256'])" | tr -d '\r')
           case "$url" in https://github.com/*) ;; *) echo "unexpected core url $url" >&2; exit 1 ;; esac
           zip="dist/core-dl/${url##*/}"
           curl -fsSL --proto '=https' "$url" -o "$zip"
