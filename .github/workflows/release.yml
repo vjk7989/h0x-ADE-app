@@ -221,7 +221,9 @@ jobs:
           Assert (Test-Path "$ade\h0x-ade.exe") 'h0x-ade.exe installed'
           Assert (Test-Path "$core\h0x-core.exe") 'h0x-core.exe installed'
           Assert (Test-Path "$core\conpty\conpty.dll") 'conpty installed'
-          Assert ((& "$ade\h0x-ade.exe" --version) -eq "h0x-ade $version") 'h0x-ade --version'
+          # h0x-ade is a GUI-subsystem exe: PowerShell's & closes its stdout, so capture it through a file.
+          Start-Process -FilePath "$ade\h0x-ade.exe" -ArgumentList '--version' -NoNewWindow -Wait -RedirectStandardOutput "$env:RUNNER_TEMP\ade-version.txt"
+          Assert ((Get-Content "$env:RUNNER_TEMP\ade-version.txt" -Raw).Trim() -eq "h0x-ade $version") 'h0x-ade --version'
           Assert ((& "$core\h0x-core.exe" --version) -eq "h0x-core $pin") 'h0x-core --version'
           Assert ((UserPath) -contains $ade) 'app dir on the user PATH'
           Assert ((UserPath) -contains $core) 'core dir on the user PATH'
