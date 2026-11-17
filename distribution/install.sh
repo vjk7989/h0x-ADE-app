@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs the HyperOx app, and h0x-core if there's none yet:
 #
-#   curl -fsSL https://github.com/vjk7989/h0x-ADE-app/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/install.sh | sh
 #
 # Linux: the app into ~/.local/share/h0x-ade, `h0x-ade` in ~/.local/bin,
 # a launcher entry and icon. macOS: HyperOx.app into ~/Applications, keeping
@@ -16,7 +16,7 @@
 # H0X_ADE_RELEASES_URL (app) and H0X_CORE_RELEASES_URL (core) point elsewhere (tests).
 set -eu
 
-releases=${H0X_ADE_RELEASES_URL:-https://github.com/vjk7989/h0x-ADE-app/releases}
+releases=${H0X_ADE_RELEASES_URL:-https://github.com/buckleson/h0x-ADE-Releases/releases}
 core_releases=${H0X_CORE_RELEASES_URL:-https://github.com/vjk7989/h0x-ADE-core/releases}
 bin="$HOME/.local/bin"
 # https only, and the downloads on GitHub; a site set by H0X_ADE_RELEASES_URL
