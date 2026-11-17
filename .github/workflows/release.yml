@@ -180,10 +180,27 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
+          # The core this release pins, fetched as install.ps1 does: the
+          # release's manifest, its checksum, then the release key's signature,
+          # checked by the downloaded h0x-core itself (trust on first use, as
+          # a first install.ps1 run does).
+          core=$(tr -d '[:space:]' < distribution/core-version)
+          base="https://github.com/vjk7989/h0x-ADE-core/releases/download/v$core"
+          mkdir -p dist/core-dl dist/h0x-core
+          curl -fsSL --proto '=https' "$base/manifest.json" -o dist/core-dl/manifest.json
+          read -r url sha < <(python -c "import json;t=json.load(open('dist/core-dl/manifest.json'))['targets']['windows-x86_64'];print(t['url'],t['sha256'])")
+          case "$url" in https://github.com/*) ;; *) echo "unexpected core url $url" >&2; exit 1 ;; esac
+          zip="dist/core-dl/${url##*/}"
+          curl -fsSL --proto '=https' "$url" -o "$zip"
+          curl -fsSL --proto '=https' "$url.minisig" -o "$zip.minisig"
+          echo "$sha  $zip" | sha256sum -c -
+          "$SYSTEMROOT/System32/tar.exe" -xf "$(cygpath -w "$zip")" -C "$(cygpath -w "$PWD/dist/h0x-core")"
+          test -s dist/h0x-core/conpty/conpty.dll
+          dist/h0x-core/h0x-core.exe update --from "$(cygpath -w "$PWD/$zip")" --check
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           tar -xzf dist/h0x-ade-windows-x86_64.tar.gz -C dist
           iscc=$(command -v iscc || ls "/c/Program Files (x86)/Inno Setup 6/ISCC.exe")
-          MSYS2_ARG_CONV_EXCL='*' "$iscc" "/DAppVersion=$version" "/DSourceDir=$(cygpath -w "$PWD/dist/h0x-ade")" distribution/windows/h0x-ade.iss
+          MSYS2_ARG_CONV_EXCL='*' "$iscc" "/DAppVersion=$version" "/DSourceDir=$(cygpath -w "$PWD/dist/h0x-ade")" "/DCoreDir=$(cygpath -w "$PWD/dist/h0x-core")" distribution/windows/h0x-ade.iss
           test -s dist/HyperOx-Setup-x64.exe
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
