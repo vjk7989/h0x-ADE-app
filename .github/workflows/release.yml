@@ -202,6 +202,48 @@ jobs:
           iscc=$(command -v iscc || ls "/c/Program Files (x86)/Inno Setup 6/ISCC.exe")
           MSYS2_ARG_CONV_EXCL='*' "$iscc" "/DAppVersion=$version" "/DSourceDir=$(cygpath -w "$PWD/dist/h0x-ade")" "/DCoreDir=$(cygpath -w "$PWD/dist/h0x-core")" distribution/windows/h0x-ade.iss
           test -s dist/HyperOx-Setup-x64.exe
+      # On the throwaway runner: install, check, upgrade over itself, uninstall.
+      # The app is never launched (silent setup skips the launch checkbox).
+      - name: Smoke-test the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = (Resolve-Path dist/HyperOx-Setup-x64.exe).Path
+          $ade = Join-Path $env:LOCALAPPDATA 'Programs\h0x-ade'
+          $core = Join-Path $env:LOCALAPPDATA 'Programs\h0x-core'
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $pin = (Get-Content distribution/core-version -Raw).Trim()
+          function Assert($ok, $what) { if (-not $ok) { throw "smoke test failed: $what" } }
+          function Install { Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$PWD\setup.log" -Wait }
+          function UserPath { ([string](Get-ItemProperty HKCU:\Environment).Path) -split ';' | ForEach-Object { $_.TrimEnd('\') } }
+          Install
+          Assert (Test-Path "$ade\h0x-ade.exe") 'h0x-ade.exe installed'
+          Assert (Test-Path "$core\h0x-core.exe") 'h0x-core.exe installed'
+          Assert (Test-Path "$core\conpty\conpty.dll") 'conpty installed'
+          Assert ((& "$ade\h0x-ade.exe" --version) -eq "h0x-ade $version") 'h0x-ade --version'
+          Assert ((& "$core\h0x-core.exe" --version) -eq "h0x-core $pin") 'h0x-core --version'
+          Assert ((UserPath) -contains $ade) 'app dir on the user PATH'
+          Assert ((UserPath) -contains $core) 'core dir on the user PATH'
+          Assert (Test-Path (Join-Path ([Environment]::GetFolderPath('Programs')) 'HyperOx.lnk')) 'Start menu shortcut'
+          $uninstall = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+          Assert (@(Get-ChildItem $uninstall | Where-Object { $_.PSChildName -like 'h0x-ade*' }).Count -eq 1) 'uninstall entry'
+          Install
+          Assert (Test-Path "$ade\h0x-ade.exe") 'h0x-ade.exe after upgrade'
+          Assert (Test-Path "$core\h0x-core.exe") 'h0x-core.exe after upgrade'
+          Start-Process "$ade\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES' -Wait
+          # The uninstaller hands over to a temporary copy of itself: wait for it.
+          for ($i = 0; $i -lt 60 -and ((Test-Path $ade) -or (Test-Path $core)); $i++) { Start-Sleep 1 }
+          Assert (-not (Test-Path $ade)) 'app dir removed'
+          Assert (-not (Test-Path $core)) 'core dir removed'
+          Assert (-not ((UserPath) -contains $ade) -and -not ((UserPath) -contains $core)) 'PATH cleaned'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure() && runner.os == 'Windows'
+        with:
+          name: installer-setup-log
+          path: setup.log
+          if-no-files-found: ignore
+          retention-days: 7
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: h0x-ade-${{ matrix.target }}
