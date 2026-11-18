@@ -5588,9 +5588,10 @@ fn split_node(node: &mut Value, target: &str, axis: &str, new: &Value, id: &str)
     if node["type"] == "block" {
         return false;
     }
+    let same_axis = node["type"] == axis;
     let children = node["children"].as_array_mut().unwrap();
     if let Some(i) = children.iter().position(|c| c["id"].as_str() == Some(target)) {
-        if node["type"] == axis {
+        if same_axis {
             children.insert(i + 1, new.clone());
         } else {
             let old = children[i].clone();
@@ -7186,7 +7187,7 @@ fn pair_item() -> Value {
     ]})
 }
 
-fn empty_window() -> BTreeMap<String, Value> {
+fn bare_window() -> BTreeMap<String, Value> {
     let mut values = sessions_values(Value::Null, "/none", "linux");
     values.insert("spaces".into(), json!([]));
     values
@@ -7198,7 +7199,7 @@ fn workspaces_a_second_restore_finds_what_the_first_brought_back_and_learns_its_
     let staged = Staged::new();
     let others = [ws_item("o1", "Before", "/x", one_tab("/x")), pair_item(), ws_item("o2", "After", "/y", one_tab("/y"))];
     let host = sessions_host(&[], &[("workspaces", ws_store(&others))]);
-    describe_ws(cx, &staged, empty_window(), &host, &format!("this.open({}, cx);", pair_item()));
+    describe_ws(cx, &staged, bare_window(), &host, &format!("this.open({}, cx);", pair_item()));
     assert_eq!(toasts(&host), vec![json!("Restored “Pair”")]);
     // The saved panes are learned under the terminals that now show them; nothing else of the item moves.
     let items = stored_items(&host);
@@ -7212,7 +7213,7 @@ fn workspaces_a_second_restore_finds_what_the_first_brought_back_and_learns_its_
     assert_eq!((items[0].clone(), items[2].clone()), (others[0].clone(), others[2].clone()));
     // Again, with what the dialog now reads: nothing starts, the saved tabs and space are shown, and it says so.
     host.borrow_mut().effects.clear();
-    describe_ws(cx, &staged, empty_window(), &host, &format!("this.open({}, cx);", items[1]));
+    describe_ws(cx, &staged, bare_window(), &host, &format!("this.open({}, cx);", items[1]));
     assert_eq!(runs(&host), vec![json!(["tab.select", {"id":"rt1"}]), json!(["tab.select", {"id":"rt2"}]), json!(["space.select", {"id":"rs2"}])]);
     assert_eq!(toasts(&host), vec![json!("Already open")]);
     assert_eq!(stored_items(&host), items, "nothing to learn the second time");
@@ -7225,12 +7226,12 @@ fn workspaces_two_spaces_on_one_folder_come_back_once_and_the_second_restore_fin
     let twin = |name: &str, terminal: &str| json!({"name":name, "machine":null, "folder":"/a", "activeTab":0, "tabs":[{"name":"", "root":{"cwd":"/a", "argv":["bash"], "terminal":terminal}}]});
     let item = json!({"id":"w1", "name":"Twins", "created":1, "saved":1, "active":1, "spaces":[twin("A1", "x1"), twin("A2", "x2")]});
     let host = sessions_host(&[], &[("workspaces", ws_store(&[item.clone()]))]);
-    describe_ws(cx, &staged, empty_window(), &host, &format!("this.open({item}, cx);"));
+    describe_ws(cx, &staged, bare_window(), &host, &format!("this.open({item}, cx);"));
     assert_eq!(run_names(&host).iter().filter(|n| *n == "space.new").count(), 2, "{:?}", runs(&host));
     let learned = stored_items(&host)[0].clone();
     assert_eq!((learned["spaces"][0]["tabs"][0]["root"]["terminal"].clone(), learned["spaces"][1]["tabs"][0]["root"]["terminal"].clone()), (json!("ra1"), json!("ra2")));
     host.borrow_mut().effects.clear();
-    describe_ws(cx, &staged, empty_window(), &host, &format!("this.open({learned}, cx);"));
+    describe_ws(cx, &staged, bare_window(), &host, &format!("this.open({learned}, cx);"));
     assert_eq!(runs(&host), vec![json!(["tab.select", {"id":"rt1"}]), json!(["tab.select", {"id":"rt2"}]), json!(["space.select", {"id":"rs2"}])]);
     assert_eq!(toasts(&host), vec![json!("Already open")]);
 }
