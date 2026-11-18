@@ -91,13 +91,13 @@ const base = (folder) => folder.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || f
 function itemOf(it) {
   if (!plain(it) || typeof it.id !== "string" || !it.id || typeof it.name !== "string" || !it.name.trim()) return null;
   const raw = Array.isArray(it.spaces) ? it.spaces : [{ name: it.space, machine: it.machine, folder: it.folder, tabs: it.tabs }];
-  const kept = raw.slice(0, MAX_SPACES).flatMap((sp, index) => {
+  const kept = raw.flatMap((sp, index) => {
     if (!plain(sp)) return [];
     const tabs = soundTabs(sp.tabs);
     if (!tabs.length) return [];
     const at = Number.isInteger(sp.activeTab) && sp.activeTab >= 0 && sp.activeTab < tabs.length ? sp.activeTab : 0;
     return [{ index, name: text(sp.name), machine: typeof sp.machine === "string" && sp.machine ? sp.machine : null, folder: text(sp.folder), activeTab: at, tabs }];
-  });
+  }).slice(0, MAX_SPACES);
   if (!kept.length) return null;
   const active = Math.max(0, kept.findIndex((x) => x.index === it.active));
   return { id: it.id, name: it.name.slice(0, 80), created: num(it.created), saved: num(it.saved), active, spaces: kept.map(({ index, ...sp }) => sp) };
@@ -154,12 +154,14 @@ export function capture() {
   for (const s of spaces()) {
     const tabs = (all.find((t) => t.id === s.id)?.tabs ?? []).map((x) => ({ id: x.id, name: x.name ?? "", root: shape(x.root, leaf) })).filter((x) => x.root);
     if (!tabs.length) continue;
+    // The first MAX_SPACES in the sidebar's order are kept; `active` then always names a kept one (0 if the shown one is later).
+    if (out.length >= MAX_SPACES) break;
     const shown = s.tabs?.find((x) => x.active)?.id;
     const at = tabs.findIndex((x) => x.id === shown);
     if (s.active) active = out.length;
     out.push({ name: s.name || (s.folder ? base(s.folder) : ""), machine: s.machine ?? null, folder: s.folder ?? "", activeTab: Math.max(0, at), tabs: tabs.map(({ name, root }) => ({ name, root })) });
   }
-  return out.length ? { active, spaces: out.slice(0, MAX_SPACES) } : null;
+  return out.length ? { active, spaces: out } : null;
 }
 
 // Gives each agent pane the newest session of its agent in its folder (`base`
@@ -470,6 +472,8 @@ export async function restore(cx, stored) {
   const made = { spaces: 0, reused: 0, tabs: 0 };
   const skipped = {};
   const got = [];
+  // Each saved space takes its own open space: one nobody took yet (a space this restore made counts as taken).
+  const claimed = new Set();
   for (const sp of item.spaces) {
     const on = sp.machine;
     if (on && !machines().some((m) => m.name === on && m.layout === "ready")) {
@@ -484,9 +488,12 @@ export async function restore(cx, stored) {
       const argv = leaf.agent ? await launch(on, leaf, fresh, started) : leaf.shell === false && leaf.argv?.length ? command(leaf.argv) : undefined;
       return { ...(folder ? { folder } : {}), ...(argv ? { argv } : {}) };
     };
-    const target = spaces().find((s) => (s.machine ?? null) === on && norm(s.folder) === norm(sp.folder));
+    const same = spaces().filter((s) => !claimed.has(s.id) && (s.machine ?? null) === on && norm(s.folder) === norm(sp.folder));
+    // Of several, the one that already runs the saved panes.
+    const target = same.find((s) => sp.tabs.some((t) => leaves(t.root).some((l) => open(l, s)))) ?? same[0];
     const done = target ? await fill(cx, target, sp, start, made) : await create(cx, sp, start, made);
     if (!done) return { state: "timeout", ...made, skipped };
+    claimed.add(done.space);
     got.push(done);
   }
   item.spaces.forEach((sp, i) => {
