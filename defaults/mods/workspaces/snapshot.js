@@ -1,11 +1,14 @@
-// Workspaces' engine: saves the shown space (its tabs, splits and each agent with its session) and restores it.
-// Storage is shared("workspaces") = { version: 1, items: [ { id, name, created, saved, machine, folder, space, tabs } ] },
-// newest first, at most MAX. A leaf is { cwd, argv?, terminal?, agent?, session? }; a split is { split, children }.
+// Workspaces' engine: saves the whole window (every space on every machine: its tabs, splits and each agent with its
+// session, and which space and tabs were shown) and restores it.
+// Storage is shared("workspaces") = { version: 2, items: [ { id, name, created, saved, active, spaces: [ { name, machine,
+// folder, activeTab, tabs } ] } ] }, newest first, at most MAX; an item of version 1 (one space: machine, folder, space,
+// tabs) reads as a workspace of one space. `active` and `activeTab` are indexes. A leaf is { cwd, argv?, terminal?, agent?, session? }; a split is { split, children }.
 // Nothing here is called while drawing except read(): the rest runs from clicks and tasks.
 
-import { spaces, panes, terminals, tree, core, home, knownAgents, run, shared, setShared, window } from "h0x";
+import { spaces, panes, terminals, trees, machines, core, home, knownAgents, run, shared, setShared, window } from "h0x";
 
 export const MAX = 5;
+const MAX_SPACES = 30;
 const KEY = "workspaces";
 
 // Stored maps (shared values people's files can hold anything in): only a
@@ -83,6 +86,23 @@ const text = (v, fallback = "") => (typeof v === "string" ? v : fallback);
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 const base = (folder) => folder.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || folder;
 
+// A stored item as { id, name, created, saved, active, spaces }, or null. Bad spaces are left out (a space with no
+// usable tab); `active` follows its space.
+function itemOf(it) {
+  if (!plain(it) || typeof it.id !== "string" || !it.id || typeof it.name !== "string" || !it.name.trim()) return null;
+  const raw = Array.isArray(it.spaces) ? it.spaces : [{ name: it.space, machine: it.machine, folder: it.folder, tabs: it.tabs }];
+  const kept = raw.slice(0, MAX_SPACES).flatMap((sp, index) => {
+    if (!plain(sp)) return [];
+    const tabs = soundTabs(sp.tabs);
+    if (!tabs.length) return [];
+    const at = Number.isInteger(sp.activeTab) && sp.activeTab >= 0 && sp.activeTab < tabs.length ? sp.activeTab : 0;
+    return [{ index, name: text(sp.name), machine: typeof sp.machine === "string" && sp.machine ? sp.machine : null, folder: text(sp.folder), activeTab: at, tabs }];
+  });
+  if (!kept.length) return null;
+  const active = Math.max(0, kept.findIndex((x) => x.index === it.active));
+  return { id: it.id, name: it.name.slice(0, 80), created: num(it.created), saved: num(it.saved), active, spaces: kept.map(({ index, ...sp }) => sp) };
+}
+
 /** The stored workspaces, newest first, each valid and fresh (not the stored objects): a value that is not
  * ours reads as none; a bad item is dropped; at most MAX. */
 export function read() {
@@ -91,20 +111,10 @@ export function read() {
   const seen = new Set();
   const out = [];
   for (const it of items) {
-    if (!plain(it) || typeof it.id !== "string" || !it.id || seen.has(it.id) || typeof it.name !== "string" || !it.name.trim()) continue;
-    const tabs = soundTabs(it.tabs);
-    if (!tabs.length) continue;
-    seen.add(it.id);
-    out.push({
-      id: it.id,
-      name: it.name.slice(0, 80),
-      created: num(it.created),
-      saved: num(it.saved),
-      machine: typeof it.machine === "string" && it.machine ? it.machine : null,
-      folder: text(it.folder),
-      space: text(it.space),
-      tabs,
-    });
+    const item = itemOf(it);
+    if (!item || seen.has(item.id)) continue;
+    seen.add(item.id);
+    out.push(item);
     if (out.length === MAX) break;
   }
   return out;
@@ -112,21 +122,22 @@ export function read() {
 
 /** Stores the list (newest first). */
 export function write(items) {
-  setShared(KEY, { version: 1, items });
+  setShared(KEY, { version: 2, items });
 }
 
-/** The count of tabs and panes of a stored workspace, for its row. */
+/** The counts of spaces, tabs and panes of a stored workspace, for its row. */
 export function counts(item) {
-  return { tabs: item.tabs.length, panes: item.tabs.reduce((n, t) => n + leaves(t.root).length, 0) };
+  const tabs = item.spaces.flatMap((sp) => sp.tabs);
+  return { spaces: item.spaces.length, tabs: tabs.length, panes: tabs.reduce((n, t) => n + leaves(t.root).length, 0) };
 }
 
-/** The shown space as a snapshot { space, machine, folder, tabs: [{ name, root }] }, or null (no shown space, no
- * terminals). Each agent pane has its agent (label h0x.agent), argv and folder; a shell pane its argv and folder;
- * every pane the core address of its terminal. `session` is filled in by saveNew / saveOver. */
+/** The whole window as { active, spaces: [{ name, machine, folder, activeTab, tabs: [{ name, root }] }] }, or null
+ * (no space has a terminal). Spaces are in the sidebar's order, on every machine; `active` and `activeTab` are indexes
+ * of the shown space and of each space's shown tab. Each agent pane has its agent (label h0x.agent), argv and folder;
+ * a program pane (not a shell) its argv, folder and `shell: false`; a shell pane its argv and folder; every pane the
+ * core address of its terminal. `session` is filled in by saveNew / saveOver. */
 export function capture() {
-  const s = spaces().find((x) => x.active);
-  const t = tree();
-  if (!s || t?.id !== s.id) return null;
+  const all = trees() ?? [];
   const ps = panes();
   const ts = terminals();
   const leaf = (address) => {
@@ -138,9 +149,17 @@ export function capture() {
     // `program.shell` is false for a program started by itself (vim, a server): it starts again from its argv.
     return r?.program && !r.program.shell ? { cwd, argv, terminal: address, shell: false } : { cwd, argv, terminal: address };
   };
-  const tabs = (t.tabs ?? []).map((x) => ({ name: x.name ?? "", root: shape(x.root, leaf) })).filter((x) => x.root);
-  if (!tabs.length) return null;
-  return { space: s.name || (s.folder ? base(s.folder) : ""), machine: s.machine ?? null, folder: s.folder ?? "", tabs };
+  let active = 0;
+  const out = [];
+  for (const s of spaces()) {
+    const tabs = (all.find((t) => t.id === s.id)?.tabs ?? []).map((x) => ({ id: x.id, name: x.name ?? "", root: shape(x.root, leaf) })).filter((x) => x.root);
+    if (!tabs.length) continue;
+    const shown = s.tabs?.find((x) => x.active)?.id;
+    const at = tabs.findIndex((x) => x.id === shown);
+    if (s.active) active = out.length;
+    out.push({ name: s.name || (s.folder ? base(s.folder) : ""), machine: s.machine ?? null, folder: s.folder ?? "", activeTab: Math.max(0, at), tabs: tabs.map(({ name, root }) => ({ name, root })) });
+  }
+  return out.length ? { active, spaces: out.slice(0, MAX_SPACES) } : null;
 }
 
 // Gives each agent pane the newest session of its agent in its folder (`base`
@@ -246,8 +265,10 @@ function command(argv) {
 async function snapshot() {
   const snap = capture();
   if (!snap) return null;
-  const on = snap.machine;
-  await assign(on, snap.folder || (on ? "" : home()), snap.tabs.flatMap((x) => leaves(x.root)).filter((x) => x.agent));
+  for (const sp of snap.spaces) {
+    const on = sp.machine;
+    await assign(on, sp.folder || (on ? "" : home()), sp.tabs.flatMap((x) => leaves(x.root)).filter((x) => x.agent));
+  }
   return snap;
 }
 
@@ -258,7 +279,7 @@ const newId = (items) => {
   }
 };
 
-/** Saves the shown space as a new workspace named `name` (empty: the space's name). Answers the item, "full"
+/** Saves the whole window as a new workspace named `name` (empty: the shown space's name). Answers the item, "full"
  * (MAX are saved: nothing is written, never one dropped) or "empty" (nothing to save). */
 export async function saveNew(name) {
   if (read().length >= MAX) return "full";
@@ -269,20 +290,18 @@ export async function saveNew(name) {
   const now = Date.now();
   const item = {
     id: newId(items),
-    name: (name ?? "").trim().slice(0, 80) || snap.space || "Workspace",
+    name: (name ?? "").trim().slice(0, 80) || snap.spaces[snap.active].name || "Workspace",
     created: now,
     saved: now,
-    machine: snap.machine,
-    folder: snap.folder,
-    space: snap.space,
-    tabs: snap.tabs,
+    active: snap.active,
+    spaces: snap.spaces,
   };
   write([item, ...items]);
   return item;
 }
 
-/** Replaces a workspace's tabs with the shown space's (name and creation time kept; it moves to the top). Answers
- * the item, "missing" (no such workspace) or "empty". */
+/** Replaces a workspace's spaces with the window's (name and creation time kept; it moves to the top). Answers the
+ * item, "missing" (no such workspace) or "empty". */
 export async function saveOver(id) {
   if (!read().some((x) => x.id === id)) return "missing";
   const snap = await snapshot();
@@ -290,7 +309,7 @@ export async function saveOver(id) {
   const items = read();
   const old = items.find((x) => x.id === id);
   if (!old) return "missing";
-  const item = { ...old, saved: Date.now(), machine: snap.machine, folder: snap.folder, space: snap.space, tabs: snap.tabs };
+  const item = { ...old, saved: Date.now(), active: snap.active, spaces: snap.spaces };
   write([item, ...items.filter((x) => x.id !== id)]);
   return item;
 }
@@ -329,7 +348,7 @@ export function importOld() {
         continue;
       }
       const now = Date.now();
-      items.push({ id: newId(items), name: name.slice(0, 80), created: now, saved: now, machine: typeof where[0] === "string" && where[0] ? where[0] : null, folder: where[1], space: base(where[1]), tabs });
+      items.push({ id: newId(items), name: name.slice(0, 80), created: now, saved: now, active: 0, spaces: [{ name: base(where[1]), machine: typeof where[0] === "string" && where[0] ? where[0] : null, folder: where[1], activeTab: 0, tabs }] });
       added += 1;
     }
   }
@@ -385,46 +404,97 @@ async function grow(cx, node, pane, start) {
   return true;
 }
 
+// A new tab in `space` with the saved tab's panes: its id, or null when it did not come up in time.
 async function addTab(cx, space, tab, start) {
   const at = await start(first(tab.root));
   const before = new Set(panes().map((p) => p.tab));
   run("tab.new", { space, ...(tab.name ? { name: tab.name } : {}), ...at });
-  const pane = await until(cx, () => panes().find((p) => !before.has(p.tab))?.pane);
-  return Boolean(pane) && (await grow(cx, tab.root, pane, start));
+  const pane = await until(cx, () => panes().find((p) => !before.has(p.tab)));
+  return pane && (await grow(cx, tab.root, pane.pane, start)) ? pane.tab : null;
 }
 
-/** Restores a workspace (an item of read()) alongside what is open; nothing is closed. The target is the space
- * with the same machine and folder (selected), else a new one made from the first tab. A saved tab with a pane
- * still there (live, shown, same program) is skipped; the others start, each agent resumed in its session when it
- * has one, else started from its saved argv. Answers { state: "ok" | "already" | "timeout", space }.
- * Runs as the caller's task (cx.spawn): it stops with the view that started it. */
-export async function restore(cx, item) {
-  const on = item.machine ?? null;
-  const known = await knownAgents().catch(() => []);
-  const started = new Set();
-  const start = async (leaf) => {
-    const folder = leaf.cwd || item.folder;
-    const fresh = leaf.argv?.length ? leaf.argv : known.find((p) => p.key === leaf.agent)?.run;
-    // An agent resumes or restarts; a program that is not a shell starts from its argv; a plain shell is the default one.
-    const argv = leaf.agent ? await launch(on, leaf, fresh, started) : leaf.shell === false && leaf.argv?.length ? command(leaf.argv) : undefined;
-    return { ...(folder ? { folder } : {}), ...(argv ? { argv } : {}) };
-  };
-  const target = spaces().find((s) => (s.machine ?? null) === on && norm(s.folder) === norm(item.folder));
-  if (target) {
-    run("space.select", { id: target.id });
-    const todo = item.tabs.filter((t) => !leaves(t.root).some((l) => open(l, target)));
-    if (!todo.length) return { state: "already", space: target.id };
-    for (const tab of todo) if (!(await addTab(cx, target.id, tab, start))) return { state: "timeout", space: target.id };
-    return { state: "ok", space: target.id };
+// The saved space's tabs in an open space: a tab with a pane still there (live, shown, same program) is kept as it is,
+// the others start. Answers { space, tabs: [tab id per saved tab] }, or null on a timeout.
+async function fill(cx, target, sp, start, made) {
+  const ids = [];
+  const todo = [];
+  sp.tabs.forEach((t, i) => {
+    const there = leaves(t.root).find((l) => open(l, target));
+    if (there) ids[i] = panes().find((p) => p.terminal === there.terminal)?.tab;
+    else todo.push(i);
+  });
+  for (const i of todo) {
+    const tab = await addTab(cx, target.id, sp.tabs[i], start);
+    if (!tab) return null;
+    ids[i] = tab;
+    made.tabs += 1;
   }
-  const [head, ...rest] = item.tabs;
+  made.reused += 1;
+  return { space: target.id, tabs: ids };
+}
+
+// A new space from the saved one: its first tab makes the space, the others follow.
+async function create(cx, sp, start, made) {
+  const [head, ...rest] = sp.tabs;
   const at = await start(first(head.root));
   const before = new Set(spaces().map((s) => s.id));
-  run("space.new", { name: item.space || item.name, ...(item.folder ? { folder: item.folder } : {}), ...(on ? { machine: on } : {}), ...(head.name ? { tab: head.name } : {}), ...(at.argv ? { argv: at.argv } : {}) });
-  const made = await until(cx, () => spaces().find((s) => !before.has(s.id)));
-  if (!made) return { state: "timeout", space: null };
-  const pane = await until(cx, () => panes().find((p) => p.tab === made.tabs?.[0]?.id)?.pane);
-  if (!pane || !(await grow(cx, head.root, pane, start))) return { state: "timeout", space: made.id };
-  for (const tab of rest) if (!(await addTab(cx, made.id, tab, start))) return { state: "timeout", space: made.id };
-  return { state: "ok", space: made.id };
+  run("space.new", { name: sp.name || base(sp.folder || "") || "Space", ...(sp.folder ? { folder: sp.folder } : {}), ...(sp.machine ? { machine: sp.machine } : {}), ...(head.name ? { tab: head.name } : {}), ...(at.argv ? { argv: at.argv } : {}) });
+  const space = await until(cx, () => spaces().find((s) => !before.has(s.id)));
+  if (!space) return null;
+  const pane = await until(cx, () => panes().find((p) => p.tab === space.tabs?.[0]?.id)?.pane);
+  if (!pane || !(await grow(cx, head.root, pane, start))) return null;
+  const ids = [space.tabs[0].id];
+  for (const tab of rest) {
+    const id = await addTab(cx, space.id, tab, start);
+    if (!id) return null;
+    ids.push(id);
+  }
+  made.spaces += 1;
+  made.tabs += sp.tabs.length;
+  return { space: space.id, tabs: ids };
+}
+
+/** Restores a workspace (an item of read()) alongside what is open; nothing is closed. Each saved space, in order:
+ * the space with the same machine and folder is filled in, else a new one is made on its machine (a machine that is
+ * not connected is skipped). A saved tab with a pane still there (live, shown, same program) is left alone; the
+ * others start, each agent resumed in its session when it has one (once), else started from its saved argv, a program
+ * from its argv. At the end each space's saved tab and then the saved space are shown. Answers
+ * { state: "ok" | "already" | "timeout", spaces, tabs, skipped: { machine: count } }: `already` when nothing had to
+ * start. Runs as the caller's task (cx.spawn): it stops with the view that started it. */
+export async function restore(cx, stored) {
+  // An item of either version, as read() would give it.
+  const item = itemOf(stored);
+  if (!item) return { state: "already", spaces: 0, tabs: 0, skipped: {} };
+  const known = await knownAgents().catch(() => []);
+  const started = new Set();
+  const made = { spaces: 0, reused: 0, tabs: 0 };
+  const skipped = {};
+  const got = [];
+  for (const sp of item.spaces) {
+    const on = sp.machine;
+    if (on && !machines().some((m) => m.name === on && m.layout === "ready")) {
+      skipped[on] = (skipped[on] ?? 0) + 1;
+      got.push(null);
+      continue;
+    }
+    const start = async (leaf) => {
+      const folder = leaf.cwd || sp.folder;
+      const fresh = leaf.argv?.length ? leaf.argv : known.find((p) => p.key === leaf.agent)?.run;
+      // An agent resumes or restarts; a program that is not a shell starts from its argv; a plain shell is the default one.
+      const argv = leaf.agent ? await launch(on, leaf, fresh, started) : leaf.shell === false && leaf.argv?.length ? command(leaf.argv) : undefined;
+      return { ...(folder ? { folder } : {}), ...(argv ? { argv } : {}) };
+    };
+    const target = spaces().find((s) => (s.machine ?? null) === on && norm(s.folder) === norm(sp.folder));
+    const done = target ? await fill(cx, target, sp, start, made) : await create(cx, sp, start, made);
+    if (!done) return { state: "timeout", ...made, skipped };
+    got.push(done);
+  }
+  item.spaces.forEach((sp, i) => {
+    const id = got[i]?.tabs[sp.activeTab];
+    if (id) run("tab.select", { id });
+  });
+  const shown = got[item.active] ?? got.find(Boolean);
+  if (shown) run("space.select", { id: shown.space });
+  const none = !made.spaces && !made.tabs && !Object.keys(skipped).length;
+  return { state: none ? "already" : "ok", spaces: made.spaces + made.reused, tabs: made.tabs, skipped };
 }

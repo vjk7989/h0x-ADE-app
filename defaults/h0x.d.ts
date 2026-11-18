@@ -245,6 +245,9 @@ export function terminals(): any[];
  *  `{ terminal }` or `{ mod, props? }`), ids as panes() names them. Live. */
 export function tree(): { id: string; tabs: { id: string; name: string; root: any }[] } | null;
 
+/** Every space's tabs as arranged, in the order `spaces()` lists them (all machines): `tree()` for each. Live. */
+export function trees(): { id: string; tabs: { id: string; name: string; root: any }[] }[] | null;
+
 /** Actual terminal/pane focus. `space` and `tab` are the current window context.
  *  Clicking a visible layout terminal block, or pane.focus {terminal}, focuses that block:
  *  `terminal` and `cwd` describe it; `pane` and `shown` are null, not its source pane.

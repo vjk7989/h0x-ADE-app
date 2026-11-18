@@ -1,7 +1,7 @@
-// Workspaces: up to five saved snapshots of a space (its tabs and splits, each agent with its session), opened from
+// Workspaces: up to five saved snapshots of the whole window (every space, its tabs and splits, each agent with its session), opened from
 // the tab bar's button as a modal dialog. A click on a row restores it alongside what is open and closes the dialog
 // when it is done (it stays open until then: a closed dialog stops its running restore). "Save over" and the bin
-// ask a second click. "New…" saves the shown space under a name. The engine is snapshot.js.
+// ask a second click. "New…" saves the whole window under a name. The engine is snapshot.js.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
@@ -63,8 +63,15 @@ export default class Workspaces extends View {
   open(item, cx) {
     this.work("Restoring…", cx, async (task) => {
       const r = await restore(task, item);
-      if (r.state === "already") this.say("Already open", `“${item.name}” is open in its space.`);
+      if (r.state === "already") this.say("Already open", `“${item.name}” is open as it was saved.`);
       else if (r.state === "timeout") this.say("Couldn't finish restoring", `“${item.name}” stopped before all its panes started.`, "warning");
+      else {
+        // One toast for all of it: what came back, and the spaces on machines that are not connected.
+        const gone = Object.entries(r.skipped).map(([machine, n]) => `${machine} isn't connected: ${plural(n, "space")} skipped`);
+        const back = r.spaces ? `${plural(r.spaces, "space")}, ${plural(r.tabs, "new tab")}` : "";
+        if (gone.length) this.say(r.spaces ? `Restored “${item.name}” in part` : `Couldn't restore “${item.name}”`, [...gone, back].filter(Boolean).join(". "), "warning");
+        else this.say(`Restored “${item.name}”`, back, "success");
+      }
     }, true);
   }
 
@@ -83,7 +90,7 @@ export default class Workspaces extends View {
     }
     this.work("Saving…", cx, async () => {
       const r = await saveOver(id);
-      if (r === "empty") this.say("Nothing to save", "The shown space has no terminals.", "warning");
+      if (r === "empty") this.say("Nothing to save", "No space has a terminal.", "warning");
       else if (r === "missing") this.say("That workspace is gone", "", "warning");
       else this.say(`Saved “${item.name}”`, "", "success");
     }, false);
@@ -94,7 +101,7 @@ export default class Workspaces extends View {
     this.work("Saving…", cx, async () => {
       const r = await saveNew(name);
       if (r === "full") this.say(`${MAX} workspaces are saved`, "Delete one or save over one.", "warning");
-      else if (r === "empty") this.say("Nothing to save", "The shown space has no terminals.", "warning");
+      else if (r === "empty") this.say("Nothing to save", "No space has a terminal.", "warning");
       else this.say(`Saved “${r.name}”`, "", "success");
     }, false);
   }
@@ -124,7 +131,7 @@ export default class Workspaces extends View {
         .child(
           v_flex().flex_1().min_w(0).gap(1)
             .child(div().truncate().text_size(13.5).font_semibold().text_color(t.foreground).child(it.name))
-            .child(div().truncate().text_size(11.5).text_color(t.dim).child([ago(it.saved, now), plural(c.tabs, "tab"), plural(c.panes, "pane")].filter(Boolean).join(" · "))),
+            .child(div().truncate().text_size(11.5).text_color(t.dim).child([ago(it.saved, now), plural(c.spaces, "space"), plural(c.tabs, "tab"), plural(c.panes, "pane")].filter(Boolean).join(" · "))),
         )
         .when(!this.busy, (el) => el
           .child(link(`ws-over-${it.id}`, over ? "Replace?" : "Save over", over ? t.accent : t.muted, (_e, cx) => this.ask("over", it.id, cx)))
@@ -156,7 +163,7 @@ export default class Workspaces extends View {
       .child(
         v_flex().max_h(300).overflow_y_scrollbar().border_t(1).border_color(t.border)
           .children(items.map(row))
-          .when(items.length === 0, (el) => el.child(div().py(14).px(10).text_size(12.5).line_height("18px").text_color(t.muted).child("No workspaces yet. New… saves the shown space: its tabs, splits and each agent's session."))),
+          .when(items.length === 0, (el) => el.child(div().py(14).px(10).text_size(12.5).line_height("18px").text_color(t.muted).child("No workspaces yet. New… saves the whole window: its spaces, tabs, splits and each agent's session."))),
       )
       .child(
         h_flex().h(30).gap(10).items_center()

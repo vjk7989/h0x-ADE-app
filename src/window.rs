@@ -1785,6 +1785,8 @@ impl AppWindow {
         changed |= mods::publish_panes(Value::Array(panes));
         let tree = m.active_space().map(|p| json!({ "id": p.id, "tabs": p.tabs.iter().map(|t| json!({ "id": t.id, "name": t.name, "root": t.root })).collect::<Vec<_>>() }));
         changed |= mods::publish_tree(tree.unwrap_or(Value::Null));
+        let trees = m.spaces.iter().map(|p| json!({ "id": p.id, "tabs": p.tabs.iter().map(|t| json!({ "id": t.id, "name": t.name, "root": t.root })).collect::<Vec<_>>() })).collect::<Vec<_>>();
+        changed |= mods::publish_trees(Value::Array(trees));
         changed |= mods::publish_focused(focused.unwrap_or(Value::Null));
         changed |= mods::publish_floats(self.float_placements());
         changed |= mods::publish_layout(&self.chrome);
