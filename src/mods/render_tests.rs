@@ -5514,6 +5514,25 @@ impl SessionsHost {
                 return;
             }
             "tab.new" => None,
+            // The pane's terminal and its tab lose it.
+            "pane.close" => {
+                let id = args["pane"].as_str().unwrap_or_default().to_owned();
+                if let Some(panes) = self.live.get_mut("panes").and_then(Value::as_array_mut) {
+                    panes.retain(|p| p["pane"].as_str() != Some(id.as_str()));
+                }
+                for entry in self.live.get_mut("trees").and_then(Value::as_array_mut).into_iter().flatten() {
+                    for tab in entry["tabs"].as_array_mut().unwrap() {
+                        remove_node(&mut tab["root"], &id);
+                    }
+                }
+                return;
+            }
+            // A new pane beside `pane` along `direction`.
+            "pane.split" => {
+                self.focus = args["pane"].as_str().map(str::to_owned);
+                let panes = self.live.get("panes").and_then(Value::as_array).cloned().unwrap_or_default();
+                panes.iter().find(|p| p["pane"].as_str() == self.focus.as_deref()).map(|p| p["tab"].clone())
+            }
             "terminal.open" if args["place"] != "tab" => {
                 let panes = self.live.get("panes").and_then(Value::as_array).cloned().unwrap_or_default();
                 panes.iter().find(|p| p["pane"].as_str() == self.focus.as_deref()).map(|p| p["tab"].clone())
@@ -5525,6 +5544,13 @@ impl SessionsHost {
         }
         self.made += 1;
         let n = self.made;
+        let split;
+        let args = if command == "pane.split" {
+            split = json!({"place":args["direction"], "argv":args["argv"], "folder":null});
+            &split
+        } else {
+            args
+        };
         let pane = json!({"pane":format!("rp{n}"), "terminal":format!("ra{n}"), "tab":tab.unwrap_or_else(|| json!(format!("rt{n}"))), "cwd":args["folder"]});
         self.live.entry("panes".into()).or_insert_with(|| json!([])).as_array_mut().unwrap().push(pane.clone());
         let focused = self.focus.clone();
@@ -5580,6 +5606,19 @@ impl SessionsHost {
                 }
             }
         }
+    }
+}
+
+// Takes the block `target` out of `node`; a container left with one child is that child.
+fn remove_node(node: &mut Value, target: &str) {
+    let Some(children) = node["children"].as_array_mut() else { return };
+    children.retain(|c| c["id"].as_str() != Some(target));
+    for c in children.iter_mut() {
+        remove_node(c, target);
+    }
+    if children.len() == 1 {
+        let only = children.remove(0);
+        *node = only;
     }
 }
 
@@ -7268,6 +7307,39 @@ fn workspaces_a_tab_with_a_stale_address_counts_as_open_when_shape_program_and_f
             assert_eq!(toasts(&host), vec![json!("Restored “Work”")], "{label}");
         }
     }
+}
+
+// Space s1 on /a whose one tab shows terminal t9, a pane the core brought back after a restart: it keeps the agent's label.
+fn lost_agent_values(program: Value, argv: Value) -> BTreeMap<String, Value> {
+    let mut values = open_tab_values(argv.clone(), "/a");
+    values.insert("terminals".into(), json!([{"address":"t9", "argv":argv, "labels":{"h0x.agent":"claude"}, "state":"live", "program":program}]));
+    values
+}
+
+#[gpui::test]
+fn workspaces_an_agent_pane_the_core_brought_back_as_a_shell_is_restarted_not_counted_as_open(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let item = ws_item("w1", "Work", "/a", json!([{"name":"", "root":{"agent":"claude", "session":"a2", "argv":["claude"], "cwd":"/a", "terminal":"t9"}}]));
+    let argv = json!(["claude", "--resume", "a2"]);
+    let replies = [("resume", core_ok(json!({"argv":argv})))];
+    // The label stayed, the program is a shell: the agent starts again in that pane's place, resumed once.
+    let host = sessions_host(&replies, &[("workspaces", ws_store(&[item.clone()]))]);
+    describe_ws(cx, &staged, lost_agent_values(json!({"key":"shell", "shell":true, "agent":false}), json!(["pwsh"])), &host, &format!("this.open({item}, cx);"));
+    assert_eq!(runs(&host), vec![
+        json!(["pane.split", {"direction":"right", "pane":"p1", "argv":argv}]),
+        json!(["pane.close", {"pane":"p1"}]),
+        json!(["tab.select", {"id":"tb1"}]),
+        json!(["space.select", {"id":"s1"}]),
+    ]);
+    assert_eq!(host.borrow().cores.iter().filter(|a| a[1] == "resume").count(), 1);
+    assert_eq!(notes(&host).iter().map(|n| (n["title"].clone(), n["body"].clone())).collect::<Vec<_>>(), vec![(json!("Restored “Work”"), json!("1 space, 1 agent restarted"))]);
+    // A genuine live agent still counts as open: nothing starts.
+    let host = sessions_host(&replies, &[("workspaces", ws_store(&[item.clone()]))]);
+    describe_ws(cx, &staged, lost_agent_values(json!({"key":"claude", "shell":false, "agent":true}), json!(["claude"])), &host, &format!("this.open({item}, cx);"));
+    assert_eq!(runs(&host), vec![json!(["tab.select", {"id":"tb1"}]), json!(["space.select", {"id":"s1"}])]);
+    assert_eq!(toasts(&host), vec![json!("Already open")]);
+    assert!(host.borrow().cores.is_empty(), "{:?}", host.borrow().cores);
 }
 
 #[gpui::test]

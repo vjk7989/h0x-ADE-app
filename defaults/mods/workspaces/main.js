@@ -68,7 +68,7 @@ export default class Workspaces extends View {
       else {
         // One toast for all of it: what came back, and the spaces on machines that are not connected.
         const gone = Object.entries(r.skipped).map(([machine, n]) => `${machine} isn't connected: ${plural(n, "space")} skipped`);
-        const back = r.spaces ? `${plural(r.spaces, "space")}, ${plural(r.tabs, "new tab")}` : "";
+        const back = r.spaces ? [plural(r.spaces, "space"), r.tabs ? plural(r.tabs, "new tab") : "", r.restarted ? `${plural(r.restarted, "agent")} restarted` : ""].filter(Boolean).join(", ") : "";
         if (gone.length) this.say(r.spaces ? `Restored “${item.name}” in part` : `Couldn't restore “${item.name}”`, [...gone, back].filter(Boolean).join(". "), "warning");
         else this.say(`Restored “${item.name}”`, back, "success");
       }

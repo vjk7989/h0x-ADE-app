@@ -384,7 +384,17 @@ function open(leaf, space) {
   if (!panes().some((p) => p.terminal === leaf.terminal && tabs.has(p.tab))) return false;
   const r = terminals().find((x) => x.address === leaf.terminal);
   if (r?.state !== "live") return false;
-  return leaf.agent ? r.labels?.["h0x.agent"] === leaf.agent : sameArgv(r.argv, leaf.argv);
+  // An agent pane the core brought back as a plain shell keeps its label but no longer runs the agent.
+  return leaf.agent ? r.labels?.["h0x.agent"] === leaf.agent && r.program?.shell !== true : sameArgv(r.argv, leaf.argv);
+}
+
+// An agent pane whose terminal lives but is only a shell now (the core replaces a lost program by a shell that keeps
+// its labels): it needs the agent started again. `folder`: also in the saved folder (a pane found by shape, not address).
+function replaced(leaf, address, folder) {
+  if (!leaf.agent) return false;
+  const r = terminals().find((x) => x.address === address);
+  if (r?.state !== "live" || r.labels?.["h0x.agent"] !== leaf.agent || r.program?.shell !== true) return false;
+  return !folder || leaf.cwd == null || norm(panes().find((p) => p.terminal === address)?.cwd) === norm(leaf.cwd);
 }
 
 // `pane` holds the node's first pane: its later children split off one after
@@ -419,7 +429,7 @@ async function addTab(cx, space, tab, start) {
 function alike(leaf, address) {
   const r = terminals().find((x) => x.address === address);
   if (r?.state !== "live") return false;
-  if (!(leaf.agent ? r.labels?.["h0x.agent"] === leaf.agent : sameArgv(r.argv, leaf.argv))) return false;
+  if (!(leaf.agent ? r.labels?.["h0x.agent"] === leaf.agent && r.program?.shell !== true : sameArgv(r.argv, leaf.argv))) return false;
   return leaf.cwd == null || norm(panes().find((p) => p.terminal === address)?.cwd) === norm(leaf.cwd);
 }
 
@@ -444,6 +454,18 @@ function findOpen(tab, space, taken) {
     if (root && fits(tab.root, root, true)) return live.id;
   }
   return null;
+}
+
+// The saved panes of a tab against a live tab's shape, each live pane either what was saved or a replaced agent shell:
+// the replaced ones as [{ leaf, terminal }], or null when the tab is not that tab.
+function dead(saved, live) {
+  if (saved.children || live.children) {
+    if (!(saved.children && live.children) || saved.split !== live.split || saved.children.length !== live.children.length) return null;
+    const parts = saved.children.map((c, i) => dead(c, live.children[i]));
+    return parts.some((x) => x === null) ? null : parts.flat();
+  }
+  if (alike(saved, live.terminal)) return [];
+  return replaced(saved, live.terminal, true) ? [{ leaf: saved, terminal: live.terminal }] : null;
 }
 
 // After a restore each saved pane that came back is learned under the terminal that now shows it, so the next restore
@@ -482,13 +504,40 @@ async function fill(cx, target, sp, start, made) {
   const ids = [];
   const todo = [];
   const taken = new Set();
+  const revive = [];
   sp.tabs.forEach((t, i) => {
     const there = findOpen(t, target, taken);
     if (there) {
       ids[i] = there;
       taken.add(there);
-    } else todo.push(i);
+      // A pane of it that the core brought back as a shell is not the agent it was.
+      for (const l of leaves(t.root)) if (l.terminal && panes().find((p) => p.terminal === l.terminal)?.tab === there && replaced(l, l.terminal, false)) revive.push({ leaf: l, terminal: l.terminal });
+      return;
+    }
+    for (const live of trees()?.find((x) => x.id === target.id)?.tabs ?? []) {
+      if (taken.has(live.id)) continue;
+      const root = shape(live.root, (terminal) => ({ terminal }));
+      const lost = root && dead(t.root, root);
+      if (lost?.length) {
+        ids[i] = live.id;
+        taken.add(live.id);
+        revive.push(...lost);
+        return;
+      }
+    }
+    todo.push(i);
   });
+  // Each such agent starts again in the pane's place (a new pane beside it, then the shell's pane closes).
+  for (const { leaf, terminal } of revive) {
+    const pane = panes().find((p) => p.terminal === terminal);
+    const at = pane && (await start(leaf));
+    if (!at?.argv) continue;
+    const seen = new Set(panes().map((p) => p.pane));
+    run("pane.split", { direction: "right", pane: pane.pane, argv: at.argv });
+    if (!(await until(cx, () => panes().find((p) => p.tab === pane.tab && !seen.has(p.pane))))) return null;
+    run("pane.close", { pane: pane.pane });
+    made.restarted += 1;
+  }
   for (const i of todo) {
     const tab = await addTab(cx, target.id, sp.tabs[i], start);
     if (!tab) return null;
@@ -533,7 +582,7 @@ export async function restore(cx, stored) {
   if (!item) return { state: "already", spaces: 0, tabs: 0, skipped: {} };
   const known = await knownAgents().catch(() => []);
   const started = new Set();
-  const made = { spaces: 0, reused: 0, tabs: 0 };
+  const made = { spaces: 0, reused: 0, tabs: 0, restarted: 0 };
   const skipped = {};
   const got = [];
   // Each saved space takes its own open space: one nobody took yet (a space this restore made counts as taken).
@@ -567,6 +616,6 @@ export async function restore(cx, stored) {
   const shown = got[item.active] ?? got.find(Boolean);
   if (shown) run("space.select", { id: shown.space });
   relearn(item, got);
-  const none = !made.spaces && !made.tabs && !Object.keys(skipped).length;
-  return { state: none ? "already" : "ok", spaces: made.spaces + made.reused, tabs: made.tabs, skipped };
+  const none = !made.spaces && !made.tabs && !made.restarted && !Object.keys(skipped).length;
+  return { state: none ? "already" : "ok", spaces: made.spaces + made.reused, tabs: made.tabs, restarted: made.restarted, skipped };
 }
