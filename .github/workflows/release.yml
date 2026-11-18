@@ -64,7 +64,8 @@ env:
 jobs:
   build:
     strategy:
-      fail-fast: true
+      # A tagged release stops on the first failure; a manual test build keeps the other platforms going.
+      fail-fast: ${{ github.ref_type == 'tag' }}
       matrix:
         include:
           # Linux on the oldest Ubuntu we can: the app links the system's
