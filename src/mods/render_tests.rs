@@ -5503,6 +5503,14 @@ impl SessionsHost {
                 let pane = json!({"pane":format!("rp{n}"), "terminal":format!("ra{n}"), "tab":format!("rt{n}"), "cwd":args["folder"]});
                 self.live.entry("panes".into()).or_insert_with(|| json!([])).as_array_mut().unwrap().push(pane);
                 self.focus = Some(format!("rp{n}"));
+                self.record_terminal(n, args);
+                let name = args["tab"].as_str().unwrap_or_default();
+                let entry = json!({"id":format!("rs{n}"), "tabs":[{"id":format!("rt{n}"), "name":name, "root":block(&format!("rp{n}"), &format!("ra{n}"))}]});
+                self.live.entry("trees".into()).or_insert(Value::Null);
+                if self.live["trees"].is_null() {
+                    self.live.insert("trees".into(), json!([]));
+                }
+                self.live.get_mut("trees").and_then(Value::as_array_mut).unwrap().push(entry);
                 return;
             }
             "tab.new" => None,
@@ -5518,9 +5526,79 @@ impl SessionsHost {
         self.made += 1;
         let n = self.made;
         let pane = json!({"pane":format!("rp{n}"), "terminal":format!("ra{n}"), "tab":tab.unwrap_or_else(|| json!(format!("rt{n}"))), "cwd":args["folder"]});
-        self.live.entry("panes".into()).or_insert_with(|| json!([])).as_array_mut().unwrap().push(pane);
+        self.live.entry("panes".into()).or_insert_with(|| json!([])).as_array_mut().unwrap().push(pane.clone());
+        let focused = self.focus.clone();
         self.focus = Some(format!("rp{n}"));
+        self.record_terminal(n, args);
+        self.grow_tree(command, args, &pane, focused.as_deref());
     }
+
+    // The core's record of the terminal a command started: its argv (a plain shell: bash), an agent's label.
+    fn record_terminal(&mut self, n: usize, args: &Value) {
+        let argv = args.get("argv").cloned().filter(|a| a.as_array().is_some_and(|a| !a.is_empty())).unwrap_or_else(|| json!(["bash"]));
+        let agent = argv[0].as_str().filter(|a| ["claude", "codex"].contains(a)).map(str::to_owned);
+        let labels = agent.map_or(json!({}), |a| json!({"h0x.agent":a}));
+        let record = json!({"address":format!("ra{n}"), "argv":argv, "labels":labels, "state":"live"});
+        if self.live.get("terminals").is_none_or(Value::is_null) {
+            self.live.insert("terminals".into(), json!([]));
+        }
+        self.live.get_mut("terminals").and_then(Value::as_array_mut).unwrap().push(record);
+    }
+
+    // trees(): a new tab is a new block; terminal.open splits the focused pane along `place` (an existing parent on that axis takes it).
+    fn grow_tree(&mut self, command: &str, args: &Value, pane: &Value, focused: Option<&str>) {
+        let block = block(pane["pane"].as_str().unwrap(), pane["terminal"].as_str().unwrap());
+        let active = self.live.get("spaces").and_then(Value::as_array).and_then(|s| s.iter().find(|s| s["active"] == json!(true))).and_then(|s| s["id"].as_str().map(str::to_owned));
+        if command == "tab.new" {
+            let space = args["space"].as_str().map(str::to_owned).or(active.clone());
+            for entry in self.live.get_mut("spaces").and_then(Value::as_array_mut).into_iter().flatten() {
+                if entry["id"].as_str() == space.as_deref() {
+                    entry["tabs"].as_array_mut().unwrap().push(json!({"id":pane["tab"]}));
+                }
+            }
+        }
+        let Some(trees) = self.live.get_mut("trees").and_then(Value::as_array_mut) else { return };
+        if command == "tab.new" {
+            let space = args["space"].as_str().map(str::to_owned).or(active);
+            if let Some(entry) = trees.iter_mut().find(|t| t["id"].as_str() == space.as_deref()) {
+                let tab = json!({"id":pane["tab"], "name":args["name"].as_str().unwrap_or_default(), "root":block});
+                entry["tabs"].as_array_mut().unwrap().push(tab);
+            }
+            return;
+        }
+        let Some(focused) = focused else { return };
+        let axis = if args["place"] == "down" { "column" } else { "row" };
+        for entry in trees.iter_mut() {
+            for tab in entry["tabs"].as_array_mut().unwrap() {
+                if tab["root"]["id"].as_str() == Some(focused) {
+                    let old = tab["root"].take();
+                    tab["root"] = json!({"id":format!("c-{}", pane["pane"].as_str().unwrap()), "type":axis, "children":[old, block]});
+                    return;
+                }
+                if split_node(&mut tab["root"], focused, axis, &block, pane["pane"].as_str().unwrap()) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+// Puts `new` beside the block `target` along `axis` in `node`, as layout.rs split does; false if `target` is not in it.
+fn split_node(node: &mut Value, target: &str, axis: &str, new: &Value, id: &str) -> bool {
+    if node["type"] == "block" {
+        return false;
+    }
+    let children = node["children"].as_array_mut().unwrap();
+    if let Some(i) = children.iter().position(|c| c["id"].as_str() == Some(target)) {
+        if node["type"] == axis {
+            children.insert(i + 1, new.clone());
+        } else {
+            let old = children[i].clone();
+            children[i] = json!({"id":format!("c-{id}"), "type":axis, "children":[old, new]});
+        }
+        return true;
+    }
+    children.iter_mut().any(|c| split_node(c, target, axis, new, id))
 }
 
 fn sessions_host(replies: &[(&str, Value)], shared: &[(&str, Value)]) -> Rc<RefCell<SessionsHost>> {
@@ -7095,6 +7173,100 @@ fn workspaces_restore_resumes_a_session_once_across_spaces(cx: &mut TestAppConte
         json!(["space.select", {"id":"rs1"}]),
     ], "the second space starts the agent from its saved command");
     assert_eq!(host.borrow().cores.iter().filter(|a| a[1] == "resume").count(), 1);
+}
+
+// What a restore makes of this item in an empty window: A (one tab), B (two tabs, the first split) and B's shown tab 0.
+fn pair_item() -> Value {
+    json!({"id":"w1", "name":"Pair", "created":5, "saved":7, "active":1, "spaces":[
+        {"name":"A", "machine":null, "folder":"/a", "activeTab":0, "tabs":[{"name":"", "root":{"cwd":"/a", "argv":["bash"], "terminal":"x1"}}]},
+        {"name":"B", "machine":null, "folder":"/b", "activeTab":0, "tabs":[
+            {"name":"T1", "root":{"split":"right", "children":[{"cwd":"/b", "argv":["bash"], "terminal":"x2"}, {"cwd":"/b/w", "argv":["htop"], "terminal":"x3", "shell":false}]}},
+            {"name":"T2", "root":{"cwd":"/b/x", "argv":["bash"], "terminal":"x4"}}
+        ]}
+    ]})
+}
+
+fn empty_window() -> BTreeMap<String, Value> {
+    let mut values = sessions_values(Value::Null, "/none", "linux");
+    values.insert("spaces".into(), json!([]));
+    values
+}
+
+#[gpui::test]
+fn workspaces_a_second_restore_finds_what_the_first_brought_back_and_learns_its_terminals(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let others = [ws_item("o1", "Before", "/x", one_tab("/x")), pair_item(), ws_item("o2", "After", "/y", one_tab("/y"))];
+    let host = sessions_host(&[], &[("workspaces", ws_store(&others))]);
+    describe_ws(cx, &staged, empty_window(), &host, &format!("this.open({}, cx);", pair_item()));
+    assert_eq!(toasts(&host), vec![json!("Restored “Pair”")]);
+    // The saved panes are learned under the terminals that now show them; nothing else of the item moves.
+    let items = stored_items(&host);
+    assert_eq!(items.iter().map(|i| i["id"].clone()).collect::<Vec<_>>(), vec![json!("o1"), json!("w1"), json!("o2")], "same place in the list");
+    let mut expected = pair_item();
+    expected["spaces"][0]["tabs"][0]["root"]["terminal"] = json!("ra1");
+    expected["spaces"][1]["tabs"][0]["root"]["children"][0]["terminal"] = json!("ra2");
+    expected["spaces"][1]["tabs"][0]["root"]["children"][1]["terminal"] = json!("ra3");
+    expected["spaces"][1]["tabs"][1]["root"]["terminal"] = json!("ra4");
+    assert_eq!(items[1], expected, "name, times and place are as saved; only the addresses are new");
+    assert_eq!((items[0].clone(), items[2].clone()), (others[0].clone(), others[2].clone()));
+    // Again, with what the dialog now reads: nothing starts, the saved tabs and space are shown, and it says so.
+    host.borrow_mut().effects.clear();
+    describe_ws(cx, &staged, empty_window(), &host, &format!("this.open({}, cx);", items[1]));
+    assert_eq!(runs(&host), vec![json!(["tab.select", {"id":"rt1"}]), json!(["tab.select", {"id":"rt2"}]), json!(["space.select", {"id":"rs2"}])]);
+    assert_eq!(toasts(&host), vec![json!("Already open")]);
+    assert_eq!(stored_items(&host), items, "nothing to learn the second time");
+}
+
+#[gpui::test]
+fn workspaces_two_spaces_on_one_folder_come_back_once_and_the_second_restore_finds_both(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let twin = |name: &str, terminal: &str| json!({"name":name, "machine":null, "folder":"/a", "activeTab":0, "tabs":[{"name":"", "root":{"cwd":"/a", "argv":["bash"], "terminal":terminal}}]});
+    let item = json!({"id":"w1", "name":"Twins", "created":1, "saved":1, "active":1, "spaces":[twin("A1", "x1"), twin("A2", "x2")]});
+    let host = sessions_host(&[], &[("workspaces", ws_store(&[item.clone()]))]);
+    describe_ws(cx, &staged, empty_window(), &host, &format!("this.open({item}, cx);"));
+    assert_eq!(run_names(&host).iter().filter(|n| *n == "space.new").count(), 2, "{:?}", runs(&host));
+    let learned = stored_items(&host)[0].clone();
+    assert_eq!((learned["spaces"][0]["tabs"][0]["root"]["terminal"].clone(), learned["spaces"][1]["tabs"][0]["root"]["terminal"].clone()), (json!("ra1"), json!("ra2")));
+    host.borrow_mut().effects.clear();
+    describe_ws(cx, &staged, empty_window(), &host, &format!("this.open({learned}, cx);"));
+    assert_eq!(runs(&host), vec![json!(["tab.select", {"id":"rt1"}]), json!(["tab.select", {"id":"rt2"}]), json!(["space.select", {"id":"rs2"}])]);
+    assert_eq!(toasts(&host), vec![json!("Already open")]);
+}
+
+// Space s1 on /a with one tab showing terminal t9 (htop, in /a/web).
+fn open_tab_values(argv: Value, cwd: &str) -> BTreeMap<String, Value> {
+    let mut values = sessions_values(Value::Null, "/a", "linux");
+    values.insert("spaces".into(), json!([{"id":"s1","index":1,"name":"Here","named":true,"folder":"/a","machine":null,"branch":null,"active":true,"status":null,"tabs":[{"id":"tb1","active":true}]}]));
+    values.insert("trees".into(), json!([{"id":"s1", "tabs":[{"id":"tb1", "name":"", "root":block("p1", "t9")}]}]));
+    values.insert("panes".into(), json!([{"pane":"p1", "terminal":"t9", "tab":"tb1", "cwd":cwd}]));
+    values.insert("terminals".into(), json!([{"address":"t9", "argv":argv, "labels":{}, "state":"live"}]));
+    values
+}
+
+#[gpui::test]
+fn workspaces_a_tab_with_a_stale_address_counts_as_open_when_shape_program_and_folder_match(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let item = ws_item("w1", "Work", "/a", json!([{"name":"", "root":{"cwd":"/a/web", "argv":["htop"], "terminal":"stale", "shell":false}}]));
+    let cases: Vec<(&str, Value, &str, bool)> = vec![
+        ("same", json!(["htop"]), "/a/web", true),
+        ("another program", json!(["top"]), "/a/web", false),
+        ("another folder", json!(["htop"]), "/a/api", false),
+    ];
+    for (label, argv, cwd, open) in cases {
+        let host = sessions_host(&[], &[("workspaces", ws_store(&[item.clone()]))]);
+        describe_ws(cx, &staged, open_tab_values(argv, cwd), &host, &format!("this.open({item}, cx);"));
+        if open {
+            assert_eq!(runs(&host), vec![json!(["tab.select", {"id":"tb1"}]), json!(["space.select", {"id":"s1"}])], "{label}");
+            assert_eq!(toasts(&host), vec![json!("Already open")], "{label}");
+            assert_eq!(stored_items(&host)[0]["spaces"][0]["tabs"][0]["root"]["terminal"], json!("t9"), "{label}: learned the live terminal");
+        } else {
+            assert_eq!(run_names(&host)[0], "tab.new", "{label}: {:?}", runs(&host));
+            assert_eq!(toasts(&host), vec![json!("Restored “Work”")], "{label}");
+        }
+    }
 }
 
 #[gpui::test]

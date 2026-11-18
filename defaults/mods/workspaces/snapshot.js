@@ -415,15 +415,79 @@ async function addTab(cx, space, tab, start) {
   return pane && (await grow(cx, tab.root, pane.pane, start)) ? pane.tab : null;
 }
 
-// The saved space's tabs in an open space: a tab with a pane still there (live, shown, same program) is kept as it is,
-// the others start. Answers { space, tabs: [tab id per saved tab] }, or null on a timeout.
+// The saved leaf against a live pane: its terminal lives, runs the same program, and is in the same folder.
+function alike(leaf, address) {
+  const r = terminals().find((x) => x.address === address);
+  if (r?.state !== "live") return false;
+  if (!(leaf.agent ? r.labels?.["h0x.agent"] === leaf.agent : sameArgv(r.argv, leaf.argv))) return false;
+  return leaf.cwd == null || norm(panes().find((p) => p.terminal === address)?.cwd) === norm(leaf.cwd);
+}
+
+// Whether a saved node and a live one (from shape()) split the same way; `leaf` also compares each pane.
+function fits(saved, live, leaf) {
+  if (saved.children || live.children) {
+    return Boolean(saved.children && live.children) && saved.split === live.split && saved.children.length === live.children.length && saved.children.every((c, i) => fits(c, live.children[i], leaf));
+  }
+  return !leaf || alike(saved, live.terminal);
+}
+
+// The open tab of `space` that shows a saved tab, else null. First by the address the save kept; then, for addresses
+// that are stale (terminals started again since), by the same pane shape with a live terminal of the same program
+// and folder in each. A tab already given to another saved tab (`taken`) is not given twice.
+function findOpen(tab, space, taken) {
+  const by = leaves(tab.root).find((l) => open(l, space));
+  const id = by && panes().find((p) => p.terminal === by.terminal)?.tab;
+  if (id && !taken.has(id)) return id;
+  for (const live of trees()?.find((x) => x.id === space.id)?.tabs ?? []) {
+    if (taken.has(live.id)) continue;
+    const root = shape(live.root, (terminal) => ({ terminal }));
+    if (root && fits(tab.root, root, true)) return live.id;
+  }
+  return null;
+}
+
+// After a restore each saved pane that came back is learned under the terminal that now shows it, so the next restore
+// finds it by address. Only the addresses change: not the name, the times or the place in the list.
+function relearn(item, got) {
+  let changed = false;
+  const spaces = item.spaces.map((sp, i) => {
+    const g = got[i];
+    const live = g && trees()?.find((x) => x.id === g.space);
+    if (!live) return sp;
+    const tabs = sp.tabs.map((tab, j) => {
+      const lt = live.tabs.find((x) => x.id === g.tabs[j]);
+      const addresses = [];
+      const root = lt && shape(lt.root, (terminal) => (addresses.push(terminal), { terminal }));
+      if (!root || !fits(tab.root, root, false)) return tab;
+      let k = 0;
+      const walk = (n) => (n.children ? { ...n, children: n.children.map(walk) } : { ...n, terminal: addresses[k++] });
+      const next = walk(tab.root);
+      if (leaves(next).some((l, n) => l.terminal !== leaves(tab.root)[n].terminal)) changed = true;
+      return { ...tab, root: next };
+    });
+    return { ...sp, tabs };
+  });
+  if (!changed) return;
+  const items = read();
+  const at = items.findIndex((x) => x.id === item.id);
+  if (at >= 0) {
+    items[at] = { ...items[at], spaces };
+    write(items);
+  }
+}
+
+// The saved space's tabs in an open space: a tab that is open already is kept as it is, the others start. Answers
+// { space, tabs: [tab id per saved tab] }, or null on a timeout.
 async function fill(cx, target, sp, start, made) {
   const ids = [];
   const todo = [];
+  const taken = new Set();
   sp.tabs.forEach((t, i) => {
-    const there = leaves(t.root).find((l) => open(l, target));
-    if (there) ids[i] = panes().find((p) => p.terminal === there.terminal)?.tab;
-    else todo.push(i);
+    const there = findOpen(t, target, taken);
+    if (there) {
+      ids[i] = there;
+      taken.add(there);
+    } else todo.push(i);
   });
   for (const i of todo) {
     const tab = await addTab(cx, target.id, sp.tabs[i], start);
@@ -502,6 +566,7 @@ export async function restore(cx, stored) {
   });
   const shown = got[item.active] ?? got.find(Boolean);
   if (shown) run("space.select", { id: shown.space });
+  relearn(item, got);
   const none = !made.spaces && !made.tabs && !Object.keys(skipped).length;
   return { state: none ? "already" : "ok", spaces: made.spaces + made.reused, tabs: made.tabs, skipped };
 }
