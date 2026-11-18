@@ -6630,7 +6630,10 @@ fn workspaces_save_the_whole_window_every_space_on_every_machine_with_the_shown_
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let host = sessions_host(&[("list", session_list())], &[]);
-    let tree = describe_ws(cx, &staged, window_values(), &host, "this.save('Both', cx);");
+    // The first space has no agent, so the save starts with an await on nothing: promise jobs alone, which the harness
+    // only runs when a timer wakes the script (see the empty-space test). Started from a timer.
+    let setup = "cx.spawn(async (cx) => { await cx.sleep(50); this.save('Both', cx); await cx.sleep(200); });";
+    let tree = describe_ws(cx, &staged, window_values(), &host, setup);
     let items = stored_items(&host);
     assert_eq!(items.len(), 1);
     let it = &items[0];
