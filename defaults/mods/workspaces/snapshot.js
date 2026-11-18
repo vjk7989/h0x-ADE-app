@@ -236,6 +236,29 @@ function windowsUnquote(arg) {
   return out + "\\".repeat(slashes);
 }
 
+// One argument as a Windows command line holds it (the C runtimes' rules, as src/programs.rs windows_arg writes it).
+function windowsArg(arg) {
+  if (arg !== "" && !/[ \t\n\v"]/.test(arg)) return arg;
+  let out = '"';
+  let slashes = 0;
+  for (const ch of arg) {
+    if (ch === "\\") {
+      slashes += 1;
+      continue;
+    }
+    out += ch === '"' ? "\\".repeat(2 * slashes) + '""' : "\\".repeat(slashes) + ch;
+    slashes = 0;
+  }
+  return out + "\\".repeat(2 * slashes) + '"';
+}
+
+const psQuote = (word) => `'${[...word].map((c) => (PS_QUOTES.includes(c) ? c + c : c)).join("")}'`;
+
+// The line `powershell_line` builds for a command.
+function psLine(cmd) {
+  return `${PS_START}${psQuote(cmd[0])}; $a = @(${cmd.slice(1).map((a) => psQuote(windowsArg(a))).join(", ")}${PS_END}`;
+}
+
 // The words of a `powershell_line`, or null.
 function psWords(line) {
   if (!line.startsWith(PS_START) || !line.endsWith(PS_END)) return null;
@@ -384,8 +407,39 @@ function open(leaf, space) {
   if (!panes().some((p) => p.terminal === leaf.terminal && tabs.has(p.tab))) return false;
   const r = terminals().find((x) => x.address === leaf.terminal);
   if (r?.state !== "live") return false;
-  // An agent pane the core brought back as a plain shell keeps its label but no longer runs the agent.
-  return leaf.agent ? r.labels?.["h0x.agent"] === leaf.agent && r.program?.shell !== true : sameArgv(r.argv, leaf.argv);
+  return leaf.agent ? r.labels?.["h0x.agent"] === leaf.agent && runsAgent(r, leaf) : sameArgv(r.argv, leaf.argv);
+}
+
+// What a program is called: its file's name without the folder or an extension that runs it (opencode.CMD -> opencode).
+const program = (word) => String(word ?? "").split(/[\\/]/).pop().replace(/\.(exe|cmd|bat|com)$/i, "").toLowerCase();
+
+// The command a terminal runs, from its argv: the wrapper the app puts around a program is taken off (command()), and
+// so is `cmd.exe /c <x>`, which is how Windows runs a .CMD shim. A plain shell (no command) is what it is.
+function inside(argv) {
+  const inner = command(argv);
+  if (inner !== argv) return inner;
+  if (argv.length > 2 && stem(argv[0]) === "cmd") {
+    const at = argv.findIndex((w, i) => i > 0 && i < 4 && w.toLowerCase() === "/c");
+    if (at > 0 && argv[at + 1]) return argv.slice(at + 1);
+  }
+  return argv;
+}
+
+// Whether a terminal runs the agent a saved pane had: the program it runs is that agent's own. The label and the
+// program table's idea of it are not asked: the core keeps a lost agent's label and status on the shell that replaces it.
+function runsAgent(record, leaf) {
+  const want = program((leaf.argv?.length ? inside(leaf.argv) : [leaf.agent])[0]);
+  const have = program(inside(Array.isArray(record.argv) ? record.argv : [])[0]);
+  return Boolean(have) && have === want;
+}
+
+// The saved wrapper (`zsh -ic '"$@"; exec "$0" -i' zsh <cmd>`, or on Windows `pwsh -NoExit -Command <line>`) around a
+// new command, so a restarted agent runs in the person's shell as the app starts one; a saved argv that had no wrapper
+// gives the command as it is.
+function rewrap(saved, cmd) {
+  if (!Array.isArray(saved) || command(saved) === saved) return cmd;
+  if (saved.length === 4 && saved[1] === "-NoExit") return [saved[0], "-NoExit", "-Command", psLine(cmd)];
+  return [...saved.slice(0, 4), ...cmd];
 }
 
 // An agent pane whose terminal lives but is only a shell now (the core replaces a lost program by a shell that keeps
@@ -393,7 +447,7 @@ function open(leaf, space) {
 function replaced(leaf, address, folder) {
   if (!leaf.agent) return false;
   const r = terminals().find((x) => x.address === address);
-  if (r?.state !== "live" || r.labels?.["h0x.agent"] !== leaf.agent || r.program?.shell !== true) return false;
+  if (r?.state !== "live" || r.labels?.["h0x.agent"] !== leaf.agent || runsAgent(r, leaf)) return false;
   return !folder || leaf.cwd == null || norm(panes().find((p) => p.terminal === address)?.cwd) === norm(leaf.cwd);
 }
 
@@ -533,9 +587,11 @@ async function fill(cx, target, sp, start, made) {
     const at = pane && (await start(leaf));
     if (!at?.argv) continue;
     const seen = new Set(panes().map((p) => p.pane));
-    run("pane.split", { direction: "right", pane: pane.pane, argv: at.argv });
+    run("pane.split", { direction: "right", pane: pane.pane, argv: rewrap(leaf.argv, at.argv) });
     if (!(await until(cx, () => panes().find((p) => p.tab === pane.tab && !seen.has(p.pane))))) return null;
     run("pane.close", { pane: pane.pane });
+    // Gone before the next step, so what is learned afterwards is the tab as it is.
+    if (!(await until(cx, () => !panes().some((p) => p.pane === pane.pane)))) return null;
     made.restarted += 1;
   }
   for (const i of todo) {
@@ -596,7 +652,7 @@ export async function restore(cx, stored) {
     }
     const start = async (leaf) => {
       const folder = leaf.cwd || sp.folder;
-      const fresh = leaf.argv?.length ? leaf.argv : known.find((p) => p.key === leaf.agent)?.run;
+      const fresh = leaf.argv?.length ? inside(leaf.argv) : known.find((p) => p.key === leaf.agent)?.run;
       // An agent resumes or restarts; a program that is not a shell starts from its argv; a plain shell is the default one.
       const argv = leaf.agent ? await launch(on, leaf, fresh, started) : leaf.shell === false && leaf.argv?.length ? command(leaf.argv) : undefined;
       return { ...(folder ? { folder } : {}), ...(argv ? { argv } : {}) };

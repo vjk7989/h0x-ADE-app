@@ -5562,7 +5562,9 @@ impl SessionsHost {
     // The core's record of the terminal a command started: its argv (a plain shell: bash), an agent's label.
     fn record_terminal(&mut self, n: usize, args: &Value) {
         let argv = args.get("argv").cloned().filter(|a| a.as_array().is_some_and(|a| !a.is_empty())).unwrap_or_else(|| json!(["bash"]));
-        let agent = argv[0].as_str().filter(|a| ["claude", "codex"].contains(a)).map(str::to_owned);
+        // The word, or quoted inside a PowerShell line.
+        let words: Vec<&str> = argv.as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        let agent = ["claude", "codex"].into_iter().find(|name| words.iter().any(|w| w == name || w.contains(&format!("'{name}'")))).map(str::to_owned);
         let labels = agent.map_or(json!({}), |a| json!({"h0x.agent":a}));
         let record = json!({"address":format!("ra{n}"), "argv":argv, "labels":labels, "state":"live"});
         if self.live.get("terminals").is_none_or(Value::is_null) {
@@ -7340,6 +7342,62 @@ fn workspaces_an_agent_pane_the_core_brought_back_as_a_shell_is_restarted_not_co
     assert_eq!(runs(&host), vec![json!(["tab.select", {"id":"tb1"}]), json!(["space.select", {"id":"s1"}])]);
     assert_eq!(toasts(&host), vec![json!("Already open")]);
     assert!(host.borrow().cores.is_empty(), "{:?}", host.borrow().cores);
+}
+
+// `powershell_line` for words without spaces or quotes (src/programs.rs builds it: the program, then each argument quoted).
+fn ps_line(words: &[&str]) -> String {
+    let args = words[1..].iter().map(|w| format!("'{w}'")).collect::<Vec<_>>().join(", ");
+    format!(
+        "& {{ $PSNativeCommandArgumentPassing = 'Legacy'; $p = '{}'; $a = @({args}{}",
+        words[0],
+        r"); if ((Get-Command $p -ErrorAction Ignore | Select-Object -First 1).Extension -in '.cmd', '.bat') { $a = $a -replace '\r?\n', ' ' }; & $p @a }"
+    )
+}
+
+#[gpui::test]
+fn workspaces_a_lost_agent_is_told_from_a_running_one_by_the_program_it_runs_and_restarts_in_its_shell(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let unix = json!(["zsh", "-ic", "\"$@\"; exec \"$0\" -i", "zsh", "claude"]);
+    let windows = json!(["pwsh.exe", "-NoExit", "-Command", ps_line(&["claude"])]);
+    let resume = json!(["claude", "--resume", "a2"]);
+    // The core kept the label and the agent's status on the shell that replaced it (program: an agent, not a shell):
+    // it still is not the agent. The restart goes through the wrapper the pane was saved with.
+    let cases = [
+        ("bare", json!(["claude"]), resume.clone()),
+        ("unix wrapper", unix.clone(), json!(["zsh", "-ic", "\"$@\"; exec \"$0\" -i", "zsh", "claude", "--resume", "a2"])),
+        ("windows wrapper", windows.clone(), json!(["pwsh.exe", "-NoExit", "-Command", ps_line(&["claude", "--resume", "a2"])])),
+    ];
+    for (label, saved, expected) in cases {
+        let item = ws_item("w1", "Work", "/a", json!([{"name":"", "root":{"agent":"claude", "session":"a2", "argv":saved, "cwd":"/a", "terminal":"t9"}}]));
+        let host = sessions_host(&[("resume", core_ok(json!({"argv":resume})))], &[("workspaces", ws_store(&[item.clone()]))]);
+        let values = lost_agent_values(json!({"key":"claude", "shell":false, "agent":true}), json!(["pwsh"]));
+        describe_ws(cx, &staged, values, &host, &format!("this.open({item}, cx);"));
+        assert_eq!(runs(&host)[..2], [json!(["pane.split", {"direction":"right", "pane":"p1", "argv":expected}]), json!(["pane.close", {"pane":"p1"}])], "{label}");
+        // What the restart started is learned for the leaf, and the next restore finds it running.
+        let learned = stored_items(&host)[0].clone();
+        assert_eq!(learned["spaces"][0]["tabs"][0]["root"]["terminal"], json!("ra1"), "{label}");
+        host.borrow_mut().effects.clear();
+        describe_ws(cx, &staged, lost_agent_values(json!({"key":"claude", "shell":false, "agent":true}), json!(["pwsh"])), &host, &format!("this.open({learned}, cx);"));
+        assert_eq!(runs(&host), vec![json!(["tab.select", {"id":"tb1"}]), json!(["space.select", {"id":"s1"}])], "{label}: nothing restarts the second time");
+        assert_eq!(toasts(&host), vec![json!("Already open")], "{label}");
+    }
+}
+
+#[gpui::test]
+fn workspaces_an_agent_run_through_cmd_exe_counts_as_running_and_is_never_restarted(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Windows runs a .CMD shim as `cmd.exe /c <path>`; its program table entry is the shell, but it runs the agent.
+    let item = ws_item("w1", "Work", "/a", json!([{"name":"", "root":{"agent":"opencode", "session":"X", "argv":["opencode"], "cwd":"/a", "terminal":"t9"}}]));
+    let argv = json!(["cmd.exe", "/c", "G:\\npm-global\\opencode.CMD", "--session", "X"]);
+    let mut values = open_tab_values(argv.clone(), "/a");
+    values.insert("terminals".into(), json!([{"address":"t9", "argv":argv, "labels":{"h0x.agent":"opencode"}, "state":"live", "program":{"key":"shell", "shell":true, "agent":false}}]));
+    let host = sessions_host(&[("resume", core_ok(json!({"argv":["opencode", "--session", "X"]})))], &[("workspaces", ws_store(&[item.clone()]))]);
+    describe_ws(cx, &staged, values, &host, &format!("this.open({item}, cx);"));
+    assert_eq!(runs(&host), vec![json!(["tab.select", {"id":"tb1"}]), json!(["space.select", {"id":"s1"}])]);
+    assert_eq!(toasts(&host), vec![json!("Already open")]);
+    assert!(host.borrow().cores.is_empty(), "no agent is resumed over a running one: {:?}", host.borrow().cores);
 }
 
 #[gpui::test]
