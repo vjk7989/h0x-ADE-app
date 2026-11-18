@@ -6611,7 +6611,7 @@ fn window_values() -> BTreeMap<String, Value> {
     ]));
     let trees = json!([
         {"id":"s1", "tabs":[{"id":"tb1", "name":"One", "root":block("p1", "t1")}, {"id":"tb2", "name":"Two", "root":block("p2", "t2")}]},
-        {"id":"s2", "tabs":[{"id":"tb3", "name":"Agent", "root":block("p3", "t3")}, {"id":"tb4", "name":"Shell", "root":block("p4", "t4")}]}
+        {"id":"s2", "tabs":[{"id":"tb3", "name":"Agent", "root":block("p3", "c3")}, {"id":"tb4", "name":"Shell", "root":block("p4", "c4")}]}
     ]);
     values.insert("trees".into(), trees);
     values.insert("panes".into(), json!([
