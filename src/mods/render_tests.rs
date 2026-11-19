@@ -2878,6 +2878,126 @@ fn settings_analytics_switch_never_overwrites_a_settings_file_it_could_not_read(
     }
 }
 
+fn modes_values() -> BTreeMap<String, Value> {
+    let mut p = props();
+    p["section"] = json!("modes");
+    fixture(true, p, updates("current", "current"))
+}
+
+// Keeps the Token Saver switch's click and names the switch by its state: st-token-saver-on or -off.
+const TOKEN_SAVER_PRESS: &str = "const toggle = this.toggle.bind(this); \
+    this.toggle = (t, id, on, onClick, asTag) => { if (id !== 'st-token-saver') return toggle(t, id, on, onClick, asTag); \
+    this.press = onClick; return toggle(t, on ? 'st-token-saver-on' : 'st-token-saver-off', on, onClick, asTag); };";
+
+#[gpui::test]
+fn settings_nav_lists_0x_modes_between_alerts_and_mods_and_it_opens_on_click(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Another page: the nav item is there without its page.
+    let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", info_values(), None, "", 0);
+    let tree = &trees[0];
+    let at = |id: &str| tree.find(&format!("\"st-s-{id}\"")).unwrap_or_else(|| panic!("st-s-{id}: {tree}"));
+    assert!(at("alerts") < at("modes") && at("modes") < at("mods"), "0x Modes is between Alerts and Mods: {tree}");
+    let line = tree.lines().find(|l| l.contains("\"st-s-modes\"")).unwrap();
+    assert!(line.contains(":on_click(fn)"), "{line}");
+    assert!(tree.contains("0x Modes") && tree.contains("gauge.svg"), "the nav names it with its icon: {tree}");
+    assert!(!tree.contains("st-token-saver") && !tree.contains("0X MODES"), "the Info page is not the 0x Modes page: {tree}");
+    assert!(calls.borrow().cores.is_empty() && calls.borrow().unexpected.is_empty(), "{:?} {:?}", calls.borrow().cores, calls.borrow().unexpected);
+}
+
+#[gpui::test]
+fn settings_0x_modes_page_renders_token_saver_off_for_the_default_person_without_calling_the_core(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // No file, an empty one, one with other keys and one with token_saver false: all the default person.
+    for file in [None, Some("{}"), Some(r#"{"zoom": 1.25}"#), Some(r#"{"token_saver": false}"#)] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, TOKEN_SAVER_PRESS, 0);
+        let tree = &trees[0];
+        for text in ["0X MODES", "Token Saver", "st-token-saver-off", "Tokens saved: ", "Security", "ZK Proofs", "Observability"] {
+            assert!(tree.contains(text), "{file:?}: {text:?}: {tree}");
+        }
+        assert_eq!(tree.matches("Coming soon").count(), 3, "{file:?}: {tree}");
+        assert!(!tree.contains("st-token-saver-on") && !tree.contains("can't be read"), "{file:?}: {tree}");
+        let c = calls.borrow();
+        assert!(c.cores.is_empty() && c.execs.is_empty(), "{file:?}: rendering never calls the core: {:?} {:?}", c.cores, c.execs);
+        assert!(c.writes.is_empty() && c.unexpected.is_empty(), "{file:?}: {:?} {:?}", c.writes, c.unexpected);
+    }
+}
+
+#[gpui::test]
+fn settings_0x_modes_coming_soon_rows_have_nothing_to_click(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), None, "", 0);
+    let tree = &trees[0];
+    // The three rows follow the savings line; nothing from there to the last "Coming soon" has an id, a click or a hand cursor.
+    let start = tree.find("Tokens saved: ").unwrap_or_else(|| panic!("{tree}"));
+    let end = tree.rfind("Coming soon").unwrap_or_else(|| panic!("{tree}"));
+    assert!(start < end, "{tree}");
+    let rows = &tree[start..end];
+    assert!(["Security", "ZK Proofs", "Observability"].iter().all(|t| rows.contains(t)), "{rows}");
+    for click in [":on_click(fn)", ":on_mouse_down(fn)", ":on_mouse_up(fn)", ".cursor_pointer", "\"st-"] {
+        assert!(!rows.contains(click), "{click:?}: {rows}");
+    }
+    let c = calls.borrow();
+    assert!(c.writes.is_empty() && c.effects.iter().all(|(n, _)| n != "run" && n != "openLink"), "{:?} {:?}", c.writes, c.effects);
+    assert!(c.cores.is_empty() && c.unexpected.is_empty(), "{:?} {:?}", c.cores, c.unexpected);
+}
+
+#[gpui::test]
+fn settings_token_saver_switch_on_writes_true_and_off_removes_the_key_keeping_every_other_key(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // settings.json, what one press writes, and whether the switch was on before it.
+    for (file, write, was_on) in [
+        (None, json!({"token_saver": true}), false),
+        (Some("{}"), json!({"token_saver": true}), false),
+        (Some(r#"{"token_saver": false, "zoom": 1.25}"#), json!({"token_saver": true, "zoom": 1.25}), false),
+        (Some(r#"{"token_saver": true, "zoom": 1.25, "share_analytics": false}"#), json!({"zoom": 1.25, "share_analytics": false}), true),
+        (Some(r#"{"token_saver": true}"#), json!({}), true),
+        (Some("\u{feff}{\"token_saver\": true}"), json!({}), true),
+    ] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, TOKEN_SAVER_PRESS, 1);
+        assert_eq!(written(&calls, "/fixture/app/settings.json"), [write], "{file:?}");
+        let (before, after) = if was_on { ("st-token-saver-on", "st-token-saver-off") } else { ("st-token-saver-off", "st-token-saver-on") };
+        assert!(trees[0].contains(before) && !trees[0].contains(after), "{file:?}: {}", trees[0]);
+        assert!(trees[1].contains(after) && !trees[1].contains(before), "{file:?}: the switch shows what was written: {}", trees[1]);
+        assert!(calls.borrow().cores.is_empty() && calls.borrow().unexpected.is_empty(), "{file:?}: {:?} {:?}", calls.borrow().cores, calls.borrow().unexpected);
+    }
+    // A Windows app home: the switch writes that home's settings.json.
+    let home = "C:\\Users\\Zo\u{eb} Q\\AppData\\Roaming\\h0x-ade";
+    let mut values = modes_values();
+    values.insert("appHome".into(), json!(home));
+    let (_, calls) = describe_pressing(cx, &staged, "frame/settings", values, Some(r#"{"zoom": 1.25}"#), TOKEN_SAVER_PRESS, 1);
+    assert_eq!(written(&calls, &format!("{home}/settings.json")), [json!({"token_saver": true, "zoom": 1.25})]);
+}
+
+#[gpui::test]
+fn settings_token_saver_with_a_value_that_is_not_true_shows_off_and_one_press_writes_true(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Only true is on; a wrong type (which the app itself rejects, see settings.rs) neither crashes the page nor reads as on.
+    for value in [r#""yes""#, "1", "0", "null", r#""true""#, "[]"] {
+        let file = format!(r#"{{"token_saver": {value}, "zoom": 1.25}}"#);
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(&file), TOKEN_SAVER_PRESS, 1);
+        assert!(trees[0].contains("st-token-saver-off") && !trees[0].contains("can't be read"), "{value}: {}", trees[0]);
+        assert_eq!(written(&calls, "/fixture/app/settings.json"), [json!({"token_saver": true, "zoom": 1.25})], "{value}");
+        assert!(trees[1].contains("st-token-saver-on"), "{value}: {}", trees[1]);
+        assert!(calls.borrow().unexpected.is_empty(), "{value}: {:?}", calls.borrow().unexpected);
+    }
+}
+
+#[gpui::test]
+fn settings_token_saver_switch_never_overwrites_a_settings_file_it_could_not_read(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for bad in ["", "{not json", "[]", "null", "true"] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(bad), TOKEN_SAVER_PRESS, 1);
+        assert!(calls.borrow().writes.is_empty(), "{bad:?}: {:?}", calls.borrow().writes);
+        assert!(trees[1].contains("can't be read") && trees[1].contains("st-token-saver-off"), "{bad:?}: {}", trees[1]);
+    }
+}
+
 const ANALYTICS_TITLE: &str = "How HyperOx handles your data (beta)";
 const ANALYTICS_ABOUT: [&str; 3] = [
     "During the beta, HyperOx sends usage data and failure reports so we can fix problems and improve the app. You are identified by a random install ID, not your name or email. We never send what you type, your prompts, agent replies, terminal contents, file or folder names, or your keys. IP addresses are not stored; your approximate location (country and city) is.",

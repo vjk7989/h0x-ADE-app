@@ -1375,6 +1375,20 @@ mod tests {
     }
 
     #[test]
+    fn a_token_saver_that_is_not_a_bool_rejects_the_settings_file_without_panicking() {
+        // token_saver is a plain bool (no lenient reader like share_analytics): a wrong type is an error, never a panic or a silent on.
+        for bad in [r#"{"token_saver":"yes"}"#, r#"{"token_saver":1}"#, r#"{"token_saver":null}"#, r#"{"token_saver":"true"}"#, r#"{"token_saver":[]}"#, "\u{feff}{\"token_saver\":0,\"zoom\":1.5}"] {
+            let err = parse_person(bad).unwrap_err();
+            assert!(err.contains("invalid type"), "{bad:?}: {err}");
+        }
+        // Only a real bool is read; false is the default and is not written back, true survives a BOM.
+        let off = parse_person(r#"{"token_saver":false,"zoom":1.5}"#).unwrap();
+        assert!(!off.token_saver && serde_json::to_value(&off).unwrap().get("token_saver").is_none());
+        assert!(parse_person("\u{feff}{\"token_saver\":true}").unwrap().token_saver);
+        assert!(!parse_person("{}").unwrap().token_saver);
+    }
+
+    #[test]
     fn share_analytics_defaults_on_and_round_trips() {
         let old: Person = serde_json::from_str(r#"{"telemetry":false}"#).unwrap();
         assert!(old.share_analytics && old.found_via.is_none());
