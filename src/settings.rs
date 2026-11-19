@@ -409,6 +409,9 @@ pub struct Person {
     /// Send usage analytics (Settings > Info). Failure reports are not governed by this.
     #[serde(skip_serializing_if = "is_true", deserialize_with = "bool_or_true")]
     pub share_analytics: bool,
+    /// 0x Modes > Token Saver: shrink big tool outputs before an agent reads them. Off unless set.
+    #[serde(skip_serializing_if = "is_false")]
+    pub token_saver: bool,
     /// The welcome's one-time "How did you find HyperOx?": the choice, or "skip". Set means asked.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "string_or_none")]
     pub found_via: Option<String>,
@@ -555,6 +558,7 @@ impl Default for Person {
             clipboard_write: false,
             check_updates: true,
             share_analytics: true,
+            token_saver: false,
             found_via: None,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
@@ -598,6 +602,7 @@ pub struct Settings {
     pub clipboard_write: bool,
     pub check_updates: bool,
     pub share_analytics: bool,
+    pub token_saver: bool,
     pub minimum_contrast: f32,
     /// Scrollback lines per new terminal pane.
     pub scrollback_lines: u32,
@@ -644,6 +649,7 @@ impl Default for Settings {
             clipboard_write: false,
             check_updates: true,
             share_analytics: true,
+            token_saver: false,
             minimum_contrast: 1.0,
             scrollback_lines: SCROLLBACK_DEFAULT,
             option_as_alt: OptionAsAlt::Auto,
@@ -686,6 +692,7 @@ impl Settings {
             clipboard_write: person.clipboard_write,
             check_updates: person.check_updates,
             share_analytics: person.share_analytics,
+            token_saver: person.token_saver,
             minimum_contrast: person.minimum_contrast,
             scrollback_lines: person.scrollback_lines,
             option_as_alt: person.option_as_alt,
@@ -1355,6 +1362,18 @@ mod tests {
 
     /// The guide's stated defaults are what an empty settings.json gives, and
     /// every key it documents is one settings.json keeps.
+    #[test]
+    fn token_saver_defaults_off_and_round_trips() {
+        let absent: Person = serde_json::from_str(r#"{"zoom":1.5}"#).unwrap();
+        assert!(!absent.token_saver && Person::default().token_saver && !Settings::default().token_saver);
+        assert!(serde_json::to_value(&absent).unwrap().get("token_saver").is_none());
+        let on: Person = serde_json::from_str(r#"{"token_saver":true}"#).unwrap();
+        assert!(on.token_saver && Settings::compose(&on, &crate::layout::Look::default(), true).token_saver);
+        assert_eq!(serde_json::to_value(&on).unwrap()["token_saver"], serde_json::json!(true));
+        let back: Person = serde_json::from_value(serde_json::to_value(&on).unwrap()).unwrap();
+        assert!(back.token_saver);
+    }
+
     #[test]
     fn share_analytics_defaults_on_and_round_trips() {
         let old: Person = serde_json::from_str(r#"{"telemetry":false}"#).unwrap();
