@@ -5692,8 +5692,8 @@ mod tests {
     #[test]
     fn agent_argv_is_unchanged_with_token_saver_off_and_for_programs_other_than_claude() {
         assert!(!crate::settings::get().token_saver, "off unless the person turns it on");
-        let claude = [(words(&["claude"]), None), (words(&["claude", "--resume"]), Some("go")), (words(&[r"C:\Program Files\claude\claude.exe"]), Some("go"))];
-        let others = [(words(&["codex"]), Some("go")), (words(&["claude-code"]), None), (words(&["CLAUDE.EXE"]), Some("go")), (words(&["pwsh.exe"]), None), (words(&["claude", "--settings", "{}"]), Some("go"))];
+        let claude = [(words(&["claude"]), None), (words(&["claude", "--resume"]), Some("go")), (words(&["CLAUDE.EXE"]), Some("go")), (words(&[r"C:\Program Files\claude\claude.exe"]), Some("go"))];
+        let others = [(words(&["codex"]), Some("go")), (words(&["claude-code"]), None), (words(&["pwsh.exe"]), None), (words(&["claude", "--settings", "{}"]), Some("go"))];
         for (argv, task) in claude.iter().chain(others.iter()) {
             let mut cmd = argv.clone();
             cmd.extend(task.map(str::to_owned));

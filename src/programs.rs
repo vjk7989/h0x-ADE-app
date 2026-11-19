@@ -257,7 +257,7 @@ const TOKEN_SAVER_SETTINGS: &str = r#"{"hooks":{"PostToolUse":[{"matcher":"^(Bas
 /// else, and a Claude that already has `--settings` (the person's choice wins),
 /// stays exactly as asked.
 pub fn with_token_saver(on: bool, mut argv: Vec<String>) -> Vec<String> {
-    let claude = argv.first().is_some_and(|a| base(a) == "claude") && agent(&argv).as_deref() == Some("claude");
+    let claude = argv.first().is_some_and(|a| base(a).eq_ignore_ascii_case("claude")) && agent(&argv).as_deref() == Some("claude");
     if on && claude && !argv.iter().any(|a| a == "--settings" || a.starts_with("--settings=")) {
         argv.splice(1..1, ["--settings".to_owned(), TOKEN_SAVER_SETTINGS.to_owned()]);
     }
@@ -892,15 +892,10 @@ mod tests {
     }
 
     #[test]
-    fn token_saver_matches_claude_by_its_lowercase_name_while_agent_ignores_case() {
-        // Windows file names ignore case and so does `agent`, but the hook goes only
-        // to `claude` as written: a differently cased Claude starts without it.
-        for name in ["CLAUDE.EXE", "Claude", "Claude.exe", r"C:\Tools\CLAUDE.EXE"] {
+    fn token_saver_matches_claude_in_any_case_like_agent() {
+        // Windows file names ignore case and so does `agent`: the hook goes to any casing.
+        for name in ["CLAUDE.EXE", "Claude", "Claude.exe", r"C:\Tools\CLAUDE.EXE", "claude.EXE", r"C:\Tools\claude.Exe", "/opt/claude/bin/claude", r"\\server\share\claude.exe"] {
             assert_eq!(agent(&argv(&[name])).as_deref(), Some("claude"), "{name}");
-            assert_eq!(with_token_saver(true, argv(&[name, "go"])), argv(&[name, "go"]), "{name}");
-        }
-        // Only the `.exe` part ignores case; any folder, either slash.
-        for name in ["claude.EXE", r"C:\Tools\claude.Exe", "/opt/claude/bin/claude", r"\\server\share\claude.exe"] {
             let run = with_token_saver(true, argv(&[name]));
             assert_eq!(run[0], name);
             assert_eq!(run[1..], hooked(&[])[1..], "{name}");
