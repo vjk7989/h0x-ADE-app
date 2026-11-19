@@ -2788,8 +2788,25 @@ fn describe_pressing_files(
     setup: &str,
     presses: usize,
 ) -> (Vec<String>, Rc<RefCell<Calls>>) {
+    describe_pressing_replying(cx, staged, entry, values, settings, files, &[], setup, presses)
+}
+
+// `describe_pressing_files` where `replies` (a core or exec command line prefix, its reply) are answered too.
+#[allow(clippy::too_many_arguments)]
+fn describe_pressing_replying(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    entry: &str,
+    values: BTreeMap<String, Value>,
+    settings: Option<&str>,
+    files: &[(&str, &str)],
+    replies: &[(&str, Value)],
+    setup: &str,
+    presses: usize,
+) -> (Vec<String>, Rc<RefCell<Calls>>) {
     let calls = Rc::new(RefCell::new(Calls::default()));
     calls.borrow_mut().files.extend(files.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    calls.borrow_mut().replies.extend(replies.iter().map(|(k, v)| (k.to_string(), v.clone())));
     // Any scripted reply records the disk; no core or exec call starts with this one.
     calls.borrow_mut().replies.insert("fixture-unused".into(), Value::Null);
     if let Some(text) = settings {
@@ -2922,6 +2939,51 @@ fn settings_0x_modes_page_renders_token_saver_off_for_the_default_person_without
         assert!(c.cores.is_empty() && c.execs.is_empty(), "{file:?}: rendering never calls the core: {:?} {:?}", c.cores, c.execs);
         assert!(c.writes.is_empty() && c.unexpected.is_empty(), "{file:?}: {:?} {:?}", c.writes, c.unexpected);
     }
+}
+
+// Opens the 0x Modes page from another one, as a nav click does.
+const OPEN_MODES: &str = "this.press = (_e, cx) => this.openSection('modes', cx);";
+
+fn gate_stats_reply(code: i64, stdout: &str) -> Value {
+    json!({"code": code, "stdout": stdout, "stderr": ""})
+}
+
+#[gpui::test]
+fn settings_0x_modes_tokens_saved_line_comes_from_one_gate_stats_call_made_when_the_page_opens(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let big = r#"{"tokens_saved":1234567,"outputs":17000,"bytes_in":9,"bytes_shown":1}"#;
+    let cases = [
+        (gate_stats_reply(0, r#"{"tokens_saved":12345,"outputs":17,"bytes_in":100,"bytes_shown":10}"#), "Tokens saved: 12,345 (~$0.04) across 17 big outputs"),
+        (gate_stats_reply(0, big), "Tokens saved: 1,234,567 (~$3.70) across 17,000 big outputs"),
+        (gate_stats_reply(0, r#"{"tokens_saved":0,"outputs":0,"bytes_in":0,"bytes_shown":0}"#), "Tokens saved: 0 (~$0.00) across 0 big outputs"),
+        (gate_stats_reply(0, "not json"), "Tokens saved: \u{2014}"),
+        (gate_stats_reply(0, ""), "Tokens saved: \u{2014}"),
+        (gate_stats_reply(0, "{}"), "Tokens saved: \u{2014}"),
+        (gate_stats_reply(0, r#"{"tokens_saved":-5,"outputs":1}"#), "Tokens saved: \u{2014}"),
+        (gate_stats_reply(0, r#"{"tokens_saved":"7","outputs":1}"#), "Tokens saved: \u{2014}"),
+        (gate_stats_reply(2, ""), "Tokens saved: \u{2014}"),
+        (gate_stats_reply(1, r#"{"error":{"kind":"unknown","message":"unknown command"}}"#), "Tokens saved: \u{2014}"),
+    ];
+    for (reply, line) in cases {
+        let replies = [("gate stats --json", reply.clone())];
+        let (trees, calls) = describe_pressing_replying(cx, &staged, "frame/settings", info_values(), None, &[], &replies, OPEN_MODES, 1);
+        assert!(trees[1].contains(line), "{reply}: {line:?}: {}", trees[1]);
+        let c = calls.borrow();
+        assert_eq!(c.cores, [["gate", "stats", "--json"]], "{reply}: one call, made on opening the page");
+        assert!(c.unexpected.is_empty(), "{reply}: {:?}", c.unexpected);
+    }
+}
+
+#[gpui::test]
+fn settings_0x_modes_as_the_first_page_and_other_pages_never_ask_the_core_for_stats(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), None, "", 0);
+    assert!(trees[0].contains("Tokens saved: \u{2014}"), "{}", trees[0]);
+    assert!(calls.borrow().cores.is_empty(), "{:?}", calls.borrow().cores);
+    let (_, calls) = describe_pressing(cx, &staged, "frame/settings", info_values(), None, "", 0);
+    assert!(calls.borrow().cores.is_empty(), "{:?}", calls.borrow().cores);
 }
 
 #[gpui::test]

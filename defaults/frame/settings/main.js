@@ -6,6 +6,9 @@ import { agentsInit, loadAgents, agentsPage } from "./agents.js";
 import { ActivityGraph } from "./activity.js";
 import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, nextCommand, window, account, accountSignIn, accountCancelSignIn, accountSwitch, accountSignOut, accountRemove } from "h0x";
 
+// Dollars per million input tokens (Claude Sonnet's price): turns tokens saved into the "~$" shown beside them.
+const SAVED_USD_PER_MILLION_TOKENS = 3;
+
 const I = (name) => `frame/settings/${name}.svg`;
 
 const SECTIONS = [
@@ -89,6 +92,8 @@ export default class Settings extends View {
     this.previewsOf = "";
     this.machineList = null;
     this.machineLoading = false;
+    this.saved = null; // Token Saver stats, once fetched
+    this.savedLoading = false;
     this.machineError = null;
     this.machineBusy = {};
     this.machineResults = {};
@@ -169,6 +174,7 @@ export default class Settings extends View {
     this.handle.focus();
     if (id === "machines") cx.spawn(async (cx) => { await this.loadMachines(); cx.notify(); });
     if (id === "remote") cx.spawn(async (cx) => { await this.loadRemote(); cx.notify(); });
+    if (id === "modes") cx.spawn(async (cx) => { await this.loadSaved(); cx.notify(); });
     if (id === "agents") loadAgents(this, cx);
     this.graph.set_props({ shown: id === "profile" });
     cx.notify();
@@ -1156,9 +1162,27 @@ export default class Settings extends View {
 
   // 0x Modes -------------------------------------------------------------
 
-  // The Token Saver savings line. TS-1b fills it from settings()/state; no numbers yet.
+  // What the Token Saver has saved, from `h0x-core gate stats --json`; null when the core is too old or answers
+  // anything else. Fetched when the page opens, never while rendering.
+  async loadSaved() {
+    if (this.savedLoading) return;
+    this.savedLoading = true;
+    try {
+      const r = await core(["gate", "stats", "--json"]);
+      const s = r.code === 0 ? JSON.parse(r.stdout) : null;
+      this.saved = Number.isSafeInteger(s?.tokens_saved) && s.tokens_saved >= 0 && Number.isSafeInteger(s?.outputs) && s.outputs >= 0 ? s : null;
+    } catch {
+      this.saved = null;
+    } finally {
+      this.savedLoading = false;
+    }
+  }
+
   savedText() {
-    return "\u2014";
+    const s = this.saved;
+    if (!s) return "\u2014";
+    const n = (v) => String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    return `${n(s.tokens_saved)} (~$${((s.tokens_saved * SAVED_USD_PER_MILLION_TOKENS) / 1e6).toFixed(2)}) across ${n(s.outputs)} big outputs`;
   }
 
   modes(t) {
