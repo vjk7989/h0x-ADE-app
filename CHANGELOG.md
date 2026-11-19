@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.1.36] - 2026-11-18
+
+Workspaces save the whole window. Bundles h0x-core 0.1.16.
+
 ### Changed
 
 - Workspaces now save the whole window: every space on every machine with its tabs, splits, running agents and sessions, and which space and tabs were shown. Restoring brings them all back, skips spaces on a machine that is not connected, and shows the saved space and tabs. Saves from before still restore. Mods get `trees()` (every space's tabs).
