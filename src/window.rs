@@ -2512,7 +2512,8 @@ impl AppWindow {
     /// (on another machine: that machine's shell).
     fn agent_argv(argv: Option<Vec<String>>, task: Option<&str>, on: Option<&str>) -> Option<Vec<String>> {
         let task = task.map(str::trim).filter(|t| !t.is_empty());
-        argv.filter(|a| !a.is_empty()).map(|mut cmd| {
+        argv.filter(|a| !a.is_empty()).map(|cmd| {
+            let mut cmd = crate::programs::with_token_saver(crate::settings::get().token_saver, cmd);
             cmd.extend(task.map(str::to_owned));
             if on.is_some() {
                 return crate::remote_shell::launch(cmd);
@@ -2599,6 +2600,7 @@ impl AppWindow {
         let size = self.model.active_tab().filter(|tab| tab.id == ctx)
             .and_then(|_| self.initial_size(&root, &new, window));
         let program = argv.clone().unwrap_or_default();
+        let argv = argv.map(|a| crate::programs::with_token_saver(crate::settings::get().token_saver, a));
         let (addr, _) = self.spawn(argv, &program, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.model.split(&target, axis, &new, &addr);
         Ok(json!({ "pane": new, "terminal": addr }))
