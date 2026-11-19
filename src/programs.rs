@@ -890,4 +890,71 @@ mod tests {
         let cmd = with_token_saver(true, argv(&["claude", "go"]));
         assert_eq!(powershell_words(&powershell_line(&cmd)), Some(cmd));
     }
+
+    #[test]
+    fn token_saver_matches_claude_by_its_lowercase_name_while_agent_ignores_case() {
+        // Windows file names ignore case and so does `agent`, but the hook goes only
+        // to `claude` as written: a differently cased Claude starts without it.
+        for name in ["CLAUDE.EXE", "Claude", "Claude.exe", r"C:\Tools\CLAUDE.EXE"] {
+            assert_eq!(agent(&argv(&[name])).as_deref(), Some("claude"), "{name}");
+            assert_eq!(with_token_saver(true, argv(&[name, "go"])), argv(&[name, "go"]), "{name}");
+        }
+        // Only the `.exe` part ignores case; any folder, either slash.
+        for name in ["claude.EXE", r"C:\Tools\claude.Exe", "/opt/claude/bin/claude", r"\\server\share\claude.exe"] {
+            let run = with_token_saver(true, argv(&[name]));
+            assert_eq!(run[0], name);
+            assert_eq!(run[1..], hooked(&[])[1..], "{name}");
+        }
+    }
+
+    #[test]
+    fn token_saver_skips_other_programs_that_run_or_resemble_claude() {
+        // `agent` calls these Claude (its process name, or the program an interpreter runs),
+        // but the command is not `claude` itself: no hook.
+        for a in [argv(&["claude-code"]), argv(&["npx", "claude"])] {
+            assert_eq!(agent(&a).as_deref(), Some("claude"), "{a:?}");
+            assert_eq!(with_token_saver(true, a.clone()), a);
+        }
+        for a in [argv(&["claude-dev"]), argv(&["claudex"]), argv(&[r"C:\Users\me\AppData\Roaming\npm\claude.cmd"]), argv(&[""]), argv(&["", "claude"]), argv(&["pwsh.exe", "-c", "claude"])] {
+            assert_eq!(with_token_saver(true, a.clone()), a, "{a:?}");
+        }
+    }
+
+    #[test]
+    fn token_saver_takes_any_settings_word_as_the_persons_own_even_a_prompt() {
+        // `-p --settings` is a prompt, yet the word still counts as the person's own
+        // `--settings`: nothing is added. So does a bare `--settings` and one after `--`.
+        for a in [argv(&["claude", "-p", "--settings"]), argv(&["claude", "--settings"]), argv(&["claude", "--", "--settings=x"]), argv(&["claude", "--settings="])] {
+            assert_eq!(with_token_saver(true, a.clone()), a, "{a:?}");
+        }
+        // Only that exact flag: look-alikes and a prompt that only mentions it get the hook.
+        for rest in [&["--settingsx"][..], &["--Settings", "x.json"], &["-p", "use --settings=x"], &["-p", " --settings"], &["--setting-sources", "user"]] {
+            let mut a = argv(&["claude"]);
+            a.extend(argv(rest));
+            assert_eq!(with_token_saver(true, a), hooked(rest), "{rest:?}");
+        }
+    }
+
+    #[test]
+    fn token_saver_hook_and_a_task_with_quotes_and_dollars_survive_the_powershell_line() {
+        let task = "say \"hi\" to $env:USERNAME's \u{2018}box\u{2019}; `$(Get-Date)` & | > done";
+        let mut cmd = with_token_saver(true, argv(&["claude"]));
+        cmd.push(task.to_owned());
+        let line = powershell_line(&cmd);
+        assert_eq!(powershell_words(&line), Some(cmd.clone()));
+        // The JSON is one single-quoted PowerShell word: `$H0X_CORE_EXE` is left for Claude's shell.
+        let arg = windows_arg(TOKEN_SAVER_SETTINGS);
+        assert!(line.contains(&format!(", {}, ", powershell_quote(&arg))), "{line}");
+        assert_eq!(windows_unquote(&arg), TOKEN_SAVER_SETTINGS);
+        // A `claude.cmd` shim goes through cmd.exe: `^` and `|` in the matcher stay inside its quotes.
+        let mut inside = false;
+        for ch in arg.chars() {
+            if ch == '"' {
+                inside = !inside;
+            } else if "^|&<>%".contains(ch) {
+                assert!(inside, "{ch:?} outside cmd.exe quotes in {arg}");
+            }
+        }
+        assert!(!inside, "the quotes close");
+    }
 }
