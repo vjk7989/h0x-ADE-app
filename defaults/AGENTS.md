@@ -783,6 +783,10 @@ What's about the user, never a look:
   Info has the switch. `found_via`: the answer to the welcome's one-time "How did
   you find HyperOx?" (`friend`, `x`, `github`, `search`, `other` or `skip`); once
   set it is not asked again.
+- `token_saver`: `true` turns Token Saver on, which shrinks big tool outputs (long
+  logs, large files, JSON) before an agent reads them (default `false`, off);
+  Settings → 0x Modes has the switch. It applies to new Claude Code terminals;
+  any value other than `true` reads as off.
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and

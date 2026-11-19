@@ -410,7 +410,7 @@ pub struct Person {
     #[serde(skip_serializing_if = "is_true", deserialize_with = "bool_or_true")]
     pub share_analytics: bool,
     /// 0x Modes > Token Saver: shrink big tool outputs before an agent reads them. Off unless set.
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "bool_or_false")]
     pub token_saver: bool,
     /// The welcome's one-time "How did you find HyperOx?": the choice, or "skip". Set means asked.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "string_or_none")]
@@ -527,6 +527,11 @@ pub fn install_id(dir: &std::path::Path) -> String {
 /// A bool; any other type is the default (true), so one bad value can't discard the file.
 fn bool_or_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     Ok(serde_json::Value::deserialize(d)?.as_bool().unwrap_or(true))
+}
+
+/// A bool; any other type is false, so one bad value can't discard the file.
+fn bool_or_false<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_bool().unwrap_or(false))
 }
 
 /// A string; any other type is None (not yet asked).
@@ -1352,7 +1357,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), mods: [("m".into(), ModChoice::default())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), clipboard_write: false, token_saver: true, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), mods: [("m".into(), ModChoice::default())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
@@ -1360,12 +1365,10 @@ mod tests {
         assert!(missing.is_empty(), "defaults/AGENTS.md (## The person) doesn't explain: {missing:?}");
     }
 
-    /// The guide's stated defaults are what an empty settings.json gives, and
-    /// every key it documents is one settings.json keeps.
     #[test]
     fn token_saver_defaults_off_and_round_trips() {
         let absent: Person = serde_json::from_str(r#"{"zoom":1.5}"#).unwrap();
-        assert!(!absent.token_saver && Person::default().token_saver && !Settings::default().token_saver);
+        assert!(!absent.token_saver && !Person::default().token_saver && !Settings::default().token_saver);
         assert!(serde_json::to_value(&absent).unwrap().get("token_saver").is_none());
         let on: Person = serde_json::from_str(r#"{"token_saver":true}"#).unwrap();
         assert!(on.token_saver && Settings::compose(&on, &crate::layout::Look::default(), true).token_saver);
@@ -1375,11 +1378,12 @@ mod tests {
     }
 
     #[test]
-    fn a_token_saver_that_is_not_a_bool_rejects_the_settings_file_without_panicking() {
-        // token_saver is a plain bool (no lenient reader like share_analytics): a wrong type is an error, never a panic or a silent on.
+    fn a_token_saver_that_is_not_a_bool_reads_as_off_and_keeps_the_file() {
+        // A wrong type is off, never a panic or a silent on, and the rest of the file is kept.
         for bad in [r#"{"token_saver":"yes"}"#, r#"{"token_saver":1}"#, r#"{"token_saver":null}"#, r#"{"token_saver":"true"}"#, r#"{"token_saver":[]}"#, "\u{feff}{\"token_saver\":0,\"zoom\":1.5}"] {
-            let err = parse_person(bad).unwrap_err();
-            assert!(err.contains("invalid type"), "{bad:?}: {err}");
+            let person = parse_person(bad).unwrap_or_else(|e| panic!("{bad:?}: {e}"));
+            assert!(!person.token_saver, "{bad:?}");
+            assert!(person.zoom == if bad.contains("zoom") { 1.5 } else { Person::default().zoom }, "{bad:?}");
         }
         // Only a real bool is read; false is the default and is not written back, true survives a BOM.
         let off = parse_person(r#"{"token_saver":false,"zoom":1.5}"#).unwrap();
@@ -1388,6 +1392,8 @@ mod tests {
         assert!(!parse_person("{}").unwrap().token_saver);
     }
 
+    /// The guide's stated defaults are what an empty settings.json gives, and
+    /// every key it documents is one settings.json keeps.
     #[test]
     fn share_analytics_defaults_on_and_round_trips() {
         let old: Person = serde_json::from_str(r#"{"telemetry":false}"#).unwrap();
