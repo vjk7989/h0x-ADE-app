@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Settings → Machines has a Mobile app block: scan a QR code (or use Download APK) to get the HyperOx Android app. Google Play and the App Store show as coming soon.
+
 ## [0.1.37] - 2026-11-20
 
 0x Modes: Token Saver. Bundles h0x-core 0.1.17.
