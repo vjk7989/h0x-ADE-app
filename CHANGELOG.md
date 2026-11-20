@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.1.38] - 2026-11-20
+
+New files and folders, and the Android app. Bundles h0x-core 0.1.18 (Token Saver fixes).
+
 ### Added
 
 - The Files panel header has New File, New Folder, Refresh and Collapse All buttons, like VS Code. New File and New Folder ask for the name in a row inside the selected folder (or next to the selected file, or at the top), refuse empty, invalid and existing names, and work on remote machines too. Esc cancels.
