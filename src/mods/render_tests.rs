@@ -3108,7 +3108,7 @@ fn machines_page_offers_the_android_app_by_qr_and_link_with_two_coming_soon_badg
     let (trees, calls) = describe_pressing_replying(cx, &staged, "frame/settings", values, None, &[], &replies, setup, 1);
     for tree in &trees {
         for text in [
-            "Mobile app",
+            "MOBILE APP",
             "Use HyperOx on your Android phone: check your agents, approve prompts and type into terminals over SSH or Tailscale.",
             "frame/settings/android-qr.svg",
             "Scan to download the Android app (APK)",

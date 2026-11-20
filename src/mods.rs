@@ -969,10 +969,10 @@ fn strings(v: Option<&HostValue>) -> Vec<String> {
     v.and_then(HostValue::as_array).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_owned)).collect()).unwrap_or_default()
 }
 
-/// The only web pages a mod may open: the ones the Info page links to.
-// The Android app the Machines page links to (the release routine attaches the newest APK to every release).
+/// The Android app the Machines page links to (the release routine attaches the newest APK to every release).
 const ANDROID_APK_URL: &str = "https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk";
 
+/// The only web pages a mod may open: the ones the Info page links to, and the Android app.
 fn allowed_link(url: &str) -> bool {
     matches!(url, "https://pavii.tech" | "https://www.pavii.tech/products/dev-tools/docs/" | "https://buckleson.com" | ANDROID_APK_URL)
 }
