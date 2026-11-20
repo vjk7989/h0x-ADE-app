@@ -1,7 +1,7 @@
 // A lazy file browser for the focused pane's folder. Local files edit in place and save
 // themselves (VS Code-style auto-save); remote and truncated files are read-only previews.
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
+import { v_flex, h_flex, Editor, EditorState, InputState, Input } from "gpui-base";
 import { spaces, panes, focused, agents, core, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, windowVisible, layout, nextCommand, openFile, shared, setShared } from "h0x";
 
 // Whether the layout shows this panel (as the sessions panel asks): no hidden
@@ -46,7 +46,8 @@ const BURST = 30000, LISTED = 5;
 // characters (they disguise a name) are dropped and it is capped at 200 characters.
 // At most 120 UTF-16 units of the error; a character the cut would split is dropped whole.
 const reason = e => { const s = String((e !== null && typeof e === "object" ? e.message : e) || "unknown error").slice(0, 120); return /[\ud800-\udbff]$/.test(s) ? s.slice(0, -1) : s; };
-const noteName =name => [...name.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "")].slice(0, 200).join("");
+const HIDDEN = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
+const noteName =name => [...name.replace(new RegExp(HIDDEN, "g"), "")].slice(0, 200).join("");
 // A file is written back with the line endings it was read with: CRLF only when every line had it.
 const eol = text => /\r\n/.test(text) && !/(^|[^\r])\n/.test(text) ? "\r\n" : "\n";
 const text = doc => { const value = doc.state.value(); return doc.eol === "\r\n" ? value.replace(/\r?\n/g, "\r\n") : value; };
@@ -76,10 +77,43 @@ async function directory(path, on) {
   return out;
 }
 
+// Makes one file (kind "file", empty) or folder; fails when the name is taken, so nothing is overwritten.
+async function create(kind, full, on) {
+  const windowsCreate = async () => {
+    const r = await exec("powershell", ["-NoProfile", "-Command", "& { param($p) New-Item -ItemType " + (kind === "file" ? "File" : "Directory") + " -LiteralPath $p -ErrorAction Stop | Out-Null } '" + full.replace(/['‘’‚‛]/g, "$&$&") + "'"], { on });
+    if (r.code !== 0) throw new Error(r.stderr || "Cannot create this");
+  };
+  if (!on && window()?.platform === "windows") return windowsCreate();
+  let r;
+  try { r = await exec("sh", ["-c", 'if [ "$2" = folder ]; then mkdir "$1"; else set -C; : > "$1"; fi', "files", full, kind], { on }); }
+  catch (e) {
+    if (on && String(e).includes("cannot start sh: program not found")) return windowsCreate();
+    throw e;
+  }
+  if (r.code !== 0) throw new Error(r.stderr || "Cannot create this");
+}
+
+// Why a new name is refused, or null. Nested names (a/b) are refused: nothing here makes parents. The rules
+// are the strictest of every system, whatever this window runs on: the folder may be on another machine.
+function badName(name, siblings) {
+  if (!name.trim()) return "Enter a name";
+  if (/[/\\:*?"<>|]/.test(name)) return 'A name cannot contain / \\ : * ? " < > |';
+  if (HIDDEN.test(name)) return "A name cannot contain control, invisible or text-direction characters";
+  if (name === "." || name === "..") return "This name is not valid";
+  if (/[ .]$/.test(name)) return "Names can't end with a space or dot";
+  const device = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.exec(name);
+  if (device) return `${device[1].toUpperCase()} is reserved on Windows`;
+  const windows = window()?.platform === "windows";
+  const same = n => windows ? n.toLowerCase() : n;
+  if (siblings.some(e => same(e.name) === same(name))) return `"${name}" already exists here`;
+  return null;
+}
+
 export default class Files extends View {
   init(_props, cx) {
     this.saved = new Map(); this.drafts = new Map(); this.edits = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
+    this.sel = null; this.creating = null;
     const last = shared(LAST_LINK);
     if (last?.full && Date.now() - last.at < LAST_LINK_MS) this.link = { full: last.full, line: last.line ?? null };
     this.refresh(cx);
@@ -141,7 +175,7 @@ export default class Files extends View {
     if (next !== this.context?.key) {
       if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file });
       const saved = this.saved.get(next);
-      this.context = { key: next, cwd, on, space }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
+      this.context = { key: next, cwd, on, space }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders); this.sel = null; this.creating = null;
       // A file opened from a terminal link stays up when the folder behind it settles (a new profile's first
       // look at the folder can change the context a moment after the click): its view is left alone, unless
       // it is still loading (that load belongs to the old context), then it is opened again.
@@ -202,6 +236,62 @@ export default class Files extends View {
       }
     }
     cx.notify();
+  }
+
+  collapseAll(cx) {
+    const top = this.entries.get("");
+    this.folders = new Set(); this.entries = new Map(top ? [["", top]] : []); this.sel = null; this.creating = null;
+    cx.notify();
+  }
+
+  // New File / New Folder: an inline name row in the selected folder, the parent of the selected file, or the root.
+  startCreate(kind, cx) {
+    if (!this.root) return;
+    const dir = !this.sel ? "" : this.sel.dir ? this.sel.path : this.sel.path.split("/").slice(0, -1).join("/");
+    // The folders down to it are opened so the row shows.
+    let at = "";
+    for (const part of dir ? dir.split("/") : []) {
+      at = at ? `${at}/${part}` : part;
+      if (!this.folders.has(at)) this.toggle(at, cx);
+    }
+    const input = InputState.new({ placeholder: kind === "file" ? "File name" : "Folder name" });
+    input.on("submit", (_e, cx) => this.commitCreate(input.value(), cx));
+    input.focus();
+    this.creating = { kind, dir, input, error: null, busy: false };
+    cx.notify();
+  }
+
+  commitCreate(value, cx) {
+    const c = this.creating;
+    if (!c || c.busy) return;
+    c.error = badName(value, this.entries.get(c.dir) ?? []);
+    if (c.error) return cx.notify();
+    const path = c.dir ? `${c.dir}/${value}` : value, full = `${this.root}/${path}`, context = this.context;
+    c.busy = true;
+    cx.spawn(async cx => {
+      try {
+        await create(c.kind, full, this.on);
+        if (!this.current(context)) return;
+        if (this.creating === c) this.creating = null;
+        await this.loadFolder(c.dir, context);
+        if (!this.current(context)) return;
+        this.sel = { path, dir: c.kind === "folder" };
+        if (c.kind === "file") this.show(path, cx);
+      } catch (e) {
+        if (this.creating === c) c.error = reason(e); else this.error = String(e);
+      } finally { c.busy = false; cx.notify(); }
+    });
+  }
+
+  createRow(depth, t) {
+    const c = this.creating;
+    return v_flex().id("files-new").flex_none().pl(8 + depth * 18).pr(8).py(2)
+      .on_key_down((e, cx) => { if (e.key === "escape") { this.creating = null; cx.stop_propagation(); cx.notify(); } })
+      .child(h_flex().h(26).gap(7).items_center()
+        .child(div().w(12).flex_none())
+        .child(svg(`mods/files/${c.kind}.svg`).size(14).flex_none().text_color(t.muted))
+        .child(Input.new(c.input).flex_1().min_w(0).h(24).px(6).rounded(5).border_1().border_color(c.error ? t.ansi1 : t.accent).bg(t.background).text_size(12.5).text_color(t.foreground)))
+      .when(Boolean(c.error), el => el.child(div().pl(33).pt(2).text_size(11).text_color(t.ansi1).child(c.error)));
   }
 
   // A terminal link opens a file of this machine, by its full path, whatever machine the panel lists.
@@ -388,11 +478,12 @@ ${doc.path}`, now = Date.now(), edit = this.edits.get(id);
 
   rows(prefix, depth, out, t) {
     if (out.length >= TOTAL || depth > 40) return out;
+    if (this.creating?.dir === prefix) out.push(this.createRow(depth, t));
     for (const entry of this.entries.get(prefix) ?? []) {
       if (out.length >= TOTAL) break;
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path), mark = this.marks[`${this.root}/${path}`];
       out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
-        .on_click((_e, cx) => entry.dir ? this.toggle(path, cx) : this.show(path, cx))
+        .on_click((_e, cx) => { this.sel = { path, dir: entry.dir }; if (entry.dir) this.toggle(path, cx); else this.show(path, cx); })
         .child(entry.dir ? svg(`mods/files/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
         .child(svg(`mods/files/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(t.muted))
         .child(div().flex_1().min_w(0).truncate().child(entry.name))
@@ -406,6 +497,8 @@ ${doc.path}`, now = Date.now(), edit = this.edits.get(id);
     if (key() !== this.context?.key) this.refresh(cx);
     const t = theme(), doc = this.doc;
     const button = (id, label, click) => div().id(id).px(8).py(2).rounded(5).cursor_pointer().border_1().border_color(t.border).hover(s => s.bg(t.hover)).on_click(click).child(label);
+    const tool = (id, icon, click) => h_flex().id(id).w(22).h(22).flex_none().items_center().justify_center().rounded(5).cursor_pointer().hover(s => s.bg(t.hover)).on_click(click)
+      .child(svg(`mods/files/${icon}.svg`).size(14).flex_none().text_color(t.muted));
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted).on_click((_e, cx) => { this.show(null, cx); cx.notify(); }).child("←")))
@@ -415,7 +508,13 @@ ${doc.path}`, now = Date.now(), edit = this.edits.get(id);
           ? h_flex().flex_1().min_w(0).justify_end().text_size(12)
             .child(div().min_w(0).truncate().text_color(t.dim).child(this.file.slice(0, this.file.lastIndexOf("/") + 1)))
             .child(div().flex_none().text_color(t.foreground).child((doc?.dirty ? "● " : "") + this.file.slice(this.file.lastIndexOf("/") + 1)))
-          : div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.root?.split(/[\\/]/).pop() ?? "")))
+          // Clicking the folder name selects the root again: New File / New Folder then create there.
+          : div().id("files-root").flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).on_click((_e, cx) => { this.sel = null; cx.notify(); }).child(this.root?.split(/[\\/]/).pop() ?? "")))
+        .when(!this.file && Boolean(this.root), el => el.child(h_flex().flex_none().gap(2)
+          .child(tool("files-new-file", "file-plus", (_e, cx) => this.startCreate("file", cx)))
+          .child(tool("files-new-folder", "folder-plus", (_e, cx) => this.startCreate("folder", cx)))
+          .child(tool("files-refresh", "refresh-cw", (_e, cx) => { this.refresh(cx); cx.notify(); }))
+          .child(tool("files-collapse", "chevrons-down-up", (_e, cx) => this.collapseAll(cx)))))
       .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
