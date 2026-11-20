@@ -1981,6 +1981,99 @@ mod tests {
     }
 
     #[test]
+    fn allowed_link_refuses_every_near_miss_of_the_android_apk_address() {
+        assert_eq!(ANDROID_APK_URL, "https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk");
+        assert!(allowed_link(ANDROID_APK_URL));
+        let apk = ANDROID_APK_URL;
+        let tail = apk.strip_prefix("https://").unwrap();
+        let mut near = vec![
+            // Anything around the address: whitespace, a slash, a query, a fragment, a longer name.
+            String::new(),
+            format!(" {apk}"),
+            format!("{apk} "),
+            format!("\t{apk}"),
+            format!("{apk}\n"),
+            format!("{apk}\r\n"),
+            format!("{apk}\0"),
+            format!("{apk}/"),
+            format!("{apk}?"),
+            format!("{apk}#"),
+            format!("{apk}#install"),
+            format!("{apk}.exe"),
+            format!("{apk}.sig"),
+            apk[..apk.len() - 1].to_owned(),
+            // Another scheme, or none.
+            format!("http://{tail}"),
+            format!("HTTPS://{tail}"),
+            format!("//{tail}"),
+            tail.to_owned(),
+            format!("file://{tail}"),
+            format!("javascript:location='{apk}'"),
+            format!("javascript://{tail}%0Aalert(1)"),
+        ];
+        near.extend(
+            [
+                "https://GITHUB.COM/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk",
+                "https://GitHub.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk",
+                "https://github.com/Buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk",
+                "https://github.com/buckleson/h0x-ade-releases/releases/latest/download/HyperOx-android.apk",
+                "https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/hyperox-android.apk",
+                "https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.APK",
+                // URL-encoded spellings of the same address.
+                "https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx%2Dandroid.apk",
+                "https://github.com/buckleson/h0x-ADE-Releases/releases/latest%2Fdownload/HyperOx-android.apk",
+                "https://github.com/%62uckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk",
+                "https%3A%2F%2Fgithub.com%2Fbuckleson%2Fh0x-ADE-Releases%2Freleases%2Flatest%2Fdownload%2FHyperOx-android.apk",
+                // Another host, port, owner, release or path shape.
+                "https://www.github.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk",
+                "https://github.com:443/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk",
+                "https://github.com.evil.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk",
+                "https://github.com@evil.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk",
+                "https://evil.com@github.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk",
+                "https://github.com/vjk7989/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk",
+                "https://github.com/buckleson/h0x-ADE-app/releases/latest/download/HyperOx-android.apk",
+                "https://github.com/buckleson/h0x-ADE-Releases/releases/download/v0.1.0/HyperOx-android.apk",
+                "https://github.com//buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk",
+                "https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/../download/HyperOx-android.apk",
+                "https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/./HyperOx-android.apk",
+                "https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-andr\u{43e}id.apk",
+                // Local files and Windows paths.
+                "file:///C:/Users/me/Downloads/HyperOx-android.apk",
+                "file:///home/me/Downloads/HyperOx-android.apk",
+                r"C:\Users\me\Downloads\HyperOx-android.apk",
+                r"\\github.com\buckleson\h0x-ADE-Releases\releases\latest\download\HyperOx-android.apk",
+                r"https:\\github.com\buckleson\h0x-ADE-Releases\releases\latest\download\HyperOx-android.apk",
+                r"https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download\HyperOx-android.apk",
+                "HyperOx-android.apk",
+            ]
+            .map(String::from),
+        );
+        for url in &near {
+            assert!(!allowed_link(url), "{url:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn the_android_qr_is_an_embedded_settings_icon_and_the_page_links_the_same_apk() {
+        let file = |path: &str| -> &'static [u8] {
+            FRAME_MODS.iter().find(|(p, _)| *p == path).map(|(_, b)| *b).unwrap_or_else(|| panic!("{path} is not embedded"))
+        };
+        let qr = std::str::from_utf8(file("settings/android-qr.svg")).unwrap();
+        assert!(qr.trim_start().starts_with("<svg") && qr.contains("viewBox=\""), "{qr}");
+        assert!(qr.len() < 16 * 1024, "a small QR: {} bytes", qr.len());
+        for other in ["<image", "<style", "<script", "<foreignObject", "href=", "data:", " onload", " onclick"] {
+            assert!(!qr.contains(other), "no {other} in the QR: {qr}");
+        }
+        // The page asks for the icon through the same helper as its other settings icons, and links the one address the host allows.
+        let page = std::str::from_utf8(file("settings/main.js")).unwrap();
+        assert!(page.contains("const I = (name) => `frame/settings/${name}.svg`;"), "settings icons resolve under frame/settings");
+        assert!(page.contains("svg(I(\"android-qr\"))"), "the Machines page shows the embedded QR");
+        assert_eq!(page.matches(&format!("\"{ANDROID_APK_URL}\"")).count(), 1, "the page names the allowed APK address once");
+        assert!(page.contains("openLink(apk)"), "Download APK opens that address");
+        assert_eq!(page.matches("HyperOx-android.apk").count(), 1, "no second, different APK address on the page");
+    }
+
+    #[test]
     fn open_file_is_for_the_files_panel_alone() {
         std::thread::spawn(|| {
             use gpui_shell::HostArguments;

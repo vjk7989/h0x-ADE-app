@@ -3133,6 +3133,57 @@ fn machines_page_offers_the_android_app_by_qr_and_link_with_two_coming_soon_badg
     assert!(c.writes.is_empty() && c.unexpected.is_empty(), "{:?} {:?}", c.writes, c.unexpected);
 }
 
+#[gpui::test]
+fn machines_page_keeps_the_mobile_app_block_on_a_white_card_when_machines_fail_or_exist_in_light_and_dark(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let failed = || core_error("unavailable");
+    let listed = || core_ok(json!({"machines":[{"name":"remote","state":"online"}]}));
+    for (label, light, reply, failing) in [
+        ("machine ls fails, dark", false, failed(), true),
+        ("machine ls fails, light", true, failed(), true),
+        ("one machine, light", true, listed(), false),
+        ("one machine, dark", false, listed(), false),
+    ] {
+        let mut p = props();
+        p["section"] = json!("machines");
+        let mut values = fixture(true, p, updates("current", "current"));
+        let colors = [("background", "#fafafa", "#111111"), ("foreground", "#1c1c1c", "#ededed"), ("dim", "#6b6b6b", "#8a8a8a"), ("border", "#d9d9d9", "#333333")];
+        for (key, on_light, on_dark) in colors {
+            values.get_mut("theme").unwrap()[key] = json!(if light { on_light } else { on_dark });
+        }
+        let (dim, border) = (values["theme"]["dim"].clone(), values["theme"]["border"].clone());
+        let replies = [("machine ls", reply)];
+        let (trees, calls) = describe_pressing_replying(cx, &staged, "frame/settings", values, None, &[], &replies, "", 1);
+        let tree = trees.last().unwrap();
+        if failing {
+            assert!(tree.contains("fixture unavailable"), "{label}: the error shows: {tree}");
+        } else {
+            assert!(tree.contains("\"st-m-rename-remote\"") && tree.contains("\"st-m-rm-remote\""), "{label}: the machine shows: {tree}");
+        }
+        for text in ["text \"MOBILE APP\"", "text \"Scan to download the Android app (APK)\"", "text \"Download APK\"", "text \"Google Play: coming soon\"", "text \"App Store: coming soon\""] {
+            assert!(tree.contains(text), "{label}: {text}: {tree}");
+        }
+        // The QR keeps dark modules on a white card in every theme, so a phone can scan it.
+        let card = tree.lines().find(|l| l.contains("\"st-m-qr\"")).unwrap_or_else(|| panic!("{label}: {tree}"));
+        assert!(card.contains(".bg[Str(\"#ffffff\")]"), "{label}: a white card: {card}");
+        let qr = tree.lines().find(|l| l.contains("frame/settings/android-qr.svg")).unwrap_or_else(|| panic!("{label}: {tree}"));
+        assert!(qr.trim_start().starts_with("svg") && qr.contains(".text_color[Str(\"#000000\")]"), "{label}: black modules: {qr}");
+        // The badges follow the theme and stay inert.
+        for id in ["st-m-play", "st-m-store"] {
+            let badge = tree.lines().find(|l| l.contains(&format!("\"{id}\""))).unwrap_or_else(|| panic!("{label}: {id}: {tree}"));
+            assert!(badge.contains(&format!(".text_color[Str({dim})]")) && badge.contains(&format!(".border_color[Str({border})]")), "{label}: {badge}");
+            assert!(!badge.contains(":on_click(fn)") && !badge.contains(".cursor_pointer"), "{label}: {badge}");
+        }
+        assert!(tree.lines().find(|l| l.contains("\"st-m-apk\"")).is_some_and(|l| l.contains(":on_click(fn)")), "{label}: {tree}");
+        let c = calls.borrow();
+        // Showing the block opens nothing, tells nothing, and asks the core only for the machine list.
+        assert!(!c.effects.iter().any(|(n, _)| n == "openLink" || n == "notify"), "{label}: {:?}", c.effects);
+        assert!(!c.cores.is_empty() && c.cores.iter().all(|a| a.join(" ").starts_with("machine ls")), "{label}: {:?}", c.cores);
+        assert!(c.writes.is_empty() && c.unexpected.is_empty(), "{label}: {:?} {:?}", c.writes, c.unexpected);
+    }
+}
+
 const FOUND_VIA_QUESTION: &str = "How did you find HyperOx?";
 const FOUND_VIA: [(&str, &str, &str); 6] = [
     ("w-found-friend", "Friend", "friend"),
