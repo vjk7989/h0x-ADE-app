@@ -409,6 +409,9 @@ pub struct Person {
     /// Send usage analytics (Settings > Info). Failure reports are not governed by this.
     #[serde(skip_serializing_if = "is_true", deserialize_with = "bool_or_true")]
     pub share_analytics: bool,
+    /// 0x Modes > Token Saver: shrink big tool outputs before an agent reads them. Off unless set.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "bool_or_false")]
+    pub token_saver: bool,
     /// The welcome's one-time "How did you find HyperOx?": the choice, or "skip". Set means asked.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "string_or_none")]
     pub found_via: Option<String>,
@@ -526,6 +529,11 @@ fn bool_or_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error
     Ok(serde_json::Value::deserialize(d)?.as_bool().unwrap_or(true))
 }
 
+/// A bool; any other type is false, so one bad value can't discard the file.
+fn bool_or_false<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_bool().unwrap_or(false))
+}
+
 /// A string; any other type is None (not yet asked).
 fn string_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     Ok(match serde_json::Value::deserialize(d)? {
@@ -555,6 +563,7 @@ impl Default for Person {
             clipboard_write: false,
             check_updates: true,
             share_analytics: true,
+            token_saver: false,
             found_via: None,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
@@ -598,6 +607,7 @@ pub struct Settings {
     pub clipboard_write: bool,
     pub check_updates: bool,
     pub share_analytics: bool,
+    pub token_saver: bool,
     pub minimum_contrast: f32,
     /// Scrollback lines per new terminal pane.
     pub scrollback_lines: u32,
@@ -644,6 +654,7 @@ impl Default for Settings {
             clipboard_write: false,
             check_updates: true,
             share_analytics: true,
+            token_saver: false,
             minimum_contrast: 1.0,
             scrollback_lines: SCROLLBACK_DEFAULT,
             option_as_alt: OptionAsAlt::Auto,
@@ -686,6 +697,7 @@ impl Settings {
             clipboard_write: person.clipboard_write,
             check_updates: person.check_updates,
             share_analytics: person.share_analytics,
+            token_saver: person.token_saver,
             minimum_contrast: person.minimum_contrast,
             scrollback_lines: person.scrollback_lines,
             option_as_alt: person.option_as_alt,
@@ -1345,12 +1357,39 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), mods: [("m".into(), ModChoice::default())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), clipboard_write: false, token_saver: true, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), mods: [("m".into(), ModChoice::default())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
         let missing: Vec<&String> = keys.iter().filter(|k| !section.contains(&format!("`{k}`"))).collect();
         assert!(missing.is_empty(), "defaults/AGENTS.md (## The person) doesn't explain: {missing:?}");
+    }
+
+    #[test]
+    fn token_saver_defaults_off_and_round_trips() {
+        let absent: Person = serde_json::from_str(r#"{"zoom":1.5}"#).unwrap();
+        assert!(!absent.token_saver && !Person::default().token_saver && !Settings::default().token_saver);
+        assert!(serde_json::to_value(&absent).unwrap().get("token_saver").is_none());
+        let on: Person = serde_json::from_str(r#"{"token_saver":true}"#).unwrap();
+        assert!(on.token_saver && Settings::compose(&on, &crate::layout::Look::default(), true).token_saver);
+        assert_eq!(serde_json::to_value(&on).unwrap()["token_saver"], serde_json::json!(true));
+        let back: Person = serde_json::from_value(serde_json::to_value(&on).unwrap()).unwrap();
+        assert!(back.token_saver);
+    }
+
+    #[test]
+    fn a_token_saver_that_is_not_a_bool_reads_as_off_and_keeps_the_file() {
+        // A wrong type is off, never a panic or a silent on, and the rest of the file is kept.
+        for bad in [r#"{"token_saver":"yes"}"#, r#"{"token_saver":1}"#, r#"{"token_saver":null}"#, r#"{"token_saver":"true"}"#, r#"{"token_saver":[]}"#, "\u{feff}{\"token_saver\":0,\"zoom\":1.5}"] {
+            let person = parse_person(bad).unwrap_or_else(|e| panic!("{bad:?}: {e}"));
+            assert!(!person.token_saver, "{bad:?}");
+            assert!(person.zoom == if bad.contains("zoom") { 1.5 } else { Person::default().zoom }, "{bad:?}");
+        }
+        // Only a real bool is read; false is the default and is not written back, true survives a BOM.
+        let off = parse_person(r#"{"token_saver":false,"zoom":1.5}"#).unwrap();
+        assert!(!off.token_saver && serde_json::to_value(&off).unwrap().get("token_saver").is_none());
+        assert!(parse_person("\u{feff}{\"token_saver\":true}").unwrap().token_saver);
+        assert!(!parse_person("{}").unwrap().token_saver);
     }
 
     /// The guide's stated defaults are what an empty settings.json gives, and

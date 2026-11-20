@@ -248,6 +248,22 @@ pub fn agent(argv: &[String]) -> Option<String> {
     })
 }
 
+/// Token Saver's PostToolUse hook, as Claude Code's `--settings` JSON. Core sets
+/// `H0X_CORE_EXE` in every terminal; Claude runs the command through a shell.
+const TOKEN_SAVER_SETTINGS: &str = r#"{"hooks":{"PostToolUse":[{"matcher":"^(Bash|Read|Grep)$","hooks":[{"type":"command","command":"\"$H0X_CORE_EXE\" gate","timeout":20}]}]}}"#;
+
+/// `argv` for a new terminal, with Token Saver's hook added when `on` and it
+/// starts Claude Code: `claude --settings <json> <the person's args>`. Anything
+/// else, and a Claude that already has `--settings` (the person's choice wins),
+/// stays exactly as asked.
+pub fn with_token_saver(on: bool, mut argv: Vec<String>) -> Vec<String> {
+    let claude = argv.first().is_some_and(|a| base(a).eq_ignore_ascii_case("claude")) && agent(&argv).as_deref() == Some("claude");
+    if on && claude && !argv.iter().any(|a| a == "--settings" || a.starts_with("--settings=")) {
+        argv.splice(1..1, ["--settings".to_owned(), TOKEN_SAVER_SETTINGS.to_owned()]);
+    }
+    argv
+}
+
 /// How the app calls an agent ("Kiro finished"), from its 7501 `app`: the
 /// name `of` shows for it (the person's `programs.json` included), else the `app`.
 pub fn name(app: &str) -> String {
@@ -835,5 +851,105 @@ mod tests {
         assert!(slot_number(Some(&crate::mods::from_host(&gpui_shell::HostValue::Number(f64::NAN)))).is_err());
         assert!(slot_number(Some(&json!(u64::MAX))).is_err());
         assert!(slot_number(Some(&json!({ "index": 1 }))).is_err());
+    }
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+    fn hooked(rest: &[&str]) -> Vec<String> {
+        let mut v = argv(&["claude", "--settings", TOKEN_SAVER_SETTINGS]);
+        v.extend(argv(rest));
+        v
+    }
+
+    #[test]
+    fn token_saver_adds_the_hook_to_claude_only_when_on() {
+        assert_eq!(with_token_saver(true, argv(&["claude"])), hooked(&[]));
+        assert_eq!(with_token_saver(false, argv(&["claude"])), argv(&["claude"]), "off: unchanged");
+        assert_eq!(with_token_saver(true, argv(&["claude.exe"]))[1..], hooked(&[])[1..]);
+        assert_eq!(with_token_saver(true, argv(&[r"C:\Program Files\claude\claude.exe"]))[0], r"C:\Program Files\claude\claude.exe");
+        assert_eq!(with_token_saver(true, argv(&[r"C:\Program Files\claude\claude.exe"]))[1], "--settings");
+        assert_eq!(with_token_saver(true, argv(&["/usr/local/bin/claude", "--resume", "fix it"])), {
+            let mut v = hooked(&["--resume", "fix it"]);
+            v[0] = "/usr/local/bin/claude".into();
+            v
+        }, "the person's args keep their order, after ours");
+    }
+
+    #[test]
+    fn token_saver_leaves_everything_else_alone() {
+        for a in [argv(&[]), argv(&["codex"]), argv(&["opencode", "x"]), argv(&["pwsh"]), argv(&["claude", "--settings", "{}"]), argv(&["claude", "--settings=x.json"])] {
+            assert_eq!(with_token_saver(true, a.clone()), a);
+        }
+    }
+
+    #[test]
+    fn token_saver_json_is_valid_and_survives_the_powershell_line() {
+        let v: Value = serde_json::from_str(TOKEN_SAVER_SETTINGS).unwrap();
+        assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "\"$H0X_CORE_EXE\" gate");
+        let cmd = with_token_saver(true, argv(&["claude", "go"]));
+        assert_eq!(powershell_words(&powershell_line(&cmd)), Some(cmd));
+    }
+
+    #[test]
+    fn token_saver_matches_claude_in_any_case_like_agent() {
+        // Windows file names ignore case and so does `agent`: the hook goes to any casing.
+        for name in ["CLAUDE.EXE", "Claude", "Claude.exe", r"C:\Tools\CLAUDE.EXE", "claude.EXE", r"C:\Tools\claude.Exe", "/opt/claude/bin/claude", r"\\server\share\claude.exe"] {
+            assert_eq!(agent(&argv(&[name])).as_deref(), Some("claude"), "{name}");
+            let run = with_token_saver(true, argv(&[name]));
+            assert_eq!(run[0], name);
+            assert_eq!(run[1..], hooked(&[])[1..], "{name}");
+        }
+    }
+
+    #[test]
+    fn token_saver_skips_other_programs_that_run_or_resemble_claude() {
+        // `agent` calls these Claude (its process name, or the program an interpreter runs),
+        // but the command is not `claude` itself: no hook.
+        for a in [argv(&["claude-code"]), argv(&["npx", "claude"])] {
+            assert_eq!(agent(&a).as_deref(), Some("claude"), "{a:?}");
+            assert_eq!(with_token_saver(true, a.clone()), a);
+        }
+        for a in [argv(&["claude-dev"]), argv(&["claudex"]), argv(&[r"C:\Users\me\AppData\Roaming\npm\claude.cmd"]), argv(&[""]), argv(&["", "claude"]), argv(&["pwsh.exe", "-c", "claude"])] {
+            assert_eq!(with_token_saver(true, a.clone()), a, "{a:?}");
+        }
+    }
+
+    #[test]
+    fn token_saver_takes_any_settings_word_as_the_persons_own_even_a_prompt() {
+        // `-p --settings` is a prompt, yet the word still counts as the person's own
+        // `--settings`: nothing is added. So does a bare `--settings` and one after `--`.
+        for a in [argv(&["claude", "-p", "--settings"]), argv(&["claude", "--settings"]), argv(&["claude", "--", "--settings=x"]), argv(&["claude", "--settings="])] {
+            assert_eq!(with_token_saver(true, a.clone()), a, "{a:?}");
+        }
+        // Only that exact flag: look-alikes and a prompt that only mentions it get the hook.
+        for rest in [&["--settingsx"][..], &["--Settings", "x.json"], &["-p", "use --settings=x"], &["-p", " --settings"], &["--setting-sources", "user"]] {
+            let mut a = argv(&["claude"]);
+            a.extend(argv(rest));
+            assert_eq!(with_token_saver(true, a), hooked(rest), "{rest:?}");
+        }
+    }
+
+    #[test]
+    fn token_saver_hook_and_a_task_with_quotes_and_dollars_survive_the_powershell_line() {
+        let task = "say \"hi\" to $env:USERNAME's \u{2018}box\u{2019}; `$(Get-Date)` & | > done";
+        let mut cmd = with_token_saver(true, argv(&["claude"]));
+        cmd.push(task.to_owned());
+        let line = powershell_line(&cmd);
+        assert_eq!(powershell_words(&line), Some(cmd.clone()));
+        // The JSON is one single-quoted PowerShell word: `$H0X_CORE_EXE` is left for Claude's shell.
+        let arg = windows_arg(TOKEN_SAVER_SETTINGS);
+        assert!(line.contains(&format!(", {}, ", powershell_quote(&arg))), "{line}");
+        assert_eq!(windows_unquote(&arg), TOKEN_SAVER_SETTINGS);
+        // A `claude.cmd` shim goes through cmd.exe: `^` and `|` in the matcher stay inside its quotes.
+        let mut inside = false;
+        for ch in arg.chars() {
+            if ch == '"' {
+                inside = !inside;
+            } else if "^|&<>%".contains(ch) {
+                assert!(inside, "{ch:?} outside cmd.exe quotes in {arg}");
+            }
+        }
+        assert!(!inside, "the quotes close");
     }
 }

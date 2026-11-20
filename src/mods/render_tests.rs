@@ -2788,8 +2788,25 @@ fn describe_pressing_files(
     setup: &str,
     presses: usize,
 ) -> (Vec<String>, Rc<RefCell<Calls>>) {
+    describe_pressing_replying(cx, staged, entry, values, settings, files, &[], setup, presses)
+}
+
+// `describe_pressing_files` where `replies` (a core or exec command line prefix, its reply) are answered too.
+#[allow(clippy::too_many_arguments)]
+fn describe_pressing_replying(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    entry: &str,
+    values: BTreeMap<String, Value>,
+    settings: Option<&str>,
+    files: &[(&str, &str)],
+    replies: &[(&str, Value)],
+    setup: &str,
+    presses: usize,
+) -> (Vec<String>, Rc<RefCell<Calls>>) {
     let calls = Rc::new(RefCell::new(Calls::default()));
     calls.borrow_mut().files.extend(files.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    calls.borrow_mut().replies.extend(replies.iter().map(|(k, v)| (k.to_string(), v.clone())));
     // Any scripted reply records the disk; no core or exec call starts with this one.
     calls.borrow_mut().replies.insert("fixture-unused".into(), Value::Null);
     if let Some(text) = settings {
@@ -2875,6 +2892,171 @@ fn settings_analytics_switch_never_overwrites_a_settings_file_it_could_not_read(
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", info_values(), Some(bad), ANALYTICS_SWITCH_PRESS, 1);
         assert!(calls.borrow().writes.is_empty(), "{bad:?}: {:?}", calls.borrow().writes);
         assert!(trees[1].contains("can't be read"), "{bad:?}: the page says why nothing changed: {}", trees[1]);
+    }
+}
+
+fn modes_values() -> BTreeMap<String, Value> {
+    let mut p = props();
+    p["section"] = json!("modes");
+    fixture(true, p, updates("current", "current"))
+}
+
+// Keeps the Token Saver switch's click and names the switch by its state: st-token-saver-on or -off.
+const TOKEN_SAVER_PRESS: &str = "const toggle = this.toggle.bind(this); \
+    this.toggle = (t, id, on, onClick, asTag) => { if (id !== 'st-token-saver') return toggle(t, id, on, onClick, asTag); \
+    this.press = onClick; return toggle(t, on ? 'st-token-saver-on' : 'st-token-saver-off', on, onClick, asTag); };";
+
+#[gpui::test]
+fn settings_nav_lists_0x_modes_between_alerts_and_mods_and_it_opens_on_click(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Another page: the nav item is there without its page.
+    let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", info_values(), None, "", 0);
+    let tree = &trees[0];
+    let at = |id: &str| tree.find(&format!("\"st-s-{id}\"")).unwrap_or_else(|| panic!("st-s-{id}: {tree}"));
+    assert!(at("alerts") < at("modes") && at("modes") < at("mods"), "0x Modes is between Alerts and Mods: {tree}");
+    let line = tree.lines().find(|l| l.contains("\"st-s-modes\"")).unwrap();
+    assert!(line.contains(":on_click(fn)"), "{line}");
+    assert!(tree.contains("0x Modes") && tree.contains("gauge.svg"), "the nav names it with its icon: {tree}");
+    assert!(!tree.contains("st-token-saver") && !tree.contains("0X MODES"), "the Info page is not the 0x Modes page: {tree}");
+    assert!(calls.borrow().cores.is_empty() && calls.borrow().unexpected.is_empty(), "{:?} {:?}", calls.borrow().cores, calls.borrow().unexpected);
+}
+
+#[gpui::test]
+fn settings_0x_modes_page_renders_token_saver_off_for_the_default_person_without_calling_the_core(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // No file, an empty one, one with other keys and one with token_saver false: all the default person.
+    for file in [None, Some("{}"), Some(r#"{"zoom": 1.25}"#), Some(r#"{"token_saver": false}"#)] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, TOKEN_SAVER_PRESS, 0);
+        let tree = &trees[0];
+        for text in ["0X MODES", "Token Saver", "st-token-saver-off", "Tokens saved: ", "Security", "ZK Proofs", "Observability"] {
+            assert!(tree.contains(text), "{file:?}: {text:?}: {tree}");
+        }
+        assert_eq!(tree.matches("Coming soon").count(), 3, "{file:?}: {tree}");
+        assert!(!tree.contains("st-token-saver-on") && !tree.contains("can't be read"), "{file:?}: {tree}");
+        let c = calls.borrow();
+        assert!(c.cores.is_empty() && c.execs.is_empty(), "{file:?}: rendering never calls the core: {:?} {:?}", c.cores, c.execs);
+        assert!(c.writes.is_empty() && c.unexpected.is_empty(), "{file:?}: {:?} {:?}", c.writes, c.unexpected);
+    }
+}
+
+// Opens the 0x Modes page from another one, as a nav click does.
+const OPEN_MODES: &str = "this.press = (_e, cx) => this.openSection('modes', cx);";
+
+fn gate_stats_reply(code: i64, stdout: &str) -> Value {
+    json!({"code": code, "stdout": stdout, "stderr": ""})
+}
+
+#[gpui::test]
+fn settings_0x_modes_tokens_saved_line_comes_from_one_gate_stats_call_made_when_the_page_opens(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let big = r#"{"tokens_saved":1234567,"outputs":17000,"bytes_in":9,"bytes_shown":1}"#;
+    let cases = [
+        (gate_stats_reply(0, r#"{"tokens_saved":12345,"outputs":17,"bytes_in":100,"bytes_shown":10}"#), "Tokens saved: 12,345 (~$0.04) across 17 big outputs"),
+        (gate_stats_reply(0, big), "Tokens saved: 1,234,567 (~$3.70) across 17,000 big outputs"),
+        (gate_stats_reply(0, r#"{"tokens_saved":0,"outputs":0,"bytes_in":0,"bytes_shown":0}"#), "Tokens saved: 0 (~$0.00) across 0 big outputs"),
+        (gate_stats_reply(0, "not json"), "Tokens saved: \u{2014}"),
+        (gate_stats_reply(0, ""), "Tokens saved: \u{2014}"),
+        (gate_stats_reply(0, "{}"), "Tokens saved: \u{2014}"),
+        (gate_stats_reply(0, r#"{"tokens_saved":-5,"outputs":1}"#), "Tokens saved: \u{2014}"),
+        (gate_stats_reply(0, r#"{"tokens_saved":"7","outputs":1}"#), "Tokens saved: \u{2014}"),
+        (gate_stats_reply(2, ""), "Tokens saved: \u{2014}"),
+        (gate_stats_reply(1, r#"{"error":{"kind":"unknown","message":"unknown command"}}"#), "Tokens saved: \u{2014}"),
+    ];
+    for (reply, line) in cases {
+        let replies = [("gate stats --json", reply.clone())];
+        let (trees, calls) = describe_pressing_replying(cx, &staged, "frame/settings", info_values(), None, &[], &replies, OPEN_MODES, 1);
+        assert!(trees[1].contains(line), "{reply}: {line:?}: {}", trees[1]);
+        let c = calls.borrow();
+        assert_eq!(c.cores, [["gate", "stats", "--json"]], "{reply}: one call, made on opening the page");
+        assert!(c.unexpected.is_empty(), "{reply}: {:?}", c.unexpected);
+    }
+}
+
+#[gpui::test]
+fn settings_0x_modes_as_the_first_page_and_other_pages_never_ask_the_core_for_stats(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), None, "", 0);
+    assert!(trees[0].contains("Tokens saved: \u{2014}"), "{}", trees[0]);
+    assert!(calls.borrow().cores.is_empty(), "{:?}", calls.borrow().cores);
+    let (_, calls) = describe_pressing(cx, &staged, "frame/settings", info_values(), None, "", 0);
+    assert!(calls.borrow().cores.is_empty(), "{:?}", calls.borrow().cores);
+}
+
+#[gpui::test]
+fn settings_0x_modes_coming_soon_rows_have_nothing_to_click(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), None, "", 0);
+    let tree = &trees[0];
+    // The three rows follow the savings line; nothing from there to the last "Coming soon" has an id, a click or a hand cursor.
+    let start = tree.find("Tokens saved: ").unwrap_or_else(|| panic!("{tree}"));
+    let end = tree.rfind("Coming soon").unwrap_or_else(|| panic!("{tree}"));
+    assert!(start < end, "{tree}");
+    let rows = &tree[start..end];
+    assert!(["Security", "ZK Proofs", "Observability"].iter().all(|t| rows.contains(t)), "{rows}");
+    for click in [":on_click(fn)", ":on_mouse_down(fn)", ":on_mouse_up(fn)", ".cursor_pointer", "\"st-"] {
+        assert!(!rows.contains(click), "{click:?}: {rows}");
+    }
+    let c = calls.borrow();
+    assert!(c.writes.is_empty() && c.effects.iter().all(|(n, _)| n != "run" && n != "openLink"), "{:?} {:?}", c.writes, c.effects);
+    assert!(c.cores.is_empty() && c.unexpected.is_empty(), "{:?} {:?}", c.cores, c.unexpected);
+}
+
+#[gpui::test]
+fn settings_token_saver_switch_on_writes_true_and_off_removes_the_key_keeping_every_other_key(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // settings.json, what one press writes, and whether the switch was on before it.
+    for (file, write, was_on) in [
+        (None, json!({"token_saver": true}), false),
+        (Some("{}"), json!({"token_saver": true}), false),
+        (Some(r#"{"token_saver": false, "zoom": 1.25}"#), json!({"token_saver": true, "zoom": 1.25}), false),
+        (Some(r#"{"token_saver": true, "zoom": 1.25, "share_analytics": false}"#), json!({"zoom": 1.25, "share_analytics": false}), true),
+        (Some(r#"{"token_saver": true}"#), json!({}), true),
+        (Some("\u{feff}{\"token_saver\": true}"), json!({}), true),
+    ] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, TOKEN_SAVER_PRESS, 1);
+        assert_eq!(written(&calls, "/fixture/app/settings.json"), [write], "{file:?}");
+        let (before, after) = if was_on { ("st-token-saver-on", "st-token-saver-off") } else { ("st-token-saver-off", "st-token-saver-on") };
+        assert!(trees[0].contains(before) && !trees[0].contains(after), "{file:?}: {}", trees[0]);
+        assert!(trees[1].contains(after) && !trees[1].contains(before), "{file:?}: the switch shows what was written: {}", trees[1]);
+        assert!(calls.borrow().cores.is_empty() && calls.borrow().unexpected.is_empty(), "{file:?}: {:?} {:?}", calls.borrow().cores, calls.borrow().unexpected);
+    }
+    // A Windows app home: the switch writes that home's settings.json.
+    let home = "C:\\Users\\Zo\u{eb} Q\\AppData\\Roaming\\h0x-ade";
+    let mut values = modes_values();
+    values.insert("appHome".into(), json!(home));
+    let (_, calls) = describe_pressing(cx, &staged, "frame/settings", values, Some(r#"{"zoom": 1.25}"#), TOKEN_SAVER_PRESS, 1);
+    assert_eq!(written(&calls, &format!("{home}/settings.json")), [json!({"token_saver": true, "zoom": 1.25})]);
+}
+
+#[gpui::test]
+fn settings_token_saver_with_a_value_that_is_not_true_shows_off_and_one_press_writes_true(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Only true is on; a wrong type (which the app itself rejects, see settings.rs) neither crashes the page nor reads as on.
+    for value in [r#""yes""#, "1", "0", "null", r#""true""#, "[]"] {
+        let file = format!(r#"{{"token_saver": {value}, "zoom": 1.25}}"#);
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(&file), TOKEN_SAVER_PRESS, 1);
+        assert!(trees[0].contains("st-token-saver-off") && !trees[0].contains("can't be read"), "{value}: {}", trees[0]);
+        assert_eq!(written(&calls, "/fixture/app/settings.json"), [json!({"token_saver": true, "zoom": 1.25})], "{value}");
+        assert!(trees[1].contains("st-token-saver-on"), "{value}: {}", trees[1]);
+        assert!(calls.borrow().unexpected.is_empty(), "{value}: {:?}", calls.borrow().unexpected);
+    }
+}
+
+#[gpui::test]
+fn settings_token_saver_switch_never_overwrites_a_settings_file_it_could_not_read(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for bad in ["", "{not json", "[]", "null", "true"] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(bad), TOKEN_SAVER_PRESS, 1);
+        assert!(calls.borrow().writes.is_empty(), "{bad:?}: {:?}", calls.borrow().writes);
+        assert!(trees[1].contains("can't be read") && trees[1].contains("st-token-saver-off"), "{bad:?}: {}", trees[1]);
     }
 }
 
