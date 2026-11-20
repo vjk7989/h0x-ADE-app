@@ -5,6 +5,7 @@
 ### Added
 
 - The Files panel header has New File, New Folder, Refresh and Collapse All buttons, like VS Code. New File and New Folder ask for the name in a row inside the selected folder (or next to the selected file, or at the top), refuse empty, invalid and existing names, and work on remote machines too. Esc cancels.
+- Settings → Machines has a Mobile app block: scan a QR code (or use Download APK) to get the HyperOx Android app. Google Play and the App Store show as coming soon.
 
 ## [0.1.37] - 2026-11-20
 
