@@ -5302,7 +5302,7 @@ fn files_panel_escape_cancels_the_new_name_row(cx: &mut TestAppContext) {
 }
 
 // A Windows root with spaces goes through PowerShell with the path as one quoted literal; a trailing
-// dot or space is refused there (and allowed elsewhere); a remote machine's folder is made on that machine.
+// dot or space is refused (on every system); a remote machine's folder is made on that machine.
 #[gpui::test]
 fn files_panel_creates_in_a_windows_folder_with_spaces_and_on_a_remote_machine(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
@@ -5318,7 +5318,7 @@ fn files_panel_creates_in_a_windows_folder_with_spaces_and_on_a_remote_machine(c
     files_step(&mut visual, &disk, "newfile");
     for name in ["dot.", "space "] {
         files_step(&mut visual, &disk, &format!("submit {name}"));
-        assert!(files_state(&mut visual, &disk)["creating"]["error"].as_str().unwrap().contains("space or a dot"), "{name:?}");
+        assert!(files_state(&mut visual, &disk)["creating"]["error"].as_str().unwrap().contains("space or dot"), "{name:?}");
     }
     assert!(files_creates(&disk).is_empty());
     files_step(&mut visual, &disk, "submit new file.txt");
@@ -5336,9 +5336,11 @@ fn files_panel_creates_in_a_windows_folder_with_spaces_and_on_a_remote_machine(c
     let (mut visual, _runtime, _root) = mount_files(cx, &staged, remote, &disk);
     files_step(&mut visual, &disk, "newfolder");
     files_step(&mut visual, &disk, "submit dot.");
+    assert!(files_creates(&disk).is_empty(), "a trailing dot is refused even in a Linux window: the machine may be Windows");
+    files_step(&mut visual, &disk, "submit dir.d");
     let creates = files_creates(&disk);
-    assert_eq!(creates.len(), 1, "a trailing dot is fine off Windows: {creates:?}");
-    assert_eq!((creates[0].1[3..].to_vec(), creates[0].2.clone()), (vec!["/fixture/project/dot.".to_owned(), "folder".to_owned()], json!({"on":"remote"})));
+    assert_eq!(creates.len(), 1, "{creates:?}");
+    assert_eq!((creates[0].1[3..].to_vec(), creates[0].2.clone()), (vec!["/fixture/project/dir.d".to_owned(), "folder".to_owned()], json!({"on":"remote"})));
 }
 
 // The one script every POSIX create runs; the name only ever arrives as "$1".
@@ -5396,9 +5398,6 @@ fn files_panel_passes_any_name_to_sh_as_one_argument_never_inside_the_script(cx:
         "-rf",
         "--help",
         "~x",
-        "\u{202e}gpj.exe",
-        "zero\u{200b}width",
-        "CON",
         long.as_str(),
     ];
     for (i, name) in names.iter().enumerate() {
@@ -5416,7 +5415,7 @@ fn files_panel_passes_any_name_to_sh_as_one_argument_never_inside_the_script(cx:
     }
     // A newline, a colon (`$env:PATH`), a double quote or a climb out of the folder is refused before anything runs.
     files_step(&mut visual, &disk, "newfolder");
-    for name in ["a\nb", "$env:PATH", "\"$1\"", "../escape", "x/../../etc"] {
+    for name in ["a\nb", "$env:PATH", "\"$1\"", "../escape", "x/../../etc", "\u{202e}gpj.exe", "zero\u{200b}width", "CON"] {
         files_step(&mut visual, &disk, &format!("submit {name}"));
         assert!(files_state(&mut visual, &disk)["creating"]["error"].is_string(), "{name:?} is refused");
     }
@@ -5446,7 +5445,6 @@ fn files_panel_quotes_any_name_as_one_powershell_literal_on_windows(cx: &mut Tes
         "@(1,2)",
         "$HOME",
         "-Force",
-        "\u{202e}gpj.exe",
         long.as_str(),
     ];
     for (i, name) in names.iter().enumerate() {
@@ -5463,25 +5461,47 @@ fn files_panel_quotes_any_name_as_one_powershell_literal_on_windows(cx: &mut Tes
     }
 }
 
-// Windows device names cannot be files or folders there: they are refused like any invalid name, and
-// nothing runs. Off Windows they are plain names.
+// Names must be portable (the folder may be on another machine than the window's system): Windows device
+// names are refused everywhere, in a Linux window as in a Windows one, and nothing runs.
 #[gpui::test]
-fn files_panel_refuses_windows_device_names_on_windows_only(cx: &mut TestAppContext) {
+fn files_panel_refuses_windows_device_names_everywhere(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    let disk = files_disk(&[]);
-    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
-    files_new_root_folder(&mut visual, &disk, "NUL");
-    assert_eq!(files_creates(&disk).len(), 1, "NUL is a plain name off Windows");
+    for values in [files_values(idle_agent()), files_values_in("C:/proj", true)] {
+        let disk = files_disk(&[]);
+        let (mut visual, _runtime, _root) = mount_files(cx, &staged, values, &disk);
+        files_step(&mut visual, &disk, "newfile");
+        for name in ["CON", "con", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9", "aux.txt", "Nul.tar.gz", "com1.log"] {
+            files_step(&mut visual, &disk, &format!("submit {name}"));
+            let state = files_state(&mut visual, &disk);
+            assert!(state["creating"]["error"].as_str().unwrap().contains("reserved on Windows"), "{name:?} is refused: {state}");
+            assert!(files_creates(&disk).is_empty(), "{name:?} runs nothing: {:?}", files_creates(&disk));
+        }
+        // Names that only start like a device are fine.
+        for name in ["console", "com10", "lpt0", "nul_x", "auxiliary.txt"] {
+            files_step(&mut visual, &disk, &format!("submit {name}"));
+            assert!(files_state(&mut visual, &disk)["creating"].is_null(), "{name:?} is allowed");
+            files_step(&mut visual, &disk, "newfile");
+        }
+        assert_eq!(files_creates(&disk).len(), 5);
+    }
+}
 
-    let disk = files_disk(&[]);
-    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values_in("C:/proj", true), &disk);
-    files_step(&mut visual, &disk, "newfile");
-    for name in ["CON", "con", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "aux.txt", "Nul.tar.gz", "com1.log"] {
-        files_step(&mut visual, &disk, &format!("submit {name}"));
-        let state = files_state(&mut visual, &disk);
-        assert!(state["creating"]["error"].is_string(), "{name:?} is refused on Windows: {state}");
-        assert!(files_creates(&disk).is_empty(), "{name:?} runs nothing: {:?}", files_creates(&disk));
+// Bidi overrides and isolates, zero-width characters, DEL and C1 controls disguise a name: refused everywhere.
+#[gpui::test]
+fn files_panel_refuses_invisible_and_text_direction_characters(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for values in [files_values(idle_agent()), files_values_in("C:/proj", true)] {
+        let disk = files_disk(&[]);
+        let (mut visual, _runtime, _root) = mount_files(cx, &staged, values, &disk);
+        files_step(&mut visual, &disk, "newfile");
+        for name in ["\u{202e}gpj.exe", "a\u{2066}b", "a\u{2069}b", "zero\u{200b}width", "a\u{200d}b", "a\u{2060}b", "a\u{feff}", "del\u{7f}", "c1\u{85}x"] {
+            files_step(&mut visual, &disk, &format!("submit {name}"));
+            let state = files_state(&mut visual, &disk);
+            assert!(state["creating"]["error"].as_str().unwrap().contains("invisible"), "{name:?} is refused: {state}");
+        }
+        assert!(files_creates(&disk).is_empty());
     }
 }
 

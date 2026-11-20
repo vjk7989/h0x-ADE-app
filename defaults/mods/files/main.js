@@ -46,7 +46,8 @@ const BURST = 30000, LISTED = 5;
 // characters (they disguise a name) are dropped and it is capped at 200 characters.
 // At most 120 UTF-16 units of the error; a character the cut would split is dropped whole.
 const reason = e => { const s = String((e !== null && typeof e === "object" ? e.message : e) || "unknown error").slice(0, 120); return /[\ud800-\udbff]$/.test(s) ? s.slice(0, -1) : s; };
-const noteName =name => [...name.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "")].slice(0, 200).join("");
+const HIDDEN = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
+const noteName =name => [...name.replace(new RegExp(HIDDEN, "g"), "")].slice(0, 200).join("");
 // A file is written back with the line endings it was read with: CRLF only when every line had it.
 const eol = text => /\r\n/.test(text) && !/(^|[^\r])\n/.test(text) ? "\r\n" : "\n";
 const text = doc => { const value = doc.state.value(); return doc.eol === "\r\n" ? value.replace(/\r?\n/g, "\r\n") : value; };
@@ -92,13 +93,17 @@ async function create(kind, full, on) {
   if (r.code !== 0) throw new Error(r.stderr || "Cannot create this");
 }
 
-// Why a new name is refused, or null. Nested names (a/b) are refused: nothing here makes parents.
+// Why a new name is refused, or null. Nested names (a/b) are refused: nothing here makes parents. The rules
+// are the strictest of every system, whatever this window runs on: the folder may be on another machine.
 function badName(name, siblings) {
   if (!name.trim()) return "Enter a name";
-  if (/[\u0000-\u001f/\\:*?"<>|]/.test(name)) return 'A name cannot contain / \\ : * ? " < > |';
+  if (/[/\\:*?"<>|]/.test(name)) return 'A name cannot contain / \\ : * ? " < > |';
+  if (HIDDEN.test(name)) return "A name cannot contain control, invisible or text-direction characters";
   if (name === "." || name === "..") return "This name is not valid";
+  if (/[ .]$/.test(name)) return "Names can't end with a space or dot";
+  const device = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.exec(name);
+  if (device) return `${device[1].toUpperCase()} is reserved on Windows`;
   const windows = window()?.platform === "windows";
-  if (windows && /[ .]$/.test(name)) return "A name cannot end with a space or a dot";
   const same = n => windows ? n.toLowerCase() : n;
   if (siblings.some(e => same(e.name) === same(name))) return `"${name}" already exists here`;
   return null;
