@@ -5659,7 +5659,7 @@ fn files_panel_falls_back_to_powershell_on_a_remote_machine_without_sh(cx: &mut 
     assert_eq!((creates[0].0.as_str(), creates[0].1[3].as_str(), creates[0].2.clone()), ("sh", "/fixture/project/a", json!({"on":"remote"})));
 
     let disk = files_disk(&[]);
-    disk.borrow_mut().create_results.extend([Err("cannot start sh: program not found".to_owned()), Err("connection refused".to_owned())]);
+    disk.borrow_mut().create_results.extend([Err("cannot start sh: program not found".to_owned()), Ok((0, String::new())), Err("connection refused".to_owned())]);
     let (mut visual, _runtime, _root) = mount_files(cx, &staged, remote(false), &disk);
     files_new_root_folder(&mut visual, &disk, "it's $x");
     let creates = files_creates(&disk);
