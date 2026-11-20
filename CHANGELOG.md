@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The Files panel header has New File, New Folder, Refresh and Collapse All buttons, like VS Code. New File and New Folder ask for the name in a row inside the selected folder (or next to the selected file, or at the top), refuse empty, invalid and existing names, and work on remote machines too. Esc cancels.
+
 ## [0.1.37] - 2026-11-20
 
 0x Modes: Token Saver. Bundles h0x-core 0.1.17.
