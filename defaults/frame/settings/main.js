@@ -885,7 +885,26 @@ export default class Settings extends View {
       .when(this.machineList?.length === 0, (el) => el.child(div().py(14).text_size(12.5).text_color(t.dim).child("No other machines yet.")))
       .when(Boolean(this.machineError), (el) => el.child(div().py(10).text_size(12.5).text_color(t.blocked).child(this.machineError)))
       .when(Boolean(this.machineNotice), (el) => el.child(div().py(10).text_size(12.5).text_color(t.ansi2).child(this.machineNotice)))
-      .child(h_flex().pt(16).child(this.button(t, "st-m-add", "Add a machine", () => run("mod.open", { name: "machine-add" }))));
+      .child(h_flex().pt(16).child(this.button(t, "st-m-add", "Add a machine", () => run("mod.open", { name: "machine-add" }))))
+      .child(this.mobileApp(t));
+  }
+
+  // The Android app: a QR (dark modules on a white card, so it scans in every theme) and the same link as a button.
+  mobileApp(t) {
+    const apk = "https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk";
+    const open = () => {
+      const why = openLink(apk);
+      if (why) notify({ title: "Can't open the link", body: why, level: "error" });
+    };
+    const soon = (id, label) => div().id(id).h(24).px(10).flex().items_center().rounded(6).border_1().border_color(t.border).text_size(12).text_color(t.dim).opacity(0.6).child(label);
+    return v_flex().w_full().pt(28)
+      .child(this.heading(t, "Mobile app"))
+      .child(div().pb(12).text_size(12.5).line_height("18px").text_color(t.dim).child("Use HyperOx on your Android phone: check your agents, approve prompts and type into terminals over SSH or Tailscale."))
+      .child(v_flex().gap(8).items_start()
+        .child(div().id("st-m-qr").p(8).rounded(10).bg("#ffffff").child(svg(I("android-qr")).size(140).text_color("#000000")))
+        .child(div().text_size(12.5).text_color(t.dim).child("Scan to download the Android app (APK)"))
+        .child(this.button(t, "st-m-apk", "Download APK", open, "arrow-up-right"))
+        .child(h_flex().gap(8).child(soon("st-m-play", "Google Play: coming soon")).child(soon("st-m-store", "App Store: coming soon"))));
   }
 
   // Remote ---------------------------------------------------------------
