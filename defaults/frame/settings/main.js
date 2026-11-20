@@ -6,6 +6,9 @@ import { agentsInit, loadAgents, agentsPage } from "./agents.js";
 import { ActivityGraph } from "./activity.js";
 import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, nextCommand, window, account, accountSignIn, accountCancelSignIn, accountSwitch, accountSignOut, accountRemove } from "h0x";
 
+// Dollars per million input tokens (Claude Sonnet's price): turns tokens saved into the "~$" shown beside them.
+const SAVED_USD_PER_MILLION_TOKENS = 3;
+
 const I = (name) => `frame/settings/${name}.svg`;
 
 const SECTIONS = [
@@ -16,6 +19,7 @@ const SECTIONS = [
   { id: "machines", title: "Machines", icon: "server" },
   { id: "remote", title: "Remote", icon: "smartphone" },
   { id: "alerts", title: "Alerts", icon: "bell" },
+  { id: "modes", title: "0x Modes", icon: "gauge" },
   { id: "mods", title: "Mods", icon: "blocks" },
   { id: "updates", title: "Updates", icon: "refresh-cw" },
   { id: "info", title: "Info", icon: "info" },
@@ -88,6 +92,8 @@ export default class Settings extends View {
     this.previewsOf = "";
     this.machineList = null;
     this.machineLoading = false;
+    this.saved = null; // Token Saver stats, once fetched
+    this.savedLoading = false;
     this.machineError = null;
     this.machineBusy = {};
     this.machineResults = {};
@@ -168,6 +174,7 @@ export default class Settings extends View {
     this.handle.focus();
     if (id === "machines") cx.spawn(async (cx) => { await this.loadMachines(); cx.notify(); });
     if (id === "remote") cx.spawn(async (cx) => { await this.loadRemote(); cx.notify(); });
+    if (id === "modes") cx.spawn(async (cx) => { await this.loadSaved(); cx.notify(); });
     if (id === "agents") loadAgents(this, cx);
     this.graph.set_props({ shown: id === "profile" });
     cx.notify();
@@ -1153,6 +1160,52 @@ export default class Settings extends View {
       .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("Want your own sounds? Ask your agent to set sounds.done and sounds.blocked in settings.json to an MP3."));
   }
 
+  // 0x Modes -------------------------------------------------------------
+
+  // What the Token Saver has saved, from `h0x-core gate stats --json`; null when the core is too old or answers
+  // anything else. Fetched when the page opens, never while rendering.
+  async loadSaved() {
+    if (this.savedLoading) return;
+    this.savedLoading = true;
+    try {
+      const r = await core(["gate", "stats", "--json"]);
+      const s = r.code === 0 ? JSON.parse(r.stdout) : null;
+      this.saved = Number.isSafeInteger(s?.tokens_saved) && s.tokens_saved >= 0 && Number.isSafeInteger(s?.outputs) && s.outputs >= 0 ? s : null;
+    } catch {
+      this.saved = null;
+    } finally {
+      this.savedLoading = false;
+    }
+  }
+
+  savedText() {
+    const s = this.saved;
+    if (!s) return "\u2014";
+    const n = (v) => String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    return `${n(s.tokens_saved)} (~$${((s.tokens_saved * SAVED_USD_PER_MILLION_TOKENS) / 1e6).toFixed(2)}) across ${n(s.outputs)} big outputs`;
+  }
+
+  modes(t) {
+    const on = this.person.token_saver === true;
+    const soon = (title) => this.row(t, title, null, div().text_size(12.5).text_color(t.dim).child("Coming soon"));
+    return v_flex()
+      .w_full()
+      .child(this.heading(t, "0x Modes"))
+      .child(div().pb(6).text_size(12.5).line_height("18px").text_color(t.dim).child("Optional power-ups for your agents. Each one stays off until you turn it on."))
+      .child(
+        this.row(
+          t,
+          "Token Saver",
+          "Shrinks big tool outputs (long logs, large files, JSON) before your agent reads them, so sessions use fewer tokens. Applies to new Claude Code terminals; Codex and OpenCode coming soon.",
+          this.toggle(t, "st-token-saver", on, (_e, cx) => this.change((p) => { if (on) delete p.token_saver; else p.token_saver = true; }, cx)),
+        ),
+      )
+      .child(div().pt(8).pb(4).text_size(12.5).text_color(t.muted).child(`Tokens saved: ${this.savedText()}`))
+      .child(soon("Security"))
+      .child(soon("ZK Proofs"))
+      .child(soon("Observability"));
+  }
+
   // Mods -----------------------------------------------------------------
 
   // Mods that did not ship with HyperOx, as answered when they asked (ADR-048).
@@ -1578,6 +1631,8 @@ export default class Settings extends View {
                         ? this.remotePage(t)
                       : this.section === "alerts"
                         ? this.alerts(t)
+                      : this.section === "modes"
+                        ? this.modes(t)
                       : this.section === "mods"
                         ? this.mods(t)
                         : this.section === "info"
