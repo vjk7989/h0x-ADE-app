@@ -970,8 +970,11 @@ fn strings(v: Option<&HostValue>) -> Vec<String> {
 }
 
 /// The only web pages a mod may open: the ones the Info page links to.
+// The Android app the Machines page links to (the release routine attaches the newest APK to every release).
+const ANDROID_APK_URL: &str = "https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk";
+
 fn allowed_link(url: &str) -> bool {
-    matches!(url, "https://pavii.tech" | "https://www.pavii.tech/products/dev-tools/docs/" | "https://buckleson.com")
+    matches!(url, "https://pavii.tech" | "https://www.pavii.tech/products/dev-tools/docs/" | "https://buckleson.com" | ANDROID_APK_URL)
 }
 
 fn opt_str(v: Option<&HostValue>, key: &str) -> Option<String> {
@@ -1920,8 +1923,8 @@ mod tests {
     }
 
     #[test]
-    fn allowed_link_accepts_only_the_three_info_page_addresses() {
-        for url in ["https://pavii.tech", "https://www.pavii.tech/products/dev-tools/docs/", "https://buckleson.com"] {
+    fn allowed_link_accepts_only_the_info_page_and_android_app_addresses() {
+        for url in ["https://pavii.tech", "https://www.pavii.tech/products/dev-tools/docs/", "https://buckleson.com", ANDROID_APK_URL] {
             assert!(allowed_link(url), "{url}");
         }
         for url in [
@@ -1969,6 +1972,9 @@ mod tests {
             "javascript:alert(1)",
             "mailto:team@pavii.tech",
             "https://github.com/vjk7989/h0x-ADE-app",
+            "https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk?x=1",
+            "http://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk",
+            "https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/latest.json",
         ] {
             assert!(!allowed_link(url), "{url:?} must be refused");
         }

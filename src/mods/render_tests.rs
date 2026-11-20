@@ -3095,6 +3095,44 @@ fn settings_analytics_about_is_closed_until_asked_and_click_here_opens_only_pavi
     assert!(c.writes.is_empty() && c.unexpected.is_empty(), "{:?} {:?}", c.writes, c.unexpected);
 }
 
+#[gpui::test]
+fn machines_page_offers_the_android_app_by_qr_and_link_with_two_coming_soon_badges(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    const APK: &str = "https://github.com/buckleson/h0x-ADE-Releases/releases/latest/download/HyperOx-android.apk";
+    let mut p = props();
+    p["section"] = json!("machines");
+    let values = fixture(true, p, updates("current", "current"));
+    let replies = [("machine ls", core_ok(json!({"machines":[]})))];
+    let setup = "const button = this.button.bind(this);         this.button = (t, id, label, onClick, icon, kind, external) => { if (id === 'st-m-apk') this.press = onClick; return button(t, id, label, onClick, icon, kind, external); };";
+    let (trees, calls) = describe_pressing_replying(cx, &staged, "frame/settings", values, None, &[], &replies, setup, 1);
+    for tree in &trees {
+        for text in [
+            "Mobile app",
+            "Use HyperOx on your Android phone: check your agents, approve prompts and type into terminals over SSH or Tailscale.",
+            "frame/settings/android-qr.svg",
+            "Scan to download the Android app (APK)",
+            "Download APK",
+        ] {
+            assert!(tree.contains(text), "the Machines page shows {text:?}: {tree}");
+        }
+        assert!(tree.lines().find(|l| l.contains("\"st-m-apk\"")).is_some_and(|l| l.contains(":on_click(fn)")), "{tree}");
+        for (id, label) in [("st-m-play", "Google Play: coming soon"), ("st-m-store", "App Store: coming soon")] {
+            let line = tree.lines().find(|l| l.contains(&format!("\"{id}\""))).unwrap_or_else(|| panic!("{id}: {tree}"));
+            assert!(!line.contains(":on_click(fn)") && !line.contains(".cursor_pointer"), "{id} is not clickable: {line}");
+            assert!(tree.contains(label), "{label}: {tree}");
+        }
+    }
+    let c = calls.borrow();
+    let links: Vec<&Value> = c.effects.iter().filter(|(n, _)| n == "openLink").map(|(_, a)| &a[0]).collect();
+    assert_eq!(links, [&json!(APK)], "Download APK opens exactly the latest APK: {:?}", c.effects);
+    assert!(allowed_link(APK));
+    assert!(!c.effects.iter().any(|(n, _)| n == "notify"), "{:?}", c.effects);
+    // The page reads the machine list, and the Mobile app block itself asks the core for nothing.
+    assert!(c.cores.iter().all(|a| a.join(" ").starts_with("machine ls")), "{:?}", c.cores);
+    assert!(c.writes.is_empty() && c.unexpected.is_empty(), "{:?} {:?}", c.writes, c.unexpected);
+}
+
 const FOUND_VIA_QUESTION: &str = "How did you find HyperOx?";
 const FOUND_VIA: [(&str, &str, &str); 6] = [
     ("w-found-friend", "Friend", "friend"),
