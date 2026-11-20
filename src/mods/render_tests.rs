@@ -4741,6 +4741,12 @@ struct FilesDisk {
     commands: std::collections::VecDeque<String>,
     notes: Vec<String>,
     opens: Vec<(String, Value)>,
+    /// `exec` calls except folder listings: program, arguments, options.
+    execs: Vec<(String, Vec<String>, Value)>,
+    /// What a folder's listing script finds, by folder path: (`d` or `f`, name).
+    listing: BTreeMap<String, Vec<(char, String)>>,
+    /// What the next create calls answer, in order: `Ok((code, stderr))`, or `Err` to reject; none left is success.
+    create_results: std::collections::VecDeque<Result<(i64, String), String>>,
 }
 
 const FILES_SCENARIO: &str = r#"
@@ -4772,10 +4778,16 @@ export default class Scenario extends Real {
         else if (verb === 'keep') this.save(cx, true);
         else if (verb === 'reload') this.reload(cx);
         else if (verb === 'refresh') this.refresh(cx);
+        else if (verb === 'select') { const [path, kind] = arg.split(' '); this.sel = { path, dir: kind === 'd' }; }
+        else if (verb === 'newfile') this.startCreate('file', cx);
+        else if (verb === 'newfolder') this.startCreate('folder', cx);
+        else if (verb === 'collapse') this.collapseAll(cx);
+        else if (verb === 'submit') { if (this.creating) { this.creating.input.set_value(arg); this.commitCreate(arg, cx); } }
         else if (verb === 'state') {
           const d = this.doc;
           note(JSON.stringify({ file: this.file ?? null, value: this.code ? this.code.value() : null, editable: Boolean(d?.editable),
-            opened: this.opened ?? null, cursors: this.cursors ?? [], pending: this.line ?? null, dirty: Boolean(d?.dirty), conflict: Boolean(d?.conflict), error: d?.error ?? null, hint: d?.hint ?? null }));
+            opened: this.opened ?? null, cursors: this.cursors ?? [], pending: this.line ?? null, dirty: Boolean(d?.dirty), conflict: Boolean(d?.conflict), error: d?.error ?? null, hint: d?.hint ?? null,
+            creating: this.creating ? { kind: this.creating.kind, dir: this.creating.dir, error: this.creating.error } : null, sel: this.sel ?? null, folders: [...this.folders] }));
         }
         cx.notify();
       }
@@ -4805,7 +4817,27 @@ fn files_module(values: BTreeMap<String, Value>, disk: Rc<RefCell<FilesDisk>>) -
     for name in ["nextCommand", "watchFolder"] {
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     }
-    module = module.async_function("exec", |_| Ok(std::future::ready(Ok(to_host(&json!({"code":0,"stdout":"","stderr":""}))))));
+    let execs = disk.clone();
+    module = module.async_function("exec", move |a| {
+        let program = a.string(0)?.to_owned();
+        let args: Vec<String> = a.get(1).map(from_host).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+        let options = a.get(2).map(from_host).unwrap_or(Value::Null);
+        let mut disk = execs.borrow_mut();
+        let stdout = if program == "sh" && args.get(1).is_some_and(|script| script.starts_with("n=0;")) {
+            let found = disk.listing.get(&args[3]).cloned().unwrap_or_default();
+            found.iter().map(|(kind, name)| format!("{kind}\0{name}\0")).collect::<String>()
+        } else {
+            let create = (program == "sh" && args.get(1).is_some_and(|script| script.contains("mkdir"))) || program == "powershell";
+            disk.execs.push((program, args, options));
+            let answer = if create { disk.create_results.pop_front() } else { None };
+            match answer {
+                Some(Err(message)) => return Ok(std::future::ready(Err(HostError::new(message)))),
+                Some(Ok((code, stderr))) => return Ok(std::future::ready(Ok(to_host(&json!({"code":code,"stdout":"","stderr":stderr}))))),
+                None => String::new(),
+            }
+        };
+        Ok(std::future::ready(Ok(to_host(&json!({"code":0,"stdout":stdout,"stderr":""})))))
+    });
     // Shared values (the panel keeps its linked file there across a reload), in memory per panel.
     let store: Rc<RefCell<BTreeMap<String, Value>>> = Rc::new(RefCell::new(BTreeMap::new()));
     let read = store.clone();
@@ -4941,6 +4973,19 @@ fn files_writes(disk: &Rc<RefCell<FilesDisk>>) -> Vec<(String, String, Value)> {
 
 fn files_sends(disk: &Rc<RefCell<FilesDisk>>) -> Vec<Vec<String>> {
     disk.borrow().sends.iter().filter(|a| a.first().map(String::as_str) == Some("send")).cloned().collect()
+}
+
+// The calls that make a file or a folder (not listings, git or anything else).
+fn files_creates(disk: &Rc<RefCell<FilesDisk>>) -> Vec<(String, Vec<String>, Value)> {
+    disk.borrow()
+        .execs
+        .iter()
+        .filter(|(program, args, _)| {
+            (program == "sh" && args.get(1).is_some_and(|script| script.contains("mkdir")))
+                || (program == "powershell" && args.last().is_some_and(|script| script.contains("New-Item")))
+        })
+        .cloned()
+        .collect()
 }
 
 fn files_note(list: &str) -> String {
@@ -5227,6 +5272,440 @@ fn files_panel_says_unknown_error_when_a_preview_fails_without_a_message(cx: &mu
         assert!(tree.contains("Cannot preview this file: unknown error"), "{thrown}: {tree}");
         assert!(!tree.contains("Cannot preview this file: null") && !tree.contains("Cannot preview this file: undefined"), "{thrown}: {tree}");
     }
+}
+
+// New File / New Folder / Refresh / Collapse All sit in the header of the tree (not above an open file),
+// and drawing the panel never calls the host: the work is in the click handlers.
+#[gpui::test]
+fn files_panel_header_has_the_four_buttons_and_drawing_calls_nothing(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[("/fixture/project/a.txt", "hello\n")]);
+    let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, "this.refresh(cx);");
+    for icon in ["file-plus.svg", "folder-plus.svg", "refresh-cw.svg", "chevrons-down-up.svg"] {
+        assert!(tree.contains(icon), "{icon}: {tree}");
+    }
+    for id in ["files-new-file", "files-new-folder", "files-refresh", "files-collapse"] {
+        assert!(tree.contains(id), "{id}: {tree}");
+    }
+    let tree = describe_files(cx, &staged, files_values(idle_agent()), &disk, "this.show('a.txt', cx);");
+    assert!(!tree.contains("file-plus.svg"), "an open file has no tree buttons: {tree}");
+
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "newfile");
+    let before = (disk.borrow().execs.len(), disk.borrow().sends.len(), disk.borrow().writes.len(), disk.borrow().reads.len());
+    for _ in 0..5 {
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+    }
+    let after = (disk.borrow().execs.len(), disk.borrow().sends.len(), disk.borrow().writes.len(), disk.borrow().reads.len());
+    assert_eq!(before, after, "drawing makes no host calls");
+}
+
+// New File in the root creates `<root>/<name>` (never over an existing file) and opens it like a click.
+#[gpui::test]
+fn files_panel_new_file_in_the_root_creates_the_path_and_opens_it(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "newfile");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!(state["creating"], json!({"kind":"file","dir":"","error":null}), "{state}");
+    files_step(&mut visual, &disk, "submit new.txt");
+    let creates = files_creates(&disk);
+    assert_eq!(creates.len(), 1, "{creates:?}");
+    assert_eq!(creates[0].0, "sh");
+    assert_eq!(creates[0].1[3..], ["/fixture/project/new.txt", "file"], "{creates:?}");
+    assert_eq!(creates[0].2, json!({"on":null}));
+    assert!(files_writes(&disk).is_empty(), "the file is made by the shell, empty: {:?}", files_writes(&disk));
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["creating"].clone(), state["file"].clone(), state["sel"]["path"].clone()), (Value::Null, json!("new.txt"), json!("new.txt")), "{state}");
+}
+
+// New Folder goes into the selected folder (opened first), and New File next to a selected file goes into its parent.
+#[gpui::test]
+fn files_panel_new_folder_goes_into_the_selected_folder_and_new_file_into_a_files_parent(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[]);
+    disk.borrow_mut().listing.insert("/fixture/project".into(), vec![('d', "src".into())]);
+    disk.borrow_mut().listing.insert("/fixture/project/src".into(), vec![('f', "a.txt".into())]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "select src d");
+    files_step(&mut visual, &disk, "newfolder");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["creating"]["dir"].clone(), state["folders"].clone()), (json!("src"), json!(["src"])), "the folder is opened: {state}");
+    files_step(&mut visual, &disk, "submit lib");
+    let creates = files_creates(&disk);
+    assert_eq!(creates[0].1[3..], ["/fixture/project/src/lib", "folder"], "{creates:?}");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["sel"].clone(), state["file"].clone()), (json!({"path":"src/lib","dir":true}), Value::Null), "a folder is selected, not opened: {state}");
+
+    files_step(&mut visual, &disk, "select src/a.txt f");
+    files_step(&mut visual, &disk, "newfile");
+    assert_eq!(files_state(&mut visual, &disk)["creating"]["dir"], json!("src"));
+    files_step(&mut visual, &disk, "submit b.txt");
+    assert_eq!(files_creates(&disk)[1].1[3..], ["/fixture/project/src/b.txt", "file"]);
+
+    // Collapse All closes every folder and forgets the selection, so the next one lands in the root.
+    files_step(&mut visual, &disk, "collapse");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["folders"].clone(), state["sel"].clone()), (json!([]), Value::Null), "{state}");
+}
+
+// A name that cannot be made is refused inline, nothing is run, and the row stays for another try.
+#[gpui::test]
+fn files_panel_refuses_invalid_and_existing_names_without_creating_anything(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[]);
+    disk.borrow_mut().listing.insert("/fixture/project".into(), vec![('f', "readme.md".into()), ('d', "src".into())]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "newfile");
+    for name in ["", "   ", ".", "..", "a/b.txt", "a\\b", "a:b", "a*b", "a?b", "a\"b", "a<b", "a>b", "a|b", "tab\tname", "readme.md", "src"] {
+        files_step(&mut visual, &disk, &format!("submit {name}"));
+        let state = files_state(&mut visual, &disk);
+        assert!(state["creating"]["error"].is_string(), "{name:?} is refused: {state}");
+        assert!(files_creates(&disk).is_empty(), "{name:?} runs nothing: {:?}", files_creates(&disk));
+    }
+    let state = files_state(&mut visual, &disk);
+    assert!(state["creating"]["error"].as_str().unwrap().contains("already exists"), "{state}");
+    // A good name still works after all the refusals.
+    files_step(&mut visual, &disk, "submit ok.txt");
+    assert_eq!(files_creates(&disk).len(), 1);
+}
+
+// Esc drops the row and creates nothing.
+#[gpui::test]
+fn files_panel_escape_cancels_the_new_name_row(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "newfolder");
+    assert_ne!(files_state(&mut visual, &disk)["creating"], Value::Null);
+    files_keys(&mut visual, "escape");
+    files_wait(&mut visual, 100);
+    assert_eq!(files_state(&mut visual, &disk)["creating"], Value::Null, "Esc cancels");
+    assert!(files_creates(&disk).is_empty() && files_writes(&disk).is_empty());
+}
+
+// A Windows root with spaces goes through PowerShell with the path as one quoted literal; a trailing
+// dot or space is refused (on every system); a remote machine's folder is made on that machine.
+#[gpui::test]
+fn files_panel_creates_in_a_windows_folder_with_spaces_and_on_a_remote_machine(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = "C:/Users/Jo Smith/my project";
+    let mut values = files_values(idle_agent());
+    values.insert("window".into(), json!({"platform":"windows","titlebar":"none","fullscreen":false,"buttons":false}));
+    values.get_mut("spaces").unwrap()[0]["folder"] = json!(root);
+    values.get_mut("panes").unwrap()[0]["cwd"] = json!(root);
+    values.get_mut("focused").unwrap()["cwd"] = json!(root);
+    let disk = files_disk(&[]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, values, &disk);
+    files_step(&mut visual, &disk, "newfile");
+    for name in ["dot.", "space "] {
+        files_step(&mut visual, &disk, &format!("submit {name}"));
+        assert!(files_state(&mut visual, &disk)["creating"]["error"].as_str().unwrap().contains("space or dot"), "{name:?}");
+    }
+    assert!(files_creates(&disk).is_empty());
+    files_step(&mut visual, &disk, "submit new file.txt");
+    let creates = files_creates(&disk);
+    assert_eq!(creates.len(), 1, "{creates:?}");
+    assert_eq!(creates[0].0, "powershell");
+    let script = creates[0].1.last().unwrap();
+    assert!(script.contains("-ItemType File") && script.ends_with(&format!("'{root}/new file.txt'")), "{script}");
+    assert!(script.contains("-LiteralPath"), "the path is literal, not a wildcard: {script}");
+
+    // The remote space (Linux window): the folder is made through the core on that machine.
+    let mut remote = files_values(idle_agent());
+    remote.get_mut("spaces").unwrap()[0]["machine"] = json!("remote");
+    let disk = files_disk(&[]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, remote, &disk);
+    files_step(&mut visual, &disk, "newfolder");
+    files_step(&mut visual, &disk, "submit dot.");
+    assert!(files_creates(&disk).is_empty(), "a trailing dot is refused even in a Linux window: the machine may be Windows");
+    files_step(&mut visual, &disk, "submit dir.d");
+    let creates = files_creates(&disk);
+    assert_eq!(creates.len(), 1, "{creates:?}");
+    assert_eq!((creates[0].1[3..].to_vec(), creates[0].2.clone()), (vec!["/fixture/project/dir.d".to_owned(), "folder".to_owned()], json!({"on":"remote"})));
+}
+
+// The one script every POSIX create runs; the name only ever arrives as "$1".
+const FILES_CREATE_SH: &str = r#"if [ "$2" = folder ]; then mkdir "$1"; else set -C; : > "$1"; fi"#;
+
+// The PowerShell `-Command` that makes the folder `full`: one single-quoted literal, every quote ('‘’‚‛) doubled.
+fn files_create_ps_folder(full: &str) -> String {
+    let quoted: String = full
+        .chars()
+        .flat_map(|c| if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') { vec![c, c] } else { vec![c] })
+        .collect();
+    format!("& {{ param($p) New-Item -ItemType Directory -LiteralPath $p -ErrorAction Stop | Out-Null }} '{quoted}'")
+}
+
+// Values for a space (and its pane) in `root`, in a Windows window when `windows`.
+fn files_values_in(root: &str, windows: bool) -> BTreeMap<String, Value> {
+    let mut values = files_values(idle_agent());
+    if windows {
+        values.insert("window".into(), json!({"platform":"windows","titlebar":"none","fullscreen":false,"buttons":false}));
+    }
+    values.get_mut("spaces").unwrap()[0]["folder"] = json!(root);
+    values.get_mut("panes").unwrap()[0]["cwd"] = json!(root);
+    values.get_mut("focused").unwrap()["cwd"] = json!(root);
+    values
+}
+
+// New Folder in the root (Collapse All first forgets the last selection), named `name`.
+fn files_new_root_folder(visual: &mut gpui::VisualTestContext, disk: &Rc<RefCell<FilesDisk>>, name: &str) {
+    files_step(visual, disk, "collapse");
+    files_step(visual, disk, "newfolder");
+    files_step(visual, disk, &format!("submit {name}"));
+}
+
+// Shell syntax in a name reaches `sh` only as "$1" after the folder (so never as an option), in a folder
+// whose own path has a quote, spaces, `$` and a backtick: the script is the same text for every name.
+#[gpui::test]
+fn files_panel_passes_any_name_to_sh_as_one_argument_never_inside_the_script(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = "/home/o'neil/my $HOME `id` dir";
+    let disk = files_disk(&[]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values_in(root, false), &disk);
+    let long = "x".repeat(300);
+    let names = [
+        "$(rm -rf x)",
+        "`rm -rf x`",
+        "a; rm -rf x",
+        "a && b",
+        "it's",
+        "''",
+        "'; rm -rf x; '",
+        "$1",
+        "${IFS}x",
+        "@(1,2)",
+        "-rf",
+        "--help",
+        "~x",
+        long.as_str(),
+    ];
+    for (i, name) in names.iter().enumerate() {
+        files_new_root_folder(&mut visual, &disk, name);
+        let creates = files_creates(&disk);
+        assert_eq!(creates.len(), i + 1, "{name:?} runs once: {creates:?}");
+        let (program, args, options) = creates.last().unwrap().clone();
+        let full = format!("{root}/{name}");
+        assert_eq!(
+            (program.as_str(), args.clone(), options),
+            ("sh", vec!["-c".to_owned(), FILES_CREATE_SH.to_owned(), "files".to_owned(), full, "folder".to_owned()], json!({"on":null})),
+            "{name:?}"
+        );
+        assert!(args[3].starts_with(&format!("{root}/")), "the folder leads, so a leading - is never an option: {args:?}");
+    }
+    // A newline, a colon (`$env:PATH`), a double quote or a climb out of the folder is refused before anything runs.
+    files_step(&mut visual, &disk, "newfolder");
+    for name in ["a\nb", "$env:PATH", "\"$1\"", "../escape", "x/../../etc", "\u{202e}gpj.exe", "zero\u{200b}width", "CON"] {
+        files_step(&mut visual, &disk, &format!("submit {name}"));
+        assert!(files_state(&mut visual, &disk)["creating"]["error"].is_string(), "{name:?} is refused");
+    }
+    assert_eq!(files_creates(&disk).len(), names.len(), "a refused name runs nothing");
+}
+
+// On Windows every name reaches PowerShell inside one single-quoted literal with its quotes doubled (the
+// typographic ones too, which PowerShell also reads as quotes), in a folder whose path has ', $, & and spaces.
+#[gpui::test]
+fn files_panel_quotes_any_name_as_one_powershell_literal_on_windows(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = "C:/Users/O'Neil/$5 & co \u{2018}x\u{2019}/proj";
+    let disk = files_disk(&[]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values_in(root, true), &disk);
+    let long = "y".repeat(260);
+    let names = [
+        "it's",
+        "''",
+        "a'; Remove-Item -Recurse x; '",
+        "\u{2018}a\u{2019}\u{201a}b\u{201b}",
+        "\u{2019}; calc; \u{2018}",
+        "$(Remove-Item -Recurse x)",
+        "`whoami`",
+        "a; calc",
+        "a && b",
+        "@(1,2)",
+        "$HOME",
+        "-Force",
+        long.as_str(),
+    ];
+    for (i, name) in names.iter().enumerate() {
+        files_new_root_folder(&mut visual, &disk, name);
+        let creates = files_creates(&disk);
+        assert_eq!(creates.len(), i + 1, "{name:?} runs once: {creates:?}");
+        let (program, args, options) = creates.last().unwrap().clone();
+        let full = format!("{root}/{name}");
+        assert_eq!(
+            (program.as_str(), args, options),
+            ("powershell", vec!["-NoProfile".to_owned(), "-Command".to_owned(), files_create_ps_folder(&full)], json!({"on":null})),
+            "{name:?}"
+        );
+    }
+}
+
+// Names must be portable (the folder may be on another machine than the window's system): Windows device
+// names are refused everywhere, in a Linux window as in a Windows one, and nothing runs.
+#[gpui::test]
+fn files_panel_refuses_windows_device_names_everywhere(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for values in [files_values(idle_agent()), files_values_in("C:/proj", true)] {
+        let disk = files_disk(&[]);
+        let (mut visual, _runtime, _root) = mount_files(cx, &staged, values, &disk);
+        files_step(&mut visual, &disk, "newfile");
+        for name in ["CON", "con", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9", "aux.txt", "Nul.tar.gz", "com1.log"] {
+            files_step(&mut visual, &disk, &format!("submit {name}"));
+            let state = files_state(&mut visual, &disk);
+            assert!(state["creating"]["error"].as_str().unwrap().contains("reserved on Windows"), "{name:?} is refused: {state}");
+            assert!(files_creates(&disk).is_empty(), "{name:?} runs nothing: {:?}", files_creates(&disk));
+        }
+        // Names that only start like a device are fine.
+        for name in ["console", "com10", "lpt0", "nul_x", "auxiliary.txt"] {
+            files_step(&mut visual, &disk, &format!("submit {name}"));
+            assert!(files_state(&mut visual, &disk)["creating"].is_null(), "{name:?} is allowed");
+            files_step(&mut visual, &disk, "newfile");
+        }
+        assert_eq!(files_creates(&disk).len(), 5);
+    }
+}
+
+// Bidi overrides and isolates, zero-width characters, DEL and C1 controls disguise a name: refused everywhere.
+#[gpui::test]
+fn files_panel_refuses_invisible_and_text_direction_characters(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for values in [files_values(idle_agent()), files_values_in("C:/proj", true)] {
+        let disk = files_disk(&[]);
+        let (mut visual, _runtime, _root) = mount_files(cx, &staged, values, &disk);
+        files_step(&mut visual, &disk, "newfile");
+        for name in ["\u{202e}gpj.exe", "a\u{2066}b", "a\u{2069}b", "zero\u{200b}width", "a\u{200d}b", "a\u{2060}b", "a\u{feff}", "del\u{7f}", "c1\u{85}x"] {
+            files_step(&mut visual, &disk, &format!("submit {name}"));
+            let state = files_state(&mut visual, &disk);
+            assert!(state["creating"]["error"].as_str().unwrap().contains("invisible"), "{name:?} is refused: {state}");
+        }
+        assert!(files_creates(&disk).is_empty());
+    }
+}
+
+// Enter pressed twice before the first create answers makes one file, once.
+#[gpui::test]
+fn files_panel_double_enter_creates_only_once(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "newfile");
+    // Both run in the same poll tick, before the first exec has answered.
+    disk.borrow_mut().commands.extend(["submit once.txt".to_owned(), "submit once.txt".to_owned()]);
+    files_wait(&mut visual, 50);
+    files_wait(&mut visual, 50);
+    let creates = files_creates(&disk);
+    assert_eq!(creates.len(), 1, "{creates:?}");
+    assert_eq!(creates[0].1[3], "/fixture/project/once.txt");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["creating"].clone(), state["file"].clone()), (Value::Null, json!("once.txt")), "{state}");
+}
+
+// A create that fails (denied, taken by a race, an empty stderr, a rejected call) shows why in the row,
+// which stays open; nothing is selected or opened. A later good try still works.
+#[gpui::test]
+fn files_panel_shows_a_failed_create_in_the_row_and_keeps_it_open(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[]);
+    let denied = "sh: 1: cannot create /fixture/project/new.txt: Permission denied";
+    let raced = "sh: 1: cannot create /fixture/project/new.txt: File exists";
+    disk.borrow_mut().create_results.extend([Ok((2, denied.to_owned())), Ok((2, raced.to_owned())), Ok((1, String::new())), Err("connection lost".to_owned())]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "newfile");
+    for (i, shown) in [denied, raced, "Cannot create this", "connection lost"].iter().enumerate() {
+        files_step(&mut visual, &disk, "submit new.txt");
+        assert_eq!(files_creates(&disk).len(), i + 1);
+        let state = files_state(&mut visual, &disk);
+        let error = state["creating"]["error"].as_str().unwrap_or_else(|| panic!("the row stays with a reason: {state}"));
+        assert!(error.ends_with(*shown), "{shown:?}: {state}");
+        assert_eq!((state["creating"]["kind"].clone(), state["creating"]["dir"].clone()), (json!("file"), json!("")), "{state}");
+        assert_eq!((state["file"].clone(), state["sel"].clone(), state["error"].clone()), (Value::Null, Value::Null, Value::Null), "nothing opened or selected: {state}");
+    }
+    files_step(&mut visual, &disk, "submit new.txt");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["creating"].clone(), state["file"].clone()), (Value::Null, json!("new.txt")), "{state}");
+    assert_eq!(files_creates(&disk).len(), 5);
+}
+
+// A remote machine gets `sh` there even from a Windows window; one with no `sh` (a Windows machine) gets
+// the PowerShell create on that machine instead. Any other failure is shown, with no second try.
+#[gpui::test]
+fn files_panel_falls_back_to_powershell_on_a_remote_machine_without_sh(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let remote = |windows: bool| {
+        let mut values = files_values_in("/fixture/project", windows);
+        values.get_mut("spaces").unwrap()[0]["machine"] = json!("remote");
+        values
+    };
+    let disk = files_disk(&[]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, remote(true), &disk);
+    files_new_root_folder(&mut visual, &disk, "a");
+    let creates = files_creates(&disk);
+    assert_eq!(creates.len(), 1, "{creates:?}");
+    assert_eq!((creates[0].0.as_str(), creates[0].1[3].as_str(), creates[0].2.clone()), ("sh", "/fixture/project/a", json!({"on":"remote"})));
+
+    let disk = files_disk(&[]);
+    disk.borrow_mut().create_results.extend([Err("cannot start sh: program not found".to_owned()), Ok((0, String::new())), Err("connection refused".to_owned())]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, remote(false), &disk);
+    files_new_root_folder(&mut visual, &disk, "it's $x");
+    let creates = files_creates(&disk);
+    assert_eq!(creates.len(), 2, "sh, then PowerShell: {creates:?}");
+    assert_eq!((creates[0].0.as_str(), creates[0].2.clone()), ("sh", json!({"on":"remote"})));
+    assert_eq!(
+        (creates[1].0.as_str(), creates[1].1.clone(), creates[1].2.clone()),
+        ("powershell", vec!["-NoProfile".to_owned(), "-Command".to_owned(), files_create_ps_folder("/fixture/project/it's $x")], json!({"on":"remote"}))
+    );
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["creating"].clone(), state["sel"].clone()), (Value::Null, json!({"path":"it's $x","dir":true})), "{state}");
+
+    files_new_root_folder(&mut visual, &disk, "b");
+    let creates = files_creates(&disk);
+    assert_eq!((creates.len(), creates[2].0.as_str()), (3, "sh"), "no PowerShell try for another failure: {creates:?}");
+    let state = files_state(&mut visual, &disk);
+    assert!(state["creating"]["error"].as_str().is_some_and(|e| e.ends_with("connection refused")), "{state}");
+}
+
+// Collapse All with nothing open (and before anything loads) is a no-op that keeps the panel usable and drops
+// an open name row; Refresh with the row open keeps it, in its folder, and the name still goes there.
+#[gpui::test]
+fn files_panel_collapse_with_nothing_open_and_refresh_with_the_row_open(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let disk = files_disk(&[]);
+    disk.borrow_mut().listing.insert("/fixture/project".into(), vec![('d', "src".into())]);
+    let (mut visual, _runtime, _root) = mount_files(cx, &staged, files_values(idle_agent()), &disk);
+    files_step(&mut visual, &disk, "collapse");
+    files_step(&mut visual, &disk, "collapse");
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["folders"].clone(), state["sel"].clone(), state["creating"].clone()), (json!([]), Value::Null, Value::Null), "{state}");
+    files_step(&mut visual, &disk, "newfile");
+    files_step(&mut visual, &disk, "collapse");
+    assert_eq!(files_state(&mut visual, &disk)["creating"], Value::Null, "Collapse All drops the row");
+
+    files_step(&mut visual, &disk, "select src d");
+    files_step(&mut visual, &disk, "newfile");
+    files_step(&mut visual, &disk, "refresh");
+    files_wait(&mut visual, 50);
+    let state = files_state(&mut visual, &disk);
+    assert_eq!((state["creating"].clone(), state["folders"].clone()), (json!({"kind":"file","dir":"src","error":null}), json!(["src"])), "{state}");
+    assert!(files_creates(&disk).is_empty(), "Refresh creates nothing");
+    files_step(&mut visual, &disk, "submit kept.txt");
+    let creates = files_creates(&disk);
+    assert_eq!((creates.len(), creates[0].1[3].as_str()), (1, "/fixture/project/src/kept.txt"), "{creates:?}");
 }
 
 #[gpui::test]
