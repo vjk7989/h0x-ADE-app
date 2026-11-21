@@ -98,14 +98,30 @@ fn curl_flags(url: &str) -> [&'static str; 4] {
     if loopback_stub(url) { ["--proto", "=https,http", "--proto-redir", "=https"] } else { CURL_HTTPS }
 }
 
-/// Unit tests only: a plain-http release server on `http://127.0.0.1:<port>/…`.
-#[cfg(test)]
+/// Unit tests, and debug builds whose `H0X_ADE_RELEASES_URL` is a loopback site: a
+/// plain-http release server on `http://127.0.0.1|localhost|[::1]:<port>/…`.
+#[cfg(any(test, debug_assertions))]
 fn loopback_stub(url: &str) -> bool {
-    url.strip_prefix("http://127.0.0.1:").and_then(|rest| rest.split(['/', '?', '#']).next()).is_some_and(|port| port.parse::<u16>().is_ok())
+    loopback_allowed(url, cfg!(test), env_url("H0X_ADE_RELEASES_URL"))
 }
 
-/// Release and debug builds: GitHub over https, nothing else.
-#[cfg(not(test))]
+/// `url` is a loopback site, and the build is a unit test or `releases_url` is a loopback site too.
+#[cfg(any(test, debug_assertions))]
+fn loopback_allowed(url: &str, unit_test: bool, releases_url: Option<String>) -> bool {
+    /// 1-5 ASCII digits, no leading zero, 1..=65535.
+    fn real_port(port: &str) -> bool {
+        port.len() <= 5 && !port.starts_with('0') && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok()
+    }
+    fn loopback(url: &str) -> bool {
+        let Some(rest) = url.strip_prefix("http://") else { return false };
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        authority.rsplit_once(':').is_some_and(|(host, port)| ["127.0.0.1", "localhost", "[::1]"].contains(&host) && real_port(port))
+    }
+    loopback(url) && (unit_test || releases_url.as_deref().is_some_and(loopback))
+}
+
+/// Release builds: GitHub over https, nothing else.
+#[cfg(not(any(test, debug_assertions)))]
 fn loopback_stub(_url: &str) -> bool {
     false
 }
@@ -195,13 +211,22 @@ const PUBLIC_KEY: &str = "RWTEdqtOBn6VKQ/x9x3qWk/gIWUb/I1OlZXsTlHyrkp9Yq30qBki+t
 /// test builds) is not signed.
 fn signed(url: &str, bytes: &[u8]) -> Result<(), String> {
     let overrides = [env_url("H0X_ADE_RELEASES_URL"), env_url("H0X_CORE_RELEASES_URL")];
+    // A signature that does not download is refused below as missing.
+    let sig = || fetch(&format!("{url}.minisig")).ok();
+    let name = url.rsplit('/').next().unwrap_or(url);
+    // Unit tests: the loopback stub is checked against the test key when it serves a
+    // signature, so a wrongly signed release is refused; a stub that serves none is unsigned.
+    #[cfg(test)]
+    if loopback_stub(url) {
+        return match sig() {
+            None => Ok(()),
+            Some(sig) => verify(bytes, Some(&sig), tests::TEST_KEY, name).map_err(|why| format!("{url}: not signed by the test key: {why}")),
+        };
+    }
     if loopback_stub(url) || under_override(url, overrides) || under_override(url, [env_url("H0X_RUNTIME_RELEASES_URL"), None]) {
         return Ok(());
     }
-    // A signature that does not download is refused below as missing.
-    let sig = fetch(&format!("{url}.minisig")).ok();
-    let name = url.rsplit('/').next().unwrap_or(url);
-    verify(bytes, sig.as_deref(), PUBLIC_KEY, name).map_err(|why| format!("{url}: not signed by the HyperOx release key: {why}"))
+    verify(bytes, sig().as_deref(), PUBLIC_KEY, name).map_err(|why| format!("{url}: not signed by the HyperOx release key: {why}"))
 }
 
 /// `url` is on one of the overridden releases sites.
@@ -1703,10 +1728,175 @@ mod tests {
         assert_eq!(curl_flags("https://github.com/x"), CURL_HTTPS);
         assert_eq!(curl_flags("http://127.0.0.1.evil.com/"), CURL_HTTPS);
         // cfg(test) only: the loopback stub may be plain http, but never redirect off https.
-        for url in ["http://127.0.0.1:1", "http://127.0.0.1:8080/latest/download/latest.json"] {
+        for url in ["http://127.0.0.1:1", "http://127.0.0.1:8080/latest/download/latest.json", "http://localhost:9/x", "http://[::1]:8080/x"] {
             assert!(trusted_url(url), "{url}");
             assert_eq!(curl_flags(url), ["--proto", "=https,http", "--proto-redir", "=https"]);
         }
+        for url in ["http://[::1]/", "http://[::1]:/", "http://[::1]:x/", "http://[::2]:8080/", "http://example.com:8080/", "http://localhost.evil.com:8080/"] {
+            assert!(!trusted_url(url), "{url:?}");
+        }
+    }
+
+    #[test]
+    fn a_debug_build_trusts_loopback_http_only_when_its_releases_url_is_loopback() {
+        let site = |s: &str| Some(s.to_owned());
+        let stub = "http://127.0.0.1:8080/latest/download/latest.json";
+        // A debug (not unit test) build needs a loopback `H0X_ADE_RELEASES_URL`.
+        for base in ["http://127.0.0.1:8080", "http://localhost:1", "http://[::1]:8080/"] {
+            assert!(loopback_allowed(stub, false, site(base)), "{base}");
+        }
+        for base in [None, site(""), site("http://example.com:8080"), site("https://127.0.0.1:8080"), site("http://127.0.0.1"), site("http://127.0.0.1.evil.com:8080")] {
+            assert!(!loopback_allowed(stub, false, base.clone()), "{base:?}");
+        }
+        // Another host over http is refused whatever the override says.
+        for url in ["", "http://example.com:8080/x", "http://github.com/x", "http://127.0.0.1/x", "http://localhost/x"] {
+            assert!(!loopback_allowed(url, false, site("http://127.0.0.1:8080")), "{url:?}");
+            assert!(!loopback_allowed(url, true, None), "{url:?}");
+        }
+        for url in ["http://localhost:9/x", "http://[::1]:8080/x"] {
+            assert!(loopback_allowed(url, true, None), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_loopback_port_must_be_plain_digits_from_1_to_65535() {
+        for url in ["http://127.0.0.1:0/", "http://127.0.0.1:+80/", "http://127.0.0.1:080/", "http://localhost:65536/", "http://[::1]:000080/"] {
+            assert!(!loopback_allowed(url, true, None), "{url}");
+        }
+        for url in ["http://127.0.0.1:1/", "http://127.0.0.1:65535/"] {
+            assert!(loopback_allowed(url, true, None), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_wrongly_signed_release_from_the_loopback_stub_is_refused() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/download/v1/{NAME}", listener.local_addr().unwrap());
+        let routes = Routes::default();
+        let asked = release_server(listener, routes.clone());
+        // No signature served: the unsigned stub stays accepted.
+        assert_eq!(signed(&url, PAYLOAD), Ok(()));
+        routes.lock().unwrap().insert(format!("/download/v1/{NAME}.minisig"), Some(SIG.to_vec()));
+        assert_eq!(signed(&url, PAYLOAD), Ok(()));
+        for (bytes, sig) in [(&b"tampered\n"[..], SIG), (PAYLOAD, OTHER_KEY_SIG), (PAYLOAD, OTHER_FILE_SIG), (PAYLOAD, &b"junk"[..])] {
+            routes.lock().unwrap().insert(format!("/download/v1/{NAME}.minisig"), Some(sig.to_vec()));
+            let err = signed(&url, bytes).unwrap_err();
+            assert!(err.starts_with(&format!("{url}: not signed by the test key: its signature")), "{err}");
+        }
+        assert!(asked.lock().unwrap().iter().all(|p| p.ends_with(".minisig")));
+    }
+
+    #[test]
+    fn the_loopback_stub_host_and_port_are_matched_exactly() {
+        let site = |s: &str| Some(s.to_owned());
+        for url in ["http://127.0.0.1:65535", "http://localhost:1?x", "http://[::1]:1#f", "http://127.0.0.1:80#@evil.com"] {
+            assert!(loopback_allowed(url, true, None), "{url}");
+            assert!(loopback_allowed(url, false, site("http://localhost:8080")), "{url}");
+        }
+        for url in [
+            "http://LOCALHOST:8080/",
+            "http://Localhost:8080/",
+            "HTTP://127.0.0.1:8080/",
+            "http://127.0.0.1:65536/",
+            "http://127.0.0.1:-1/",
+            "http://127.0.0.1@evil.com:80/",
+            "http://evil.com@127.0.0.1:80/",
+            "http://127.0.0.1:80@evil.com:80/",
+            r"http://127.0.0.1\@evil.com:80/",
+            r"http://evil.com\@127.0.0.1:80/",
+            r"http://127.0.0.1:80\@evil.com/",
+            "http://evil.com#@127.0.0.1:80/",
+            "http://evil.com?@127.0.0.1:80/",
+            "http://127.0.0.1.evil.com:80/",
+            "http://localhost.:80/",
+            "http://127.0.0.1.:80/",
+            "http://[::1].:80/",
+            // Only the three hosts the AC names: no IPv4-mapped, expanded or other loopback forms.
+            "http://[::ffff:127.0.0.1]:80/",
+            "http://[0:0:0:0:0:0:0:1]:80/",
+            "http://::1:80/",
+            "http://127.0.0.2:80/",
+            "http://127.1:80/",
+            "http://2130706433:80/",
+            "http://0.0.0.0:80/",
+            "http:// 127.0.0.1:80/",
+            "http://127.0.0.1 :80/",
+            "http://127.0.0.1:80 /",
+            "http:127.0.0.1:80/",
+            "http:/127.0.0.1:80/",
+            "file:///C:/Users/me/latest.json",
+            r"C:\Users\me\latest.json",
+            r"\\127.0.0.1\share\latest.json",
+        ] {
+            assert!(!loopback_allowed(url, true, None), "{url:?}");
+            assert!(!loopback_allowed(url, false, site("http://127.0.0.1:8080")), "{url:?}");
+            assert!(!trusted_url(url), "{url:?}");
+            assert_eq!(curl_flags(url), CURL_HTTPS, "{url:?}");
+        }
+        // A debug build's override must itself be an exact loopback site.
+        let stub = "http://127.0.0.1:8080/latest.json";
+        for base in [
+            "http://LOCALHOST:8080",
+            "http://127.0.0.1@evil.com:8080",
+            "http://evil.com@127.0.0.1:8080",
+            "http://[::ffff:127.0.0.1]:8080",
+            "http://localhost.:8080",
+            "http://127.0.0.1:65536",
+            "file:///C:/Users/me/releases",
+            r"C:\Users\me\releases",
+            "   ",
+        ] {
+            assert!(!loopback_allowed(stub, false, site(base)), "{base:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_signature_from_the_loopback_stub_is_refused() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/download/v1/{NAME}", listener.local_addr().unwrap());
+        let routes = Routes::default();
+        release_server(listener, routes.clone());
+        // Served (200) but empty: a signature that is there must verify, so this is not "unsigned".
+        routes.lock().unwrap().insert(format!("/download/v1/{NAME}.minisig"), Some(Vec::new()));
+        let err = signed(&url, PAYLOAD).unwrap_err();
+        assert!(err.starts_with(&format!("{url}: not signed by the test key: its signature is unreadable")), "{err}");
+        // A signature that drops the connection does not download: treated as missing (unsigned stub).
+        routes.lock().unwrap().insert(format!("/download/v1/{NAME}.minisig"), None);
+        assert_eq!(signed(&url, PAYLOAD), Ok(()));
+    }
+
+    #[test]
+    fn the_loopback_stub_neither_reads_a_404_page_as_a_signature_nor_follows_a_redirect_off_loopback() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let not_found = [b"HTTP/1.1 404 Not Found\r\nContent-Length: ".to_vec(), OTHER_KEY_SIG.len().to_string().into_bytes(), b"\r\nConnection: close\r\n\r\n".to_vec(), OTHER_KEY_SIG.to_vec()].concat();
+        let moved = b"HTTP/1.1 302 Found\r\nLocation: http://example.invalid/evil\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+        let answers: std::collections::HashMap<String, Vec<u8>> =
+            [(format!("/download/v1/{NAME}.minisig"), not_found), ("/moved/latest.json".to_owned(), moved.clone()), ("/moved/latest.json.minisig".to_owned(), moved)].into();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") && stream.read_exact(&mut byte).is_ok() {
+                    request.push(byte[0]);
+                }
+                let path = String::from_utf8_lossy(&request).split(' ').nth(1).unwrap_or_default().to_owned();
+                let _ = stream.write_all(answers.get(&path).map_or(&b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"[..], Vec::as_slice));
+            }
+        });
+        // A 404 page is no signature, whatever its body: the stub counts as unsigned, as with no `.minisig`.
+        assert_eq!(signed(&format!("{base}/download/v1/{NAME}"), PAYLOAD), Ok(()));
+        // curl may not be redirected from the plain-http stub to anything but https.
+        let url = format!("{base}/moved/latest.json");
+        let err = curl_text(&url).unwrap_err();
+        assert!(err.starts_with(&format!("{url}: ")), "{err}");
+        let file = std::env::temp_dir().join(format!("h0x-ade-loopback-moved-{}", std::process::id()));
+        let err = download(&url, &file, "5").unwrap_err();
+        assert!(err.starts_with(&format!("{url}: ")), "{err}");
+        assert!(!file.exists());
     }
 
     #[test]
@@ -1724,7 +1914,7 @@ mod tests {
     /// `PAYLOAD`, and the same payload signed by a second throwaway key; made
     /// with rsign2 (`generate -W`, `sign -W -t`), trusted comments the way
     /// `minisign -S` writes them.
-    const TEST_KEY: &str = "RWSdBj3+m1kau24wxYnVraQxNX7fJSNwEU8cGRBq0f/kLy3T7o02KkXn";
+    pub(super) const TEST_KEY: &str = "RWSdBj3+m1kau24wxYnVraQxNX7fJSNwEU8cGRBq0f/kLy3T7o02KkXn";
     const PAYLOAD: &[u8] = b"h0x-core test release\n";
     const NAME: &str = "h0x-ade-linux-x86_64.tar.gz";
     const SIG: &[u8] = b"untrusted comment: signature from rsign secret key
@@ -3154,8 +3344,8 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
     /// What the loopback release server answers per path: a body, or None to drop the connection.
     type Routes = std::sync::Arc<Mutex<std::collections::HashMap<String, Option<Vec<u8>>>>>;
 
-    /// A plain-http release server on `listener` (the loopback stub only unit tests trust, so
-    /// nothing is signed): answers each GET from `routes`, 404 for a path not there, and
+    /// A plain-http release server on `listener` (the loopback stub only unit tests trust; a
+    /// release is unsigned unless its `.minisig` route is set): answers each GET from `routes`, 404 for a path not there, and
     /// records the paths asked for. Runs until the process ends.
     fn release_server(listener: std::net::TcpListener, routes: Routes) -> std::sync::Arc<Mutex<Vec<String>>> {
         use std::io::{Read, Write};
