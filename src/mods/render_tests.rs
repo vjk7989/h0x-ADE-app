@@ -3038,7 +3038,7 @@ fn settings_token_saver_switch_on_writes_true_and_off_removes_the_key_keeping_ev
 fn settings_token_saver_with_a_value_that_is_not_true_shows_off_and_one_press_writes_true(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    // Only true is on; a wrong type (which the app itself rejects, see settings.rs) neither crashes the page nor reads as on.
+    // Only true is on; a wrong type (which the app reads as off, see bool_or_false in settings.rs) neither crashes the page nor reads as on.
     for value in [r#""yes""#, "1", "0", "null", r#""true""#, "[]"] {
         let file = format!(r#"{{"token_saver": {value}, "zoom": 1.25}}"#);
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(&file), TOKEN_SAVER_PRESS, 1);
@@ -3057,6 +3057,173 @@ fn settings_token_saver_switch_never_overwrites_a_settings_file_it_could_not_rea
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(bad), TOKEN_SAVER_PRESS, 1);
         assert!(calls.borrow().writes.is_empty(), "{bad:?}: {:?}", calls.borrow().writes);
         assert!(trees[1].contains("can't be read") && trees[1].contains("st-token-saver-off"), "{bad:?}: {}", trees[1]);
+    }
+}
+
+// Names the Smart routing switch by its state (st-smart-routing-on or -off) and keeps its click.
+const SMART_ROUTING_PRESS: &str = "const toggle = this.toggle.bind(this); \
+    this.toggle = (t, id, on, onClick, asTag) => { if (id !== 'st-smart-routing') return toggle(t, id, on, onClick, asTag); \
+    this.press = onClick; return toggle(t, on ? 'st-smart-routing-on' : 'st-smart-routing-off', on, onClick, asTag); };";
+
+#[gpui::test]
+fn settings_smart_routing_row_sits_under_token_saver_with_its_heading_and_is_off_by_default(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Token Saver on, and smart_routing absent, false or not a bool: the row is there, enabled, and off.
+    for file in [r#"{"token_saver": true}"#, r#"{"token_saver": true, "smart_routing": false}"#, r#"{"token_saver": true, "smart_routing": "yes"}"#, r#"{"token_saver": true, "smart_routing": 1}"#] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(file), SMART_ROUTING_PRESS, 0);
+        let tree = &trees[0];
+        for text in ["Smart routing", "Picks the right tools and model for tasks you start with a prompt (logs and data questions run on a cheaper model).", "st-smart-routing-off"] {
+            assert!(tree.contains(text), "{file}: {text:?}: {tree}");
+        }
+        assert!(!tree.contains("st-smart-routing-on") && !tree.contains("Turn on Token Saver") && !tree.contains("can't be read"), "{file}: {tree}");
+        let (saver, routing, saved) = (tree.find("Token Saver").unwrap(), tree.find("Smart routing").unwrap(), tree.find("Tokens saved: ").unwrap());
+        assert!(saver < routing && routing < saved, "{file}: the row is under Token Saver: {tree}");
+        let c = calls.borrow();
+        assert!(c.writes.is_empty() && c.cores.is_empty() && c.unexpected.is_empty(), "{file}: {:?} {:?} {:?}", c.writes, c.cores, c.unexpected);
+    }
+}
+
+#[gpui::test]
+fn settings_smart_routing_switch_on_writes_true_and_off_removes_the_key_keeping_every_other_key(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (file, write, was_on) in [
+        (r#"{"token_saver": true}"#, json!({"token_saver": true, "smart_routing": true}), false),
+        (r#"{"token_saver": true, "smart_routing": false, "zoom": 1.25}"#, json!({"token_saver": true, "smart_routing": true, "zoom": 1.25}), false),
+        (r#"{"token_saver": true, "smart_routing": true, "zoom": 1.25}"#, json!({"token_saver": true, "zoom": 1.25}), true),
+        ("\u{feff}{\"token_saver\": true, \"smart_routing\": true}", json!({"token_saver": true}), true),
+    ] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(file), SMART_ROUTING_PRESS, 1);
+        assert_eq!(written(&calls, "/fixture/app/settings.json"), [write], "{file:?}");
+        let (before, after) = if was_on { ("st-smart-routing-on", "st-smart-routing-off") } else { ("st-smart-routing-off", "st-smart-routing-on") };
+        assert!(trees[0].contains(before) && !trees[0].contains(after), "{file:?}: {}", trees[0]);
+        assert!(trees[1].contains(after) && !trees[1].contains(before), "{file:?}: the switch shows what was written: {}", trees[1]);
+        assert!(calls.borrow().cores.is_empty() && calls.borrow().unexpected.is_empty(), "{file:?}: {:?} {:?}", calls.borrow().cores, calls.borrow().unexpected);
+    }
+}
+
+#[gpui::test]
+fn settings_smart_routing_is_disabled_with_a_note_when_token_saver_is_off(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Token Saver off, absent or not true: the row is shown, has no switch to press, and says why. A stored smart_routing true is kept, not shown on.
+    for file in [None, Some("{}"), Some(r#"{"token_saver": false}"#), Some(r#"{"token_saver": "yes"}"#), Some(r#"{"smart_routing": true}"#), Some(r#"{"token_saver": false, "smart_routing": true, "zoom": 1.25}"#)] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, SMART_ROUTING_PRESS, 0);
+        let tree = &trees[0];
+        assert!(tree.contains("Smart routing") && tree.contains("Turn on Token Saver to use this."), "{file:?}: {tree}");
+        assert!(!tree.contains("st-smart-routing"), "{file:?}: no switch while Token Saver is off: {tree}");
+        let c = calls.borrow();
+        assert!(c.writes.is_empty() && c.cores.is_empty() && c.unexpected.is_empty(), "{file:?}: {:?} {:?} {:?}", c.writes, c.cores, c.unexpected);
+    }
+}
+
+#[gpui::test]
+fn settings_token_saver_off_makes_smart_routing_inert_and_keeps_its_stored_value_for_when_it_is_back_on(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let (saver, routing) = ("st-token-saver", "st-smart-routing");
+    // settings.json, the switches pressed in order, what each press writes, and the Smart routing switch shown after it (None: inert).
+    let cases: [(Option<&str>, Vec<&str>, Vec<Value>, Vec<Option<&str>>); 3] = [
+        (
+            Some(r#"{"token_saver": true, "smart_routing": true, "zoom": 1.25}"#),
+            vec![saver, saver, routing, saver],
+            vec![
+                json!({"smart_routing": true, "zoom": 1.25}),
+                json!({"token_saver": true, "smart_routing": true, "zoom": 1.25}),
+                json!({"token_saver": true, "zoom": 1.25}),
+                json!({"zoom": 1.25}),
+            ],
+            vec![None, Some("st-smart-routing-on"), Some("st-smart-routing-off"), None],
+        ),
+        (
+            None,
+            vec![saver, routing, saver],
+            vec![json!({"token_saver": true}), json!({"token_saver": true, "smart_routing": true}), json!({"smart_routing": true})],
+            vec![Some("st-smart-routing-off"), Some("st-smart-routing-on"), None],
+        ),
+        (
+            Some(r#"{"smart_routing": true}"#),
+            vec![saver, routing],
+            vec![json!({"smart_routing": true, "token_saver": true}), json!({"token_saver": true})],
+            vec![Some("st-smart-routing-on"), Some("st-smart-routing-off")],
+        ),
+    ];
+    for (file, steps, writes, shown) in cases {
+        // Presses the two switches in the order of `steps` (their ids), one per press, and names each by its state (-on or -off).
+        let setup = format!(
+            "this.steps = {}; const toggle = this.toggle.bind(this); \
+             this.toggle = (t, id, on, onClick, asTag) => {{ if (id !== 'st-token-saver' && id !== 'st-smart-routing') return toggle(t, id, on, onClick, asTag); \
+             if (id === this.steps[0]) this.press = (e, cx) => {{ this.steps.shift(); onClick(e, cx); }}; \
+             return toggle(t, id + (on ? '-on' : '-off'), on, onClick, asTag); }};",
+            json!(steps)
+        );
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, &setup, steps.len());
+        assert_eq!(written(&calls, "/fixture/app/settings.json"), writes, "{file:?} {steps:?}");
+        for (tree, shown) in trees[1..].iter().zip(&shown) {
+            assert!(tree.contains("Smart routing") && !tree.contains("can't be read"), "{file:?}: {tree}");
+            match shown {
+                Some(id) => {
+                    assert!(tree.contains(id) && !tree.contains("Turn on Token Saver"), "{file:?}: {id}: {tree}");
+                    assert!(tree.contains("st-token-saver-on"), "{file:?}: {tree}");
+                }
+                None => {
+                    assert!(!tree.contains("st-smart-routing") && tree.contains("Turn on Token Saver to use this."), "{file:?}: inert: {tree}");
+                    assert!(tree.contains("st-token-saver-off"), "{file:?}: {tree}");
+                }
+            }
+        }
+        assert!(calls.borrow().cores.is_empty() && calls.borrow().unexpected.is_empty(), "{file:?}: {:?} {:?}", calls.borrow().cores, calls.borrow().unexpected);
+    }
+}
+
+#[gpui::test]
+fn settings_inert_smart_routing_row_has_nothing_to_click(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for file in [None, Some(r#"{"smart_routing": true}"#)] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, "", 0);
+        let tree = &trees[0];
+        // From the row's title to the savings line below it: no id, click or hand cursor.
+        let start = tree.find("Smart routing").unwrap_or_else(|| panic!("{file:?}: {tree}"));
+        let end = tree.find("Tokens saved: ").unwrap_or_else(|| panic!("{file:?}: {tree}"));
+        assert!(start < end, "{file:?}: {tree}");
+        let row = &tree[start..end];
+        for click in [":on_click(fn)", ":on_mouse_down(fn)", ":on_mouse_up(fn)", ".cursor_pointer", "\"st-"] {
+            assert!(!row.contains(click), "{file:?}: {click:?}: {row}");
+        }
+        assert!(calls.borrow().writes.is_empty(), "{file:?}: {:?}", calls.borrow().writes);
+    }
+}
+
+#[gpui::test]
+fn settings_smart_routing_reads_a_crlf_file_and_writes_a_windows_app_home(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // A file saved with CRLF (and with a BOM too) reads as on; the press turns it off, keeping the other keys.
+    for file in ["{\r\n  \"token_saver\": true,\r\n  \"smart_routing\": true,\r\n  \"zoom\": 1.25\r\n}\r\n", "\u{feff}{\r\n\"smart_routing\": true,\r\n\"token_saver\": true,\r\n\"zoom\": 1.25}\r\n"] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(file), SMART_ROUTING_PRESS, 1);
+        assert!(trees[0].contains("st-smart-routing-on") && !trees[0].contains("can't be read"), "{file:?}: {}", trees[0]);
+        assert_eq!(written(&calls, "/fixture/app/settings.json"), [json!({"token_saver": true, "zoom": 1.25})], "{file:?}");
+        assert!(trees[1].contains("st-smart-routing-off"), "{file:?}: {}", trees[1]);
+    }
+    // A Windows app home: the switch writes that home's settings.json.
+    let home = "C:\\Users\\Zo\u{eb} Q\\AppData\\Roaming\\h0x-ade";
+    let mut values = modes_values();
+    values.insert("appHome".into(), json!(home));
+    let (_, calls) = describe_pressing(cx, &staged, "frame/settings", values, Some(r#"{"token_saver": true}"#), SMART_ROUTING_PRESS, 1);
+    assert_eq!(written(&calls, &format!("{home}/settings.json")), [json!({"token_saver": true, "smart_routing": true})]);
+}
+
+#[gpui::test]
+fn settings_smart_routing_stays_inert_and_writes_nothing_for_an_unreadable_settings_file(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // An unreadable file reads as the default person: Token Saver off, so the row is inert and there is nothing to press.
+    for bad in ["", "   ", "\r\n", "{not json", "[]", "null"] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(bad), SMART_ROUTING_PRESS, 0);
+        assert!(trees[0].contains("Turn on Token Saver to use this.") && !trees[0].contains("st-smart-routing"), "{bad:?}: {}", trees[0]);
+        assert!(calls.borrow().writes.is_empty(), "{bad:?}: {:?}", calls.borrow().writes);
     }
 }
 
