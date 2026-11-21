@@ -1187,6 +1187,7 @@ export default class Settings extends View {
 
   modes(t) {
     const on = this.person.token_saver === true;
+    const routing = this.person.smart_routing === true;
     const soon = (title) => this.row(t, title, null, div().text_size(12.5).text_color(t.dim).child("Coming soon"));
     return v_flex()
       .w_full()
@@ -1198,6 +1199,16 @@ export default class Settings extends View {
           "Token Saver",
           "Shrinks big tool outputs (long logs, large files, JSON) before your agent reads them, so sessions use fewer tokens. Applies to new Claude Code terminals; Codex and OpenCode coming soon.",
           this.toggle(t, "st-token-saver", on, (_e, cx) => this.change((p) => { if (on) delete p.token_saver; else p.token_saver = true; }, cx)),
+        ),
+      )
+      .child(
+        this.row(
+          t,
+          "Smart routing",
+          "Picks the right tools and model for tasks you start with a prompt (logs and data questions run on a cheaper model)." + (on ? "" : " Turn on Token Saver to use this."),
+          on
+            ? this.toggle(t, "st-smart-routing", routing, (_e, cx) => this.change((p) => { if (routing) delete p.smart_routing; else p.smart_routing = true; }, cx))
+            : div().w(36).h(20).rounded(10).p(2).bg(t.hover).child(div().w(16).h(16).rounded(8).bg(t.muted)),
         ),
       )
       .child(div().pt(8).pb(4).text_size(12.5).text_color(t.muted).child(`Tokens saved: ${this.savedText()}`))

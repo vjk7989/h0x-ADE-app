@@ -412,6 +412,9 @@ pub struct Person {
     /// 0x Modes > Token Saver: shrink big tool outputs before an agent reads them. Off unless set.
     #[serde(skip_serializing_if = "is_false", deserialize_with = "bool_or_false")]
     pub token_saver: bool,
+    /// 0x Modes > Smart routing (needs Token Saver): pick the tools and model for a task started with a prompt. Off unless set.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "bool_or_false")]
+    pub smart_routing: bool,
     /// The welcome's one-time "How did you find HyperOx?": the choice, or "skip". Set means asked.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "string_or_none")]
     pub found_via: Option<String>,
@@ -564,6 +567,7 @@ impl Default for Person {
             check_updates: true,
             share_analytics: true,
             token_saver: false,
+            smart_routing: false,
             found_via: None,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
@@ -608,6 +612,7 @@ pub struct Settings {
     pub check_updates: bool,
     pub share_analytics: bool,
     pub token_saver: bool,
+    pub smart_routing: bool,
     pub minimum_contrast: f32,
     /// Scrollback lines per new terminal pane.
     pub scrollback_lines: u32,
@@ -655,6 +660,7 @@ impl Default for Settings {
             check_updates: true,
             share_analytics: true,
             token_saver: false,
+            smart_routing: false,
             minimum_contrast: 1.0,
             scrollback_lines: SCROLLBACK_DEFAULT,
             option_as_alt: OptionAsAlt::Auto,
@@ -698,6 +704,7 @@ impl Settings {
             check_updates: person.check_updates,
             share_analytics: person.share_analytics,
             token_saver: person.token_saver,
+            smart_routing: person.smart_routing,
             minimum_contrast: person.minimum_contrast,
             scrollback_lines: person.scrollback_lines,
             option_as_alt: person.option_as_alt,
@@ -1390,6 +1397,39 @@ mod tests {
         assert!(!off.token_saver && serde_json::to_value(&off).unwrap().get("token_saver").is_none());
         assert!(parse_person("\u{feff}{\"token_saver\":true}").unwrap().token_saver);
         assert!(!parse_person("{}").unwrap().token_saver);
+    }
+
+    #[test]
+    fn smart_routing_defaults_off_round_trips_and_a_bad_value_keeps_the_file() {
+        let absent: Person = serde_json::from_str(r#"{"zoom":1.5}"#).unwrap();
+        assert!(!absent.smart_routing && !Person::default().smart_routing && !Settings::default().smart_routing);
+        assert!(serde_json::to_value(&absent).unwrap().get("smart_routing").is_none());
+        let on: Person = serde_json::from_str(r#"{"smart_routing":true}"#).unwrap();
+        assert!(on.smart_routing && Settings::compose(&on, &crate::layout::Look::default(), true).smart_routing);
+        assert_eq!(serde_json::to_value(&on).unwrap()["smart_routing"], serde_json::json!(true));
+        for bad in [r#"{"smart_routing":"yes"}"#, r#"{"smart_routing":1}"#, r#"{"smart_routing":null}"#, r#"{"smart_routing":[]}"#, r#"{"smart_routing":"true","zoom":1.5}"#] {
+            let person = parse_person(bad).unwrap_or_else(|e| panic!("{bad:?}: {e}"));
+            assert!(!person.smart_routing, "{bad:?}");
+        }
+        assert!(parse_person(r#"{"smart_routing":false,"zoom":1.5}"#).unwrap().zoom == 1.5);
+    }
+
+    #[test]
+    fn smart_routing_is_kept_apart_from_token_saver_and_reads_from_crlf_files() {
+        // Stored without Token Saver: it is read and written back as is, so turning Token Saver on again finds it.
+        let alone = parse_person(r#"{"smart_routing":true}"#).unwrap();
+        assert!(alone.smart_routing && !alone.token_saver);
+        let back = serde_json::to_value(&alone).unwrap();
+        assert!(back["smart_routing"] == serde_json::json!(true) && back.get("token_saver").is_none(), "{back}");
+        // CRLF line ends, with and without a BOM, read like LF.
+        for text in ["{\r\n  \"token_saver\": true,\r\n  \"smart_routing\": true\r\n}\r\n", "\u{feff}{\r\n\"smart_routing\":true,\r\n\"token_saver\":true}\r\n"] {
+            let person = parse_person(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
+            assert!(person.smart_routing && person.token_saver, "{text:?}");
+        }
+        // An empty or blank file is not a person at all, so it is refused rather than read as off.
+        for empty in ["", "   ", "\r\n", "\u{feff}"] {
+            assert!(parse_person(empty).is_err(), "{empty:?}");
+        }
     }
 
     /// The guide's stated defaults are what an empty settings.json gives, and
