@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// At most this many throttled events (shortcuts, panels, themes) an hour.
@@ -393,7 +393,7 @@ pub fn agents(now: &[Seen], first: bool, core: &Arc<crate::core_link::Core>) {
             .iter()
             .any(|s| &s.address == addr && agent_kind(&s.app) == run.kind);
         if !alive {
-            ended.push((addr.clone(), run.kind, run.since, run.job()));
+            ended.push((addr.clone(), run.kind, run.since, run.job(addr)));
         }
         alive
     });
@@ -401,23 +401,27 @@ pub fn agents(now: &[Seen], first: bool, core: &Arc<crate::core_link::Core>) {
     for s in now {
         if !map.contains_key(&s.address) {
             let kind = agent_kind(&s.app);
+            // A terminal keeps running in the core when the app quits: its run goes on under the same
+            // trace id, from where its last read stopped.
+            let saved = saved_run(&s.address, kind);
+            let started = saved.as_ref().map_or_else(SystemTime::now, |e| UNIX_EPOCH + Duration::from_millis(e.started_ms));
             map.insert(
                 s.address.clone(),
                 Running {
                     kind,
-                    since: Instant::now(),
-                    started: SystemTime::now(),
-                    folder: s.folder.clone(),
-                    trace: new_trace_id(),
+                    since: Instant::now().checked_sub(started.elapsed().unwrap_or_default()).unwrap_or_else(Instant::now),
+                    started,
+                    folder: s.folder.clone().or_else(|| saved.as_ref().map(|e| e.folder.clone()).filter(|f| !f.is_empty())),
+                    trace: saved.as_ref().map_or_else(new_trace_id, |e| e.trace.clone()),
                     last_read: Instant::now(),
-                    turns: Arc::new(AtomicU64::new(0)),
+                    turns: Arc::new(AtomicU64::new(saved.as_ref().map_or(0, |e| e.turns))),
                     remote: s.address.contains('/'),
                 },
             );
-            if !first {
+            if !first && saved.is_none() {
                 crate::activity::session_started();
             }
-            if !first && allow(&format!("agent_started:{kind}"), Duration::from_secs(5)) {
+            if !first && saved.is_none() && allow(&format!("agent_started:{kind}"), Duration::from_secs(5)) {
                 event(
                     "agent_started",
                     json!({ "agent": kind, "concurrent": map.len(), "remote": s.address.contains('/') }),
@@ -426,31 +430,47 @@ pub fn agents(now: &[Seen], first: bool, core: &Arc<crate::core_link::Core>) {
         }
     }
     let mut due = Vec::new();
-    for run in map.values_mut() {
+    for (addr, run) in map.iter_mut() {
         if run.last_read.elapsed() >= READ_EVERY
-            && let Some(job) = run.job()
+            && let Some(job) = run.job(addr)
         {
             run.last_read = Instant::now();
             due.push(job);
         }
     }
+    // Once, after the first listing has surely arrived: a run stored by an earlier app session whose
+    // terminal is gone ended while the app was closed; it gets its final read.
+    let mut orphans = Vec::new();
+    if crate::analytics::session_seconds() >= 30 && !SWEPT.swap(true, Ordering::Relaxed) {
+        for (addr, saved) in Cursors::load(&usage_dir()).runs {
+            if !map.contains_key(&addr)
+                && let Some(mut job) = saved.job(&addr)
+            {
+                job.seconds = job.started.elapsed().unwrap_or_default().as_secs();
+                orphans.push(job);
+            }
+        }
+    }
     let concurrent = before + ended.len();
     drop(map);
-    let token_saver = (!due.is_empty() || ended.iter().any(|e| e.3.is_some()))
+    let token_saver = (!due.is_empty() || !orphans.is_empty() || ended.iter().any(|e| e.3.is_some()))
         .then(|| crate::settings::get().token_saver)
         .unwrap_or_default();
     for job in due {
         read_in_background(core, job, false, token_saver);
     }
+    for job in orphans {
+        read_in_background(core, job, true, token_saver);
+    }
     for (addr, kind, since, job) in ended {
         let seconds = since.elapsed().as_secs();
-        if seconds < 5 {
-            continue;
+        if seconds >= 5 {
+            event(
+                "agent_ended",
+                json!({ "agent": kind, "seconds": seconds, "concurrent": concurrent, "remote": addr.contains('/') }),
+            );
         }
-        event(
-            "agent_ended",
-            json!({ "agent": kind, "seconds": seconds, "concurrent": concurrent, "remote": addr.contains('/') }),
-        );
+        // Even a short run gets its last read and its trace.
         if let Some(mut job) = job {
             job.seconds = seconds;
             read_in_background(core, job, true, token_saver);
@@ -458,9 +478,26 @@ pub fn agents(now: &[Seen], first: bool, core: &Arc<crate::core_link::Core>) {
     }
 }
 
+/// Set once the stored runs without a terminal have been finished.
+static SWEPT: AtomicBool = AtomicBool::new(false);
+
+fn usage_dir() -> PathBuf {
+    crate::mods::app_dir().join("usage")
+}
+
+/// The stored run of this terminal when it was the same kind of agent.
+fn saved_run(address: &str, kind: &str) -> Option<RunCursor> {
+    if address.contains('/') || !matches!(kind, "claude" | "codex") {
+        return None;
+    }
+    Cursors::load(&usage_dir()).runs.remove(address).filter(|e| e.agent == kind && !e.trace.is_empty())
+}
+
 /// A local claude or codex run whose turns are read.
 #[derive(Clone)]
 struct Job {
+    /// The core's terminal id: stable while the terminal lives, also across app restarts.
+    address: String,
     kind: &'static str,
     usage_kind: AgentKind,
     folder: PathBuf,
@@ -472,7 +509,7 @@ struct Job {
 }
 
 impl Running {
-    fn job(&self) -> Option<Job> {
+    fn job(&self, address: &str) -> Option<Job> {
         let usage_kind = match self.kind {
             "claude" => AgentKind::Claude,
             "codex" => AgentKind::Codex,
@@ -480,6 +517,7 @@ impl Running {
         };
         let folder = self.folder.clone().filter(|_| !self.remote)?;
         Some(Job {
+            address: address.to_owned(),
             kind: self.kind,
             usage_kind,
             folder: PathBuf::from(folder),
@@ -512,7 +550,7 @@ fn read_in_background(core: &Arc<crate::core_link::Core>, job: Job, finish: bool
         let _one = READING.lock().unwrap_or_else(|e| e.into_inner());
         let redact = |text: &str| parse_redacted(&core.call_timeout("text.redact", json!({ "text": text }), Duration::from_secs(3)));
         let ctx = Ctx {
-            dir: &crate::mods::app_dir().join("usage"),
+            dir: &usage_dir(),
             sharing: crate::analytics::sharing(),
             token_saver,
             redact: &redact,
@@ -540,26 +578,46 @@ struct Ctx<'a> {
 /// `$ai_generation`. The cursor is stored only after the events are queued, and a turn read once is
 /// never read again. Returns how many turns were read.
 fn read_run(ctx: &Ctx, job: &Job, finish: bool) -> usize {
-    let turns = read_with(ctx, job, finish, |cursor| {
+    read_with(ctx, job, finish, |cursor| {
         crate::agent_usage::turns(job.usage_kind, &job.folder, job.started, SystemTime::now(), cursor, finish)
-    });
-    job.turns.fetch_add(turns as u64, Ordering::Relaxed);
-    turns
+    })
+}
+
+/// When a turn is stamped: its prompt time, or the read time when that is missing (0), negative, or
+/// more than a day ahead of the read.
+fn turn_time(ms: i64, read_ms: u64) -> u64 {
+    u64::try_from(ms).ok().filter(|m| *m > 0 && *m <= read_ms.saturating_add(86_400_000)).unwrap_or(read_ms)
 }
 
 fn read_with(ctx: &Ctx, job: &Job, finish: bool, read: impl FnOnce(&mut TurnCursor) -> Vec<Turn>) -> usize {
     let mut store = Cursors::load(ctx.dir);
-    let mut cursor = store.runs.remove(&job.trace).map(|r| r.cursor).unwrap_or_default();
+    let mut cursor = store.runs.remove(&job.address).map(|r| r.cursor).unwrap_or_default();
     let turns = read(&mut cursor);
+    let read_at = unix_secs() * 1000;
     for t in &turns {
         (ctx.usage)(job.kind, t.input.saturating_add(t.output), t.cost_usd.unwrap_or(0.0));
         if ctx.sharing {
-            let input = t.prompt.as_deref().filter(|p| !p.trim().is_empty()).and_then(|p| (ctx.redact)(p));
-            (ctx.emit)("$ai_generation", generation_props(&job.trace, job.kind, t, input.as_deref(), ctx.token_saver), u64::try_from(t.timestamp_ms).unwrap_or(0));
+            let input = t
+                .prompt
+                .as_deref()
+                .filter(|p| !p.trim().is_empty())
+                .and_then(|p| (ctx.redact)(p))
+                .filter(|p| !p.trim().is_empty());
+            (ctx.emit)("$ai_generation", generation_props(&job.trace, job.kind, t, input.as_deref(), ctx.token_saver), turn_time(t.timestamp_ms, read_at));
         }
     }
+    let total = job.turns.fetch_add(turns.len() as u64, Ordering::Relaxed) + turns.len() as u64;
     if !finish {
-        store.runs.insert(job.trace.clone(), RunCursor { at: unix_secs(), cursor });
+        let run = RunCursor {
+            at: unix_secs(),
+            trace: job.trace.clone(),
+            started_ms: job.started.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
+            agent: job.kind.to_owned(),
+            folder: job.folder.to_string_lossy().into_owned(),
+            turns: total,
+            cursor,
+        };
+        store.runs.insert(job.address.clone(), run);
     }
     store.save(ctx.dir);
     turns.len()
@@ -591,10 +649,9 @@ fn generation_props(trace: &str, agent: &str, t: &Turn, input: Option<&str>, tok
         "skills": t.skills,
         "token_saver": token_saver,
     });
-    if let Some(model) = &t.model {
-        p["$ai_model"] = json!(model);
-    }
-    if let Some(cost) = t.cost_usd.filter(|c| c.is_finite()) {
+    // PostHog needs a model on every generation.
+    p["$ai_model"] = json!(t.model.as_deref().filter(|m| !m.is_empty()).unwrap_or("unknown"));
+    if let Some(cost) = t.cost_usd.filter(|c| c.is_finite() && *c >= 0.0) {
         p["$ai_total_cost_usd"] = json!(cost);
     }
     if let Some(ms) = t.latency_ms {
@@ -615,8 +672,9 @@ fn unix_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// Where each running agent's reads stopped (`usage/cursors.json`, keyed by trace id), so a quit
-/// and restart, or the next read, never sends a turn twice.
+/// Where each running agent's reads stopped (`usage/cursors.json`, keyed by the core's terminal id,
+/// which outlives an app restart), so a quit and restart, or the next read, never sends a turn
+/// twice and the run keeps its trace id.
 #[derive(Default, Serialize, Deserialize)]
 struct Cursors {
     runs: HashMap<String, RunCursor>,
@@ -626,15 +684,53 @@ struct Cursors {
 struct RunCursor {
     /// Unix seconds of the last read; old entries of runs that never ended are dropped.
     at: u64,
+    /// What a restarted app needs to go on with the run, or to end it if the terminal is gone.
+    #[serde(default)]
+    trace: String,
+    #[serde(default)]
+    started_ms: u64,
+    #[serde(default)]
+    agent: String,
+    #[serde(default)]
+    folder: String,
+    #[serde(default)]
+    turns: u64,
     cursor: TurnCursor,
 }
 
+impl RunCursor {
+    /// The run as a job to finish; none for an entry that does not say what ran where.
+    fn job(&self, address: &str) -> Option<Job> {
+        let (kind, usage_kind) = match self.agent.as_str() {
+            "claude" => ("claude", AgentKind::Claude),
+            "codex" => ("codex", AgentKind::Codex),
+            _ => return None,
+        };
+        (!self.folder.is_empty() && !self.trace.is_empty()).then(|| Job {
+            address: address.to_owned(),
+            kind,
+            usage_kind,
+            folder: PathBuf::from(&self.folder),
+            started: UNIX_EPOCH + Duration::from_millis(self.started_ms),
+            trace: self.trace.clone(),
+            turns: Arc::new(AtomicU64::new(self.turns)),
+            seconds: 0,
+        })
+    }
+}
+
 impl Cursors {
+    /// The stored runs. An unreadable file is empty; one entry of the wrong shape is dropped alone.
     fn load(dir: &Path) -> Self {
-        std::fs::read_to_string(dir.join("cursors.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let value: Value = std::fs::read_to_string(dir.join("cursors.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let runs = value
+            .get("runs")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter_map(|(k, v)| Some((k.clone(), serde_json::from_value(v.clone()).ok()?)))
+            .collect();
+        Self { runs }
     }
 
     fn save(&mut self, dir: &Path) {
@@ -741,6 +837,7 @@ mod tests {
 
     fn job(trace: &str) -> Job {
         Job {
+            address: trace.into(),
             kind: "claude",
             usage_kind: AgentKind::Claude,
             folder: PathBuf::from("/x/y"),
@@ -801,11 +898,12 @@ mod tests {
             assert_eq!(p["$ai_input_tokens"], 10);
             assert!(!p.to_string().contains("secret"));
         }
-        // An unknown model, cost or latency leaves those names out.
+        // An unknown model is named "unknown" (PostHog needs one); an unknown cost or latency is left out.
         let mut bare = turn(None);
         (bare.model, bare.cost_usd, bare.latency_ms) = (None, Some(f64::NAN), None);
         let p = generation_props("t", "codex", &bare, None, false);
-        for k in ["$ai_model", "$ai_total_cost_usd", "$ai_latency", "$ai_input"] {
+        assert_eq!(p["$ai_model"], "unknown");
+        for k in ["$ai_total_cost_usd", "$ai_latency", "$ai_input"] {
             assert!(p.get(k).is_none(), "{k}");
         }
         assert_eq!(p["token_saver"], false);
@@ -997,8 +1095,91 @@ mod tests {
                 t
             })
             .collect();
+        let before = unix_secs() * 1000;
         assert_eq!(read_with(&ctx, &job("ts"), false, |_| turns), 4);
-        assert_eq!(got.into_inner(), [i64::MAX as u64, 0, 0, 0]);
+        // A bad, zero, negative or far-future time is stamped with the read time.
+        let after = unix_secs() * 1000;
+        assert!(got.into_inner().iter().all(|at| (before..=after).contains(at)));
+    }
+
+    #[test]
+    fn turn_time_keeps_a_good_time_and_replaces_one_more_than_a_day_ahead() {
+        let read: u64 = 1_700_000_000_000;
+        let day: u64 = 86_400_000;
+        assert_eq!(turn_time((read - 5_000) as i64, read), read - 5_000);
+        assert_eq!(turn_time((read + day) as i64, read), read + day, "exactly a day ahead is kept");
+        assert_eq!(turn_time((read + day + 1) as i64, read), read);
+        assert_eq!((turn_time(0, read), turn_time(-1, read), turn_time(i64::MIN, read), turn_time(i64::MAX, read)), (read, read, read, read));
+    }
+
+    #[test]
+    fn a_stored_run_resumes_under_its_trace_and_a_gone_terminal_can_be_finished() {
+        let d = dir("resume");
+        let emit = |_: &str, _: Value, _: u64| ();
+        let usage = |_: &str, _: u64, _: f64| ();
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        // Keyed by terminal id, with the trace id and what is needed to end the run inside.
+        let mut j = job("term-7");
+        j.trace = "h0x-run-1".into();
+        read_with(&ctx, &j, false, |c| {
+            *c = cursor_at(42);
+            vec![turn(None), turn(None)]
+        });
+        let saved = Cursors::load(&d).runs.remove("term-7").unwrap();
+        assert_eq!((saved.trace.as_str(), saved.agent.as_str(), saved.turns), ("h0x-run-1", "claude", 2));
+        assert_eq!(saved.cursor, cursor_at(42));
+        // After a restart the same terminal gets the same trace and the stored count.
+        let again = saved.job("term-7").unwrap();
+        assert_eq!((again.trace.as_str(), again.kind, again.turns.load(Ordering::Relaxed)), ("h0x-run-1", "claude", 2));
+        assert_eq!(again.folder, PathBuf::from("/x/y"));
+        // The final read starts from the stored cursor, sends `$ai_trace` with the whole count, and clears the entry.
+        let got = std::cell::RefCell::new(Vec::new());
+        let emit = |n: &str, p: Value, _: u64| got.borrow_mut().push((n.to_string(), p));
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        read_with(&ctx, &again, true, |c| {
+            assert_eq!(*c, cursor_at(42));
+            vec![turn(None)]
+        });
+        ctx.trace_ended(&again);
+        let got = got.into_inner();
+        assert_eq!(got[1].0, "$ai_trace");
+        assert_eq!((got[0].1["$ai_trace_id"].clone(), got[1].1["turns"].clone()), (json!("h0x-run-1"), json!(3)));
+        assert!(Cursors::load(&d).runs.is_empty());
+        // An entry that cannot say what ran where is not finished.
+        let bare = RunCursor { at: 1, trace: String::new(), started_ms: 0, agent: String::new(), folder: String::new(), turns: 0, cursor: TurnCursor::default() };
+        assert!(bare.job("t").is_none());
+    }
+
+    #[test]
+    fn one_bad_entry_in_the_cursor_file_drops_only_that_entry() {
+        let d = dir("one-bad");
+        std::fs::create_dir_all(&d).unwrap();
+        let now = unix_secs();
+        let good = json!({ "at": now, "cursor": { "offsets": { "f.jsonl": 3 } } });
+        let file = json!({ "runs": { "a": good, "b": { "at": "x", "cursor": 1 }, "c": 5, "d": { "at": now, "cursor": {} }, "e": null } });
+        std::fs::write(d.join("cursors.json"), file.to_string()).unwrap();
+        let store = Cursors::load(&d);
+        let mut keys: Vec<&String> = store.runs.keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["a", "d"]);
+        assert_eq!(store.runs["a"].cursor, cursor_at(3));
+    }
+
+    #[test]
+    fn a_run_shorter_than_five_seconds_still_gets_its_final_read_and_trace() {
+        // The read and the trace do not depend on the run's length: `seconds` is only reported.
+        let d = dir("short");
+        let got = std::cell::RefCell::new(Vec::new());
+        let emit = |n: &str, p: Value, _: u64| got.borrow_mut().push((n.to_string(), p));
+        let usage = |_: &str, _: u64, _: f64| ();
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        let mut j = job("quick");
+        j.seconds = 1;
+        read_with(&ctx, &j, true, |_| vec![turn(None)]);
+        ctx.trace_ended(&j);
+        let got = got.into_inner();
+        assert_eq!(got.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["$ai_generation", "$ai_trace"]);
+        assert_eq!(got[1].1["$ai_latency"], 1);
     }
 
     #[test]
@@ -1045,7 +1226,7 @@ mod tests {
         let store = Cursors::load(&d);
         assert_eq!(store.runs["t1"].cursor, cursor_at(7));
         assert_eq!(store.runs["t2"].cursor, TurnCursor::default());
-        // One entry of the wrong shape discards the whole file: every run starts over.
+        // A file or entry of the wrong shape holds no run.
         for bad in [
             json!({ "runs": { "t1": { "cursor": {} } } }),
             json!({ "runs": { "t1": { "at": -1, "cursor": {} } } }),
@@ -1138,9 +1319,9 @@ mod tests {
             turns: Arc::new(AtomicU64::new(0)),
             remote,
         };
-        let job = running("codex", Some("C:\\work\\repo"), false).job().unwrap();
+        let job = running("codex", Some("C:\\work\\repo"), false).job("a").unwrap();
         assert_eq!((job.kind, job.usage_kind, job.folder), ("codex", AgentKind::Codex, PathBuf::from("C:\\work\\repo")));
-        assert!(running("claude", Some("/srv/x"), false).job().is_some());
+        assert!(running("claude", Some("/srv/x"), false).job("a").is_some());
         for (kind, folder, remote) in [
             ("claude", Some("/srv/x"), true),
             ("claude", None, false),
@@ -1148,7 +1329,7 @@ mod tests {
             ("opencode", Some("/srv/x"), false),
             ("other", Some("/srv/x"), false),
         ] {
-            assert!(running(kind, folder, remote).job().is_none(), "{kind} {folder:?} {remote}");
+            assert!(running(kind, folder, remote).job("a").is_none(), "{kind} {folder:?} {remote}");
         }
     }
 }
