@@ -2517,6 +2517,10 @@ impl AppWindow {
             if let Some(route) = route {
                 cmd = crate::programs::with_routing(route, cmd);
             }
+            if task.is_some() && cmd.iter().any(|a| a == "--tools") && !cmd.iter().any(|a| a == "--") {
+                // `--tools <tools...>` is variadic: without `--` Claude reads the task as a tool name.
+                cmd.push("--".to_owned());
+            }
             cmd.extend(task.map(str::to_owned));
             if on.is_some() {
                 return crate::remote_shell::launch(cmd);
@@ -5799,7 +5803,7 @@ mod tests {
         let hook = crate::programs::with_token_saver(true, words(&["claude"]));
         let want = crate::programs::with_routing(&route, hook);
         let mut cmd = want;
-        cmd.push("fix it".into());
+        cmd.extend(words(&["--", "fix it"]));
         assert_eq!(routed, local_agent_argv(cmd));
     }
 
@@ -5852,7 +5856,7 @@ mod tests {
         let route: crate::programs::Route = serde_json::from_value(haiku_route()).unwrap();
         let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some("go"), Some("box"), Some(&route))).unwrap();
         let mut want = crate::programs::with_routing(&route, crate::programs::with_token_saver(true, words(&["claude"])));
-        want.push("go".into());
+        want.extend(words(&["--", "go"]));
         assert_eq!(run, crate::remote_shell::launch(want.clone()));
         assert_eq!(run[..4], crate::remote_shell::launch(Vec::new())[..]);
         assert_eq!(run[4..].iter().filter(|a| *a == "--settings").count(), 1);
@@ -5880,7 +5884,7 @@ mod tests {
         for on in [None, Some("box")] {
             let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(padded.as_str()), on, Some(&route))).unwrap();
             let mut want = crate::programs::with_routing(&route, crate::programs::with_token_saver(true, words(&["claude"])));
-            want.push(task.clone());
+            want.extend(["--".to_owned(), task.clone()]);
             let expected = if on.is_some() { crate::remote_shell::launch(want) } else { local_agent_argv(want) };
             assert_eq!(run, expected, "{on:?}");
         }
@@ -5899,7 +5903,7 @@ mod tests {
         assert!(!route.graft, "no code map hint for another machine");
         let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(task), Some("box"), Some(&route))).unwrap();
         let mut want = crate::programs::with_routing(&route, crate::programs::with_token_saver(true, words(&["claude"])));
-        want.push(task.into());
+        want.extend(words(&["--", task]));
         assert_eq!(run[..4], crate::remote_shell::launch(Vec::new())[..], "the wrapper is the same");
         assert_eq!(run[4..], want[..]);
         let cmd = &run[4..];
@@ -5908,8 +5912,9 @@ mod tests {
         assert!(settings["hooks"]["PostToolUse"].is_array() && settings["hooks"]["SessionStart"].is_array());
         assert_eq!(cmd[3..7], words(&["--tools", "Bash,Read", "--model", "haiku"])[..]);
         assert!(!cmd.iter().any(|a| a == "--append-system-prompt"), "no map hint on another machine");
-        assert_eq!(cmd[7], task, "the task is last, untouched");
-        assert_eq!(cmd.len(), 8);
+        assert_eq!(cmd[7], "--", "the end-of-options marker keeps the task out of --tools");
+        assert_eq!(cmd[8], task, "the task is last, untouched");
+        assert_eq!(cmd.len(), 9);
         // No `sh` there (Windows): the same words through PowerShell.
         let ps = super::AppWindow::powershell_argv(&run);
         assert_eq!(ps, words(&["powershell.exe", "-NoLogo", "-NoExit", "-Command", &crate::programs::powershell_line(&want)]));
@@ -5976,12 +5981,48 @@ mod tests {
             assert!(!cmd.iter().any(|a| a == "haiku"), "{own:?}: {cmd:?}");
             assert_eq!(cmd.iter().filter(|a| a.starts_with("--model")).count(), own.iter().filter(|a| a.starts_with("--model")).count(), "{own:?}");
             assert!(cmd.iter().any(|a| a == "--tools"), "the rest of the route still applies: {own:?}");
-            assert_eq!(cmd[cmd.len() - own.len()..cmd.len() - 1], own[1..], "theirs, in order, before the task");
+            assert_eq!(cmd[cmd.len() - own.len() - 1..cmd.len() - 2], own[1..], "theirs, in order, before the marker and the task");
+            assert_eq!(cmd[cmd.len() - 2], "--");
             assert_eq!(cmd.last().map(String::as_str), Some("go"));
             // Here too.
             let local = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(own.clone()), Some("go"), None, Some(&route))).unwrap();
             assert_eq!(local, local_agent_argv(cmd.to_vec()), "{own:?}");
         }
+    }
+
+    #[test]
+    fn smart_routing_always_puts_the_end_of_options_marker_before_the_task_after_tools() {
+        let kinds = [
+            ("edit", serde_json::json!({ "graft": false, "tools": ["Bash", "Read", "Edit"], "model": null })),
+            ("code-read", serde_json::json!({ "graft": false, "tools": ["Bash", "Read"], "model": null })),
+            ("code-nav", serde_json::json!({ "graft": true, "tools": ["Bash", "Read"], "model": null })),
+            ("haiku", haiku_route()),
+        ];
+        for (name, reply) in kinds {
+            let route: crate::programs::Route = serde_json::from_value(reply).unwrap();
+            for on in [None, Some("box")] {
+                let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some("fix it"), on, Some(&route))).unwrap();
+                let mut want = crate::programs::with_routing(&route, crate::programs::with_token_saver(true, words(&["claude"])));
+                let at = want.iter().position(|a| a == "--tools").unwrap();
+                assert!(want[at + 1..].iter().all(|a| a != "--"), "{name}: routing alone adds no marker");
+                want.extend(words(&["--", "fix it"]));
+                let expected = if on.is_some() { crate::remote_shell::launch(want) } else { local_agent_argv(want) };
+                assert_eq!(run, expected, "{name} {on:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn smart_routing_does_not_duplicate_a_person_given_end_of_options_marker() {
+        let route: crate::programs::Route = serde_json::from_value(haiku_route()).unwrap();
+        let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude", "--"])), Some("go"), Some("box"), Some(&route))).unwrap();
+        let cmd = &run[4..];
+        assert_eq!(cmd.iter().filter(|a| *a == "--").count(), 1, "{cmd:?}");
+        assert_eq!(cmd.last().map(String::as_str), Some("go"));
+        // No tools in the route: no marker added.
+        let none: crate::programs::Route = serde_json::from_value(serde_json::json!({})).unwrap();
+        let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some("go"), Some("box"), Some(&none))).unwrap();
+        assert!(!run[4..].iter().any(|a| a == "--"));
     }
 
     #[test]
