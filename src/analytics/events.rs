@@ -735,6 +735,7 @@ mod tests {
             mcp_servers: vec!["github".into()],
             skills: vec!["review".into()],
             prompt: prompt.map(Into::into),
+            id: None,
         }
     }
 
