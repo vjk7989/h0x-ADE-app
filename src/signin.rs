@@ -463,11 +463,12 @@ fn content(state: State) -> Content {
     }
 }
 
-/// The footer's key hints for a state: (key, what it does); Tab always moves focus.
+/// What the consent-only form shows: one Continue button.
 fn content_only() -> Content {
     Content { status: None, primary: Some(CONTINUE), secondary: None, note: None, skip: false }
 }
 
+/// The footer's key hints for a state: (key, what it does); Tab always moves focus.
 fn hints(state: State) -> [(&'static str, &'static str); 2] {
     let first = match state {
         State::Idle => ("Enter", "sign in"),
@@ -846,11 +847,6 @@ fn open_with(url: &str, open: impl FnOnce(&crate::links::Target)) {
     open(&crate::links::Target::Url(url.to_string()))
 }
 
-/// The look of a button that cannot be used yet.
-fn disabled(button: Stateful<Div>, off: bool) -> Stateful<Div> {
-    button.when(off, |d| d.opacity(0.4).cursor_default().hover(|d| d))
-}
-
 /// The consent line: a box that ticks, "I agree to the", then the Terms and Privacy Policy links.
 fn consent_row(agreed: bool, focus: &FocusHandle, s: f32, light: bool, toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Div {
     let text = move || div().text_size(z(12.5, s)).line_height(z(18.0, s)).text_color(c("muted"));
@@ -910,7 +906,8 @@ fn consent_row(agreed: bool, focus: &FocusHandle, s: f32, light: bool, toggle: i
 
 /// The main action: a solid button with a lit top edge and a soft lift, and the focus ring while it has focus
 /// (not `focus_visible`: the ring must not hide after a mouse move).
-fn primary_button(id: &'static str, label: &'static str, s: f32) -> Stateful<Div> {
+/// `off`: it cannot be used yet (faded, no hover).
+fn primary_button(id: &'static str, label: &'static str, s: f32, off: bool) -> Stateful<Div> {
     let lift = BoxShadow::new(px(0.0), z(8.0, s), c("solid").opacity(0.7)).blur_radius(z(20.0, s)).spread_radius(z(-10.0, s));
     let mut focused = ring();
     focused.push(lift.clone());
@@ -932,7 +929,8 @@ fn primary_button(id: &'static str, label: &'static str, s: f32) -> Stateful<Div
         .cursor_pointer()
         .text_size(z(14.0, s))
         .font_weight(FontWeight::MEDIUM)
-        .hover(|d| d.opacity(0.92))
+        .when(off, |d| d.opacity(0.4).cursor_default())
+        .when(!off, |d| d.hover(|d| d.opacity(0.92)))
         .focus(move |mut d| {
             d.box_shadow = Some(focused);
             d
@@ -944,8 +942,8 @@ fn primary_button(id: &'static str, label: &'static str, s: f32) -> Stateful<Div
         .child(svg().data(OPEN_ICON).size(z(15.0, s)).flex_none().text_color(c("solid_foreground")))
 }
 
-/// Cancel and Skip: a quiet glass button.
-fn quiet_button(id: &'static str, label: &'static str, s: f32, light: bool) -> Stateful<Div> {
+/// Cancel and Skip: a quiet glass button. `off`: it cannot be used yet (faded, no hover).
+fn quiet_button(id: &'static str, label: &'static str, s: f32, light: bool, off: bool) -> Stateful<Div> {
     let ring = ring();
     div()
         .id(id)
@@ -963,7 +961,8 @@ fn quiet_button(id: &'static str, label: &'static str, s: f32, light: bool) -> S
         .cursor_pointer()
         .text_size(z(13.0, s))
         .font_weight(FontWeight::MEDIUM)
-        .hover(move |d| d.bg(veil(light, 0.10, 0.07)))
+        .when(off, |d| d.opacity(0.4).cursor_default())
+        .when(!off, |d| d.hover(move |d| d.bg(veil(light, 0.10, 0.07))))
         .focus(move |mut d| {
             d.box_shadow = Some(ring);
             d
@@ -1114,9 +1113,9 @@ impl Render for SignIn {
                     .when(self.ask && view.secondary.is_none(), |d| d.child(consent_row(self.agreed, &self.consent_focus, s, light, cx.listener(|this, _, _, cx| this.toggle_consent(cx)))))
                     .when_some(view.primary, |d, label| {
                         let id = if idle { "signin" } else { "retry" };
-                        d.child(disabled(primary_button(id, label, s), off).track_focus(&self.primary_focus).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
+                        d.child(primary_button(id, label, s, off).track_focus(&self.primary_focus).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
                     })
-                    .when_some(view.secondary, |d, label| d.child(quiet_button("cancel", label, s, light).on_click(cx.listener(|this, _, w, cx| this.cancel(w, cx)))))
+                    .when_some(view.secondary, |d, label| d.child(quiet_button("cancel", label, s, light, false).on_click(cx.listener(|this, _, w, cx| this.cancel(w, cx)))))
                     .when_some(view.note, |d, note| {
                         let row = div().flex().text_size(z(12.5, s)).line_height(z(18.0, s)).text_color(c("muted"));
                         d.child(match note.split_once(TEAM_DOMAIN) {
@@ -1143,7 +1142,7 @@ impl Render for SignIn {
                                 .flex()
                                 .items_center()
                                 .gap(z(14.0, s))
-                                .child(disabled(quiet_button("signin-skip", SKIP, s, light), off).track_focus(&self.skip_focus).on_click(cx.listener(|this, _, w, cx| this.skip(w, cx))))
+                                .child(quiet_button("signin-skip", SKIP, s, light, off).track_focus(&self.skip_focus).on_click(cx.listener(|this, _, w, cx| this.skip(w, cx))))
                                 .child(div().id("signin-skip-note").text_size(z(12.5, s)).line_height(z(18.0, s)).text_color(c("muted")).children(SKIP_NOTE.map(|line| div().child(line)))),
                         ),
                 )
@@ -1958,5 +1957,183 @@ mod tests {
             let after = &fill[fill.find("\")").expect("token end") + 2..];
             assert!(after.starts_with(".opacity("), "an opaque glass fill: {}", &fill[..40.min(fill.len())]);
         }
+    }
+
+    // Runs itself again in a child process with its own app home (`H0X_ADE_HOME`, a folder name with a space and a
+    // non-ASCII letter, as a Windows profile folder can have) and no bypass: `required()` reads the real marker and
+    // settings.json there.
+    #[test]
+    fn the_screen_asks_once_for_the_current_terms_whatever_settings_json_holds() {
+        use crate::settings::{Consent, Person, TERMS_VERSION, load_person, path, write_person};
+        const CHILD: &str = "H0X_TEST_SIGNIN_OWN_HOME";
+        const NAME: &str = "signin::tests::the_screen_asks_once_for_the_current_terms_whatever_settings_json_holds";
+        if std::env::var_os(CHILD).is_none() {
+            let home = std::env::temp_dir().join(format!("h0x ade signin \u{e9}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&home);
+            std::fs::create_dir_all(home.join("empty-path")).unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", NAME, "--nocapture", "--test-threads=1"]).env(CHILD, "1").env("H0X_ADE_HOME", &home).env_remove("H0X_ADE_SKIP_SIGNIN");
+            if cfg!(not(windows)) {
+                // No browser opener can be found (Windows opens links through the shell: not run from a test).
+                child.env("PATH", home.join("empty-path"));
+            }
+            let out = child.output().unwrap();
+            let _ = std::fs::remove_dir_all(&home);
+            let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && log.contains("1 passed"), "{log}");
+            return;
+        }
+        assert!(crate::mods::app_dir().to_string_lossy().contains("h0x ade signin \u{e9}"), "the child's own home");
+        // A new computer: the full screen, even with the current terms already stored.
+        assert!(crate::auth::screen_needed() && super::required(), "never signed in, nothing stored");
+        let mut current = Person::default();
+        assert!(current.accept_terms(1));
+        write_person(&current).unwrap();
+        assert!(super::required(), "agreed but never signed in or skipped: still the full screen");
+        // Skipped (or signed in) once: from now on only the consent-only form can show.
+        std::fs::remove_file(path()).unwrap();
+        crate::auth::skip_screen().unwrap();
+        assert!(!crate::auth::screen_needed(), "the consent-only form");
+        assert!(super::required(), "skipped before, no settings.json at all");
+        let v = TERMS_VERSION;
+        for (stored, why) in [
+            (r#"{"consent":{"version":"alpha-0","at":1}}"#.to_string(), "an older version"),
+            (format!(r#"{{"consent":{{"version":"{v} ","at":1}}}}"#), "the version with a trailing space"),
+            (r#"{"consent":{"version":"","at":0}}"#.to_string(), "an empty version"),
+            (format!(r#"{{"consent":"{v}"}}"#), "malformed: the version alone"),
+            (format!(r#"{{"consent":{{"version":"{v}"}}}}"#), "malformed: no time"),
+            (format!(r#"{{"consent":{{"version":"{v}","at":-1}}}}"#), "malformed: a negative time"),
+            (r#"{"consent":null}"#.to_string(), "null"),
+            (format!(r#"{{"consent":{{"version":"{v}","at":1}},"zoom":99}}"#), "settings.json that does not load (zoom out of range)"),
+            ("{not json".to_string(), "settings.json that is not JSON"),
+            (String::new(), "an empty settings.json"),
+        ] {
+            std::fs::write(path(), &stored).unwrap();
+            assert!(super::required(), "{why}: the consent-only form");
+            assert_eq!(std::fs::read_to_string(path()).unwrap(), stored, "{why}: the person's file is left as it was");
+        }
+        // The current terms stored: no screen at all.
+        write_person(&current).unwrap();
+        assert!(!super::required(), "skipped before and agreed to the current terms");
+        std::fs::write(path(), format!("\u{feff}{{\"consent\":{{\"version\":\"{v}\",\"at\":1}}}}")).unwrap();
+        assert!(!super::required(), "a BOM some editors add does not hide the agreement");
+        // TERMS_VERSION raised after the agreement (simulated: the stored version is the previous one): asked again
+        // once, and the new agreement replaces the old one.
+        let mut bumped = load_person().unwrap();
+        bumped.consent = Some(Consent { version: format!("{v}-previous"), at: 1 });
+        write_person(&bumped).unwrap();
+        assert!(super::required(), "a raised version asks again");
+        assert!(bumped.accept_terms(2));
+        write_person(&bumped).unwrap();
+        assert!(!super::required(), "agreed again: no screen");
+        assert_eq!(load_person().unwrap().consent, Some(Consent { version: v.into(), at: 2 }));
+        // settings.json that cannot be read at all (a folder in its place): the screen shows, nothing panics.
+        std::fs::remove_file(path()).unwrap();
+        std::fs::create_dir_all(path()).unwrap();
+        assert!(load_person().is_err(), "unreadable");
+        assert!(super::required(), "unreadable settings.json: the consent-only form");
+        // The Terms and Privacy links with no browser opener to run: nothing panics.
+        if cfg!(not(windows)) {
+            for (_, url) in super::LEGAL {
+                crate::links::open(&crate::links::Target::Url(url.to_string()));
+            }
+        }
+    }
+
+    // The consent-only form in a real (test) window, at 842 x 684 and just inside the compact layout: Tab reaches the
+    // box and Continue, Space and Enter tick the focused box, and neither Enter on an unticked Continue nor Escape
+    // ticks it or leaves the screen. No core is attached, so nothing can open the main window from here.
+    #[gpui::test]
+    fn the_consent_only_form_answers_tab_space_enter_and_escape_in_both_layouts(cx: &mut gpui::TestAppContext) {
+        use super::{Mode, SignIn, layout};
+        use gpui::{FocusHandle, InputEvent as _, KeyUpEvent, Keystroke, VisualTestContext, px, size};
+        use std::{cell::RefCell, rc::Rc};
+        fn press(cx: &mut VisualTestContext, key: &str) {
+            cx.simulate_keystrokes(key);
+            let keystroke = Keystroke::parse(key).unwrap();
+            cx.update(|window, cx| {
+                window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        fn tab_to(cx: &mut VisualTestContext, target: &FocusHandle) -> bool {
+            for _ in 0..24 {
+                if cx.update(|window, _| target.is_focused(window)) {
+                    return true;
+                }
+                press(cx, "tab");
+            }
+            false
+        }
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let primary_focus = cx.focus_handle().tab_stop(true);
+            window.focus(&primary_focus, cx);
+            SignIn {
+                state: State::Idle,
+                attempt: 0,
+                core: None,
+                requests: None,
+                focus: cx.focus_handle(),
+                primary_focus,
+                skip_focus: cx.focus_handle().tab_stop(true),
+                consent_focus: cx.focus_handle().tab_stop(true),
+                ask: true,
+                agreed: false,
+                only: true,
+                held: Vec::new(),
+                frame: 0,
+                rain: Rc::new(RefCell::new(super::RainPaint::default())),
+            }
+        });
+        let (primary, consent) = cx.update(|_, app| {
+            let v = view.read(app);
+            (v.primary_focus.clone(), v.consent_focus.clone())
+        });
+        let agreed = |cx: &mut VisualTestContext| cx.update(|_, app| view.read(app).agreed);
+        let idle = |cx: &mut VisualTestContext| cx.update(|_, app| matches!(view.read(app).state, State::Idle));
+        for (w, h, mode) in [(842.0, 684.0, Mode::Regular), (839.0, 684.0, Mode::Compact)] {
+            cx.simulate_resize(size(px(w), px(h)));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(cx.update(|window, _| window.viewport_size()), size(px(w), px(h)));
+            assert_eq!(layout(w, h).mode, mode, "{w}x{h}");
+            cx.update(|_, app| view.update(app, |v, _| v.agreed = false));
+            cx.update(|window, app| window.focus(&primary, app));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            // Continue has the keys; unticked, Enter does nothing, and Escape neither ticks the box nor moves on.
+            press(cx, "enter");
+            assert!(!agreed(cx) && idle(cx), "{w}x{h}: Enter on an unticked Continue");
+            press(cx, "escape");
+            assert!(!agreed(cx) && idle(cx), "{w}x{h}: Escape");
+            // Tab reaches the box, which Space ticks and unticks and Enter ticks (Enter on the box never continues).
+            assert!(tab_to(cx, &consent), "{w}x{h}: Tab reaches the checkbox");
+            press(cx, "space");
+            assert!(agreed(cx), "{w}x{h}: Space ticks");
+            press(cx, "space");
+            assert!(!agreed(cx), "{w}x{h}: Space unticks");
+            press(cx, "enter");
+            assert!(agreed(cx) && idle(cx), "{w}x{h}: Enter on the box ticks it");
+            assert!(tab_to(cx, &primary), "{w}x{h}: Tab reaches Continue again");
+            press(cx, "escape");
+            assert!(agreed(cx) && idle(cx), "{w}x{h}: Escape keeps the tick");
+        }
+        // The full form while a sign-in is under way: no checkbox to reach (it is hidden while waiting).
+        cx.update(|_, app| {
+            view.update(app, |v, _| {
+                v.only = false;
+                v.agreed = true;
+                v.state = State::Waiting;
+            })
+        });
+        let root = cx.update(|_, app| view.read(app).focus.clone());
+        cx.update(|window, app| window.focus(&root, app));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        for _ in 0..24 {
+            press(cx, "tab");
+            assert!(!cx.update(|window, _| consent.is_focused(window)), "the checkbox is not shown while waiting");
+        }
+        // Back to idle so closing the test window does not cancel a sign-in.
+        cx.update(|_, app| view.update(app, |v, _| v.state = State::Idle));
     }
 }
