@@ -1016,13 +1016,15 @@ mod tests {
         let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|t| Some(t.into()), emit: &emit, usage: &usage };
         let (mut early, mut odd) = (turn(Some("p")), turn(None));
         (early.timestamp_ms, odd.timestamp_ms) = (1_700_000_000_123, -5);
+        let start = unix_secs() * 1000;
         read_with(&ctx, &job("tw"), false, |_| vec![early, odd]);
         let mut j = job("tw");
         j.seconds = 9;
         let before = unix_secs() * 1000;
         ctx.trace_ended(&j);
         let got = got.into_inner();
-        assert_eq!((got[0].2, got[1].2), (1_700_000_000_123, 0), "a bad time is 0, never a panic");
+        assert_eq!(got[0].2, 1_700_000_000_123);
+        assert!(got[1].2 >= start && got[1].2 <= before, "a bad time is the read time, never a panic");
         assert!(got[2].2 >= before && got[2].0 == "$ai_trace");
         for (_, p, _) in &got {
             assert!(p.get("$set").is_none() && p.get("$set_once").is_none());
