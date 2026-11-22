@@ -787,6 +787,9 @@ What's about the user, never a look:
   logs, large files, JSON) before an agent reads them (default `false`, off);
   Settings → 0x Modes has the switch. It applies to new Claude Code terminals;
   any value other than `true` reads as off.
+- `smart_routing`: `true` lets the core pick a tool set and, for read-only work, a
+  cheaper model for a Claude Code launch that has a task (default `false`); it
+  needs `token_saver` on, and any failure leaves the plain Token Saver launch.
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and
