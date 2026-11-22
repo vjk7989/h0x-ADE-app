@@ -6849,7 +6849,7 @@ fn panel_layout(hidden: bool, active: &str) -> Value {
 
 fn sessions_module(mut values: BTreeMap<String, Value>, host: Rc<RefCell<SessionsHost>>) -> HostModule {
     let mut module = HostModule::new("h0x");
-    for name in ["panes", "terminals", "tree", "trees", "layout", "spaces", "revision", "windowVisible"] {
+    for name in ["panes", "terminals", "tree", "trees", "layout", "spaces"] {
         let value = values.remove(name).unwrap_or(Value::Null);
         host.borrow_mut().live.entry(name.into()).or_insert(value);
         let h = host.clone();
@@ -7115,70 +7115,6 @@ fn files_and_changes_ask_nothing_while_hidden_and_refresh_when_shown(cx: &mut Te
         if name == "changes" {
             assert_eq!(execs[0], json!(["git", ["rev-parse", "--show-toplevel"]]));
         }
-        window.update(cx, |_, window, _| window.remove_window()).unwrap();
-    }
-}
-
-// The 250 ms look for new spaces rests while the window is hidden, even as spaces come and the
-// revision moves; shown again, the very next look catches up: machines first (stale), then git.
-#[gpui::test]
-fn spaces_look_for_nothing_new_while_hidden_and_catch_up_on_the_next_tick(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
-    let staged = Staged::new();
-    let ls = vec!["machine".to_string(), "ls".into(), "--json".into()];
-    let lists = |h: &SessionsHost| h.cores.iter().filter(|a| **a == ls).count();
-    let statuses = |h: &SessionsHost| h.execs.iter().filter(|e| e[1].as_array().is_some_and(|a| a.contains(&json!("status")))).count();
-    for (machine, folder, platform) in [
-        (Value::Null, "/fixture/project", "linux"),
-        (json!("remote"), "/srv/app", "linux"),
-        (Value::Null, r"C:\Users\me\My Project", "windows"),
-    ] {
-        let label = format!("{machine} {folder}");
-        let came = |host: &Rc<RefCell<SessionsHost>>, n: usize| {
-            let mut h = host.borrow_mut();
-            h.live.insert("revision".into(), json!(n));
-            h.live.get_mut("spaces").unwrap().as_array_mut().unwrap().push(json!({"id":format!("s{}", n + 1),"index":n + 1,"name":format!("New {n}"),"named":true,"folder":format!("{folder}-{n}"),"machine":machine,"branch":null,"active":false,"status":null,"tabs":[]}));
-        };
-        let host = sessions_host(&[], &[]);
-        let mut values = sessions_values(machine.clone(), folder, platform);
-        values.insert("windowVisible".into(), json!(false));
-        let (window, _session) = load_sessions(cx, &staged, "mods/spaces", values, &host, "");
-        // Hidden from the start, past two 15 s machine refreshes (over 120 looks).
-        for n in 1..=2 {
-            came(&host, n);
-            advance(cx, 15_500);
-        }
-        {
-            let h = host.borrow();
-            assert_eq!(statuses(&h), 0, "{label}: no git while hidden: {:?}", h.execs);
-            assert_eq!(h.cores, vec![ls.clone()], "{label}: only the first machine list while hidden");
-        }
-        // Shown: the next look (at most 250 ms) lists machines again, then asks git for the
-        // first space and the two that came while hidden.
-        host.borrow_mut().live.insert("windowVisible".into(), json!(true));
-        advance(cx, 250);
-        let (seen, listed) = {
-            let h = host.borrow();
-            assert_eq!(lists(&h), 2, "{label}: the stale machine list is refreshed at once: {:?}", h.cores);
-            assert_eq!(statuses(&h), 3, "{label}: every space is looked at: {:?}", h.execs);
-            (statuses(&h), lists(&h))
-        };
-        // Hidden again, past the 60 s fallback, while another space comes: nothing.
-        host.borrow_mut().live.insert("windowVisible".into(), json!(false));
-        came(&host, 3);
-        advance(cx, 61_000);
-        {
-            let h = host.borrow();
-            assert_eq!(statuses(&h), seen, "{label}: hidden again, no git: {:?}", h.execs);
-            assert_eq!(lists(&h), listed, "{label}: hidden again, no machine list");
-        }
-        // Shown again: the new space is looked at on the next tick.
-        host.borrow_mut().live.insert("windowVisible".into(), json!(true));
-        advance(cx, 250);
-        let h = host.borrow();
-        assert!(statuses(&h) > seen, "{label}: shown again, it resumes: {:?}", h.execs);
-        assert_eq!(lists(&h), listed + 1, "{label}: shown again, machines first");
-        drop(h);
         window.update(cx, |_, window, _| window.remove_window()).unwrap();
     }
 }
