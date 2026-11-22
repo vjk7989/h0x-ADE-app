@@ -751,7 +751,7 @@ mod tests {
             std::fs::write(dir.join("activity.json"), text).unwrap();
             let delta: BTreeMap<String, Day> = [("2026-11-14".to_string(), day(3, 1, 0))].into();
             write_merged(&dir, &delta, "2026-11-14").unwrap();
-            let got = read(&dir)["2026-11-14"];
+            let got = read(&dir)["2026-11-14"].clone();
             if i == 0 {
                 assert_eq!(got, day(5, 1, 0), "CRLF is valid JSON: merged");
             } else {
