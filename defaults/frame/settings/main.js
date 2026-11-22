@@ -118,7 +118,7 @@ export default class Settings extends View {
     this.pairing = null; // {code, expires_ms}
     this.webLink = null; // {url, pair}
     this.webQr = null; // {text, size, rows}
-    this.reach = "lan"; // "lan" | "tunnel" | "vps"
+    this.reach = "lan"; // "lan" | "tailscale" | "tunnel" | "vps"
     this.via = "";
     this.publicHost = InputState.new({ placeholder: "Public host, like vps.example.com" });
     this.tick = 0;
@@ -1072,7 +1072,7 @@ export default class Settings extends View {
 
   startWeb(cx) {
     const host = this.publicHost.value().trim();
-    const options = this.reach === "tunnel" ? ["--tunnel", "--yes"] : this.reach === "vps" ? ["--via", this.via, "--public-host", host] : ["--lan"];
+    const options = this.reach === "tailscale" ? ["--tailscale"] : this.reach === "tunnel" ? ["--tunnel", "--yes"] : this.reach === "vps" ? ["--via", this.via, "--public-host", host] : ["--lan"];
     this.remoteAction("web", async () => {
       if (this.reach === "vps" && (!this.via || !host)) throw new Error("Pick a machine and type its public host.");
       this.webLink = null;
@@ -1176,8 +1176,10 @@ export default class Settings extends View {
       .child(this.heading(t, "Phone / web panel"))
       .child(v_flex().w_full().py(8).gap(2)
         .child(choice("lan", "Same Wi-Fi"))
+        .child(choice("tailscale", "Through Tailscale"))
         .child(choice("tunnel", "From anywhere (Cloudflare)"))
         .child(choice("vps", "Through my VPS")))
+      .when(this.reach === "tailscale", (el) => el.child(div().pb(8).text_size(12.5).text_color(t.dim).child("Your phone needs Tailscale on the same account.")))
       .when(this.reach === "tunnel", (el) => el.child(div().pb(8).text_size(12.5).text_color(t.dim).child("Traffic passes through Cloudflare.")))
       .when(this.reach === "vps", (el) => el.child(v_flex().pb(8).gap(6)
         .child(h_flex().gap(6).children(machines))
