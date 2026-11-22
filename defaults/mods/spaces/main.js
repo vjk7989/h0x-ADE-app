@@ -90,7 +90,6 @@ export default class Spaces extends View {
       this.machinesStale = false;
       this.refreshMachines(cx);
     }
-    if (!windowVisible()) return;
     if (look === this.look && now < this.wake && this.ids.every((id) => this.shown.has(id)) && !this.orderingDue(now)) return;
     this.look = look;
     const sp = spaces(), ps = panes();
