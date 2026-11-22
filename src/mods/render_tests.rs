@@ -12614,3 +12614,101 @@ fn settings_profile_and_info_keep_every_id(cx: &mut TestAppContext) {
     }
     assert!(info.contains("Usage data and failure reports, tied to a random install ID. Never what you type."), "{info}");
 }
+
+// The Tokens card under the activity graph. `days` is a JS list of [days ago, day] pairs, dated by the scenario with
+// the local clock (like the app) and read through the same parser as the file; `period` is the card's period.
+fn describe_tokens(cx: &mut TestAppContext, staged: &Staged, days: &str, period: &str) -> String {
+    let scenario = format!(
+        "import {{ ActivityGraph, parseActivity }} from './frame/settings/activity.js';\n\
+         const p = (x) => String(x).padStart(2, '0');\n\
+         const ago = (n) => {{ const d = new Date(); d.setDate(d.getDate() - n); return `${{d.getFullYear()}}-${{p(d.getMonth() + 1)}}-${{p(d.getDate())}}`; }};\n\
+         export default class Scenario extends ActivityGraph {{\n\
+           init(props, cx) {{ super.init({{ shown: true }}, cx); this.tokenPeriod = '{period}'; }}\n\
+           refresh() {{ const days = {{}}; for (const [n, v] of {days}) days[ago(n)] = v; this.activity = {{ days: parseActivity(JSON.stringify({{ version: 1, days }})) }}; }}\n\
+         }}\n"
+    );
+    describe_activity(cx, staged, fixture(true, props(), updates("current", "current")), None, Some(&scenario), None)
+}
+
+const TOKEN_DAYS: &str = r#"[
+  [0, { tokens: 1500, by_agent: { claude: 1000, codex: 500 }, cost_usd: 0.5, saved: 300 }],
+  [3, { tokens: 2000, by_agent: { claude: 2000 }, cost_usd: 1.25, saved: 700 }],
+  [7, { tokens: 50, by_agent: { claude: 50 } }],
+  [10, { tokens: 5000, by_agent: { codex: 4000, zed: 1000 }, cost_usd: 2, saved: 0 }],
+  [29, { tokens: 10, by_agent: { claude: 10 } }],
+  [30, { tokens: 20, by_agent: { codex: 20 } }],
+  [35, { tokens: 100000, by_agent: { claude: 100000 }, cost_usd: 10, saved: 20000 }],
+  [-1, { tokens: 999999, by_agent: { claude: 999999 }, cost_usd: 99, saved: 999 }]
+]"#;
+
+#[gpui::test]
+fn settings_profile_tokens_card_sums_each_period_over_forty_days_and_splits_by_agent(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let cases: [(&str, &[&str], &[&str]); 4] = [
+        ("today", &["1,500 tokens", "Claude Code", "Codex", "$0.50", "300 tokens (~$0.00) \u{b7} 17%"], &["zed", "$1.75"]),
+        ("week", &["3,500 tokens", "$1.75", "1,000 tokens (~$0.00) \u{b7} 22%"], &["zed"]),
+        ("month", &["8,560 tokens", "$3.75", "1,000 tokens (~$0.00) \u{b7} 10%", "st-prof-tokens-agent-zed", "\"3,060\"", "\"4,500\""], &[]),
+        ("all", &["108,580 tokens", "$13.75", "21,000 tokens (~$0.06) \u{b7} 16%", "\"103,060\"", "\"4,520\""], &[]),
+    ];
+    for (period, present, absent) in cases {
+        let tree = describe_tokens(cx, &staged, TOKEN_DAYS, period);
+        for text in ["st-prof-tokens", "Tokens", "Today", "7 days", "30 days", "All time", "API-equivalent est.", "Counted for agents started in HyperOx."] {
+            assert!(tree.contains(text), "{period}: {text:?}: {tree}");
+        }
+        for text in present {
+            assert!(tree.contains(text), "{period}: {text:?}: {tree}");
+        }
+        for text in absent {
+            assert!(!tree.contains(text), "{period}: {text:?} must not be there: {tree}");
+        }
+        // The future day never counts.
+        assert!(!tree.contains("999,999") && !tree.contains("$99"), "{period}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_profile_tokens_card_defaults_to_today_and_shows_dashes_without_a_record(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tree = describe_graph(cx, &staged, Some(&full_record()), "");
+    assert!(tree.contains("st-prof-tokens-used") && tree.contains("18,200 tokens"), "today is the default: {tree}");
+    for record in [None, Some(""), Some("{not json"), Some(r#"{"version":1,"days":{}}"#)] {
+        let tree = describe_graph(cx, &staged, record, "");
+        for id in ["st-prof-tokens", "st-prof-tokens-today", "st-prof-tokens-all"] {
+            assert!(tree.contains(id), "{record:?}: {id}: {tree}");
+        }
+        assert!(tree.matches("\"\u{2014}\"").count() == 3 && !tree.contains("tokens\""), "{record:?}: {tree}");
+        assert!(!tree.contains("st-prof-tokens-agent-") && !tree.contains("NaN"), "{record:?}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_profile_tokens_card_counts_bad_values_as_zero_and_groups_big_numbers(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let record = r#"{"version":1,"days":{
+        "2026-01-01":{"tokens":-5,"saved":"x","cost_usd":-1,"by_agent":{"claude":-3,"codex":"7"}},
+        "2026-01-02":{"tokens":1234567,"cost_usd":0.004,"by_agent":{"claude":1234567}},
+        "2026-01-03":{"tokens":null,"cost_usd":"1","by_agent":[1,2]}}}"#;
+    let tree = describe_graph(cx, &staged, Some(record), "this.tokenPeriod = 'all';");
+    for text in ["1,234,567 tokens", "\"1,234,567\"", "Claude Code", "<$0.01", "0 tokens (~$0.00) \u{b7} 0%"] {
+        assert!(tree.contains(text), "{text:?}: {tree}");
+    }
+    assert!(!tree.contains("Codex") && !tree.contains("NaN") && !tree.contains("undefined"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_profile_tokens_card_saved_percent_with_zero_used_and_zero_saved(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (days, saved) in [
+        ("[[0, { tokens: 0, saved: 500 }]]", "500 tokens (~$0.00) \u{b7} 100%"),
+        ("[[0, { tokens: 500 }]]", "0 tokens (~$0.00) \u{b7} 0%"),
+        ("[[0, { tokens: 0 }]]", "0 tokens (~$0.00) \u{b7} 0%"),
+        ("[[0, { tokens: 1, saved: 2000000 }]]", "2,000,000 tokens (~$6.00) \u{b7} 100%"),
+    ] {
+        let tree = describe_tokens(cx, &staged, days, "today");
+        assert!(tree.contains(saved) && !tree.contains("NaN"), "{days}: {saved:?}: {tree}");
+    }
+}
