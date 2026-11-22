@@ -376,7 +376,6 @@ fn codex(
 const MAX_LINE: u64 = 8 * 1024 * 1024;
 
 /// One agent turn: a typed prompt and everything the agent did until the next one.
-#[allow(dead_code)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Turn {
     /// Unix milliseconds of the prompt.
@@ -405,7 +404,6 @@ pub struct Turn {
 
 /// Where the last `turns` call stopped, per transcript file. Keep it between
 /// calls so a turn is never returned twice.
-#[allow(dead_code)]
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct TurnCursor {
@@ -425,7 +423,6 @@ const SYNTHETIC: &str = "<synthetic>";
 /// `start..=end`, read from `cursor`. The turn still being written stays
 /// unread (the cursor holds at its prompt) unless `finish` is set, which
 /// closes it too (agent ended).
-#[allow(dead_code)]
 pub fn turns(
     kind: AgentKind,
     folder: &Path,

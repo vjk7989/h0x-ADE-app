@@ -3,11 +3,13 @@
 //! throttled here so a busy session stays at a few hundred events an hour.
 
 use crate::analytics::{device_details, event};
+use crate::agent_usage::{AgentKind, Turn, TurnCursor};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// At most this many throttled events (shortcuts, panels, themes) an hour.
@@ -356,7 +358,16 @@ struct Running {
     since: Instant,
     started: SystemTime,
     folder: Option<String>,
+    /// One id for this run (`$ai_trace_id`).
+    trace: String,
+    last_read: Instant,
+    /// Turns sent so far, for `$ai_trace`.
+    turns: Arc<AtomicU64>,
+    remote: bool,
 }
+
+/// A running agent's new turns are read this often.
+const READ_EVERY: Duration = Duration::from_secs(600);
 
 static AGENTS: Mutex<BTreeMap<String, Running>> = Mutex::new(BTreeMap::new());
 
@@ -370,9 +381,11 @@ fn agent_kind(app: &str) -> &'static str {
 }
 
 /// Compares the agents running now with the ones seen last time: `agent_started` for new ones
-/// (not on the first listing, `first`: they were already there), `agent_ended` for gone ones, and
-/// for claude and codex their token counts, read off the UI thread.
-pub fn agents(now: &[Seen], first: bool) {
+/// (not on the first listing, `first`: they were already there), `agent_ended` for gone ones. For
+/// local claude and codex runs their turns are read off the UI thread every ten minutes and once
+/// more when the run ends (`$ai_generation` per turn, `$ai_trace` at the end). `core` redacts the
+/// typed prompts.
+pub fn agents(now: &[Seen], first: bool, core: &Arc<crate::core_link::Core>) {
     let mut map = AGENTS.lock().unwrap_or_else(|e| e.into_inner());
     let mut ended = Vec::new();
     map.retain(|addr, run| {
@@ -380,13 +393,7 @@ pub fn agents(now: &[Seen], first: bool) {
             .iter()
             .any(|s| &s.address == addr && agent_kind(&s.app) == run.kind);
         if !alive {
-            ended.push((
-                addr.clone(),
-                run.kind,
-                run.since,
-                run.started,
-                run.folder.clone(),
-            ));
+            ended.push((addr.clone(), run.kind, run.since, run.job(addr)));
         }
         alive
     });
@@ -394,19 +401,27 @@ pub fn agents(now: &[Seen], first: bool) {
     for s in now {
         if !map.contains_key(&s.address) {
             let kind = agent_kind(&s.app);
+            // A terminal keeps running in the core when the app quits: its run goes on under the same
+            // trace id, from where its last read stopped.
+            let saved = saved_run(&s.address, kind);
+            let started = saved.as_ref().map_or_else(SystemTime::now, |e| UNIX_EPOCH + Duration::from_millis(e.started_ms));
             map.insert(
                 s.address.clone(),
                 Running {
                     kind,
-                    since: Instant::now(),
-                    started: SystemTime::now(),
-                    folder: s.folder.clone(),
+                    since: Instant::now().checked_sub(started.elapsed().unwrap_or_default()).unwrap_or_else(Instant::now),
+                    started,
+                    folder: s.folder.clone().or_else(|| saved.as_ref().map(|e| e.folder.clone()).filter(|f| !f.is_empty())),
+                    trace: saved.as_ref().map_or_else(new_trace_id, |e| e.trace.clone()),
+                    last_read: Instant::now(),
+                    turns: Arc::new(AtomicU64::new(saved.as_ref().map_or(0, |e| e.turns))),
+                    remote: s.address.contains('/'),
                 },
             );
-            if !first {
+            if !first && saved.is_none() {
                 crate::activity::session_started();
             }
-            if !first && allow(&format!("agent_started:{kind}"), Duration::from_secs(5)) {
+            if !first && saved.is_none() && allow(&format!("agent_started:{kind}"), Duration::from_secs(5)) {
                 event(
                     "agent_started",
                     json!({ "agent": kind, "concurrent": map.len(), "remote": s.address.contains('/') }),
@@ -414,39 +429,320 @@ pub fn agents(now: &[Seen], first: bool) {
             }
         }
     }
+    let mut due = Vec::new();
+    for (addr, run) in map.iter_mut() {
+        if run.last_read.elapsed() >= READ_EVERY
+            && let Some(job) = run.job(addr)
+        {
+            run.last_read = Instant::now();
+            due.push(job);
+        }
+    }
+    // Once, after the first listing has surely arrived: a run stored by an earlier app session whose
+    // terminal is gone ended while the app was closed; it gets its final read.
+    let mut orphans = Vec::new();
+    if crate::analytics::session_seconds() >= 30 && !SWEPT.swap(true, Ordering::Relaxed) {
+        for (addr, saved) in Cursors::load(&usage_dir()).runs {
+            if !map.contains_key(&addr)
+                && let Some(mut job) = saved.job(&addr)
+            {
+                job.seconds = job.started.elapsed().unwrap_or_default().as_secs();
+                orphans.push(job);
+            }
+        }
+    }
     let concurrent = before + ended.len();
     drop(map);
-    for (addr, kind, since, started, folder) in ended {
+    let token_saver = (!due.is_empty() || !orphans.is_empty() || ended.iter().any(|e| e.3.is_some()))
+        .then(|| crate::settings::get().token_saver)
+        .unwrap_or_default();
+    for job in due {
+        read_in_background(core, job, false, token_saver);
+    }
+    for job in orphans {
+        read_in_background(core, job, true, token_saver);
+    }
+    for (addr, kind, since, job) in ended {
         let seconds = since.elapsed().as_secs();
-        if seconds < 5 {
-            continue;
-        }
-        let remote = addr.contains('/');
-        event(
-            "agent_ended",
-            json!({ "agent": kind, "seconds": seconds, "concurrent": concurrent, "remote": remote }),
-        );
-        let usage_kind = match kind {
-            "claude" => crate::agent_usage::AgentKind::Claude,
-            "codex" => crate::agent_usage::AgentKind::Codex,
-            _ => continue,
-        };
-        let Some(folder) = folder.filter(|_| !remote) else {
-            continue;
-        };
-        let _ = std::thread::Builder::new().name("analytics-tokens".into()).spawn(move || {
-            let Some(u) = crate::agent_usage::usage(usage_kind, Path::new(&folder), started, SystemTime::now()) else { return };
-            // Kept on this computer whether or not usage is shared.
-            crate::activity::add_tokens(u.input.saturating_add(u.output));
-            let model: Value = u.model.map_or(Value::Null, Value::from);
+        if seconds >= 5 {
             event(
-                "agent_tokens",
-                json!({
-                    "agent": kind, "model": model, "input": u.input, "output": u.output, "cache_read": u.cache_read,
-                    "cache_write": u.cache_write, "reasoning": u.reasoning, "cost_usd": u.cost_usd,
-                }),
+                "agent_ended",
+                json!({ "agent": kind, "seconds": seconds, "concurrent": concurrent, "remote": addr.contains('/') }),
             );
-        });
+        }
+        // Even a short run gets its last read and its trace.
+        if let Some(mut job) = job {
+            job.seconds = seconds;
+            read_in_background(core, job, true, token_saver);
+        }
+    }
+}
+
+/// Set once the stored runs without a terminal have been finished.
+static SWEPT: AtomicBool = AtomicBool::new(false);
+
+fn usage_dir() -> PathBuf {
+    crate::mods::app_dir().join("usage")
+}
+
+/// The stored run of this terminal when it was the same kind of agent.
+fn saved_run(address: &str, kind: &str) -> Option<RunCursor> {
+    if address.contains('/') || !matches!(kind, "claude" | "codex") {
+        return None;
+    }
+    Cursors::load(&usage_dir()).runs.remove(address).filter(|e| e.agent == kind && !e.trace.is_empty())
+}
+
+/// A local claude or codex run whose turns are read.
+#[derive(Clone)]
+struct Job {
+    /// The core's terminal id: stable while the terminal lives, also across app restarts.
+    address: String,
+    kind: &'static str,
+    usage_kind: AgentKind,
+    folder: PathBuf,
+    started: SystemTime,
+    trace: String,
+    turns: Arc<AtomicU64>,
+    /// Run length, set when the run ended.
+    seconds: u64,
+}
+
+impl Running {
+    fn job(&self, address: &str) -> Option<Job> {
+        let usage_kind = match self.kind {
+            "claude" => AgentKind::Claude,
+            "codex" => AgentKind::Codex,
+            _ => return None,
+        };
+        let folder = self.folder.clone().filter(|_| !self.remote)?;
+        Some(Job {
+            address: address.to_owned(),
+            kind: self.kind,
+            usage_kind,
+            folder: PathBuf::from(folder),
+            started: self.started,
+            trace: self.trace.clone(),
+            turns: self.turns.clone(),
+            seconds: 0,
+        })
+    }
+}
+
+/// One id per HyperOx agent run; PostHog groups the run's generations as one trace.
+fn new_trace_id() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    format!("h0x-{nanos:x}-{:x}-{:x}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// `text.redact` answered `{text}`; anything else (an old core, `too_large`, any error) is no text.
+fn parse_redacted(reply: &anyhow::Result<Value>) -> Option<String> {
+    reply.as_ref().ok()?.get("text")?.as_str().map(str::to_owned)
+}
+
+/// Reads are one at a time, so a slow read never overlaps the final one of its run.
+static READING: Mutex<()> = Mutex::new(());
+
+fn read_in_background(core: &Arc<crate::core_link::Core>, job: Job, finish: bool, token_saver: bool) {
+    let core = core.clone();
+    let _ = std::thread::Builder::new().name("analytics-turns".into()).spawn(move || {
+        let _one = READING.lock().unwrap_or_else(|e| e.into_inner());
+        let redact = |text: &str| parse_redacted(&core.call_timeout("text.redact", json!({ "text": text }), Duration::from_secs(3)));
+        let ctx = Ctx {
+            dir: &usage_dir(),
+            sharing: crate::analytics::sharing(),
+            token_saver,
+            redact: &redact,
+            emit: &|name, props, at| crate::analytics::event_at(name, props, at),
+            usage: &crate::activity::add_usage,
+        };
+        read_run(&ctx, &job, finish);
+        if finish {
+            ctx.trace_ended(&job);
+        }
+    });
+}
+
+/// What one read needs from outside, so tests can swap it.
+struct Ctx<'a> {
+    dir: &'a Path,
+    sharing: bool,
+    token_saver: bool,
+    redact: &'a dyn Fn(&str) -> Option<String>,
+    emit: &'a dyn Fn(&str, Value, u64),
+    usage: &'a dyn Fn(&str, u64, f64),
+}
+
+/// The turns since the stored cursor: each is booked locally and, with sharing on, queued as
+/// `$ai_generation`. The cursor is stored only after the events are queued, and a turn read once is
+/// never read again. Returns how many turns were read.
+fn read_run(ctx: &Ctx, job: &Job, finish: bool) -> usize {
+    read_with(ctx, job, finish, |cursor| {
+        crate::agent_usage::turns(job.usage_kind, &job.folder, job.started, SystemTime::now(), cursor, finish)
+    })
+}
+
+/// When a turn is stamped: its prompt time, or the read time when that is missing (0), negative, or
+/// more than a day ahead of the read.
+fn turn_time(ms: i64, read_ms: u64) -> u64 {
+    u64::try_from(ms).ok().filter(|m| *m > 0 && *m <= read_ms.saturating_add(86_400_000)).unwrap_or(read_ms)
+}
+
+fn read_with(ctx: &Ctx, job: &Job, finish: bool, read: impl FnOnce(&mut TurnCursor) -> Vec<Turn>) -> usize {
+    let mut store = Cursors::load(ctx.dir);
+    let mut cursor = store.runs.remove(&job.address).map(|r| r.cursor).unwrap_or_default();
+    let turns = read(&mut cursor);
+    let read_at = unix_secs() * 1000;
+    for t in &turns {
+        (ctx.usage)(job.kind, t.input.saturating_add(t.output), t.cost_usd.unwrap_or(0.0));
+        if ctx.sharing {
+            let input = t
+                .prompt
+                .as_deref()
+                .filter(|p| !p.trim().is_empty())
+                .and_then(|p| (ctx.redact)(p))
+                .filter(|p| !p.trim().is_empty());
+            (ctx.emit)("$ai_generation", generation_props(&job.trace, job.kind, t, input.as_deref(), ctx.token_saver), turn_time(t.timestamp_ms, read_at));
+        }
+    }
+    let total = job.turns.fetch_add(turns.len() as u64, Ordering::Relaxed) + turns.len() as u64;
+    if !finish {
+        let run = RunCursor {
+            at: unix_secs(),
+            trace: job.trace.clone(),
+            started_ms: job.started.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
+            agent: job.kind.to_owned(),
+            folder: job.folder.to_string_lossy().into_owned(),
+            turns: total,
+            cursor,
+        };
+        store.runs.insert(job.address.clone(), run);
+    }
+    store.save(ctx.dir);
+    turns.len()
+}
+
+impl Ctx<'_> {
+    /// The run is over: `$ai_trace` with the run's length and how many turns were sent.
+    fn trace_ended(&self, job: &Job) {
+        if self.sharing {
+            (self.emit)("$ai_trace", trace_props(&job.trace, job.kind, job.seconds, job.turns.load(Ordering::Relaxed)), unix_secs() * 1000);
+        }
+    }
+}
+
+/// PostHog's `$ai_generation` for one turn. `$ai_input` is the redacted typed prompt as a one-message
+/// list, left out when there is none. Agent replies and tool output are never part of it.
+fn generation_props(trace: &str, agent: &str, t: &Turn, input: Option<&str>, token_saver: bool) -> Value {
+    let mut p = json!({
+        "$ai_trace_id": trace,
+        "$ai_provider": t.provider,
+        "$ai_output_choices": [],
+        "$ai_input_tokens": t.input,
+        "$ai_output_tokens": t.output,
+        "$ai_cache_read_input_tokens": t.cache_read,
+        "$ai_cache_creation_input_tokens": t.cache_write,
+        "agent": agent,
+        "tools": t.tools,
+        "mcp_servers": t.mcp_servers,
+        "skills": t.skills,
+        "token_saver": token_saver,
+    });
+    // PostHog needs a model on every generation.
+    p["$ai_model"] = json!(t.model.as_deref().filter(|m| !m.is_empty()).unwrap_or("unknown"));
+    if let Some(cost) = t.cost_usd.filter(|c| c.is_finite() && *c >= 0.0) {
+        p["$ai_total_cost_usd"] = json!(cost);
+    }
+    if let Some(ms) = t.latency_ms {
+        p["$ai_latency"] = json!(ms as f64 / 1000.0);
+    }
+    if let Some(text) = input {
+        p["$ai_input"] = json!([{ "role": "user", "content": text }]);
+    }
+    p
+}
+
+/// PostHog's `$ai_trace` for a finished run.
+fn trace_props(trace: &str, agent: &str, seconds: u64, turns: u64) -> Value {
+    json!({ "$ai_trace_id": trace, "$ai_span_name": agent, "$ai_latency": seconds, "turns": turns, "remote": false })
+}
+
+fn unix_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Where each running agent's reads stopped (`usage/cursors.json`, keyed by the core's terminal id,
+/// which outlives an app restart), so a quit and restart, or the next read, never sends a turn
+/// twice and the run keeps its trace id.
+#[derive(Default, Serialize, Deserialize)]
+struct Cursors {
+    runs: HashMap<String, RunCursor>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RunCursor {
+    /// Unix seconds of the last read; old entries of runs that never ended are dropped.
+    at: u64,
+    /// What a restarted app needs to go on with the run, or to end it if the terminal is gone.
+    #[serde(default)]
+    trace: String,
+    #[serde(default)]
+    started_ms: u64,
+    #[serde(default)]
+    agent: String,
+    #[serde(default)]
+    folder: String,
+    #[serde(default)]
+    turns: u64,
+    cursor: TurnCursor,
+}
+
+impl RunCursor {
+    /// The run as a job to finish; none for an entry that does not say what ran where.
+    fn job(&self, address: &str) -> Option<Job> {
+        let (kind, usage_kind) = match self.agent.as_str() {
+            "claude" => ("claude", AgentKind::Claude),
+            "codex" => ("codex", AgentKind::Codex),
+            _ => return None,
+        };
+        (!self.folder.is_empty() && !self.trace.is_empty()).then(|| Job {
+            address: address.to_owned(),
+            kind,
+            usage_kind,
+            folder: PathBuf::from(&self.folder),
+            started: UNIX_EPOCH + Duration::from_millis(self.started_ms),
+            trace: self.trace.clone(),
+            turns: Arc::new(AtomicU64::new(self.turns)),
+            seconds: 0,
+        })
+    }
+}
+
+impl Cursors {
+    /// The stored runs. An unreadable file is empty; one entry of the wrong shape is dropped alone.
+    fn load(dir: &Path) -> Self {
+        let value: Value = std::fs::read_to_string(dir.join("cursors.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let runs = value
+            .get("runs")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter_map(|(k, v)| Some((k.clone(), serde_json::from_value(v.clone()).ok()?)))
+            .collect();
+        Self { runs }
+    }
+
+    fn save(&mut self, dir: &Path) {
+        let keep = unix_secs().saturating_sub(7 * 24 * 3600);
+        self.runs.retain(|_, r| r.at >= keep);
+        let (file, tmp) = (dir.join("cursors.json"), dir.join("cursors.json.tmp"));
+        let _ = std::fs::create_dir_all(dir);
+        if let Ok(text) = serde_json::to_string(self)
+            && std::fs::write(&tmp, text).is_ok()
+        {
+            let _ = std::fs::rename(&tmp, &file);
+        }
     }
 }
 
@@ -518,5 +814,524 @@ mod tests {
         ));
         update_downloaded("", "");
         assert!(allow("update_downloaded:", Duration::from_secs(60)));
+    }
+
+    fn turn(prompt: Option<&str>) -> Turn {
+        Turn {
+            timestamp_ms: 1,
+            model: Some("claude-sonnet".into()),
+            provider: "anthropic",
+            input: 10,
+            output: 20,
+            cache_read: 30,
+            cache_write: 40,
+            cost_usd: Some(0.5),
+            latency_ms: Some(2500),
+            tools: vec!["Bash".into()],
+            mcp_servers: vec!["github".into()],
+            skills: vec!["review".into()],
+            prompt: prompt.map(Into::into),
+            id: None,
+        }
+    }
+
+    fn job(trace: &str) -> Job {
+        Job {
+            address: trace.into(),
+            kind: "claude",
+            usage_kind: AgentKind::Claude,
+            folder: PathBuf::from("/x/y"),
+            started: SystemTime::now(),
+            trace: trace.into(),
+            turns: Arc::new(AtomicU64::new(0)),
+            seconds: 0,
+        }
+    }
+
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("h0x-events-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    type Sent = std::cell::RefCell<Vec<(String, Value)>>;
+    type Booked = std::cell::RefCell<Vec<(String, u64, f64)>>;
+
+    /// One `read_with` with fakes: `redact` is the fake core, `sent` and `booked` record the outputs.
+    #[allow(clippy::too_many_arguments)]
+    fn run(d: &Path, sharing: bool, redact: &dyn Fn(&str) -> Option<String>, sent: &Sent, booked: &Booked, trace: &str, finish: bool, turns: Vec<Turn>) -> usize {
+        let emit = |n: &str, p: Value, _at: u64| sent.borrow_mut().push((n.into(), p));
+        let usage = |a: &str, t: u64, c: f64| booked.borrow_mut().push((a.into(), t, c));
+        let ctx = Ctx { dir: d, sharing, token_saver: true, redact, emit: &emit, usage: &usage };
+        read_with(&ctx, &job(trace), finish, |_| turns)
+    }
+
+    #[test]
+    fn a_generation_has_the_posthog_names_and_the_redacted_prompt_as_a_message() {
+        let (d, sent, booked) = (dir("shape"), Sent::default(), Booked::default());
+        let fake_core = |t: &str| Some(t.replace("sk-secret", "[redacted]"));
+        run(&d, true, &fake_core, &sent, &booked, "t1", false, vec![turn(Some("use sk-secret now"))]);
+        let sent = sent.into_inner();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "$ai_generation");
+        assert_eq!(
+            sent[0].1,
+            json!({
+                "$ai_trace_id": "t1", "$ai_provider": "anthropic", "$ai_model": "claude-sonnet", "$ai_output_choices": [],
+                "$ai_input_tokens": 10, "$ai_output_tokens": 20, "$ai_cache_read_input_tokens": 30,
+                "$ai_cache_creation_input_tokens": 40, "$ai_total_cost_usd": 0.5, "$ai_latency": 2.5,
+                "$ai_input": [{ "role": "user", "content": "use [redacted] now" }],
+                "agent": "claude", "tools": ["Bash"], "mcp_servers": ["github"], "skills": ["review"], "token_saver": true,
+            })
+        );
+        assert!(!sent[0].1.to_string().contains("sk-secret"));
+    }
+
+    #[test]
+    fn without_a_redacting_core_the_numbers_go_and_no_text() {
+        let (d, sent, booked) = (dir("noredact"), Sent::default(), Booked::default());
+        run(&d, true, &|_| None, &sent, &booked, "t1", false, vec![turn(Some("a secret prompt")), turn(None), turn(Some("  \n"))]);
+        let sent = sent.into_inner();
+        assert_eq!(sent.len(), 3);
+        for (_, p) in &sent {
+            assert!(p.get("$ai_input").is_none());
+            assert_eq!(p["$ai_input_tokens"], 10);
+            assert!(!p.to_string().contains("secret"));
+        }
+        // An unknown model is named "unknown" (PostHog needs one); an unknown cost or latency is left out.
+        let mut bare = turn(None);
+        (bare.model, bare.cost_usd, bare.latency_ms) = (None, Some(f64::NAN), None);
+        let p = generation_props("t", "codex", &bare, None, false);
+        assert_eq!(p["$ai_model"], "unknown");
+        for k in ["$ai_total_cost_usd", "$ai_latency", "$ai_input"] {
+            assert!(p.get(k).is_none(), "{k}");
+        }
+        assert_eq!(p["token_saver"], false);
+    }
+
+    #[test]
+    fn redact_replies_are_text_or_nothing() {
+        assert_eq!(parse_redacted(&Ok(json!({ "text": "ok" }))), Some("ok".into()));
+        assert_eq!(parse_redacted(&Ok(json!({ "text": "" }))), Some(String::new()));
+        for bad in [json!({}), json!(null), json!("x"), json!({ "text": 5 })] {
+            assert_eq!(parse_redacted(&Ok(bad.clone())), None, "{bad}");
+        }
+        assert_eq!(parse_redacted(&Err(anyhow::anyhow!("too_large"))), None);
+    }
+
+    #[test]
+    fn sharing_off_books_locally_and_queues_nothing() {
+        let (d, sent, booked) = (dir("off"), Sent::default(), Booked::default());
+        let n = run(&d, false, &|t| Some(t.into()), &sent, &booked, "t1", false, vec![turn(Some("hi"))]);
+        assert_eq!(n, 1);
+        assert!(sent.borrow().is_empty());
+        assert_eq!(booked.into_inner(), [("claude".to_string(), 30, 0.5)]);
+    }
+
+    #[test]
+    fn usage_is_booked_once_per_turn_with_a_missing_cost_as_zero() {
+        let (d, sent, booked) = (dir("book"), Sent::default(), Booked::default());
+        let mut free = turn(None);
+        free.cost_usd = None;
+        run(&d, true, &|_| None, &sent, &booked, "t1", false, vec![turn(None), free]);
+        assert_eq!(booked.into_inner(), [("claude".to_string(), 30, 0.5), ("claude".to_string(), 30, 0.0)]);
+    }
+
+    fn cursor_at(n: u64) -> TurnCursor {
+        serde_json::from_value(json!({ "offsets": { "f.jsonl": n } })).unwrap()
+    }
+
+    #[test]
+    fn the_cursor_is_stored_only_after_the_events_are_queued_and_dropped_at_the_end() {
+        let d = dir("cursor");
+        let seen_before = std::cell::Cell::new(None);
+        let emit = |_: &str, _: Value, _: u64| seen_before.set(Some(Cursors::load(&d).runs.contains_key("t1")));
+        let usage = |_: &str, _: u64, _: f64| ();
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        read_with(&ctx, &job("t1"), false, |c| {
+            *c = cursor_at(99);
+            vec![turn(None)]
+        });
+        assert_eq!(seen_before.get(), Some(false), "no cursor yet while the event is being queued");
+        assert_eq!(Cursors::load(&d).runs["t1"].cursor, cursor_at(99));
+        // The next read starts from the stored cursor; the final read drops it.
+        let got = std::cell::RefCell::new(None);
+        read_with(&ctx, &job("t1"), true, |c| {
+            *got.borrow_mut() = Some(c.clone());
+            Vec::new()
+        });
+        assert_eq!(got.into_inner(), Some(cursor_at(99)));
+        assert!(Cursors::load(&d).runs.is_empty());
+        // A broken file starts over instead of failing.
+        std::fs::write(d.join("cursors.json"), "{ nope").unwrap();
+        assert!(Cursors::load(&d).runs.is_empty());
+    }
+
+    #[test]
+    fn a_turn_is_never_sent_twice_across_ten_minute_reads_and_the_final_read() {
+        let (d, sent, booked) = (dir("dedup"), Sent::default(), Booked::default());
+        let all = [turn(Some("one")), turn(Some("two")), turn(Some("three"))];
+        let emit = |n: &str, p: Value, _at: u64| sent.borrow_mut().push((n.into(), p));
+        let usage = |a: &str, t: u64, c: f64| booked.borrow_mut().push((a.into(), t, c));
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|t| Some(t.into()), emit: &emit, usage: &usage };
+        // The cursor offset stands in for the transcript position: how many turns were read.
+        let step = |finish: bool, upto: u64| {
+            read_with(&ctx, &job("t9"), finish, |c| {
+                let done = (0..=3).find(|n| *c == cursor_at(*n)).unwrap_or(0) as usize;
+                *c = cursor_at(upto);
+                all[done..upto as usize].to_vec()
+            })
+        };
+        assert_eq!([step(false, 1), step(false, 1), step(false, 2), step(true, 3)], [1, 0, 1, 1]);
+        let sent = sent.into_inner();
+        let texts: Vec<&str> = sent.iter().map(|(_, p)| p["$ai_input"][0]["content"].as_str().unwrap()).collect();
+        assert_eq!(texts, ["one", "two", "three"]);
+        // Only `$ai_generation` is sent for tokens: the old `agent_tokens` event is retired.
+        assert!(sent.iter().all(|(n, _)| n == "$ai_generation"));
+        assert_eq!(booked.borrow().len(), 3);
+    }
+
+    #[test]
+    fn a_trace_names_the_run_and_each_run_has_its_own_id() {
+        assert_eq!(
+            trace_props("t1", "codex", 125, 4),
+            json!({ "$ai_trace_id": "t1", "$ai_span_name": "codex", "$ai_latency": 125, "turns": 4, "remote": false })
+        );
+        assert_ne!(new_trace_id(), new_trace_id());
+    }
+
+    #[test]
+    fn trace_ids_use_only_the_characters_posthog_allows() {
+        let allowed = |c: char| c.is_ascii_alphanumeric() || "-_~.@()!':|".contains(c);
+        let id = new_trace_id();
+        assert!(!id.is_empty() && id.len() <= 100 && id.chars().all(allowed), "{id}");
+    }
+
+    #[test]
+    fn events_carry_the_time_they_happened_and_no_person_set() {
+        let (d, booked) = (dir("when"), Booked::default());
+        let got = std::cell::RefCell::new(Vec::new());
+        let emit = |n: &str, p: Value, at: u64| got.borrow_mut().push((n.to_string(), p, at));
+        let usage = |a: &str, t: u64, c: f64| booked.borrow_mut().push((a.into(), t, c));
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|t| Some(t.into()), emit: &emit, usage: &usage };
+        let (mut early, mut odd) = (turn(Some("p")), turn(None));
+        (early.timestamp_ms, odd.timestamp_ms) = (1_700_000_000_123, -5);
+        let start = unix_secs() * 1000;
+        read_with(&ctx, &job("tw"), false, |_| vec![early, odd]);
+        let mut j = job("tw");
+        j.seconds = 9;
+        let before = unix_secs() * 1000;
+        ctx.trace_ended(&j);
+        let got = got.into_inner();
+        assert_eq!(got[0].2, 1_700_000_000_123);
+        assert!(got[1].2 >= start && got[1].2 <= before, "a bad time is the read time, never a panic");
+        assert!(got[2].2 >= before && got[2].0 == "$ai_trace");
+        for (_, p, _) in &got {
+            assert!(p.get("$set").is_none() && p.get("$set_once").is_none());
+        }
+        assert_eq!(got[0].1["$ai_output_choices"], json!([]));
+    }
+
+    #[test]
+    fn a_turn_without_a_known_model_still_carries_the_ai_model_posthog_requires() {
+        // PostHog's LLM analytics drops `$ai_generation` events that have no `$ai_model`.
+        let mut bare = turn(None);
+        bare.model = None;
+        let p = generation_props("t", "claude", &bare, None, false);
+        assert!(p["$ai_model"].as_str().is_some_and(|m| !m.is_empty()), "{p}");
+    }
+
+    #[test]
+    fn a_negative_or_infinite_cost_is_left_out_and_zero_is_kept() {
+        for bad in [-0.01, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let mut t = turn(None);
+            t.cost_usd = Some(bad);
+            let p = generation_props("t", "claude", &t, None, false);
+            assert!(p.get("$ai_total_cost_usd").is_none(), "{bad}: {p}");
+        }
+        let mut free = turn(None);
+        free.cost_usd = Some(0.0);
+        assert_eq!(generation_props("t", "claude", &free, None, false)["$ai_total_cost_usd"], 0.0);
+    }
+
+    #[test]
+    fn a_prompt_the_core_redacts_to_nothing_sends_no_ai_input() {
+        for reply in ["", "   ", "\n\t"] {
+            let (d, sent, booked) = (dir("empty-redact"), Sent::default(), Booked::default());
+            run(&d, true, &|_| Some(reply.to_string()), &sent, &booked, "t1", false, vec![turn(Some("hello"))]);
+            let sent = sent.into_inner();
+            assert_eq!(sent.len(), 1, "the numbers still go");
+            assert!(sent[0].1.get("$ai_input").is_none(), "{reply:?}: {}", sent[0].1);
+        }
+    }
+
+    #[test]
+    fn the_core_reply_is_trusted_as_is_and_its_extra_fields_are_ignored() {
+        // Extra fields and a text far past the 2,000 cap are accepted here: the cap is applied
+        // when the event is queued (`analytics::scrub`).
+        let huge = "x".repeat(100_000);
+        assert_eq!(parse_redacted(&Ok(json!({ "text": huge.clone(), "redacted": 3, "kinds": ["key"] }))), Some(huge));
+        for bad in [json!({ "text": null }), json!({ "text": ["a"] }), json!({ "text": { "a": 1 } }), json!([{ "text": "a" }])] {
+            assert_eq!(parse_redacted(&Ok(bad.clone())), None, "{bad}");
+        }
+        assert_eq!(parse_redacted(&Err(anyhow::anyhow!("timed out after 3s"))), None);
+        // Whatever the core returns is sent: a secret it missed is not caught by the app.
+        let (d, sent, booked) = (dir("trust"), Sent::default(), Booked::default());
+        run(&d, true, &|t| Some(t.into()), &sent, &booked, "t1", false, vec![turn(Some("key sk-live-123"))]);
+        assert_eq!(sent.into_inner()[0].1["$ai_input"], json!([{ "role": "user", "content": "key sk-live-123" }]));
+    }
+
+    #[test]
+    fn turn_times_in_the_future_at_zero_or_negative_reach_the_queue_without_a_panic() {
+        let d = dir("skew");
+        let got = std::cell::RefCell::new(Vec::new());
+        let emit = |_: &str, _: Value, at: u64| got.borrow_mut().push(at);
+        let usage = |_: &str, _: u64, _: f64| ();
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        let times = [i64::MAX, 0, -1, i64::MIN];
+        let turns: Vec<Turn> = times
+            .iter()
+            .map(|&ms| {
+                let mut t = turn(None);
+                t.timestamp_ms = ms;
+                t
+            })
+            .collect();
+        let before = unix_secs() * 1000;
+        assert_eq!(read_with(&ctx, &job("ts"), false, |_| turns), 4);
+        // A bad, zero, negative or far-future time is stamped with the read time.
+        let after = unix_secs() * 1000;
+        assert!(got.into_inner().iter().all(|at| (before..=after).contains(at)));
+    }
+
+    #[test]
+    fn turn_time_keeps_a_good_time_and_replaces_one_more_than_a_day_ahead() {
+        let read: u64 = 1_700_000_000_000;
+        let day: u64 = 86_400_000;
+        assert_eq!(turn_time((read - 5_000) as i64, read), read - 5_000);
+        assert_eq!(turn_time((read + day) as i64, read), read + day, "exactly a day ahead is kept");
+        assert_eq!(turn_time((read + day + 1) as i64, read), read);
+        assert_eq!((turn_time(0, read), turn_time(-1, read), turn_time(i64::MIN, read), turn_time(i64::MAX, read)), (read, read, read, read));
+    }
+
+    #[test]
+    fn a_stored_run_resumes_under_its_trace_and_a_gone_terminal_can_be_finished() {
+        let d = dir("resume");
+        let emit = |_: &str, _: Value, _: u64| ();
+        let usage = |_: &str, _: u64, _: f64| ();
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        // Keyed by terminal id, with the trace id and what is needed to end the run inside.
+        let mut j = job("term-7");
+        j.trace = "h0x-run-1".into();
+        read_with(&ctx, &j, false, |c| {
+            *c = cursor_at(42);
+            vec![turn(None), turn(None)]
+        });
+        let saved = Cursors::load(&d).runs.remove("term-7").unwrap();
+        assert_eq!((saved.trace.as_str(), saved.agent.as_str(), saved.turns), ("h0x-run-1", "claude", 2));
+        assert_eq!(saved.cursor, cursor_at(42));
+        // After a restart the same terminal gets the same trace and the stored count.
+        let again = saved.job("term-7").unwrap();
+        assert_eq!((again.trace.as_str(), again.kind, again.turns.load(Ordering::Relaxed)), ("h0x-run-1", "claude", 2));
+        assert_eq!(again.folder, PathBuf::from("/x/y"));
+        // The final read starts from the stored cursor, sends `$ai_trace` with the whole count, and clears the entry.
+        let got = std::cell::RefCell::new(Vec::new());
+        let emit = |n: &str, p: Value, _: u64| got.borrow_mut().push((n.to_string(), p));
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        read_with(&ctx, &again, true, |c| {
+            assert_eq!(*c, cursor_at(42));
+            vec![turn(None)]
+        });
+        ctx.trace_ended(&again);
+        let got = got.into_inner();
+        assert_eq!(got[1].0, "$ai_trace");
+        assert_eq!((got[0].1["$ai_trace_id"].clone(), got[1].1["turns"].clone()), (json!("h0x-run-1"), json!(3)));
+        assert!(Cursors::load(&d).runs.is_empty());
+        // An entry that cannot say what ran where is not finished.
+        let bare = RunCursor { at: 1, trace: String::new(), started_ms: 0, agent: String::new(), folder: String::new(), turns: 0, cursor: TurnCursor::default() };
+        assert!(bare.job("t").is_none());
+    }
+
+    #[test]
+    fn one_bad_entry_in_the_cursor_file_drops_only_that_entry() {
+        let d = dir("one-bad");
+        std::fs::create_dir_all(&d).unwrap();
+        let now = unix_secs();
+        let good = json!({ "at": now, "cursor": { "offsets": { "f.jsonl": 3 } } });
+        let file = json!({ "runs": { "a": good, "b": { "at": "x", "cursor": 1 }, "c": 5, "d": { "at": now, "cursor": {} }, "e": null } });
+        std::fs::write(d.join("cursors.json"), file.to_string()).unwrap();
+        let store = Cursors::load(&d);
+        let mut keys: Vec<&String> = store.runs.keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["a", "d"]);
+        assert_eq!(store.runs["a"].cursor, cursor_at(3));
+    }
+
+    #[test]
+    fn a_run_shorter_than_five_seconds_still_gets_its_final_read_and_trace() {
+        // The read and the trace do not depend on the run's length: `seconds` is only reported.
+        let d = dir("short");
+        let got = std::cell::RefCell::new(Vec::new());
+        let emit = |n: &str, p: Value, _: u64| got.borrow_mut().push((n.to_string(), p));
+        let usage = |_: &str, _: u64, _: f64| ();
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        let mut j = job("quick");
+        j.seconds = 1;
+        read_with(&ctx, &j, true, |_| vec![turn(None)]);
+        ctx.trace_ended(&j);
+        let got = got.into_inner();
+        assert_eq!(got.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["$ai_generation", "$ai_trace"]);
+        assert_eq!(got[1].1["$ai_latency"], 1);
+    }
+
+    #[test]
+    fn a_quit_between_queueing_and_the_cursor_save_sends_the_turn_again_on_the_next_read() {
+        // At-least-once: the cursor is stored only after the events are queued, so a stop in
+        // between repeats the turn instead of losing it.
+        let d = dir("crash");
+        let sent = std::cell::Cell::new(0);
+        let crash = std::cell::Cell::new(true);
+        let emit = |_: &str, _: Value, _: u64| {
+            sent.set(sent.get() + 1);
+            if crash.get() {
+                panic!("app quit");
+            }
+        };
+        let usage = |_: &str, _: u64, _: f64| ();
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        let read = |ctx: &Ctx| {
+            read_with(ctx, &job("tc"), false, |c| {
+                let fresh = *c == TurnCursor::default();
+                *c = cursor_at(1);
+                if fresh { vec![turn(None)] } else { Vec::new() }
+            })
+        };
+        let quit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read(&ctx)));
+        assert!(quit.is_err());
+        assert!(!Cursors::load(&d).runs.contains_key("tc"), "no cursor was stored");
+        crash.set(false);
+        assert_eq!(read(&ctx), 1, "the turn is read again");
+        assert_eq!(read(&ctx), 0, "and only once more");
+        assert_eq!(sent.get(), 2);
+    }
+
+    #[test]
+    fn cursors_from_an_older_version_without_seen_ids_still_load() {
+        let d = dir("old-cursors");
+        std::fs::create_dir_all(&d).unwrap();
+        let now = unix_secs();
+        std::fs::write(
+            d.join("cursors.json"),
+            json!({ "runs": { "t1": { "at": now, "cursor": { "offsets": { "f.jsonl": 7 } } }, "t2": { "at": now, "cursor": {} } } }).to_string(),
+        )
+        .unwrap();
+        let store = Cursors::load(&d);
+        assert_eq!(store.runs["t1"].cursor, cursor_at(7));
+        assert_eq!(store.runs["t2"].cursor, TurnCursor::default());
+        // A file or entry of the wrong shape holds no run.
+        for bad in [
+            json!({ "runs": { "t1": { "cursor": {} } } }),
+            json!({ "runs": { "t1": { "at": -1, "cursor": {} } } }),
+            json!({ "runs": [] }),
+            json!({}),
+            json!(null),
+        ] {
+            std::fs::write(d.join("cursors.json"), bad.to_string()).unwrap();
+            assert!(Cursors::load(&d).runs.is_empty(), "{bad}");
+        }
+        std::fs::write(d.join("cursors.json"), "").unwrap();
+        assert!(Cursors::load(&d).runs.is_empty());
+    }
+
+    #[test]
+    fn two_runs_in_one_folder_keep_their_own_cursors_and_ending_one_keeps_the_other() {
+        let d = dir("two-runs");
+        let emit = |_: &str, _: Value, _: u64| ();
+        let usage = |_: &str, _: u64, _: f64| ();
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        read_with(&ctx, &job("a"), false, |c| {
+            *c = cursor_at(5);
+            vec![turn(None)]
+        });
+        read_with(&ctx, &job("b"), false, |c| {
+            assert_eq!(*c, TurnCursor::default(), "b does not start from a's cursor");
+            *c = cursor_at(9);
+            vec![turn(None)]
+        });
+        read_with(&ctx, &job("a"), true, |c| {
+            assert_eq!(*c, cursor_at(5));
+            Vec::new()
+        });
+        let store = Cursors::load(&d);
+        assert!(!store.runs.contains_key("a"));
+        assert_eq!(store.runs["b"].cursor, cursor_at(9));
+    }
+
+    #[test]
+    fn cursors_of_runs_not_read_for_seven_days_are_dropped_and_a_large_file_still_works() {
+        let d = dir("prune");
+        std::fs::create_dir_all(&d).unwrap();
+        let now = unix_secs();
+        let week = 7 * 24 * 3600;
+        let mut runs = serde_json::Map::new();
+        runs.insert("old".into(), json!({ "at": now - week - 60, "cursor": {} }));
+        runs.insert("edge".into(), json!({ "at": now - week + 60, "cursor": {} }));
+        runs.insert("zero".into(), json!({ "at": 0, "cursor": {} }));
+        runs.insert("future".into(), json!({ "at": u64::MAX, "cursor": {} }));
+        for i in 0..5000 {
+            runs.insert(format!("r{i}"), json!({ "at": now, "cursor": { "offsets": { "f.jsonl": i } } }));
+        }
+        std::fs::write(d.join("cursors.json"), json!({ "runs": runs }).to_string()).unwrap();
+        let emit = |_: &str, _: Value, _: u64| ();
+        let usage = |_: &str, _: u64, _: f64| ();
+        let ctx = Ctx { dir: &d, sharing: false, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        read_with(&ctx, &job("new"), false, |_| Vec::new());
+        let store = Cursors::load(&d);
+        for gone in ["old", "zero"] {
+            assert!(!store.runs.contains_key(gone), "{gone}");
+        }
+        for kept in ["edge", "future", "new", "r0", "r4999"] {
+            assert!(store.runs.contains_key(kept), "{kept}");
+        }
+        assert_eq!(store.runs.len(), 5003);
+        assert_eq!(store.runs["r4999"].cursor, cursor_at(4999));
+        assert!(!d.join("cursors.json.tmp").exists());
+    }
+
+    #[test]
+    fn trace_ids_stay_unique_and_within_posthogs_characters_across_100k_runs() {
+        let allowed = |c: char| c.is_ascii_alphanumeric() || "-_~.@()!':|".contains(c);
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..100_000 {
+            let id = new_trace_id();
+            assert!(!id.is_empty() && id.len() <= 100 && id.chars().all(allowed), "{id}");
+            assert!(ids.insert(id));
+        }
+    }
+
+    #[test]
+    fn only_local_claude_and_codex_runs_with_a_folder_are_read() {
+        let running = |kind: &'static str, folder: Option<&str>, remote: bool| Running {
+            kind,
+            since: Instant::now(),
+            started: SystemTime::now(),
+            folder: folder.map(Into::into),
+            trace: "t".into(),
+            last_read: Instant::now(),
+            turns: Arc::new(AtomicU64::new(0)),
+            remote,
+        };
+        let job = running("codex", Some("C:\\work\\repo"), false).job("a").unwrap();
+        assert_eq!((job.kind, job.usage_kind, job.folder), ("codex", AgentKind::Codex, PathBuf::from("C:\\work\\repo")));
+        assert!(running("claude", Some("/srv/x"), false).job("a").is_some());
+        for (kind, folder, remote) in [
+            ("claude", Some("/srv/x"), true),
+            ("claude", None, false),
+            ("gemini", Some("/srv/x"), false),
+            ("opencode", Some("/srv/x"), false),
+            ("other", Some("/srv/x"), false),
+        ] {
+            assert!(running(kind, folder, remote).job("a").is_none(), "{kind} {folder:?} {remote}");
+        }
     }
 }

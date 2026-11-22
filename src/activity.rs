@@ -173,16 +173,7 @@ pub fn session_started() {
     day.sessions = day.sessions.saturating_add(1);
 }
 
-/// An agent that ran here ended, having used this many tokens.
-pub fn add_tokens(tokens: u64) {
-    let today = local_date();
-    let mut r = recorder();
-    let day = r.day(&today);
-    day.tokens = day.tokens.saturating_add(tokens);
-}
-
-/// An agent used this many tokens, which cost this much (API-equivalent dollars). Also counts as `add_tokens` does.
-#[allow(dead_code)] // called by the LLM events step
+/// An agent used this many tokens, which cost this much (API-equivalent dollars).
 pub fn add_usage(agent: &str, tokens: u64, cost_usd: f64) {
     let today = local_date();
     let mut r = recorder();
