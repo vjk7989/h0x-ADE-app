@@ -1,7 +1,9 @@
 //! A private record of how much agents worked, per day, for the person's own use. It lives in
 //! `<app home>/usage/activity.json` and is never sent anywhere (not even with analytics on).
 //!
-//! `{"version":1,"days":{"YYYY-MM-DD":{"seconds":n,"sessions":n,"tokens":n}}}`, days are local dates.
+//! `{"version":1,"days":{"YYYY-MM-DD":{"seconds":n,"sessions":n,"tokens":n,"by_agent":{"claude":n},"cost_usd":x,"saved":n}}}`,
+//! days are local dates; `by_agent` is tokens per agent, `cost_usd` the API-equivalent estimate, `saved` the tokens the
+//! Token Saver kept out of agents' reading. Files from before those three keys still load (they count as zero).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -14,12 +16,31 @@ const TICK_CAP: Duration = Duration::from_secs(10);
 const FLUSH_EVERY: Duration = Duration::from_secs(60);
 const KEEP_DAYS: i64 = 371;
 
-#[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
 #[serde(default)]
 struct Day {
     seconds: u64,
     sessions: u64,
     tokens: u64,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    by_agent: BTreeMap<String, u64>,
+    #[serde(skip_serializing_if = "is_zero", deserialize_with = "cost_or_zero")]
+    cost_usd: f64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    saved: u64,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+/// A finite, non-negative number; anything else is 0 (a bad number never loses the rest of the file).
+fn cost_or_zero<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_f64().filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -106,15 +127,75 @@ pub fn add_tokens(tokens: u64) {
     day.tokens = day.tokens.saturating_add(tokens);
 }
 
+/// An agent used this many tokens, which cost this much (API-equivalent dollars). Also counts as `add_tokens` does.
+#[allow(dead_code)] // called by the LLM events step
+pub fn add_usage(agent: &str, tokens: u64, cost_usd: f64) {
+    let today = local_date();
+    let mut r = recorder();
+    r.day(&today).add_usage(agent, tokens, cost_usd);
+}
+
+/// The Token Saver's lifetime counters (`gate.stats`): tokens kept out of agents' reading and how many outputs.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq, Debug)]
+#[serde(default)]
+pub struct Saved {
+    pub tokens: u64,
+    pub outputs: u64,
+}
+
+/// Books what the Token Saver saved since the last call: the change from the lifetime counters stored in
+/// `usage/saved.json`, never negative (a counter that was reset gives 0 and is stored as the new base). The
+/// tokens are added to today. Returns the change.
+pub fn book_saved(now: Saved) -> Saved {
+    let delta = book_saved_in(&crate::mods::app_dir().join("usage"), now);
+    if delta.tokens > 0 {
+        let today = local_date();
+        let mut r = recorder();
+        let day = r.day(&today);
+        day.saved = day.saved.saturating_add(delta.tokens);
+    }
+    delta
+}
+
+fn book_saved_in(dir: &Path, now: Saved) -> Saved {
+    let path = dir.join("saved.json");
+    let last = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Saved>(&t).ok()).unwrap_or_default();
+    let delta = Saved { tokens: now.tokens.saturating_sub(last.tokens), outputs: now.outputs.saturating_sub(last.outputs) };
+    if now != last {
+        let stored = std::fs::create_dir_all(dir).and_then(|()| crate::persist::write_atomic(&path, serde_json::to_string(&now).unwrap_or_default()));
+        if let Err(e) = stored {
+            tracing::warn!("cannot save the tokens-saved base: {e}");
+        }
+    }
+    delta
+}
+
 /// Writes what is pending (the app is quitting).
 pub fn finish() {
     flush(&local_date());
+}
+
+impl Day {
+    fn add_usage(&mut self, agent: &str, tokens: u64, cost_usd: f64) {
+        self.tokens = self.tokens.saturating_add(tokens);
+        let slot = self.by_agent.entry(agent.to_owned()).or_default();
+        *slot = slot.saturating_add(tokens);
+        if cost_usd.is_finite() && cost_usd > 0.0 {
+            self.cost_usd += cost_usd;
+        }
+    }
 }
 
 fn add_to(slot: &mut Day, d: &Day) {
     slot.seconds = slot.seconds.saturating_add(d.seconds);
     slot.sessions = slot.sessions.saturating_add(d.sessions);
     slot.tokens = slot.tokens.saturating_add(d.tokens);
+    slot.saved = slot.saved.saturating_add(d.saved);
+    slot.cost_usd += d.cost_usd;
+    for (agent, tokens) in &d.by_agent {
+        let v = slot.by_agent.entry(agent.clone()).or_default();
+        *v = v.saturating_add(*tokens);
+    }
 }
 
 fn flush(today: &str) {
@@ -269,7 +350,85 @@ mod tests {
     }
 
     fn day(seconds: u64, sessions: u64, tokens: u64) -> Day {
-        Day { seconds, sessions, tokens }
+        Day { seconds, sessions, tokens, ..Default::default() }
+    }
+
+    #[test]
+    fn usage_adds_to_the_day_tokens_the_agents_row_and_the_cost() {
+        let mut d = Day::default();
+        d.add_usage("claude", 100, 0.5);
+        d.add_usage("claude", 50, 0.25);
+        d.add_usage("codex", 7, 0.0);
+        assert_eq!((d.tokens, d.by_agent["claude"], d.by_agent["codex"], d.cost_usd), (157, 150, 7, 0.75));
+        // A cost that is not a number, or negative, adds nothing; tokens saturate.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            d.add_usage("codex", 1, bad);
+        }
+        assert_eq!((d.cost_usd, d.by_agent["codex"]), (0.75, 11));
+        d.add_usage("codex", u64::MAX, 0.0);
+        assert_eq!((d.by_agent["codex"], d.tokens), (u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn per_agent_numbers_cost_and_saved_merge_into_the_file_and_round_trip() {
+        let dir = scratch("usage-merge");
+        let mut a = Day::default();
+        a.add_usage("claude", 10, 0.5);
+        a.saved = 4;
+        let mut b = Day::default();
+        b.add_usage("claude", 5, 0.25);
+        b.add_usage("codex", 3, 1.0);
+        b.saved = 6;
+        write_merged(&dir, &[("2026-11-14".to_string(), a)].into(), "2026-11-14").unwrap();
+        write_merged(&dir, &[("2026-11-14".to_string(), b)].into(), "2026-11-14").unwrap();
+        let d = &read(&dir)["2026-11-14"];
+        assert_eq!((d.tokens, d.saved, d.cost_usd), (18, 10, 1.75));
+        assert_eq!(d.by_agent, [("claude".to_string(), 15), ("codex".to_string(), 3)].into());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_day_without_the_new_keys_loads_as_zero_and_writes_none_of_them() {
+        let old: Day = serde_json::from_str(r#"{"seconds":4,"sessions":1,"tokens":9}"#).unwrap();
+        assert_eq!(old, day(4, 1, 9));
+        let text = serde_json::to_string(&old).unwrap();
+        assert!(!text.contains("by_agent") && !text.contains("cost_usd") && !text.contains("saved"), "{text}");
+        // Bad new values are zero, not damage.
+        for bad in [r#""cost_usd":"x""#, r#""cost_usd":-3"#, r#""cost_usd":null"#, r#""cost_usd":[]"#] {
+            let d: Day = serde_json::from_str(&format!(r#"{{"tokens":2,{bad}}}"#)).unwrap_or_else(|e| panic!("{bad}: {e}"));
+            assert_eq!((d.tokens, d.cost_usd), (2, 0.0), "{bad}");
+        }
+        let d: Day = serde_json::from_str(r#"{"by_agent":{"claude":3},"cost_usd":1.5,"saved":8}"#).unwrap();
+        assert_eq!((d.by_agent["claude"], d.cost_usd, d.saved), (3, 1.5, 8));
+    }
+
+    #[test]
+    fn saved_is_the_change_since_the_stored_lifetime_value_and_never_negative() {
+        let dir = scratch("saved");
+        let at = |tokens, outputs| Saved { tokens, outputs };
+        // Nothing stored yet: the whole lifetime value is the first change.
+        assert_eq!(book_saved_in(&dir, at(1000, 10)), at(1000, 10));
+        assert_eq!(book_saved_in(&dir, at(1500, 12)), at(500, 2));
+        assert_eq!(book_saved_in(&dir, at(1500, 12)), at(0, 0), "nothing new");
+        // The counter was reset (a new core home): 0, and counting resumes from the new base.
+        assert_eq!(book_saved_in(&dir, at(40, 1)), at(0, 0));
+        assert_eq!(book_saved_in(&dir, at(90, 4)), at(50, 3));
+        // One of the two went down: only that one clamps.
+        assert_eq!(book_saved_in(&dir, at(100, 0)), at(10, 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_damaged_saved_base_counts_as_nothing_stored_and_is_replaced() {
+        let dir = scratch("saved-bad");
+        std::fs::create_dir_all(&dir).unwrap();
+        for bad in ["", "not json", "[]", r#"{"tokens":-1}"#, r#"{"tokens":"7"}"#] {
+            std::fs::write(dir.join("saved.json"), bad).unwrap();
+            assert_eq!(book_saved_in(&dir, Saved { tokens: 7, outputs: 1 }), Saved { tokens: 7, outputs: 1 }, "{bad:?}");
+            let kept: Saved = serde_json::from_str(&std::fs::read_to_string(dir.join("saved.json")).unwrap()).unwrap();
+            assert_eq!(kept, Saved { tokens: 7, outputs: 1 }, "{bad:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -547,7 +706,8 @@ mod tests {
         let delta: BTreeMap<String, Day> = [("2026-11-14".to_string(), day(5, 1, 100))].into();
         write_merged(&dir, &delta, "2026-11-14").unwrap();
         let days = read(&dir);
-        assert_eq!(days["2026-11-13"], day(4, 1, 9));
+        // `by_agent` is a real field now: the other version's {"claude":4} is read, not dropped.
+        assert_eq!(days["2026-11-13"], Day { by_agent: [("claude".to_string(), 4)].into(), ..day(4, 1, 9) });
         assert_eq!(days["2026-11-14"], day(6, 1, 100), "a day missing fields counts them as zero");
         let aside = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("activity.damaged-")).count();
         assert_eq!(aside, 0, "a valid file is never put aside");

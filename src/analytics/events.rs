@@ -227,6 +227,29 @@ pub fn daily_due() -> bool {
     true
 }
 
+/// `gate.stats` as the Token Saver's lifetime counters; None for an old core (error) or anything but two whole numbers.
+pub fn parse_gate_stats(reply: &anyhow::Result<Value>) -> Option<crate::activity::Saved> {
+    let v = reply.as_ref().ok()?;
+    Some(crate::activity::Saved { tokens: v.get("tokens_saved")?.as_u64()?, outputs: v.get("outputs")?.as_u64()? })
+}
+
+/// The `token_saver_daily` event: what changed since yesterday, and the totals as person properties.
+pub fn token_saver_daily_props(delta: crate::activity::Saved, total: crate::activity::Saved, on: bool) -> Value {
+    json!({
+        "tokens_saved_delta": delta.tokens,
+        "outputs_delta": delta.outputs,
+        "$set": { "tokens_saved_total": total.tokens, "token_saver_on": on },
+    })
+}
+
+/// Once a day: books the Token Saver's change (a local record, whatever the sharing setting) and sends it.
+/// An old core or an unreadable answer records and sends nothing.
+pub fn token_saver_daily(reply: &anyhow::Result<Value>, on: bool) {
+    let Some(total) = parse_gate_stats(reply) else { return };
+    let delta = crate::activity::book_saved(total);
+    event("token_saver_daily", token_saver_daily_props(delta, total, on));
+}
+
 /// How the workspace looks, counted by the window.
 pub struct Shape {
     pub spaces: usize,
@@ -430,6 +453,27 @@ pub fn agents(now: &[Seen], first: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity::Saved;
+
+    #[test]
+    fn gate_stats_reads_two_whole_numbers_and_nothing_else() {
+        let ok = |v: Value| parse_gate_stats(&Ok(v));
+        assert_eq!(ok(json!({"tokens_saved": 12, "outputs": 3, "bytes_in": 9})), Some(Saved { tokens: 12, outputs: 3 }));
+        assert_eq!(ok(json!({"tokens_saved": 0, "outputs": 0})), Some(Saved { tokens: 0, outputs: 0 }));
+        for bad in [json!({}), json!(null), json!("x"), json!([]), json!({"tokens_saved": 1}), json!({"outputs": 1}), json!({"tokens_saved": -5, "outputs": 1}), json!({"tokens_saved": "7", "outputs": 1}), json!({"tokens_saved": 1.5, "outputs": 1}), json!({"tokens_saved": 1, "outputs": null})] {
+            assert_eq!(ok(bad.clone()), None, "{bad}");
+        }
+        // An old core has no `gate.stats`: the call fails.
+        assert_eq!(parse_gate_stats(&Err(anyhow::anyhow!("unknown method"))), None);
+    }
+
+    #[test]
+    fn the_daily_saver_event_has_the_change_and_sets_the_totals() {
+        let props = token_saver_daily_props(Saved { tokens: 500, outputs: 2 }, Saved { tokens: 1500, outputs: 12 }, true);
+        assert_eq!(props, json!({"tokens_saved_delta": 500, "outputs_delta": 2, "$set": {"tokens_saved_total": 1500, "token_saver_on": true}}));
+        let reset = token_saver_daily_props(Saved::default(), Saved { tokens: 40, outputs: 1 }, false);
+        assert_eq!((&reset["tokens_saved_delta"], &reset["$set"]["token_saver_on"]), (&json!(0), &json!(false)));
+    }
 
     #[test]
     fn words_and_names_keep_only_fixed_looking_text() {
