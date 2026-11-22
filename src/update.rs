@@ -3449,7 +3449,18 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         let asked = release_server(listener, routes);
         let asked = || asked.lock().unwrap().clone();
         assert_eq!(check_from(&root, &url), Ok(Some("99.0.0".to_owned())));
-        assert_eq!(asked(), vec!["/latest/download/latest.json", "/download/v99.0.0/changelog.md", file]);
+        // Under cfg(test) the loopback stub is checked against the test key when it serves a
+        // signature, so each signed file (latest.json, the tarball) is followed by a `.minisig` request.
+        assert_eq!(
+            asked(),
+            vec![
+                "/latest/download/latest.json",
+                "/latest/download/latest.json.minisig",
+                "/download/v99.0.0/changelog.md",
+                file,
+                "/download/v99.0.0/h0x-ade-linux.tar.gz.minisig"
+            ]
+        );
         assert_eq!(version_of(&beside(&root, ".new")).as_deref(), Some("99.0.0"), "the checked release is staged");
         assert_eq!(std::fs::read_to_string(beside(&root, ".new.json")).unwrap(), r#"{"version":"99.0.0"}"#);
         assert!(!beside(&root, ".download").exists(), "the work folder is cleaned up");
