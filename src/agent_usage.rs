@@ -2,7 +2,7 @@
 //! read from the agent's own on-disk session logs. `usage` keeps only counters,
 //! model names, ids and timestamps; `turns` also returns the typed prompt text.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -190,7 +190,7 @@ fn claude(
             }
             let Some(msg) = l.message else { return };
             let Some(u) = msg.usage else { return };
-            if msg.model.is_some() {
+            if msg.model.as_deref().is_some_and(|m| m != SYNTHETIC) {
                 model = msg.model;
             }
             let key = match (msg.id, l.request_id) {
@@ -398,15 +398,28 @@ pub struct Turn {
     /// What the person typed (Claude user text blocks / Codex `user_message`).
     /// Never tool results or text the agent injected. Not redacted here.
     pub prompt: Option<String>,
+    /// Claude: the prompt message uuid, else the first reply's message id.
+    /// `None` for Codex.
+    pub id: Option<String>,
 }
 
 /// Where the last `turns` call stopped, per transcript file. Keep it between
 /// calls so a turn is never returned twice.
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct TurnCursor {
     offsets: HashMap<PathBuf, u64>,
+    /// Ids of the most recent turns returned, so a session copied into another
+    /// file (resume) is not counted twice.
+    seen: VecDeque<String>,
 }
+
+/// Recent turn ids a cursor remembers.
+const MAX_SEEN: usize = 10_000;
+
+/// Model name Claude Code logs for its own zero-usage error replies.
+const SYNTHETIC: &str = "<synthetic>";
 
 /// New completed turns of the session that ran in `folder` with a prompt in
 /// `start..=end`, read from `cursor`. The turn still being written stays
@@ -485,6 +498,7 @@ struct Open {
     last_ts: i64,
     provider: &'static str,
     prompt: Option<String>,
+    id: Option<String>,
     model: Option<String>,
     /// [input, output, cache read, cache write], max-merged per message id
     /// because a streamed response repeats its id with growing counters.
@@ -504,6 +518,7 @@ impl Open {
             last_ts: ts,
             provider,
             prompt,
+            id: None,
             model: None,
             by_id: HashMap::new(),
             anonymous: Vec::new(),
@@ -537,6 +552,7 @@ impl Open {
             mcp_servers: self.mcp_servers,
             skills: self.skills,
             prompt: self.prompt,
+            id: self.id,
             ..Turn::default()
         };
         for u in self.by_id.values().chain(self.anonymous.iter()) {
@@ -579,7 +595,7 @@ fn scan_turns(
     }
     let mut open: Option<Open> = None;
     let mut done = Vec::new();
-    let end = lines_from(path, from, budget, |line, off| {
+    let (end, clean) = lines_from(path, from, budget, |line, off| {
         match serde_json::from_slice::<serde_json::Value>(line) {
             Ok(v) => handle(&v, off, &mut open, &mut done),
             // Half-written last line: leave it for the next call.
@@ -588,12 +604,24 @@ fn scan_turns(
         }
         true
     });
-    if finish {
+    // An unfinished read (budget, half-written line) must not close the turn.
+    if finish && clean {
         done.extend(open.take().and_then(Open::close));
     }
     cursor
         .offsets
         .insert(path.to_path_buf(), open.map_or(end, |o| o.start_off));
+    done.retain(|t| match &t.id {
+        Some(id) if cursor.seen.contains(id) => false,
+        Some(id) => {
+            cursor.seen.push_back(id.clone());
+            if cursor.seen.len() > MAX_SEEN {
+                cursor.seen.pop_front();
+            }
+            true
+        }
+        None => true,
+    });
     done
 }
 
@@ -605,13 +633,13 @@ fn lines_from(
     from: u64,
     budget: &mut u64,
     mut f: impl FnMut(&[u8], u64) -> bool,
-) -> u64 {
+) -> (u64, bool) {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut file) = File::open(path) else {
-        return from;
+        return (from, false);
     };
     if file.seek(SeekFrom::Start(from)).is_err() {
-        return from;
+        return (from, false);
     }
     let mut reader = BufReader::new(file);
     let mut buf = Vec::new();
@@ -619,12 +647,13 @@ fn lines_from(
     loop {
         buf.clear();
         let n = match (&mut reader).take(MAX_LINE + 1).read_until(b'\n', &mut buf) {
-            Ok(0) | Err(_) => return pos,
+            Ok(0) => return (pos, true),
+            Err(_) => return (pos, false),
             Ok(n) => n as u64,
         };
         if n > *budget {
             *budget = 0;
-            return pos;
+            return (pos, false);
         }
         *budget -= n;
         if n > MAX_LINE && !buf.ends_with(b"\n") {
@@ -647,7 +676,7 @@ fn lines_from(
             continue;
         }
         if !f(&buf, pos) {
-            return pos;
+            return (pos, false);
         }
         pos += n;
     }
@@ -662,16 +691,22 @@ const INJECTED: &[&str] = &[
     "<local-command-stderr>",
     "<local-command-caveat>",
     "<system-reminder>",
+    "<user-prompt-submit-hook>",
     "<bash-input>",
     "<bash-stdout>",
     "<bash-stderr>",
     "[Request interrupted",
 ];
 
+/// What the person typed: the text before the first injected tag. Nothing
+/// after an injected tag is kept, and a compact summary is not a prompt.
 fn typed_text(s: &str) -> Option<&str> {
-    let s = s.trim();
-    (!s.is_empty() && !INJECTED.iter().any(|m| s.starts_with(m))).then_some(s)
+    let cut = INJECTED.iter().filter_map(|m| s.find(m)).min().unwrap_or(s.len());
+    let s = s[..cut].trim();
+    (!s.is_empty() && !s.starts_with(COMPACT_SUMMARY)).then_some(s)
 }
+
+const COMPACT_SUMMARY: &str = "This session is being continued from a previous conversation";
 
 fn claude_line(
     v: &serde_json::Value,
@@ -709,16 +744,20 @@ fn claude_line(
                 }
                 _ => return,
             };
-            done.extend(
-                open.replace(Open::new("anthropic", off, ts, prompt))
-                    .and_then(Open::close),
-            );
+            let mut o = Open::new("anthropic", off, ts, prompt);
+            o.id = v["uuid"].as_str().map(|u| format!("u:{u}"));
+            done.extend(open.replace(o).and_then(Open::close));
         }
         Some("assistant") => {
             let Some(o) = open.as_mut() else { return };
             o.last_ts = o.last_ts.max(ts);
-            if let Some(m) = msg["model"].as_str() {
+            if let Some(m) = msg["model"].as_str().filter(|m| *m != SYNTHETIC) {
                 o.model = Some(m.to_string());
+            }
+            if o.id.is_none()
+                && let Some(id) = msg["id"].as_str()
+            {
+                o.id = Some(format!("m:{id}"));
             }
             if let Some(blocks) = msg["content"].as_array() {
                 for b in blocks.iter().filter(|b| b["type"].as_str() == Some("tool_use")) {
@@ -842,7 +881,7 @@ fn codex_cwd(path: &Path) -> Option<String> {
     let mut budget = MAX_LINE;
     let mut cwd = None;
     let mut seen = 0;
-    lines_from(path, 0, &mut budget, |line, _| {
+    let _ = lines_from(path, 0, &mut budget, |line, _| {
         seen += 1;
         if cwd.is_none() && seen <= 20 {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
