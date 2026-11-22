@@ -17,7 +17,7 @@ New files and folders, and the Android app. Bundles h0x-core 0.1.18 (Token Saver
 
 ### Added
 
-- Settings → 0x Modes, a home for optional power-ups that stay off until you turn them on. The first is Token Saver: new Claude Code terminals shrink big tool outputs (long logs, large files, JSON) before the agent reads them, so sessions use fewer tokens. Small outputs are never touched. The page shows the tokens saved and what they are worth. Security, ZK Proofs and Observability are coming soon.
+- Settings → 0x Modes, a home for optional power-ups that stay off until you turn them on. The first is Token Saver, which helps your agents use fewer tokens. The page shows the tokens saved and what they are worth. Security, ZK Proofs and Observability are coming soon.
 
 ## [0.1.36] - 2026-11-18
 
