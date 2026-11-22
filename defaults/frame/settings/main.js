@@ -156,9 +156,7 @@ export default class Settings extends View {
       } else cx.notify(); // the pairing countdown
     });
     cx.timer.every(3000, (cx) => {
-      const resting = !windowVisible(), back = this.restedMachines && !resting;
-      this.restedMachines = resting;
-      if (resting || this.section !== "machines") return;
+      if (!windowVisible() || this.section !== "machines") return;
       cx.spawn(async (cx) => {
         await this.loadMachines();
         cx.notify();
@@ -170,10 +168,10 @@ export default class Settings extends View {
   watchToken(cx) {
     if (this.tokenTimer) return;
     this.tokenTimer = cx.timer.every(200, (cx) => {
-      if (this.tokenAt && Date.now() - this.tokenAt < 400) return;
+      if (this.tokenAt && (this.section !== "remote" || Date.now() - this.tokenAt < 400)) return; // saved once Remote is shown
       this.tokenTimer.cancel();
       this.tokenTimer = null;
-      if (this.section !== "remote" || !this.tokenAt) return;
+      if (!this.tokenAt) return;
       this.tokenAt = 0;
       if (TOKEN_SHAPE.test(this.tokenInput.value().trim())) this.saveToken(cx);
     });

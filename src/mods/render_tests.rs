@@ -4339,7 +4339,7 @@ fn describe_remote_after(cx: &mut TestAppContext, staged: &Staged, replies: &[(&
 }
 
 // What the token box's "change" handler records (main.js), a second ago: the pause is over.
-const TOKEN_PASTED: &str = "this.tokenAt = Date.now() - 1000;";
+const TOKEN_PASTED: &str = "this.tokenAt = Date.now() - 1000; this.watchToken(cx);";
 
 #[gpui::test]
 fn settings_remote_token_saves_itself_after_the_pause_only_when_it_has_the_token_shape(cx: &mut TestAppContext) {
@@ -4385,7 +4385,7 @@ fn settings_remote_partial_or_malformed_token_is_never_saved_on_a_pause(cx: &mut
         "C:\\\\Users\\\\Ana\\\\token.txt",
     ]
     .iter()
-    .map(|v| (format!("this.tokenInput.set_value('{v}'); {TOKEN_PASTED}"), *v))
+    .map(|v| (format!("this.tokenInput.set_value('{v}'); this.edit(cx, Date.now() - 1000);"), *v))
     .collect();
     // A valid token that is not waiting: never changed, still inside the pause, or off the Remote page.
     let valid = format!("this.tokenInput.set_value('123456789:{tail}');");
@@ -4393,7 +4393,13 @@ fn settings_remote_partial_or_malformed_token_is_never_saved_on_a_pause(cx: &mut
     cases.push((format!("{valid} this.tokenAt = Date.now() + 600000;"), "changed just now"));
     cases.push((format!("{valid} {TOKEN_PASTED} this.section = 'look';"), "on another page"));
     for (setup, label) in &cases {
-        let (tree, calls) = describe_remote_after(cx, &staged, &replies, setup, 1000);
+        // The edits (not the other cases) arm exactly one timer, so a pass is not for want of a timer.
+        let edit = setup.contains("this.edit(");
+        let setup = if edit { format!("{TOKEN_EDITS} {setup}") } else { setup.clone() };
+        let (tree, calls) = describe_remote_after(cx, &staged, &replies, &setup, 1000);
+        if edit {
+            assert!(tree.contains("st-r-help-armed-1"), "{label:?}: a timer was armed: {tree}");
+        }
         let c = calls.borrow();
         assert!(c.writes.is_empty() && c.removes.is_empty(), "{label:?} is not saved: {:?} {:?}", c.writes, c.removes);
         assert!(c.cores.iter().all(|a| a.get(..2) != Some(&["bridge".to_string(), "telegram".to_string()][..])), "{label:?}: {:?}", c.cores);
