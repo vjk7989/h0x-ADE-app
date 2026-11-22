@@ -12552,7 +12552,7 @@ fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppCo
     // A Saturday ends the grid: all 371 days are real and the first is the Sunday 52 weeks before its week.
     assert_eq!((probe["slots"].clone(), probe["real"].clone()), (json!(371), json!(371)));
     assert_eq!(probe["first"], json!("Sun Nov 09 2025"));
-    assert_eq!(probe["parsed"], json!([{}, {}, {}, {"2026-11-03": {"seconds": 5, "sessions": 0, "tokens": 0}}]));
+    assert_eq!(probe["parsed"], json!([{}, {}, {}, {"2026-11-03": {"seconds": 5, "sessions": 0, "tokens": 0, "by_agent": {}, "cost_usd": 0, "saved": 0}}]));
     // A column is runs of days in a row with the same level (days after today are not drawn).
     assert_eq!(probe["runs"], json!([[[2, 0], [3, 2], [1, 0], [1, 3]], [[3, 1]]]));
     // One geometry: 9 px cells and a 2 px gap at the 634 px column; a wider row grows the cells to fill it (700: 53 columns
@@ -12678,7 +12678,7 @@ fn settings_profile_tokens_card_defaults_to_today_and_shows_dashes_without_a_rec
         for id in ["st-prof-tokens", "st-prof-tokens-today", "st-prof-tokens-all"] {
             assert!(tree.contains(id), "{record:?}: {id}: {tree}");
         }
-        assert!(tree.matches("\"\u{2014}\"").count() == 3 && !tree.contains("tokens\""), "{record:?}: {tree}");
+        assert!(tree.matches("\"\u{2014}\"").count() == 3 && !tree.contains(" tokens"), "{record:?}: {tree}");
         assert!(!tree.contains("st-prof-tokens-agent-") && !tree.contains("NaN"), "{record:?}: {tree}");
     }
 }
