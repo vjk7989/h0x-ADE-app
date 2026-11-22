@@ -3,7 +3,7 @@
 //! waits for it. Then the main window opens.
 //!
 //! The look is cook/SPEC.md section 10: the app theme, a frosted card, a dot-matrix mark and a
-//! calm band of falling code at the bottom. Colors are theme tokens (`settings::color`) with alpha.
+//! clear band of falling code rising from the bottom. Colors are theme tokens (`settings::color`) with alpha.
 
 use crate::mods::Request;
 use gpui::prelude::FluentBuilder as _;
@@ -418,7 +418,7 @@ struct Layout {
     mode: Mode,
     /// Every size, radius, font size and gap is multiplied by this (1.12 from 1600 x 950).
     scale: f32,
-    /// Height of the code band.
+    /// Height of the code band: 70% of the room above the footer.
     band: f32,
     /// The code texture draws only in the regular layout: in the compact one the tiles cover it.
     rain: bool,
@@ -426,11 +426,10 @@ struct Layout {
 
 fn layout(width: f32, height: f32) -> Layout {
     let mode = if width >= 900.0 && height >= 680.0 { Mode::Regular } else { Mode::Compact };
-    let k = if height <= 700.0 { 0.40 } else { 0.24 };
     Layout {
         mode,
         scale: if mode == Mode::Regular && width >= 1600.0 && height >= 950.0 { 1.12 } else { 1.0 },
-        band: ((height - 44.0) * k).round().clamp(120.0, 260.0),
+        band: ((height - 44.0) * 0.70).round(),
         rain: mode == Mode::Regular,
     }
 }
@@ -445,9 +444,9 @@ const GRID_W: f32 = 3.0 * COL + 2.0 * GAP;
 const GRID_H: f32 = HERO_H + GAP + LEAD_H + GAP + FEATURE_H;
 
 /// The five tiles of the regular grid in window coordinates as (left, top, right, bottom): hero, mark,
-/// then the three features. The grid is centred, 3% of the window height below the middle.
+/// then the three features. The grid is centred.
 fn tile_rects(width: f32, height: f32, scale: f32) -> [(f32, f32, f32, f32); 5] {
-    let (x0, y0) = ((width - GRID_W * scale) / 2.0, height / 2.0 + 0.03 * height - GRID_H * scale / 2.0);
+    let (x0, y0) = ((width - GRID_W * scale) / 2.0, height / 2.0 - GRID_H * scale / 2.0);
     let rect = |col: f32, row_top: f32, cols: f32, h: f32| {
         let (left, top) = (x0 + col * (COL + GAP) * scale, y0 + row_top * scale);
         (left, top, left + (cols * COL + (cols - 1.0) * GAP) * scale, top + h * scale)
@@ -544,14 +543,14 @@ impl Rain {
         for h in [(c.h1 + step).rem_euclid(cycle), (c.h2 + step).rem_euclid(cycle)] {
             let d = h - row as i64;
             if d == 0 {
-                strength = strength.max(0.26);
+                strength = strength.max(0.60);
                 head = true;
             } else if d > 0 && d < c.len {
-                strength = strength.max(0.15 * (1.0 - d as f32 / c.len as f32) + 0.04);
+                strength = strength.max(0.36 * (1.0 - d as f32 / c.len as f32) + 0.08);
             }
         }
         if strength == 0.0 && *c.noise.get(row)? {
-            strength = 0.05;
+            strength = 0.12;
         }
         if strength == 0.0 {
             return None;
@@ -561,12 +560,12 @@ impl Rain {
     }
 }
 
-/// How much of a glyph shows: faded toward the top of the band, and away from the card.
+/// How much of a glyph shows: faded toward the top of the band, and (to a faint 30%) behind the cards.
 /// `y` is the cell's top in the band, `distance` the gap from its box to the card.
 fn cell_weight(y: f32, band: f32, distance: f32, light: bool) -> f32 {
     let t = (y / (band * 0.75)).min(1.0);
     let fade = t * t * (3.0 - 2.0 * t);
-    fade * if light { 0.55 } else { 1.0 } * ((distance - 6.0) / 28.0).clamp(0.0, 1.0)
+    fade * if light { 0.9 } else { 1.0 } * (0.3 + 0.7 * ((distance - 6.0) / 28.0).clamp(0.0, 1.0))
 }
 
 /// The distance between a cell's box and the card's box (0 when they overlap).
@@ -728,7 +727,7 @@ fn inset(radius: Pixels) -> Div {
     div().absolute().top(px(0.0)).left(px(0.0)).right(px(0.0)).bottom(px(0.0)).rounded(radius)
 }
 
-/// A glass tile: no backdrop blur in GPUI, so a translucent fill over the wash and the code band, a sheen,
+/// A glass tile: no backdrop blur in GPUI, so a translucent fill over the code band (faintly visible through it), a sheen,
 /// a hairline edge, a highlight along the top and a soft drop shadow (cook/SPEC-v2.md section 2).
 fn glass(id: &'static str, radius: f32, s: f32, light: bool) -> Stateful<Div> {
     let r = z(radius, s);
@@ -744,13 +743,13 @@ fn glass(id: &'static str, radius: f32, s: f32, light: bool) -> Stateful<Div> {
             BoxShadow::new(px(0.0), z(1.0, s), black().opacity(0.30)).blur_radius(z(2.0, s)),
         ]
     });
-    let (top, bottom) = if light { (0.80, 0.55) } else { (0.075, 0.030) };
+    let (top, bottom) = if light { (0.38, 0.20) } else { (0.10, 0.04) };
     // A shadow paints under the whole tile in GPUI, not only outside it: light tiles sit on the page's own
     // color first, so the shadow does not grey them (dark ones get their body from the raised fill).
-    tile.when(light, |d| d.child(inset(r).bg(c("background"))))
-        .when(!light, |d| d.child(inset(r).bg(c("raised").opacity(0.55))))
+    tile.when(light, |d| d.child(inset(r).bg(c("background").opacity(0.55))))
+        .when(!light, |d| d.child(inset(r).bg(c("raised").opacity(0.40))))
         .child(inset(r).bg(linear_gradient(180.0, linear_color_stop(white().opacity(top), 0.0), linear_color_stop(white().opacity(bottom), 1.0))))
-        .child(div().absolute().top(px(0.0)).left(r).right(r).h(px(1.0)).bg(if light { white() } else { white().opacity(0.20) }))
+        .child(div().absolute().top(px(0.0)).left(r).right(r).h(px(1.0)).bg(white().opacity(if light { 0.9 } else { 0.28 })))
 }
 
 /// A duotone icon: its soft fill layer under its line layer, one tint at two strengths.
@@ -878,15 +877,6 @@ fn spinner() -> Div {
         Animation::new(Duration::from_millis(900)).repeat(),
         |s, delta| s.with_transformation(Transformation::rotate(percentage(delta))),
     ))
-}
-
-/// The soft tint behind the grid: ten stacked ellipses centred on (`cx`, `cy`), each a tenth of the peak, from the full size down to a tenth.
-fn wash(tint: Hsla, peak: f32, cx: f32, cy: f32, w: f32, h: f32) -> Div {
-    div().absolute().left(px(cx - w / 2.0)).top(px(cy - h / 2.0)).w(px(w)).h(px(h)).children((0..10).map(move |i| {
-        let k = 1.0 - i as f32 * 0.1;
-        let (lw, lh) = (w * k, h * k);
-        div().absolute().left(px((w - lw) / 2.0)).top(px((h - lh) / 2.0)).w(px(lw)).h(px(lh)).rounded(px(999.0)).bg(tint.opacity(peak / 10.0))
-    }))
 }
 
 /// A feature tile: a tinted icon box, then the name and what it does at the bottom.
@@ -1079,7 +1069,7 @@ impl Render for SignIn {
             .child(div().h(z(LEAD_H, s)).pl(z(4.0, s)).text_size(z(12.0, s)).line_height(z(LEAD_H, s)).text_color(c("muted")).child(PERKS_LEAD))
             .child(div().flex().gap(z(gap, s)).children(features));
 
-        // The grid, centred as one piece: 3% of the height below the middle, or 8 above it when compact.
+        // The grid, centred as one piece (8 above the middle when compact).
         let grid = if compact {
             let w = compact_width(width);
             div()
@@ -1088,7 +1078,6 @@ impl Render for SignIn {
                 .flex()
                 .flex_col()
                 .gap(px(10.0))
-                .child(wash(tint, if light { 0.02 } else { 0.16 }, w / 2.0, 100.0, w * 1.5, 361.0))
                 .child(hero)
                 .child(perks)
                 .child(mark)
@@ -1099,7 +1088,6 @@ impl Render for SignIn {
                 .flex()
                 .flex_col()
                 .gap(z(GAP, s))
-                .child(wash(tint, if light { 0.02 } else { 0.16 }, (2.0 * COL + GAP) * s / 2.0, HERO_H * s / 2.0, 1.5 * (2.0 * COL + GAP) * s, 1.9 * HERO_H * s))
                 .child(div().flex().gap(z(GAP, s)).child(hero).child(mark))
                 .child(perks)
         };
@@ -1128,7 +1116,7 @@ impl Render for SignIn {
             .overflow_hidden()
             .font_family(crate::settings::get().ui_font_family.clone())
             .text_color(c("foreground"))
-            .bg(c("background"))
+            .bg(c("raised"))
             .when(lay.rain, |d| {
                 d.child(
                     div().id("signin-rain").absolute().left(px(0.0)).right(px(0.0)).bottom(px(44.0)).h(px(band)).child(
@@ -1150,8 +1138,6 @@ impl Render for SignIn {
                     .flex()
                     .items_center()
                     .justify_center()
-                    // Twice the offset of the centre: the box is centred in what the padding leaves.
-                    .when(!compact, |d| d.pt(px(0.06 * height)))
                     .when(compact, |d| d.pb(px(16.0)))
                     .child(grid),
             )
@@ -1205,16 +1191,15 @@ mod tests {
     fn the_layout_follows_the_window_size() {
         use super::{Layout, Mode, layout};
         // A small window (760 x 640) is the compact grid: no code band, tiles in one column.
-        assert_eq!(layout(760.0, 640.0), Layout { mode: Mode::Compact, scale: 1.0, band: 238.0, rain: false });
-        assert_eq!(layout(620.0, 460.0), Layout { mode: Mode::Compact, scale: 1.0, band: 166.0, rain: false });
+        assert_eq!(layout(760.0, 640.0), Layout { mode: Mode::Compact, scale: 1.0, band: 417.0, rain: false });
+        assert_eq!(layout(620.0, 460.0), Layout { mode: Mode::Compact, scale: 1.0, band: 291.0, rain: false });
         assert_eq!(layout(1280.0, 800.0).mode, Mode::Regular);
         assert!(layout(1280.0, 800.0).rain);
-        // The band: 40% of the room up to 700 high, 24% above, never under 120 or over 260.
-        assert_eq!(layout(1280.0, 800.0).band, (756.0_f32 * 0.24).round());
-        assert_eq!(layout(1280.0, 700.0).band, (656.0_f32 * 0.40).round().clamp(120.0, 260.0));
-        assert_eq!(layout(1920.0, 1080.0).band, (1036.0_f32 * 0.24).round().min(260.0));
-        assert_eq!(layout(1920.0, 3000.0).band, 260.0);
-        assert_eq!(layout(900.0, 680.0).band, (636.0_f32 * 0.40).round().clamp(120.0, 260.0));
+        // The band: 70% of the room above the footer.
+        assert_eq!(layout(1280.0, 800.0).band, (756.0_f32 * 0.70).round());
+        assert_eq!(layout(1280.0, 700.0).band, (656.0_f32 * 0.70).round());
+        assert_eq!(layout(1920.0, 1080.0).band, (1036.0_f32 * 0.70).round());
+        assert_eq!(layout(900.0, 680.0).band, (636.0_f32 * 0.70).round());
     }
 
     #[test]
@@ -1246,21 +1231,21 @@ mod tests {
     }
 
     #[test]
-    fn the_tiles_sit_in_a_grid_centred_three_percent_below_the_middle() {
+    fn the_tiles_sit_in_a_grid_centred_in_the_window() {
         use super::{GRID_H, GRID_W, tile_rects};
         let [hero, mark, a, b, c] = tile_rects(1280.0, 800.0, 1.0);
-        // The 1280 x 800 still: the hero at (196, 174), 588 x 312, the mark tile beside it, the features at 526.
-        assert_eq!(hero, (196.0, 174.0, 784.0, 486.0));
-        assert_eq!(mark, (796.0, 174.0, 1084.0, 486.0));
-        assert_eq!((a, b, c), ((196.0, 526.0, 484.0, 674.0), (496.0, 526.0, 784.0, 674.0), (796.0, 526.0, 1084.0, 674.0)));
+        // The 1280 x 800 still: the hero at (196, 150), 588 x 312, the mark tile beside it, the features at 502.
+        assert_eq!(hero, (196.0, 150.0, 784.0, 462.0));
+        assert_eq!(mark, (796.0, 150.0, 1084.0, 462.0));
+        assert_eq!((a, b, c), ((196.0, 502.0, 484.0, 650.0), (496.0, 502.0, 784.0, 650.0), (796.0, 502.0, 1084.0, 650.0)));
         assert_eq!((GRID_W, GRID_H), (888.0, 500.0));
-        // Centred as a unit: 3% of the height below the middle, at any size and scale.
+        // Centred as a unit at any size and scale.
         for (w, h, s) in [(1280.0, 800.0, 1.0), (1920.0, 1080.0, 1.12), (900.0, 680.0, 1.0)] {
             let rects = tile_rects(w, h, s);
             let (left, top) = (rects[0].0, rects[0].1);
             let (right, bottom) = (rects[1].2, rects[4].3);
             assert!(((left + right) / 2.0 - w / 2.0).abs() < 0.01, "{w}x{h}");
-            assert!(((top + bottom) / 2.0 - (h / 2.0 + 0.03 * h)).abs() < 0.01, "{w}x{h}");
+            assert!(((top + bottom) / 2.0 - h / 2.0).abs() < 0.01, "{w}x{h}");
             assert!((right - left - GRID_W * s).abs() < 0.01 && (bottom - top - GRID_H * s).abs() < 0.01);
         }
     }
@@ -1336,17 +1321,17 @@ mod tests {
         use super::{GLYPHS, Rain};
         let rain = Rain::new(5, 10);
         let (glyph, strength) = rain.cell(0, 4, 0).expect("column 0's first head");
-        assert_eq!(strength, 0.26);
+        assert_eq!(strength, 0.60);
         assert!(glyph < GLYPHS.len());
         let (_, trail) = rain.cell(0, 3, 0).expect("the trail above the head");
-        assert!(trail < 0.26 && trail > 0.04);
+        assert!(trail < 0.60 && trail > 0.08);
         assert!(rain.cell(0, 3, 0).unwrap().1 > rain.cell(0, 1, 0).map_or(0.0, |c| c.1) || rain.cell(0, 1, 0).is_none());
         assert!(GLYPHS.iter().all(u8::is_ascii) && GLYPHS.len() == 37);
         assert_eq!(rain.cell(9, 0, 0), None, "past the last column");
         for frame in 0..200 {
             for r in 0..10 {
                 if let Some((g, s)) = rain.cell(1, r, frame) {
-                    assert!(g < GLYPHS.len() && (0.04..=0.26).contains(&s), "{r}@{frame}: {g} {s}");
+                    assert!(g < GLYPHS.len() && (0.08..=0.60).contains(&s), "{r}@{frame}: {g} {s}");
                 }
             }
         }
@@ -1358,7 +1343,7 @@ mod tests {
         let rain = Rain::new(1, 30);
         let c = &rain.cols[0];
         let step = c.every as u64;
-        let head = |frame| (0..30).find_map(|r| rain.cell(0, r, frame).filter(|(_, s)| *s == 0.26).map(|(g, _)| (r, g)));
+        let head = |frame| (0..30).find_map(|r| rain.cell(0, r, frame).filter(|(_, s)| *s == 0.60).map(|(g, _)| (r, g)));
         let (r0, g0) = head(0).unwrap();
         let (r1, g1) = head(step).unwrap();
         assert_eq!(r1, r0 + 1, "the head moves a row each step");
@@ -1370,13 +1355,13 @@ mod tests {
     fn the_texture_fades_toward_the_top_and_away_from_the_card() {
         use super::{card_distance, cell_weight};
         assert_eq!(cell_weight(0.0, 200.0, 1000.0, false), 0.0, "invisible at the top of the band");
-        assert_eq!(cell_weight(150.0, 200.0, 1000.0, false), 1.0, "full from three quarters down");
-        assert_eq!(cell_weight(190.0, 200.0, 1000.0, false), 1.0);
+        assert!((cell_weight(150.0, 200.0, 1000.0, false) - 1.0).abs() < 1e-6, "full from three quarters down");
+        assert!((cell_weight(190.0, 200.0, 1000.0, false) - 1.0).abs() < 1e-6);
         assert!(cell_weight(75.0, 200.0, 1000.0, false) > 0.0 && cell_weight(75.0, 200.0, 1000.0, false) < 1.0);
-        assert_eq!(cell_weight(150.0, 200.0, 1000.0, true), 0.55, "light themes are calmer");
-        assert_eq!(cell_weight(150.0, 200.0, 6.0, false), 0.0, "within 6 px of the card: nothing");
-        assert_eq!(cell_weight(150.0, 200.0, 20.0, false), 0.5);
-        assert_eq!(cell_weight(150.0, 200.0, 34.0, false), 1.0);
+        assert!((cell_weight(150.0, 200.0, 1000.0, true) - 0.9).abs() < 1e-6, "light themes are a little calmer");
+        assert!((cell_weight(150.0, 200.0, 6.0, false) - 0.3).abs() < 1e-6, "within 6 px of the card: a faint 30%");
+        assert!((cell_weight(150.0, 200.0, 20.0, false) - 0.65).abs() < 1e-6);
+        assert!((cell_weight(150.0, 200.0, 34.0, false) - 1.0).abs() < 1e-6);
         let card = (100.0, 100.0, 500.0, 400.0);
         assert_eq!(card_distance((200.0, 200.0, 9.0, 14.0), card), 0.0, "inside");
         assert_eq!(card_distance((520.0, 200.0, 9.0, 14.0), card), 20.0, "right of it");
