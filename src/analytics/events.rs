@@ -246,7 +246,7 @@ pub fn token_saver_daily_props(delta: crate::activity::Saved, total: crate::acti
 /// An old core or an unreadable answer records and sends nothing.
 pub fn token_saver_daily(reply: &anyhow::Result<Value>, on: bool) {
     let Some(total) = parse_gate_stats(reply) else { return };
-    let delta = crate::activity::book_saved(total);
+    let Some(delta) = crate::activity::book_saved(total) else { return };
     event("token_saver_daily", token_saver_daily_props(delta, total, on));
 }
 

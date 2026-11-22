@@ -1516,8 +1516,6 @@ mod tests {
         assert!(!inert.token_saver && inert.smart_routing);
     }
 
-    /// The guide's stated defaults are what an empty settings.json gives, and
-    /// every key it documents is one settings.json keeps.
     #[test]
     fn consent_round_trips_and_only_the_current_version_counts() {
         let none: Person = serde_json::from_str("{}").unwrap();
@@ -1581,6 +1579,8 @@ mod tests {
         }
     }
 
+    /// The guide's stated defaults are what an empty settings.json gives, and
+    /// every key it documents is one settings.json keeps.
     #[test]
     fn share_analytics_defaults_on_and_round_trips() {
         let old: Person = serde_json::from_str(r#"{"telemetry":false}"#).unwrap();

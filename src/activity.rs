@@ -22,11 +22,11 @@ struct Day {
     seconds: u64,
     sessions: u64,
     tokens: u64,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", deserialize_with = "agents_or_none")]
     by_agent: BTreeMap<String, u64>,
     #[serde(skip_serializing_if = "is_zero", deserialize_with = "cost_or_zero")]
     cost_usd: f64,
-    #[serde(skip_serializing_if = "is_zero_u64")]
+    #[serde(skip_serializing_if = "is_zero_u64", deserialize_with = "count_or_zero")]
     saved: u64,
 }
 
@@ -38,9 +38,29 @@ fn is_zero_u64(v: &u64) -> bool {
     *v == 0
 }
 
+// The new fields are read as raw text: a number serde_json cannot hold (`1e400`) is an error in any typed or
+// `Value` read, and would put the whole file aside. As text it is just a bad value, and reads as 0.
+
+/// A whole number; anything else (text, a negative, a fraction, `1e400`, null) is 0.
+fn raw_count(raw: &serde_json::value::RawValue) -> u64 {
+    raw.get().trim().parse().unwrap_or(0)
+}
+
 /// A finite, non-negative number; anything else is 0 (a bad number never loses the rest of the file).
 fn cost_or_zero<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
-    Ok(serde_json::Value::deserialize(d)?.as_f64().filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0))
+    let raw = Box::<serde_json::value::RawValue>::deserialize(d)?;
+    Ok(raw.get().trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0))
+}
+
+fn count_or_zero<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    Ok(raw_count(&Box::<serde_json::value::RawValue>::deserialize(d)?))
+}
+
+/// Tokens per agent; a value that is not a whole number is 0 (the row is dropped), and anything but an object is empty.
+fn agents_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BTreeMap<String, u64>, D::Error> {
+    let raw = Box::<serde_json::value::RawValue>::deserialize(d)?;
+    let rows: BTreeMap<String, Box<serde_json::value::RawValue>> = serde_json::from_str(raw.get()).unwrap_or_default();
+    Ok(rows.into_iter().map(|(agent, v)| (agent, raw_count(&v))).filter(|(_, tokens)| *tokens > 0).collect())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -145,19 +165,20 @@ pub struct Saved {
 
 /// Books what the Token Saver saved since the last call: the change from the lifetime counters stored in
 /// `usage/saved.json`, never negative (a counter that was reset gives 0 and is stored as the new base). The
-/// tokens are added to today. Returns the change.
-pub fn book_saved(now: Saved) -> Saved {
-    let delta = book_saved_in(&crate::mods::app_dir().join("usage"), now);
+/// tokens are added to today. Returns the change; None (nothing booked) when the base cannot be stored, since
+/// the next day would count the whole lifetime again.
+pub fn book_saved(now: Saved) -> Option<Saved> {
+    let delta = book_saved_in(&crate::mods::app_dir().join("usage"), now)?;
     if delta.tokens > 0 {
         let today = local_date();
         let mut r = recorder();
         let day = r.day(&today);
         day.saved = day.saved.saturating_add(delta.tokens);
     }
-    delta
+    Some(delta)
 }
 
-fn book_saved_in(dir: &Path, now: Saved) -> Saved {
+fn book_saved_in(dir: &Path, now: Saved) -> Option<Saved> {
     let path = dir.join("saved.json");
     let last = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Saved>(&t).ok()).unwrap_or_default();
     let delta = Saved { tokens: now.tokens.saturating_sub(last.tokens), outputs: now.outputs.saturating_sub(last.outputs) };
@@ -165,9 +186,10 @@ fn book_saved_in(dir: &Path, now: Saved) -> Saved {
         let stored = std::fs::create_dir_all(dir).and_then(|()| crate::persist::write_atomic(&path, serde_json::to_string(&now).unwrap_or_default()));
         if let Err(e) = stored {
             tracing::warn!("cannot save the tokens-saved base: {e}");
+            return None;
         }
     }
-    delta
+    Some(delta)
 }
 
 /// Writes what is pending (the app is quitting).
@@ -178,8 +200,10 @@ pub fn finish() {
 impl Day {
     fn add_usage(&mut self, agent: &str, tokens: u64, cost_usd: f64) {
         self.tokens = self.tokens.saturating_add(tokens);
-        let slot = self.by_agent.entry(agent.to_owned()).or_default();
-        *slot = slot.saturating_add(tokens);
+        if tokens > 0 {
+            let slot = self.by_agent.entry(agent.to_owned()).or_default();
+            *slot = slot.saturating_add(tokens);
+        }
         if cost_usd.is_finite() && cost_usd > 0.0 {
             self.cost_usd += cost_usd;
         }
@@ -407,14 +431,14 @@ mod tests {
         let dir = scratch("saved");
         let at = |tokens, outputs| Saved { tokens, outputs };
         // Nothing stored yet: the whole lifetime value is the first change.
-        assert_eq!(book_saved_in(&dir, at(1000, 10)), at(1000, 10));
-        assert_eq!(book_saved_in(&dir, at(1500, 12)), at(500, 2));
-        assert_eq!(book_saved_in(&dir, at(1500, 12)), at(0, 0), "nothing new");
+        assert_eq!(book_saved_in(&dir, at(1000, 10)), Some(at(1000, 10)));
+        assert_eq!(book_saved_in(&dir, at(1500, 12)), Some(at(500, 2)));
+        assert_eq!(book_saved_in(&dir, at(1500, 12)), Some(at(0, 0)), "nothing new");
         // The counter was reset (a new core home): 0, and counting resumes from the new base.
-        assert_eq!(book_saved_in(&dir, at(40, 1)), at(0, 0));
-        assert_eq!(book_saved_in(&dir, at(90, 4)), at(50, 3));
+        assert_eq!(book_saved_in(&dir, at(40, 1)), Some(at(0, 0)));
+        assert_eq!(book_saved_in(&dir, at(90, 4)), Some(at(50, 3)));
         // One of the two went down: only that one clamps.
-        assert_eq!(book_saved_in(&dir, at(100, 0)), at(10, 0));
+        assert_eq!(book_saved_in(&dir, at(100, 0)), Some(at(10, 0)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -424,7 +448,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         for bad in ["", "not json", "[]", r#"{"tokens":-1}"#, r#"{"tokens":"7"}"#] {
             std::fs::write(dir.join("saved.json"), bad).unwrap();
-            assert_eq!(book_saved_in(&dir, Saved { tokens: 7, outputs: 1 }), Saved { tokens: 7, outputs: 1 }, "{bad:?}");
+            assert_eq!(book_saved_in(&dir, Saved { tokens: 7, outputs: 1 }), Some(Saved { tokens: 7, outputs: 1 }), "{bad:?}");
             let kept: Saved = serde_json::from_str(&std::fs::read_to_string(dir.join("saved.json")).unwrap()).unwrap();
             assert_eq!(kept, Saved { tokens: 7, outputs: 1 }, "{bad:?}");
         }
@@ -785,6 +809,70 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_base_that_cannot_be_stored_books_nothing() {
+        let dir = scratch("saved-unwritable");
+        std::fs::create_dir_all(dir.join("saved.json")).unwrap();
+        let at = |tokens, outputs| Saved { tokens, outputs };
+        // A folder where the file belongs: the write fails, so no change is booked (and none is sent).
+        assert_eq!(book_saved_in(&dir, at(1000, 10)), None);
+        assert!(dir.join("saved.json").is_dir(), "the folder is left alone");
+        // A folder where the usage folder belongs fails the same way.
+        let file = scratch("saved-unwritable-parent");
+        std::fs::write(&file, "x").unwrap();
+        assert_eq!(book_saved_in(&file, at(1, 1)), None);
+        // Nothing to store (nothing saved and nothing stored) still books a change of nothing.
+        let empty = scratch("saved-unwritable-empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(book_saved_in(&empty, at(0, 0)), Some(at(0, 0)));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&empty);
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn a_bad_new_field_reads_as_zero_and_the_rest_of_the_day_and_file_is_kept() {
+        for cost in ["1e400", "-1e400", "-1", "\"x\"", "null", "[]", "{}", "true"] {
+            let d: Day = serde_json::from_str(&format!(r#"{{"seconds":4,"tokens":9,"cost_usd":{cost}}}"#)).unwrap_or_else(|e| panic!("{cost}: {e}"));
+            assert_eq!((d.seconds, d.tokens, d.cost_usd), (4, 9, 0.0), "{cost}");
+        }
+        for saved in ["1e400", "-1", "1.5", "\"7\"", "null", "[]", "{}", "18446744073709551616"] {
+            let d: Day = serde_json::from_str(&format!(r#"{{"seconds":4,"saved":{saved}}}"#)).unwrap_or_else(|e| panic!("{saved}: {e}"));
+            assert_eq!((d.seconds, d.saved), (4, 0), "{saved}");
+        }
+        for agents in ["1e400", "\"x\"", "null", "[1,2]", "5", "{\"claude\":1e400}"] {
+            let d: Day = serde_json::from_str(&format!(r#"{{"seconds":4,"by_agent":{agents}}}"#)).unwrap_or_else(|e| panic!("{agents}: {e}"));
+            assert_eq!((d.seconds, d.by_agent), (4, BTreeMap::new()), "{agents}");
+        }
+        // One bad row costs only that row.
+        let d: Day = serde_json::from_str(r#"{"by_agent":{"claude":3,"codex":-1,"gemini":"x","aider":1e400,"zero":0,"big":18446744073709551615}}"#).unwrap();
+        assert_eq!(d.by_agent, [("claude".to_string(), 3), ("big".to_string(), u64::MAX)].into());
+        // In a whole file: the good day and the bad day both load, and nothing is put aside.
+        let dir = scratch("lenient-file");
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = r#"{"version":1,"days":{"2026-11-13":{"seconds":1,"tokens":2,"cost_usd":1e400,"saved":1e400,"by_agent":{"claude":1e400,"codex":5}},"2026-11-12":{"seconds":8,"cost_usd":2.5,"saved":3}}}"#;
+        std::fs::write(dir.join("activity.json"), text).unwrap();
+        write_merged(&dir, &[("2026-11-14".to_string(), day(5, 1, 0))].into(), "2026-11-14").unwrap();
+        let days = read(&dir);
+        assert_eq!(days["2026-11-13"], Day { by_agent: [("codex".to_string(), 5)].into(), ..day(1, 0, 2) });
+        assert_eq!((days["2026-11-12"].seconds, days["2026-11-12"].cost_usd, days["2026-11-12"].saved), (8, 2.5, 3));
+        assert_eq!(days["2026-11-14"], day(5, 1, 0));
+        let aside = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("activity.damaged-")).count();
+        assert_eq!(aside, 0, "a bad new field is never damage");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn zero_token_usage_adds_no_agent_row() {
+        let mut d = Day::default();
+        d.add_usage("claude", 0, 0.5);
+        assert!(d.by_agent.is_empty() && d.tokens == 0, "{d:?}");
+        assert_eq!(d.cost_usd, 0.5, "the cost still counts");
+        d.add_usage("claude", 2, 0.0);
+        d.add_usage("codex", 0, 0.0);
+        assert_eq!(d.by_agent, [("claude".to_string(), 2)].into());
+    }
+
+    #[test]
     fn zero_token_usage_adds_nothing_and_merged_agent_rows_and_saved_saturate() {
         let mut d = day(1, 1, 5);
         d.add_usage("claude", 0, 0.0);
@@ -898,21 +986,21 @@ mod tests {
         let dir = scratch("saved-edges").join("usage dir é 名");
         let at = |tokens, outputs| Saved { tokens, outputs };
         // Nothing stored and nothing saved: no change and no file.
-        assert_eq!(book_saved_in(&dir, at(0, 0)), at(0, 0));
+        assert_eq!(book_saved_in(&dir, at(0, 0)), Some(at(0, 0)));
         assert!(!dir.join("saved.json").exists());
         std::fs::create_dir_all(&dir).unwrap();
         // The largest base there is: anything lower is a reset, booked as 0 and stored as the new base.
         std::fs::write(dir.join("saved.json"), format!(r#"{{"tokens":{0},"outputs":{0}}}"#, u64::MAX)).unwrap();
-        assert_eq!(book_saved_in(&dir, at(5, 5)), at(0, 0));
-        assert_eq!(book_saved_in(&dir, at(6, 5)), at(1, 0));
+        assert_eq!(book_saved_in(&dir, at(5, 5)), Some(at(0, 0)));
+        assert_eq!(book_saved_in(&dir, at(6, 5)), Some(at(1, 0)));
         // A lifetime counter that falls to zero and then climbs again counts only the climb.
-        assert_eq!(book_saved_in(&dir, at(0, 0)), at(0, 0));
-        assert_eq!(book_saved_in(&dir, at(u64::MAX, u64::MAX)), at(u64::MAX, u64::MAX));
+        assert_eq!(book_saved_in(&dir, at(0, 0)), Some(at(0, 0)));
+        assert_eq!(book_saved_in(&dir, at(u64::MAX, u64::MAX)), Some(at(u64::MAX, u64::MAX)));
         // Beyond u64 is damage: nothing stored. A missing key is zero; an unknown key is ignored.
         std::fs::write(dir.join("saved.json"), r#"{"tokens":18446744073709551616,"outputs":1}"#).unwrap();
-        assert_eq!(book_saved_in(&dir, at(8, 2)), at(8, 2));
+        assert_eq!(book_saved_in(&dir, at(8, 2)), Some(at(8, 2)));
         std::fs::write(dir.join("saved.json"), r#"{"tokens":10,"bytes":99}"#).unwrap();
-        assert_eq!(book_saved_in(&dir, at(15, 2)), at(5, 2));
+        assert_eq!(book_saved_in(&dir, at(15, 2)), Some(at(5, 2)));
         let kept: Saved = serde_json::from_str(&std::fs::read_to_string(dir.join("saved.json")).unwrap()).unwrap();
         assert_eq!(kept, at(15, 2));
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
