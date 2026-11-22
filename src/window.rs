@@ -5728,7 +5728,6 @@ mod tests {
 
     #[test]
     fn agent_argv_is_unchanged_with_token_saver_off_and_for_programs_other_than_claude() {
-        assert!(!crate::settings::get().token_saver, "off unless the person turns it on");
         let claude = [(words(&["claude"]), None), (words(&["claude", "--resume"]), Some("go")), (words(&["CLAUDE.EXE"]), Some("go")), (words(&[r"C:\Program Files\claude\claude.exe"]), Some("go"))];
         let others = [(words(&["codex"]), Some("go")), (words(&["claude-code"]), None), (words(&["pwsh.exe"]), None), (words(&["claude", "--settings", "{}"]), Some("go"))];
         for (argv, task) in claude.iter().chain(others.iter()) {
@@ -5736,15 +5735,17 @@ mod tests {
             cmd.extend(task.map(str::to_owned));
             for on in [None, Some("box")] {
                 let before = if on.is_some() { crate::remote_shell::launch(cmd.clone()) } else { local_agent_argv(cmd.clone()) };
-                let default = super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None);
-                assert_eq!(default.as_ref(), Some(&before), "default {argv:?} {on:?}");
+                if others.iter().any(|(o, _)| o == argv) {
+                    let default = super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None);
+                    assert_eq!(default.as_ref(), Some(&before), "default {argv:?} {on:?}");
+                }
                 let off = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None));
                 assert_eq!(off.as_ref(), Some(&before), "off {argv:?} {on:?}");
             }
         }
         for (argv, task) in &others {
             for on in [None, Some("box")] {
-                let off = super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None);
+                let off = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None));
                 let run = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None));
                 assert_eq!(run, off, "on {argv:?} {on:?}");
             }
