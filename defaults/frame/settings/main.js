@@ -4,7 +4,7 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
 import { agentsInit, loadAgents, agentsPage } from "./agents.js";
 import { ActivityGraph } from "./activity.js";
-import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, coreConfig, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, nextCommand, window, account, accountSignIn, accountCancelSignIn, accountSwitch, accountSignOut, accountRemove } from "h0x";
+import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, coreConfig, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, nextCommand, window, account, accountSignIn, accountCancelSignIn, accountSwitch, accountSignOut, accountRemove, windowVisible } from "h0x";
 
 // Dollars per million input tokens (Claude Sonnet's price): turns tokens saved into the "~$" shown beside them.
 const SAVED_USD_PER_MILLION_TOKENS = 3;
@@ -103,7 +103,7 @@ export default class Settings extends View {
     this.tokenInput = InputState.new({ placeholder: "Paste the bot token" });
     this.tokenInput.set_masked(true);
     this.tokenAt = 0; // when the token field last changed; 0 = nothing waiting to be saved
-    this.tokenInput.on("change", (_e, cx) => { this.tokenAt = Date.now(); cx.notify(); });
+    this.tokenInput.on("change", (_e, cx) => { this.tokenAt = Date.now(); this.watchToken(cx); cx.notify(); });
     this.tokenInput.on("submit", (_e, cx) => { this.tokenAt = 0; this.saveToken(cx, true); }); // Enter saves any text; the core judges it
     this.changingToken = false;
     this.showHelp = false;
@@ -143,26 +143,39 @@ export default class Settings extends View {
       cx.notify();
     });
     if (this.section === "remote") cx.spawn(async (cx) => { await this.loadRemote(); cx.notify(); });
+    // Both timers rest while the window is hidden; the first tick after it is back refreshes once.
     cx.timer.every(1000, (cx) => {
-      if (this.section !== "remote") return;
-      if (++this.tick % 3 === 0) {
+      const resting = !windowVisible(), back = this.restedRemote && !resting;
+      this.restedRemote = resting;
+      if (resting || this.section !== "remote") return;
+      if (back || ++this.tick % 3 === 0) {
         cx.spawn(async (cx) => {
           await this.loadRemote();
           cx.notify();
         });
       } else cx.notify(); // the pairing countdown
     });
-    cx.timer.every(200, (cx) => {
-      if (this.section !== "remote" || !this.tokenAt || Date.now() - this.tokenAt < 400) return;
-      this.tokenAt = 0;
-      if (TOKEN_SHAPE.test(this.tokenInput.value().trim())) this.saveToken(cx);
-    });
     cx.timer.every(3000, (cx) => {
-      if (this.section !== "machines") return;
+      const resting = !windowVisible(), back = this.restedMachines && !resting;
+      this.restedMachines = resting;
+      if (resting || this.section !== "machines") return;
       cx.spawn(async (cx) => {
         await this.loadMachines();
         cx.notify();
       });
+    });
+  }
+
+  // A pending token edit is saved once the field has been still for a moment; the timer runs only until then.
+  watchToken(cx) {
+    if (this.tokenTimer) return;
+    this.tokenTimer = cx.timer.every(200, (cx) => {
+      if (this.tokenAt && Date.now() - this.tokenAt < 400) return;
+      this.tokenTimer.cancel();
+      this.tokenTimer = null;
+      if (this.section !== "remote" || !this.tokenAt) return;
+      this.tokenAt = 0;
+      if (TOKEN_SHAPE.test(this.tokenInput.value().trim())) this.saveToken(cx);
     });
   }
 

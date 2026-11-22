@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar } from "gpui-base";
-import { spaces, run, theme, props, closeOverlay, setShared, shared, core, appHome, home, readTextFile, writeTextFile, settings, layout, keys, knownAgents, installOpenCode } from "h0x";
+import { spaces, run, theme, props, closeOverlay, setShared, shared, core, appHome, home, readTextFile, writeTextFile, settings, layout, keys, knownAgents, installOpenCode, windowVisible } from "h0x";
 
 const I = (name) => `frame/welcome/${name}.svg`;
 const PAGES = 4;
@@ -71,7 +71,7 @@ export default class Welcome extends View {
     });
     // Machines added meanwhile (the Add a machine dialog) appear.
     cx.timer.every(3000, (cx) => {
-      if (this.page !== 2) return;
+      if (this.page !== 2 || !windowVisible()) return;
       cx.spawn(async (cx) => {
         await this.loadMachines();
         cx.notify();
