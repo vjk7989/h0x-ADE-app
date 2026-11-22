@@ -4401,6 +4401,214 @@ fn settings_remote_partial_or_malformed_token_is_never_saved_on_a_pause(cx: &mut
     }
 }
 
+// `entry` (with `setup` run after its init) on the populated fixture with `props`, `replies` answering core and
+// `windowVisible()` reading `visible`, once its first tasks have finished. Its timers run with the clock
+// (`advance`) for as long as the session is kept and the window is not removed.
+fn mount_with_visibility(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    entry: &str,
+    props: Value,
+    replies: &[(&str, Value)],
+    setup: &str,
+    visible: &Rc<Cell<bool>>,
+) -> (Rc<RefCell<Calls>>, gpui::WindowHandle<Empty>, DescriptionSession) {
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    calls.borrow_mut().replies = replies.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+    let shown = visible.clone();
+    let host = module(fixture(true, props, updates("current", "current")), calls.clone())
+        .function("windowVisible", move |_| Ok(HostValue::Bool(shown.get())));
+    let policy = Policy::new()
+        .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+        .with_host_module(host)
+        .unwrap();
+    let root = staged.wrapper(entry, setup);
+    let window = cx.add_window(|_, _| Empty);
+    let session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root, policy, window, cx))
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
+    (calls, window, session)
+}
+
+// How many core calls so far start with `what` (the arguments joined by spaces).
+fn core_calls(calls: &Rc<RefCell<Calls>>, what: &str) -> usize {
+    calls.borrow().cores.iter().filter(|a| a.join(" ").starts_with(what)).count()
+}
+
+// The Remote page's token box, counted: `this.edit(cx, at)` does what its "change" handler does (`tokenAt`, then
+// `watchToken`), and every timer that arms is counted into the How to use button's id (`st-r-help-armed-<n>`).
+// The field holds a token of the right shape.
+const TOKEN_EDITS: &str = "this.armed = 0; \
+    const button = this.button.bind(this); \
+    this.button = (t, id, ...rest) => button(t, id === 'st-r-help' ? `${id}-armed-${this.armed}` : id, ...rest); \
+    this.edit = (cx, at) => { this.tokenAt = at; this.watchToken({ timer: { every: (ms, f) => { this.armed++; return cx.timer.every(ms, f); } } }); }; \
+    this.tokenInput.set_value('123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw');";
+
+fn token_replies() -> Vec<(&'static str, Value)> {
+    let mut replies = remote_replies(bridge_ls(json!([]), false, "unset"), json!([]));
+    replies.push(("bridge telegram token --file", core_ok(json!({"telegram_token":"set"}))));
+    replies
+}
+
+fn token_saves(calls: &Rc<RefCell<Calls>>) -> usize {
+    calls.borrow().writes.iter().filter(|(path, _)| path == "/fixture/app/telegram-token.tmp").count()
+}
+
+#[gpui::test]
+fn settings_remote_token_edits_arm_one_timer_that_saves_once_after_the_pause_then_stops(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["section"] = json!("remote");
+    // An edit, a second one 300 ms later while the first still waits, the pause over at 1 s. At 3 s the field
+    // holds a token again with no edit (a leftover timer would save it); at 5 s a new edit comes.
+    let setup = TOKEN_EDITS.to_string()
+        + " this.edit(cx, Date.now() + 600000);"
+        + " cx.timer.after(300, (cx) => this.edit(cx, Date.now() + 600000));"
+        + " cx.timer.after(1000, () => { this.tokenAt = Date.now() - 1000; });"
+        + " cx.timer.after(3000, () => { this.tokenInput.set_value('123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw'); this.tokenAt = Date.now() - 1000; });"
+        + " cx.timer.after(5000, (cx) => this.edit(cx, Date.now() - 1000));";
+    let (calls, window, mut session) = mount_with_visibility(cx, &staged, "frame/settings", p, &token_replies(), &setup, &Rc::new(Cell::new(true)));
+    let mut describe = |cx: &mut TestAppContext| window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+    advance(cx, 900);
+    assert_eq!(token_saves(&calls), 0, "nothing is saved inside the pause");
+    let tree = describe(cx);
+    assert!(tree.contains("st-r-help-armed-1"), "a second edit while one waits arms no second timer: {tree}");
+    advance(cx, 1100);
+    assert_eq!(token_saves(&calls), 1, "saved once the field is still: {:?}", calls.borrow().writes);
+    advance(cx, 2500);
+    assert_eq!(token_saves(&calls), 1, "the timer stopped after the save: {:?}", calls.borrow().writes);
+    assert!(describe(cx).contains("st-r-help-armed-1"));
+    advance(cx, 1500);
+    assert_eq!(token_saves(&calls), 2, "a new edit arms a new timer and saves once: {:?}", calls.borrow().writes);
+    assert!(describe(cx).contains("st-r-help-armed-2"));
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+}
+
+#[gpui::test]
+fn settings_remote_token_timer_never_saves_without_a_pending_edit_or_after_enter(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Enter does what its "submit" handler does; a second later the field holds a token again with no edit.
+    let enter = TOKEN_EDITS.to_string()
+        + " this.edit(cx, Date.now() + 600000); this.tokenAt = 0; this.saveToken(cx, true);"
+        + " cx.timer.after(1000, () => { this.tokenInput.set_value('123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw'); this.tokenAt = Date.now() - 1000; });";
+    for (label, setup, saves, armed) in [
+        ("never edited", TOKEN_EDITS.to_string() + " this.tokenAt = Date.now() - 1000;", 0, "st-r-help-armed-0"),
+        ("never edited, empty field", TOKEN_EDITS.to_string() + " this.tokenInput.set_value(''); this.tokenAt = Date.now() - 1000;", 0, "st-r-help-armed-0"),
+        ("Enter saved it", enter, 1, "st-r-help-armed-1"),
+    ] {
+        let mut p = props();
+        p["section"] = json!("remote");
+        let (calls, window, mut session) = mount_with_visibility(cx, &staged, "frame/settings", p, &token_replies(), &setup, &Rc::new(Cell::new(true)));
+        advance(cx, 3000);
+        assert_eq!(token_saves(&calls), saves, "{label}: {:?}", calls.borrow().writes);
+        let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+        assert!(tree.contains(armed), "{label}: {armed}: {tree}");
+        window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    }
+}
+
+#[gpui::test]
+fn settings_remote_token_edited_then_left_for_another_page_still_saves_once_back(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["section"] = json!("remote");
+    // The pause runs out while another page is shown; the person comes back a second later.
+    let setup = TOKEN_EDITS.to_string()
+        + " this.edit(cx, Date.now() - 1000); this.section = 'look';"
+        + " cx.timer.after(1000, (cx) => { this.section = 'remote'; cx.notify(); });";
+    let (calls, window, _session) = mount_with_visibility(cx, &staged, "frame/settings", p, &token_replies(), &setup, &Rc::new(Cell::new(true)));
+    advance(cx, 900);
+    assert_eq!(token_saves(&calls), 0, "never saved off the Remote page");
+    advance(cx, 2100);
+    assert_eq!(token_saves(&calls), 1, "the pending edit is saved once back, as before: {:?}", calls.borrow().writes);
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+}
+
+#[gpui::test]
+fn settings_remote_refresh_rests_while_hidden_and_loads_once_when_shown_again(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["section"] = json!("remote");
+    let shown = Rc::new(Cell::new(true));
+    let replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+    let (calls, window, _session) = mount_with_visibility(cx, &staged, "frame/settings", p, &replies, "", &shown);
+    let loads = |calls: &Rc<RefCell<Calls>>| (core_calls(calls, "bridge ls"), core_calls(calls, "machine ls"));
+    let (start, _) = loads(&calls);
+    // Shown: every third second, as before.
+    advance(cx, 9500);
+    assert_eq!(loads(&calls).0, start + 3, "{:?}", calls.borrow().cores);
+    shown.set(false);
+    let before = loads(&calls);
+    advance(cx, 30000);
+    assert_eq!(loads(&calls), before, "nothing loads while hidden: {:?}", calls.borrow().cores);
+    shown.set(true);
+    advance(cx, 1000);
+    assert_eq!(loads(&calls).0, before.0 + 1, "the first tick back loads once");
+    advance(cx, 2000);
+    assert_eq!(loads(&calls).0, before.0 + 1, "and only once");
+    advance(cx, 1000);
+    assert_eq!(loads(&calls).0, before.0 + 2, "then every third second again");
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+}
+
+#[gpui::test]
+fn settings_machines_refresh_rests_while_hidden_from_the_start_and_resumes_when_shown(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["section"] = json!("machines");
+    let shown = Rc::new(Cell::new(false));
+    let replies = [("machine ls", core_ok(json!({"machines":[{"name":"remote","state":"online"}]})))];
+    let (calls, window, _session) = mount_with_visibility(cx, &staged, "frame/settings", p, &replies, "", &shown);
+    let start = core_calls(&calls, "machine ls");
+    advance(cx, 30500);
+    assert_eq!(core_calls(&calls, "machine ls"), start, "nothing loads while hidden: {:?}", calls.borrow().cores);
+    shown.set(true);
+    advance(cx, 3000);
+    assert_eq!(core_calls(&calls, "machine ls"), start + 1, "the first tick shown loads once");
+    advance(cx, 9000);
+    assert_eq!(core_calls(&calls, "machine ls"), start + 4, "then every 3 s, as before");
+    shown.set(false);
+    advance(cx, 9000);
+    assert_eq!(core_calls(&calls, "machine ls"), start + 4, "hidden again: nothing");
+    assert!(calls.borrow().cores.iter().all(|a| a.join(" ").starts_with("machine ls")), "{:?}", calls.borrow().cores);
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+}
+
+#[gpui::test]
+fn welcome_machine_list_refreshes_only_on_page_two_while_shown(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let replies = [("machine ls", core_ok(json!({"machines":[]})))];
+    // (page, shown, loads over 9.5 s)
+    for (page, visible, want) in [(2, true, 3), (2, false, 0), (1, true, 0), (3, true, 0), (4, true, 0), (1, false, 0)] {
+        let shown = Rc::new(Cell::new(visible));
+        let setup = format!("this.page = {page};");
+        let (calls, window, _session) = mount_with_visibility(cx, &staged, "frame/welcome", props(), &replies, &setup, &shown);
+        let start = core_calls(&calls, "machine ls");
+        advance(cx, 9500);
+        assert_eq!(core_calls(&calls, "machine ls"), start + want, "page {page}, shown {visible}: {:?}", calls.borrow().cores);
+        assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
+        window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    }
+    // Page 2 hidden for a while, then shown: the refresh resumes on its next tick.
+    let shown = Rc::new(Cell::new(false));
+    let (calls, window, _session) = mount_with_visibility(cx, &staged, "frame/welcome", props(), &replies, "this.page = 2;", &shown);
+    let start = core_calls(&calls, "machine ls");
+    advance(cx, 30500);
+    assert_eq!(core_calls(&calls, "machine ls"), start, "{:?}", calls.borrow().cores);
+    shown.set(true);
+    advance(cx, 3000);
+    assert_eq!(core_calls(&calls, "machine ls"), start + 1, "{:?}", calls.borrow().cores);
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+}
+
 #[gpui::test]
 fn settings_remote_status_line_follows_the_token_and_telegram_pairings(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
