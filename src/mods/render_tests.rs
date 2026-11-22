@@ -3501,35 +3501,35 @@ fn settings_smart_routing_reads_an_unreadable_settings_file_as_the_default_perso
 
 const ANALYTICS_TITLE: &str = "How HyperOx handles your data (beta)";
 const ANALYTICS_ABOUT: [&str; 3] = [
-    "During the beta, HyperOx sends usage data and failure reports so we can fix problems and improve the app. You are identified by a random install ID, not your name or email. We never send what you type, your prompts, agent replies, terminal contents, file or folder names, or your keys. IP addresses are not stored; your approximate location (country and city) is.",
+    "During the beta, HyperOx sends app and device info, the features and agents you use, model and tool names, token counts and estimated cost, and the prompts you type to agents with secrets removed (long text is cut short). Never agent replies, terminal output or file contents. Failure reports are sent too. You are identified by a random install ID or your account ID, not your name or email.",
     "After the beta we plan to move data collection to zero-knowledge proofs.",
-    "You can turn usage analytics off any time. Failure reports stay on so we can fix crashes and update problems.",
+    "You can turn this off any time with the switch above, or by email (see the Privacy Policy). Failure reports stay on so we can fix crashes and update problems.",
 ];
 
 #[gpui::test]
-fn settings_analytics_about_is_closed_until_asked_and_click_here_opens_only_pavii_tech(cx: &mut TestAppContext) {
+fn settings_analytics_about_is_closed_until_asked_and_privacy_policy_opens_only_the_privacy_page(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     // Closed at first, whatever the switch says.
     for file in [None, Some(r#"{"share_analytics": false}"#)] {
         let (trees, _) = describe_pressing(cx, &staged, "frame/settings", info_values(), file, "", 0);
         assert!(trees[0].contains("st-analytics-info"), "{file:?}: the i button is there: {}", trees[0]);
-        assert!(!trees[0].contains(ANALYTICS_TITLE) && !trees[0].contains("st-analytics-more") && !trees[0].contains("Click here"), "{file:?}: {}", trees[0]);
+        assert!(!trees[0].contains(ANALYTICS_TITLE) && !trees[0].contains("st-analytics-more") && !trees[0].contains("Privacy Policy"), "{file:?}: {}", trees[0]);
         assert!(ANALYTICS_ABOUT.iter().all(|p| !trees[0].contains(p)), "{file:?}: {}", trees[0]);
     }
-    // Open: the title, the three paragraphs word for word, and Click here, which opens pavii.tech.
+    // Open: the title, the three paragraphs word for word, and the Privacy Policy button, which opens the privacy page.
     let setup = "this.analyticsAbout = true; const button = this.button.bind(this); \
         this.button = (t, id, label, onClick) => { if (id === 'st-analytics-more') this.press = onClick; return button(t, id, label, onClick); };";
     let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", info_values(), None, setup, 1);
     for tree in &trees {
-        for text in [ANALYTICS_TITLE, ANALYTICS_ABOUT[0], ANALYTICS_ABOUT[1], ANALYTICS_ABOUT[2], "Click here", "st-analytics-more"] {
+        for text in [ANALYTICS_TITLE, ANALYTICS_ABOUT[0], ANALYTICS_ABOUT[1], ANALYTICS_ABOUT[2], "Privacy Policy", "st-analytics-more"] {
             assert!(tree.contains(text), "the open panel shows {text:?}: {tree}");
         }
     }
     let c = calls.borrow();
     let links: Vec<&Value> = c.effects.iter().filter(|(n, _)| n == "openLink").map(|(_, a)| &a[0]).collect();
-    assert_eq!(links, [&json!("https://pavii.tech")], "{:?}", c.effects);
-    assert!(allowed_link("https://pavii.tech"));
+    assert_eq!(links, [&json!("https://pavii.tech/hyperox/privacy")], "{:?}", c.effects);
+    assert!(allowed_link("https://pavii.tech/hyperox/privacy"));
     assert!(!c.effects.iter().any(|(n, _)| n == "notify"), "no \"Can't open the link\": {:?}", c.effects);
     assert!(c.writes.is_empty() && c.unexpected.is_empty(), "{:?} {:?}", c.writes, c.unexpected);
 }
@@ -12612,5 +12612,5 @@ fn settings_profile_and_info_keep_every_id(cx: &mut TestAppContext) {
     for id in ["st-info-version", "st-info-learn", "st-info-install", "st-info-docs", "st-info-feedback", "st-info-pavii", "st-info-buckleson", "st-analytics", "st-analytics-info"] {
         assert!(info.contains(id), "{id}: {info}");
     }
-    assert!(info.contains("Usage data and failure reports, tied to a random install ID. Never what you type."), "{info}");
+    assert!(info.contains("Usage, agent and prompt data with secrets removed, plus failure reports. Tap i for details."), "{info}");
 }

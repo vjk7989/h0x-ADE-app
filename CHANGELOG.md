@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- A Tokens card on your Profile, and a required Terms and Privacy Policy checkbox at sign-in.
+
+### Changed
+
+- Beta analytics now include agent usage and prompts with secrets removed; see the Privacy Policy.
+
 ### Changed
 
 - Token Saver is now on by default; you can turn it off in Settings → 0x Modes.
