@@ -429,7 +429,7 @@ fn layout(width: f32, height: f32) -> Layout {
     Layout {
         mode,
         scale: if mode == Mode::Regular && width >= 1600.0 && height >= 950.0 { 1.12 } else { 1.0 },
-        band: ((height - 44.0) * 0.70).round(),
+        band: ((height - 44.0) * 0.70).round().max(0.0),
         rain: mode == Mode::Regular,
     }
 }
@@ -563,6 +563,9 @@ impl Rain {
 /// How much of a glyph shows: faded toward the top of the band, and (to a faint 30%) behind the cards.
 /// `y` is the cell's top in the band, `distance` the gap from its box to the card.
 fn cell_weight(y: f32, band: f32, distance: f32, light: bool) -> f32 {
+    if band <= 0.0 {
+        return 0.0;
+    }
     let t = (y / (band * 0.75)).min(1.0);
     let fade = t * t * (3.0 - 2.0 * t);
     fade * if light { 0.9 } else { 1.0 } * (0.3 + 0.7 * ((distance - 6.0) / 28.0).clamp(0.0, 1.0))
@@ -1355,6 +1358,7 @@ mod tests {
     fn the_texture_fades_toward_the_top_and_away_from_the_card() {
         use super::{card_distance, cell_weight};
         assert_eq!(cell_weight(0.0, 200.0, 1000.0, false), 0.0, "invisible at the top of the band");
+        assert_eq!(cell_weight(0.0, 0.0, 1000.0, false), 0.0, "an empty band shows nothing");
         assert!((cell_weight(150.0, 200.0, 1000.0, false) - 1.0).abs() < 1e-6, "full from three quarters down");
         assert!((cell_weight(190.0, 200.0, 1000.0, false) - 1.0).abs() < 1e-6);
         assert!(cell_weight(75.0, 200.0, 1000.0, false) > 0.0 && cell_weight(75.0, 200.0, 1000.0, false) < 1.0);
@@ -1629,5 +1633,113 @@ mod tests {
     fn a_display_that_reports_no_usable_height_still_gets_a_window_between_460_and_760() {
         let h = window_height(Some(f32::NAN));
         assert!(h.is_finite() && (460.0..=760.0).contains(&h), "{h}");
+    }
+
+    #[test]
+    fn the_band_stays_inside_the_room_above_the_footer_from_tiny_to_4k_windows() {
+        use super::{Layout, Mode, layout};
+        // Below the 620 x 460 minimum (never shown, but no panic, no negative or NaN band).
+        assert_eq!(layout(320.0, 240.0), Layout { mode: Mode::Compact, scale: 1.0, band: 137.0, rain: false });
+        assert_eq!(layout(620.0, 44.0).band, 0.0, "no room above the footer: an empty band");
+        assert_eq!(layout(620.0, 30.0).band, 0.0, "shorter than the footer: still an empty band, never negative");
+        // A 4K window: the band still rises to 70% of the room, with the grid scaled up.
+        assert_eq!(layout(3840.0, 2160.0), Layout { mode: Mode::Regular, scale: 1.12, band: 1481.0, rain: true });
+        // Around the old 700 px threshold the band now grows smoothly: no jump between 700 and 701.
+        assert_eq!(layout(1280.0, 700.0).band, 459.0);
+        assert_eq!(layout(1280.0, 701.0).band, 460.0);
+        assert_eq!((layout(899.0, 700.0).mode, layout(899.0, 701.0).mode), (Mode::Compact, Mode::Compact));
+        assert!(layout(1280.0, 700.0).rain && layout(1280.0, 701.0).rain);
+        let mut last = 0.0;
+        for h in (44..=4000).map(|h| h as f32) {
+            let band = layout(1280.0, h).band;
+            assert!(band.is_finite() && (0.0..=h - 44.0).contains(&band), "{h}: {band}");
+            assert!(band >= last && band - last <= 1.0, "{h}: grows by at most a pixel per pixel ({last} -> {band})");
+            if h >= 460.0 {
+                assert!((band / (h - 44.0) - 0.70).abs() < 0.005, "{h}: about 70% of the room ({band})");
+            }
+            last = band;
+        }
+    }
+
+    #[test]
+    fn the_fade_rises_monotonically_from_nothing_at_the_band_top() {
+        use super::{CELL_H, cell_weight, layout};
+        for (w, h) in [(320.0, 240.0), (620.0, 460.0), (1280.0, 700.0), (1280.0, 701.0), (1920.0, 1080.0), (3840.0, 2160.0)] {
+            let band = layout(w, h).band;
+            assert_eq!(cell_weight(0.0, band, 1000.0, false), 0.0, "{w}x{h}: nothing at the very top");
+            assert!(cell_weight(CELL_H, band, 1000.0, false) < 0.06, "{w}x{h}: the first row below the top is close to nothing");
+            let mut last = 0.0;
+            // Every row the paint can reach, including the partly cut-off last one.
+            for y in (0..=(band + CELL_H) as usize).map(|y| y as f32) {
+                let weight = cell_weight(y, band, 1000.0, false);
+                assert!(weight >= last - 1e-6, "{w}x{h}: weaker at y {y} ({weight}) than above it ({last})");
+                last = weight;
+            }
+            assert!((last - 1.0).abs() < 1e-6, "{w}x{h}: full strength at the bottom");
+        }
+    }
+
+    #[test]
+    fn the_cell_weight_stays_between_0_and_1_for_any_distance_and_theme() {
+        use super::cell_weight;
+        for light in [false, true] {
+            for band in [0.0, 1.0, 137.0, 459.0, 1481.0] {
+                for distance in [0.0, 0.5, 5.999, 6.0, 6.001, 20.0, 33.999, 34.0, 34.001, 1000.0, f32::MAX] {
+                    for y in [0.0, 1.0, 14.0, band * 0.5, band * 0.75, band, band + 13.0] {
+                        let weight = cell_weight(y, band, distance, light);
+                        assert!(weight.is_finite() && (0.0..=1.0).contains(&weight), "y {y} band {band} distance {distance} light {light}: {weight}");
+                        assert!(band > 0.0 || weight == 0.0, "an empty band shows nothing: {weight}");
+                    }
+                }
+            }
+        }
+        // Inside a card (distance 0) the texture still shows, at 30% of its strength.
+        assert!((cell_weight(300.0, 400.0, 0.0, false) - 0.3).abs() < 1e-6);
+        assert!((cell_weight(300.0, 400.0, 0.0, true) - 0.27).abs() < 1e-6);
+        // Closer to the card never shows more.
+        let mut last = 0.0;
+        for d in 0..=60 {
+            let weight = cell_weight(300.0, 400.0, d as f32, false);
+            assert!(weight >= last - 1e-6, "distance {d}");
+            last = weight;
+        }
+    }
+
+    #[test]
+    fn light_themes_show_nine_tenths_of_the_dark_texture_everywhere() {
+        use super::{Rain, cell_weight};
+        for (y, distance) in [(10.0, 1000.0), (100.0, 0.0), (150.0, 20.0), (190.0, 34.0), (300.0, 6.0)] {
+            let (dark, light) = (cell_weight(y, 200.0, distance, false), cell_weight(y, 200.0, distance, true));
+            assert!((light - 0.9 * dark).abs() < 1e-6, "y {y} distance {distance}: {light} vs {dark}");
+        }
+        // A head at full strength: 60 alpha levels in dark, 54 in light; even behind a card it stays visible.
+        let (_, head) = Rain::new(5, 10).cell(0, 4, 0).expect("column 0's first head");
+        let level = |w: f32| (head * w * 100.0).round() as u8;
+        assert_eq!((level(cell_weight(190.0, 200.0, 1000.0, false)), level(cell_weight(190.0, 200.0, 1000.0, true))), (60, 54));
+        assert_eq!((level(cell_weight(190.0, 200.0, 0.0, false)), level(cell_weight(190.0, 200.0, 0.0, true))), (18, 16));
+        // The faintest glyph (a trail's end or noise, 0.08) behind a card still paints in both themes.
+        assert!(((0.08_f32 * cell_weight(190.0, 200.0, 0.0, true) * 100.0).round() as u8) > 0);
+    }
+
+    #[test]
+    fn the_glow_is_gone_the_page_is_raised_and_the_glass_is_translucent() {
+        // Only the screen's own code counts, not these tests.
+        let source = include_str!("signin.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!source.contains("fn wash(") && !source.contains("wash("), "no glow behind the grid");
+        assert!(!source.contains("0.06 * height"), "the regular grid is not pushed below the middle");
+        assert!(source.contains(".when(compact, |d| d.pb(px(16.0)))"), "the compact grid keeps its 8 px lift");
+        // The page itself is the slightly gray raised token.
+        let root = &source[source.find("\"signin-root\"").expect("the root")..];
+        let first_bg = root.find(".bg(c(\"").expect("a page fill");
+        assert!(root[first_bg..].starts_with(".bg(c(\"raised\"))"), "{}", &root[first_bg..first_bg + 40]);
+        // Every themed fill of a glass tile carries an alpha: nothing opaque hides the code band.
+        let glass = &source[source.find("fn glass(").expect("glass")..];
+        let glass = &glass[..glass[1..].find("\nfn ").expect("the next fn") + 1];
+        let fills: Vec<&str> = glass.match_indices(".bg(c(\"").map(|(i, _)| &glass[i..]).collect();
+        assert!(fills.len() >= 2, "a light and a dark body");
+        for fill in fills {
+            let after = &fill[fill.find("\")").expect("token end") + 2..];
+            assert!(after.starts_with(".opacity("), "an opaque glass fill: {}", &fill[..40.min(fill.len())]);
+        }
     }
 }
