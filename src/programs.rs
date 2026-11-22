@@ -263,7 +263,7 @@ pub fn with_token_saver(on: bool, mut argv: Vec<String>) -> Vec<String> {
     argv
 }
 
-fn starts_claude(argv: &[String]) -> bool {
+pub(crate) fn starts_claude(argv: &[String]) -> bool {
     argv.first().is_some_and(|a| base(a).eq_ignore_ascii_case("claude")) && agent(argv).as_deref() == Some("claude")
 }
 
