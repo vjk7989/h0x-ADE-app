@@ -418,6 +418,9 @@ pub struct Person {
     /// The welcome's one-time "How did you find HyperOx?": the choice, or "skip". Set means asked.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "string_or_none")]
     pub found_via: Option<String>,
+    /// The terms the person agreed to on the sign-in screen: the version and when (unix seconds). Absent means never.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "consent_or_none")]
+    pub consent: Option<Consent>,
     /// A draggable scroll position thumb at a terminal pane's right edge.
     #[serde(skip_serializing_if = "is_true")]
     pub pane_scrollbars: bool,
@@ -545,6 +548,37 @@ fn string_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Strin
     })
 }
 
+/// The version of the Terms and Privacy Policy shown on the sign-in screen; raising it asks everyone again.
+pub const TERMS_VERSION: &str = "beta-1";
+
+/// An agreement to the terms: which version, and when (unix seconds).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Consent {
+    pub version: String,
+    pub at: u64,
+}
+
+/// A well-formed consent; anything else is None (asked again).
+fn consent_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Consent>, D::Error> {
+    Ok(Consent::deserialize(serde_json::Value::deserialize(d)?).ok())
+}
+
+impl Person {
+    /// Whether the stored agreement is to the current terms.
+    pub fn consent_current(&self) -> bool {
+        self.consent.as_ref().is_some_and(|c| c.version == TERMS_VERSION)
+    }
+
+    /// Records the agreement to the current terms at `now`; false (nothing changed) when it was already given.
+    pub fn accept_terms(&mut self, now: u64) -> bool {
+        if self.consent_current() {
+            return false;
+        }
+        self.consent = Some(Consent { version: TERMS_VERSION.into(), at: now });
+        true
+    }
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -569,6 +603,7 @@ impl Default for Person {
             token_saver: true,
             smart_routing: false,
             found_via: None,
+            consent: None,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
             scrollback_lines: SCROLLBACK_DEFAULT,
@@ -1483,6 +1518,34 @@ mod tests {
 
     /// The guide's stated defaults are what an empty settings.json gives, and
     /// every key it documents is one settings.json keeps.
+    #[test]
+    fn consent_round_trips_and_only_the_current_version_counts() {
+        let none: Person = serde_json::from_str("{}").unwrap();
+        assert!(none.consent.is_none() && !none.consent_current());
+        assert!(serde_json::to_value(&none).unwrap().get("consent").is_none());
+        let mut person = Person::default();
+        assert!(person.accept_terms(1_700_000_000), "the first agreement is news");
+        assert!(!person.accept_terms(1_800_000_000), "a second one is not");
+        assert_eq!(person.consent, Some(Consent { version: TERMS_VERSION.into(), at: 1_700_000_000 }), "the first time stays");
+        let v = serde_json::to_value(&person).unwrap();
+        assert_eq!(v["consent"], serde_json::json!({"version": TERMS_VERSION, "at": 1_700_000_000u64}));
+        let back: Person = serde_json::from_value(v).unwrap();
+        assert!(back.consent_current() && back == person);
+    }
+
+    #[test]
+    fn an_older_or_broken_consent_asks_again_and_a_new_agreement_replaces_it() {
+        let old: Person = serde_json::from_str(r#"{"consent":{"version":"alpha-0","at":5},"zoom":1.5}"#).unwrap();
+        assert!(!old.consent_current() && old.zoom == 1.5);
+        let mut renewed = old.clone();
+        assert!(renewed.accept_terms(9));
+        assert_eq!(renewed.consent, Some(Consent { version: TERMS_VERSION.into(), at: 9 }));
+        for bad in [r#"{"consent":null}"#, r#"{"consent":"beta-1"}"#, r#"{"consent":{}}"#, r#"{"consent":{"version":"beta-1"}}"#, r#"{"consent":{"version":1,"at":2}}"#, r#"{"consent":{"version":"beta-1","at":-1}}"#, r#"{"consent":[]}"#] {
+            let p: Person = serde_json::from_str(&format!(r#"{{"zoom":1.25,{}"#, &bad[1..])).unwrap_or_else(|e| panic!("{bad}: {e}"));
+            assert!(p.consent.is_none() && !p.consent_current() && p.zoom == 1.25, "{bad}");
+        }
+    }
+
     #[test]
     fn share_analytics_defaults_on_and_round_trips() {
         let old: Person = serde_json::from_str(r#"{"telemetry":false}"#).unwrap();

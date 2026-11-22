@@ -2144,6 +2144,8 @@ impl AppWindow {
         crate::events::hourly();
         if crate::events::daily_due() {
             crate::events::daily_device(self.workspace_shape(window));
+            let (core, on) = (self.core.clone(), crate::settings::get().token_saver);
+            cx.background_executor().spawn(async move { crate::events::token_saver_daily(&core.call("gate.stats", json!({})), on) }).detach();
         }
         changed |= self.share_seen(cx);
         // Changes already made before HyperOx started aren't news.
