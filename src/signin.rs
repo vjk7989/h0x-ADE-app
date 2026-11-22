@@ -118,15 +118,15 @@ pub struct SignIn {
     rain: Rc<RefCell<RainPaint>>,
 }
 
-/// The window height: 760, or less on a short screen (visible height minus 80, never below 460).
+/// The window height: 684, or less on a short screen (visible height minus 80, never below 460).
 fn window_height(visible: Option<f32>) -> f32 {
-    visible.filter(|h| !h.is_nan()).map_or(760.0, |h| (h - 80.0).clamp(460.0, 760.0))
+    visible.filter(|h| !h.is_nan()).map_or(684.0, |h| (h - 80.0).clamp(460.0, 684.0))
 }
 
-/// The window width: 1040, or less on a narrow screen (visible width minus 80, never below 620).
+/// The window width: 936, or less on a narrow screen (visible width minus 80, never below 620).
 /// From 900 wide and 680 high the screen shows the regular grid, below that the compact one.
 fn window_width(visible: Option<f32>) -> f32 {
-    visible.filter(|w| !w.is_nan()).map_or(1040.0, |w| (w - 80.0).clamp(620.0, 1040.0))
+    visible.filter(|w| !w.is_nan()).map_or(936.0, |w| (w - 80.0).clamp(620.0, 936.0))
 }
 
 /// The window's size on a screen with `visible` room (width, height).
@@ -417,7 +417,7 @@ struct Layout {
     mode: Mode,
     /// Every size, radius, font size and gap is multiplied by this (1.12 from 1600 x 950).
     scale: f32,
-    /// Height of the code band: 85% of the room above the footer.
+    /// Height of the code band: all of the room above the footer, so the code reaches the top.
     band: f32,
 }
 
@@ -426,7 +426,7 @@ fn layout(width: f32, height: f32) -> Layout {
     Layout {
         mode,
         scale: if mode == Mode::Regular && width >= 1600.0 && height >= 950.0 { 1.12 } else { 1.0 },
-        band: ((height - 44.0) * 0.85).round().max(0.0),
+        band: (height - 44.0).round().max(0.0),
     }
 }
 
@@ -539,14 +539,14 @@ impl Rain {
         for h in [(c.h1 + step).rem_euclid(cycle), (c.h2 + step).rem_euclid(cycle)] {
             let d = h - row as i64;
             if d == 0 {
-                strength = strength.max(0.60);
+                strength = strength.max(0.80);
                 head = true;
             } else if d > 0 && d < c.len {
-                strength = strength.max(0.36 * (1.0 - d as f32 / c.len as f32) + 0.08);
+                strength = strength.max(0.48 * (1.0 - d as f32 / c.len as f32) + 0.10);
             }
         }
         if strength == 0.0 && *c.noise.get(row)? {
-            strength = 0.12;
+            strength = 0.16;
         }
         if strength == 0.0 {
             return None;
@@ -556,15 +556,15 @@ impl Rain {
     }
 }
 
-/// How much of a glyph shows: faded over the top 40% of the band, and (to a faint 30%) behind the cards.
+/// How much of a glyph shows: faded over the top 56 px of the band, and (to 55%) behind the cards.
 /// `y` is the cell's top in the band, `distance` the gap from its box to the card.
 fn cell_weight(y: f32, band: f32, distance: f32, light: bool) -> f32 {
     if band <= 0.0 {
         return 0.0;
     }
-    let t = (y / (band * 0.40)).min(1.0);
+    let t = (y / 56.0).min(1.0);
     let fade = t * t * (3.0 - 2.0 * t);
-    fade * if light { 1.15 } else { 1.0 } * (0.3 + 0.7 * ((distance - 6.0) / 28.0).clamp(0.0, 1.0))
+    fade * if light { 1.15 } else { 1.0 } * (0.55 + 0.45 * ((distance - 6.0) / 28.0).clamp(0.0, 1.0))
 }
 
 /// The distance between a cell's box and the card's box (0 when they overlap).
@@ -726,29 +726,29 @@ fn inset(radius: Pixels) -> Div {
     div().absolute().top(px(0.0)).left(px(0.0)).right(px(0.0)).bottom(px(0.0)).rounded(radius)
 }
 
-/// A glass tile: no backdrop blur in GPUI, so a translucent fill over the code band (faintly visible through it), a sheen,
-/// a hairline edge, a highlight along the top and a soft drop shadow (cook/SPEC-v2.md section 2).
+/// A glass tile: GPUI has no element backdrop blur, so a low-alpha fill over the code band (clearly visible through it), a
+/// diagonal sheen, a bright hairline edge, a highlight along the top and a soft drop shadow (cook/SPEC-v2.md section 2).
 fn glass(id: &'static str, radius: f32, s: f32, light: bool) -> Stateful<Div> {
     let r = z(radius, s);
-    let mut tile = div().id(id).relative().rounded(r).border_1().border_color(veil(light, 0.16, 0.07));
+    let mut tile = div().id(id).relative().rounded(r).border_1().border_color(white().opacity(if light { 0.55 } else { 0.18 }));
     tile.style().box_shadow = Some(if light {
         vec![
-            BoxShadow::new(px(0.0), z(24.0, s), black().opacity(0.20)).blur_radius(z(60.0, s)).spread_radius(z(-28.0, s)),
+            BoxShadow::new(px(0.0), z(24.0, s), black().opacity(0.14)).blur_radius(z(60.0, s)).spread_radius(z(-28.0, s)),
             BoxShadow::new(px(0.0), z(1.0, s), black().opacity(0.06)).blur_radius(z(2.0, s)),
         ]
     } else {
         vec![
-            BoxShadow::new(px(0.0), z(24.0, s), black().opacity(0.70)).blur_radius(z(60.0, s)).spread_radius(z(-24.0, s)),
+            BoxShadow::new(px(0.0), z(24.0, s), black().opacity(0.45)).blur_radius(z(60.0, s)).spread_radius(z(-24.0, s)),
             BoxShadow::new(px(0.0), z(1.0, s), black().opacity(0.30)).blur_radius(z(2.0, s)),
         ]
     });
-    let (top, bottom) = if light { (0.38, 0.20) } else { (0.10, 0.04) };
+    let (top, bottom) = if light { (0.30, 0.08) } else { (0.14, 0.03) };
     // A shadow paints under the whole tile in GPUI, not only outside it: light tiles sit on the page's own
     // color first, so the shadow does not grey them (dark ones get their body from the raised fill).
-    tile.when(light, |d| d.child(inset(r).bg(c("background").opacity(0.55))))
-        .when(!light, |d| d.child(inset(r).bg(c("raised").opacity(0.40))))
-        .child(inset(r).bg(linear_gradient(180.0, linear_color_stop(white().opacity(top), 0.0), linear_color_stop(white().opacity(bottom), 1.0))))
-        .child(div().absolute().top(px(0.0)).left(r).right(r).h(px(1.0)).bg(white().opacity(if light { 0.9 } else { 0.28 })))
+    tile.when(light, |d| d.child(inset(r).bg(c("background").opacity(0.38))))
+        .when(!light, |d| d.child(inset(r).bg(c("raised").opacity(0.25))))
+        .child(inset(r).bg(linear_gradient(135.0, linear_color_stop(white().opacity(top), 0.0), linear_color_stop(white().opacity(bottom), 1.0))))
+        .child(div().absolute().top(px(0.0)).left(r).right(r).h(px(1.0)).bg(white().opacity(if light { 1.0 } else { 0.45 })))
 }
 
 /// A duotone icon: its soft fill layer under its line layer, one tint at two strengths.
@@ -1174,9 +1174,9 @@ mod tests {
             let s = super::window_size(visible);
             (f32::from(s.width), f32::from(s.height))
         };
-        assert_eq!(dims(None), (1040.0, 760.0));
-        assert_eq!(dims(Some((1920.0, 1040.0))), (1040.0, 760.0));
-        assert_eq!(dims(Some((1366.0, 728.0))), (1040.0, 648.0), "a short laptop screen");
+        assert_eq!(dims(None), (936.0, 684.0));
+        assert_eq!(dims(Some((1920.0, 1040.0))), (936.0, 684.0));
+        assert_eq!(dims(Some((1366.0, 728.0))), (936.0, 648.0), "a short laptop screen");
         assert_eq!(dims(Some((500.0, 500.0))), (620.0, 460.0));
         // The window's own size picks the grid: regular on a normal screen, compact on a small one.
         for (visible, regular) in [(None, true), (Some((1920.0, 1080.0)), true), (Some((1366.0, 768.0)), true), (Some((1024.0, 700.0)), false), (Some((979.0, 1000.0)), false), (Some((980.0, 1000.0)), true)] {
@@ -1189,14 +1189,14 @@ mod tests {
     fn the_layout_follows_the_window_size() {
         use super::{Layout, Mode, layout};
         // A small window (760 x 640) is the compact grid: tiles in one column, the code band behind them.
-        assert_eq!(layout(760.0, 640.0), Layout { mode: Mode::Compact, scale: 1.0, band: 507.0 });
-        assert_eq!(layout(620.0, 460.0), Layout { mode: Mode::Compact, scale: 1.0, band: 354.0 });
+        assert_eq!(layout(760.0, 640.0), Layout { mode: Mode::Compact, scale: 1.0, band: 596.0 });
+        assert_eq!(layout(620.0, 460.0), Layout { mode: Mode::Compact, scale: 1.0, band: 416.0 });
         assert_eq!(layout(1280.0, 800.0).mode, Mode::Regular);
-        // The band: 85% of the room above the footer.
-        assert_eq!(layout(1280.0, 800.0).band, (756.0_f32 * 0.85).round());
-        assert_eq!(layout(1280.0, 700.0).band, (656.0_f32 * 0.85).round());
-        assert_eq!(layout(1920.0, 1080.0).band, (1036.0_f32 * 0.85).round());
-        assert_eq!(layout(900.0, 680.0).band, (636.0_f32 * 0.85).round());
+        // The band: all of the room above the footer.
+        assert_eq!(layout(1280.0, 800.0).band, 756.0_f32);
+        assert_eq!(layout(1280.0, 700.0).band, 656.0_f32);
+        assert_eq!(layout(1920.0, 1080.0).band, 1036.0_f32);
+        assert_eq!(layout(900.0, 680.0).band, 636.0_f32);
     }
 
     #[test]
@@ -1316,17 +1316,17 @@ mod tests {
         use super::{GLYPHS, Rain};
         let rain = Rain::new(5, 10);
         let (glyph, strength) = rain.cell(0, 4, 0).expect("column 0's first head");
-        assert_eq!(strength, 0.60);
+        assert_eq!(strength, 0.80);
         assert!(glyph < GLYPHS.len());
         let (_, trail) = rain.cell(0, 3, 0).expect("the trail above the head");
-        assert!(trail < 0.60 && trail > 0.08);
+        assert!(trail < 0.80 && trail > 0.10);
         assert!(rain.cell(0, 3, 0).unwrap().1 > rain.cell(0, 1, 0).map_or(0.0, |c| c.1) || rain.cell(0, 1, 0).is_none());
         assert!(GLYPHS.iter().all(u8::is_ascii) && GLYPHS.len() == 37);
         assert_eq!(rain.cell(9, 0, 0), None, "past the last column");
         for frame in 0..200 {
             for r in 0..10 {
                 if let Some((g, s)) = rain.cell(1, r, frame) {
-                    assert!(g < GLYPHS.len() && (0.08..=0.60).contains(&s), "{r}@{frame}: {g} {s}");
+                    assert!(g < GLYPHS.len() && (0.10..=0.80).contains(&s), "{r}@{frame}: {g} {s}");
                 }
             }
         }
@@ -1338,7 +1338,7 @@ mod tests {
         let rain = Rain::new(1, 30);
         let c = &rain.cols[0];
         let step = c.every as u64;
-        let head = |frame| (0..30).find_map(|r| rain.cell(0, r, frame).filter(|(_, s)| *s == 0.60).map(|(g, _)| (r, g)));
+        let head = |frame| (0..30).find_map(|r| rain.cell(0, r, frame).filter(|(_, s)| *s == 0.80).map(|(g, _)| (r, g)));
         let (r0, g0) = head(0).unwrap();
         let (r1, g1) = head(step).unwrap();
         assert_eq!(r1, r0 + 1, "the head moves a row each step");
@@ -1351,12 +1351,12 @@ mod tests {
         use super::{card_distance, cell_weight};
         assert_eq!(cell_weight(0.0, 200.0, 1000.0, false), 0.0, "invisible at the top of the band");
         assert_eq!(cell_weight(0.0, 0.0, 1000.0, false), 0.0, "an empty band shows nothing");
-        assert!((cell_weight(150.0, 200.0, 1000.0, false) - 1.0).abs() < 1e-6, "full from the top 40% of the band down");
+        assert!((cell_weight(150.0, 200.0, 1000.0, false) - 1.0).abs() < 1e-6, "full from 56 px below the top");
         assert!((cell_weight(190.0, 200.0, 1000.0, false) - 1.0).abs() < 1e-6);
-        assert!(cell_weight(75.0, 200.0, 1000.0, false) > 0.0 && cell_weight(75.0, 200.0, 1000.0, false) < 1.0);
+        assert!(cell_weight(28.0, 200.0, 1000.0, false) > 0.0 && cell_weight(28.0, 200.0, 1000.0, false) < 1.0);
         assert!((cell_weight(150.0, 200.0, 1000.0, true) - 1.15).abs() < 1e-6, "light themes are boosted to match dark");
-        assert!((cell_weight(150.0, 200.0, 6.0, false) - 0.3).abs() < 1e-6, "within 6 px of the card: a faint 30%");
-        assert!((cell_weight(150.0, 200.0, 20.0, false) - 0.65).abs() < 1e-6);
+        assert!((cell_weight(150.0, 200.0, 6.0, false) - 0.55).abs() < 1e-6, "within 6 px of the card: 55%");
+        assert!((cell_weight(150.0, 200.0, 20.0, false) - 0.775).abs() < 1e-6);
         assert!((cell_weight(150.0, 200.0, 34.0, false) - 1.0).abs() < 1e-6);
         let card = (100.0, 100.0, 500.0, 400.0);
         assert_eq!(card_distance((200.0, 200.0, 9.0, 14.0), card), 0.0, "inside");
@@ -1501,42 +1501,44 @@ mod tests {
     }
 
     #[test]
-    fn the_window_is_760_high_and_shrinks_on_a_short_screen_but_never_below_460() {
-        assert_eq!(window_height(None), 760.0);
-        assert_eq!(window_height(Some(1040.0)), 760.0);
-        assert_eq!(window_height(Some(840.0)), 760.0);
-        assert_eq!(window_height(Some(768.0)), 688.0);
+    fn the_window_is_684_high_and_shrinks_on_a_short_screen_but_never_below_460() {
+        assert_eq!(window_height(None), 684.0);
+        assert_eq!(window_height(Some(1040.0)), 684.0);
+        assert_eq!(window_height(Some(840.0)), 684.0);
+        assert_eq!(window_height(Some(768.0)), 684.0);
+        assert_eq!(window_height(Some(760.0)), 680.0);
         assert_eq!(window_height(Some(700.0)), 620.0);
         assert_eq!(window_height(Some(500.0)), 460.0);
         assert_eq!(window_height(Some(0.0)), 460.0);
     }
 
     #[test]
-    fn the_window_is_1040_wide_and_shrinks_on_a_narrow_screen_but_never_below_620() {
-        assert_eq!(window_width(None), 1040.0);
-        assert_eq!(window_width(Some(1920.0)), 1040.0);
-        assert_eq!(window_width(Some(1120.0)), 1040.0);
-        assert_eq!(window_width(Some(1366.0)), 1040.0);
-        assert_eq!(window_width(Some(1024.0)), 944.0);
+    fn the_window_is_936_wide_and_shrinks_on_a_narrow_screen_but_never_below_620() {
+        assert_eq!(window_width(None), 936.0);
+        assert_eq!(window_width(Some(1920.0)), 936.0);
+        assert_eq!(window_width(Some(1120.0)), 936.0);
+        assert_eq!(window_width(Some(1366.0)), 936.0);
+        assert_eq!(window_width(Some(1024.0)), 936.0);
+        assert_eq!(window_width(Some(1000.0)), 920.0);
         assert_eq!(window_width(Some(700.0)), 620.0);
         assert_eq!(window_width(Some(0.0)), 620.0);
-        for (visible, want) in [(699.0, 620.0), (700.0, 620.0), (701.0, 621.0), (1119.0, 1039.0), (1121.0, 1040.0), (f32::MAX, 1040.0), (f32::INFINITY, 1040.0), (f32::NEG_INFINITY, 620.0), (f32::MIN, 620.0)] {
+        for (visible, want) in [(699.0, 620.0), (700.0, 620.0), (701.0, 621.0), (1015.0, 935.0), (1016.0, 936.0), (1017.0, 936.0), (1121.0, 936.0), (f32::MAX, 936.0), (f32::INFINITY, 936.0), (f32::NEG_INFINITY, 620.0), (f32::MIN, 620.0)] {
             assert_eq!(window_width(Some(visible)), want, "{visible}");
         }
         let w = window_width(Some(f32::NAN));
-        assert!(w.is_finite() && (620.0..=1040.0).contains(&w), "{w}");
+        assert!(w.is_finite() && (620.0..=936.0).contains(&w), "{w}");
     }
 
     #[test]
     fn the_regular_grid_fits_the_window_with_margins_and_stays_centred() {
         use super::{GRID_H, GRID_W, layout, tile_rects};
-        let (w, h) = (1040.0, 760.0);
+        let (w, h) = (936.0, 684.0);
         assert_eq!(layout(w, h).mode, super::Mode::Regular);
         let [hero, mark, a, _, c] = tile_rects(w, h, 1.0);
         assert_eq!(hero, (76.0, (h - GRID_H) / 2.0, 664.0, (h - GRID_H) / 2.0 + 312.0));
         assert!((hero.1 - (h - c.3)).abs() < 0.5, "centred: the top margin {} equals the bottom margin {}", hero.1, h - c.3);
-        assert!(hero.0 >= 40.0 && w - mark.2 >= 40.0, "margins of 40 px or more at the sides: {} / {}", hero.0, w - mark.2);
-        assert_eq!(w - GRID_W, 152.0);
+        assert!(hero.0 >= 24.0 && w - mark.2 >= 24.0, "margins of 24 px or more at the sides: {} / {}", hero.0, w - mark.2);
+        assert_eq!(w - GRID_W, 48.0);
         assert!(a.1 > hero.3 && c.3 + 36.0 <= h, "the grid sits above the footer line");
         assert!(hero.1 >= 0.0, "and below the top edge");
     }
@@ -1599,46 +1601,46 @@ mod tests {
 
     #[test]
     fn the_window_height_at_and_around_each_limit() {
-        // 460 + 80 = 540 and 760 + 80 = 840 are the two corners.
+        // 460 + 80 = 540 and 684 + 80 = 764 are the two corners.
         for (visible, want) in [
             (539.0, 460.0),
             (540.0, 460.0),
             (541.0, 461.0),
-            (839.0, 759.0),
-            (840.0, 760.0),
-            (841.0, 760.0),
+            (763.0, 683.0),
+            (764.0, 684.0),
+            (765.0, 684.0),
             (80.0, 460.0),
             (-0.0, 460.0),
             (-500.0, 460.0),
             (f32::MIN, 460.0),
             (f32::NEG_INFINITY, 460.0),
-            (f32::MAX, 760.0),
-            (f32::INFINITY, 760.0),
+            (f32::MAX, 684.0),
+            (f32::INFINITY, 684.0),
             (f32::MIN_POSITIVE, 460.0),
         ] {
             assert_eq!(window_height(Some(visible)), want, "{visible}");
         }
-        assert_eq!(window_height(None), 760.0);
+        assert_eq!(window_height(None), 684.0);
     }
 
     #[test]
-    fn a_display_that_reports_no_usable_height_still_gets_a_window_between_460_and_760() {
+    fn a_display_that_reports_no_usable_height_still_gets_a_window_between_460_and_684() {
         let h = window_height(Some(f32::NAN));
-        assert!(h.is_finite() && (460.0..=760.0).contains(&h), "{h}");
+        assert!(h.is_finite() && (460.0..=684.0).contains(&h), "{h}");
     }
 
     #[test]
     fn the_band_stays_inside_the_room_above_the_footer_from_tiny_to_4k_windows() {
         use super::{Layout, Mode, layout};
         // Below the 620 x 460 minimum (never shown, but no panic, no negative or NaN band).
-        assert_eq!(layout(320.0, 240.0), Layout { mode: Mode::Compact, scale: 1.0, band: 167.0 });
+        assert_eq!(layout(320.0, 240.0), Layout { mode: Mode::Compact, scale: 1.0, band: 196.0 });
         assert_eq!(layout(620.0, 44.0).band, 0.0, "no room above the footer: an empty band");
         assert_eq!(layout(620.0, 30.0).band, 0.0, "shorter than the footer: still an empty band, never negative");
-        // A 4K window: the band still rises to 85% of the room, with the grid scaled up.
-        assert_eq!(layout(3840.0, 2160.0), Layout { mode: Mode::Regular, scale: 1.12, band: 1799.0 });
+        // A 4K window: the band still rises to the whole room, with the grid scaled up.
+        assert_eq!(layout(3840.0, 2160.0), Layout { mode: Mode::Regular, scale: 1.12, band: 2116.0 });
         // Around the old 700 px threshold the band now grows smoothly: no jump between 700 and 701.
-        assert_eq!(layout(1280.0, 700.0).band, 558.0);
-        assert_eq!(layout(1280.0, 701.0).band, 558.0);
+        assert_eq!(layout(1280.0, 700.0).band, 656.0);
+        assert_eq!(layout(1280.0, 701.0).band, 657.0);
         assert_eq!((layout(899.0, 700.0).mode, layout(899.0, 701.0).mode), (Mode::Compact, Mode::Compact));
         let mut last = 0.0;
         for h in (44..=4000).map(|h| h as f32) {
@@ -1646,7 +1648,7 @@ mod tests {
             assert!(band.is_finite() && (0.0..=h - 44.0).contains(&band), "{h}: {band}");
             assert!(band >= last && band - last <= 1.0, "{h}: grows by at most a pixel per pixel ({last} -> {band})");
             if h >= 460.0 {
-                assert!((band / (h - 44.0) - 0.85).abs() < 0.005, "{h}: about 85% of the room ({band})");
+                assert!((band / (h - 44.0) - 1.0).abs() < 0.005, "{h}: the whole room ({band})");
             }
             last = band;
         }
@@ -1658,7 +1660,7 @@ mod tests {
         for (w, h) in [(320.0, 240.0), (620.0, 460.0), (1280.0, 700.0), (1280.0, 701.0), (1920.0, 1080.0), (3840.0, 2160.0)] {
             let band = layout(w, h).band;
             assert_eq!(cell_weight(0.0, band, 1000.0, false), 0.0, "{w}x{h}: nothing at the very top");
-            assert!(cell_weight(CELL_H, band, 1000.0, false) < if band < 200.0 { 0.12 } else { 0.06 }, "{w}x{h}: the first row below the top is close to nothing");
+            assert!(cell_weight(CELL_H, band, 1000.0, false) < 0.2, "{w}x{h}: the first row below the top is close to nothing");
             let mut last = 0.0;
             // Every row the paint can reach, including the partly cut-off last one.
             for y in (0..=(band + CELL_H) as usize).map(|y| y as f32) {
@@ -1684,9 +1686,9 @@ mod tests {
                 }
             }
         }
-        // Inside a card (distance 0) the texture still shows, at 30% of its strength.
-        assert!((cell_weight(300.0, 400.0, 0.0, false) - 0.3).abs() < 1e-6);
-        assert!((cell_weight(300.0, 400.0, 0.0, true) - 0.345).abs() < 1e-6);
+        // Inside a card (distance 0) the texture still shows, at 55% of its strength.
+        assert!((cell_weight(300.0, 400.0, 0.0, false) - 0.55).abs() < 1e-6);
+        assert!((cell_weight(300.0, 400.0, 0.0, true) - 0.6325).abs() < 1e-6);
         // Closer to the card never shows more.
         let mut last = 0.0;
         for d in 0..=60 {
@@ -1703,13 +1705,13 @@ mod tests {
             let (dark, light) = (cell_weight(y, 200.0, distance, false), cell_weight(y, 200.0, distance, true));
             assert!((light - 1.15 * dark).abs() < 1e-6, "y {y} distance {distance}: {light} vs {dark}");
         }
-        // A head at full strength: 60 alpha levels in dark, 69 in light; even behind a card it stays visible.
+        // A head at full strength: 80 alpha levels in dark, 92 in light; even behind a card it stays visible.
         let (_, head) = Rain::new(5, 10).cell(0, 4, 0).expect("column 0's first head");
         let level = |w: f32| (head * w * 100.0).round() as u8;
-        assert_eq!((level(cell_weight(190.0, 200.0, 1000.0, false)), level(cell_weight(190.0, 200.0, 1000.0, true))), (60, 69));
-        assert_eq!((level(cell_weight(190.0, 200.0, 0.0, false)), level(cell_weight(190.0, 200.0, 0.0, true))), (18, 21));
-        // The faintest glyph (a trail's end or noise, 0.08) behind a card still paints in both themes.
-        assert!(((0.08_f32 * cell_weight(190.0, 200.0, 0.0, true) * 100.0).round() as u8) > 0);
+        assert_eq!((level(cell_weight(190.0, 200.0, 1000.0, false)), level(cell_weight(190.0, 200.0, 1000.0, true))), (80, 92));
+        assert_eq!((level(cell_weight(190.0, 200.0, 0.0, false)), level(cell_weight(190.0, 200.0, 0.0, true))), (44, 51));
+        // The faintest glyph (a trail's end or noise, 0.10) behind a card still paints in both themes.
+        assert!(((0.10_f32 * cell_weight(190.0, 200.0, 0.0, true) * 100.0).round() as u8) > 0);
     }
 
     #[test]
