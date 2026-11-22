@@ -20,6 +20,8 @@ export function core(args: string[]): Promise<ExecResult>;
 export function home(): string;
 /** The app's folder (`~/.config/h0x-ade`, or `$H0X_ADE_HOME`): settings.json, keys.json, layouts/. */
 export function appHome(): string;
+/** Where this PC's `h0x-core` reads its config.toml. */
+export function coreConfig(): string;
 
 /** Reads UTF-8 text (up to 1 MiB), or null if absent. Runs off the UI thread.
  *  `on`: from that machine (a space's `machine`). */
