@@ -124,7 +124,7 @@ fn window_height(visible: Option<f32>) -> f32 {
 }
 
 /// The window width: 842, or less on a narrow screen (visible width minus 80, never below 620).
-/// From 900 wide and 680 high the screen shows the regular grid, below that the compact one.
+/// From 840 wide and 680 high the screen shows the regular grid, below that the compact one.
 fn window_width(visible: Option<f32>) -> f32 {
     visible.filter(|w| !w.is_nan()).map_or(842.0, |w| (w - 80.0).clamp(620.0, 842.0))
 }
@@ -405,7 +405,7 @@ fn hints(state: State) -> [(&'static str, &'static str); 2] {
 /// The grid of tiles at a window size (cook/SPEC-v2.md section 1).
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Mode {
-    /// 3 columns of 288, the hero over two of them.
+    /// 3 columns of 256, the hero over two of them.
     Regular,
     /// One narrow column of tiles, no mark.
     Compact,
@@ -421,7 +421,7 @@ struct Layout {
 }
 
 fn layout(width: f32, height: f32) -> Layout {
-    let mode = if width >= 900.0 && height >= 680.0 { Mode::Regular } else { Mode::Compact };
+    let mode = if width >= GRID_W + 48.0 && height >= 680.0 { Mode::Regular } else { Mode::Compact };
     Layout {
         mode,
         scale: if mode == Mode::Regular && width >= 1600.0 && height >= 950.0 { 1.12 } else { 1.0 },
@@ -430,7 +430,7 @@ fn layout(width: f32, height: f32) -> Layout {
 }
 
 /// The regular grid, in px at scale 1: three columns, the hero 312 high, the lead line, the feature row.
-const COL: f32 = 288.0;
+const COL: f32 = 256.0;
 const GAP: f32 = 12.0;
 const HERO_H: f32 = 312.0;
 const LEAD_H: f32 = 16.0;
@@ -1177,8 +1177,8 @@ mod tests {
         assert_eq!(dims(Some((1920.0, 1040.0))), (842.0, 684.0));
         assert_eq!(dims(Some((1366.0, 728.0))), (842.0, 648.0), "a short laptop screen");
         assert_eq!(dims(Some((500.0, 500.0))), (620.0, 460.0));
-        // At 842 wide the window is under the regular grid's 900: every screen gets the compact grid.
-        for (visible, regular) in [(None, false), (Some((1920.0, 1080.0)), false), (Some((1366.0, 768.0)), false), (Some((1024.0, 700.0)), false), (Some((979.0, 1000.0)), false), (Some((980.0, 1000.0)), false)] {
+        // The 842 wide window holds the regular grid (792 plus 25 px a side) when it is 680 high; a short or narrow screen gets the compact one.
+        for (visible, regular) in [(None, true), (Some((1920.0, 1080.0)), true), (Some((1366.0, 768.0)), true), (Some((1024.0, 700.0)), false), (Some((919.0, 1000.0)), false), (Some((920.0, 1000.0)), true)] {
             let (w, h) = dims(visible);
             assert_eq!(super::layout(w, h).mode == super::Mode::Regular, regular, "{visible:?} gives {w}x{h}");
         }
@@ -1195,22 +1195,22 @@ mod tests {
         assert_eq!(layout(1280.0, 800.0).band, 756.0_f32);
         assert_eq!(layout(1280.0, 700.0).band, 656.0_f32);
         assert_eq!(layout(1920.0, 1080.0).band, 1036.0_f32);
-        assert_eq!(layout(900.0, 680.0).band, 636.0_f32);
+        assert_eq!(layout(840.0, 680.0).band, 636.0_f32);
     }
 
     #[test]
-    fn the_compact_grid_replaces_the_regular_one_below_900_by_680() {
+    fn the_compact_grid_replaces_the_regular_one_below_840_by_680() {
         use super::{Mode, compact_width, layout};
-        assert_eq!(layout(900.0, 680.0).mode, Mode::Regular, "both limits met");
-        assert_eq!(layout(899.0, 680.0).mode, Mode::Compact, "too narrow");
-        assert_eq!(layout(900.0, 679.0).mode, Mode::Compact, "too short");
+        assert_eq!(layout(840.0, 680.0).mode, Mode::Regular, "both limits met");
+        assert_eq!(layout(839.0, 680.0).mode, Mode::Compact, "too narrow");
+        assert_eq!(layout(840.0, 679.0).mode, Mode::Compact, "too short");
         assert_eq!(layout(760.0, 640.0).mode, Mode::Compact);
         assert_eq!(layout(2560.0, 1440.0).mode, Mode::Regular);
         // 712 wide, or the window less 16 each side.
         assert_eq!(compact_width(760.0), 712.0);
         assert_eq!(compact_width(740.0), 708.0);
         assert_eq!(compact_width(620.0), 588.0);
-        assert_eq!(compact_width(899.0), 712.0);
+        assert_eq!(compact_width(839.0), 712.0);
     }
 
     #[test]
@@ -1226,15 +1226,18 @@ mod tests {
 
     #[test]
     fn the_tiles_sit_in_a_grid_centred_in_the_window() {
-        use super::{GRID_H, GRID_W, tile_rects};
+        use super::{COL, FEATURE_H, GAP, GRID_H, GRID_W, HERO_H, LEAD_H, tile_rects};
         let [hero, mark, a, b, c] = tile_rects(1280.0, 800.0, 1.0);
-        // The 1280 x 800 still: the hero at (196, 150), 588 x 312, the mark tile beside it, the features at 502.
-        assert_eq!(hero, (196.0, 150.0, 784.0, 462.0));
-        assert_eq!(mark, (796.0, 150.0, 1084.0, 462.0));
-        assert_eq!((a, b, c), ((196.0, 502.0, 484.0, 650.0), (496.0, 502.0, 784.0, 650.0), (796.0, 502.0, 1084.0, 650.0)));
-        assert_eq!((GRID_W, GRID_H), (888.0, 500.0));
+        // The 1280 x 800 window: the hero is two columns and a gap, the mark tile the third column, the features sit below.
+        let (x0, y0, step) = ((1280.0 - GRID_W) / 2.0, (800.0 - GRID_H) / 2.0, COL + GAP);
+        let hero_w = 2.0 * COL + GAP;
+        assert_eq!(hero, (x0, y0, x0 + hero_w, y0 + HERO_H));
+        assert_eq!(mark, (x0 + 2.0 * step, y0, x0 + 2.0 * step + COL, y0 + HERO_H));
+        let row = y0 + HERO_H + GAP + LEAD_H + GAP;
+        assert_eq!((a, b, c), ((x0, row, x0 + COL, row + FEATURE_H), (x0 + step, row, x0 + step + COL, row + FEATURE_H), (x0 + 2.0 * step, row, x0 + 2.0 * step + COL, row + FEATURE_H)));
+        assert_eq!((GRID_W, GRID_H), (3.0 * COL + 2.0 * GAP, HERO_H + GAP + LEAD_H + GAP + FEATURE_H));
         // Centred as a unit at any size and scale.
-        for (w, h, s) in [(1280.0, 800.0, 1.0), (1920.0, 1080.0, 1.12), (900.0, 680.0, 1.0)] {
+        for (w, h, s) in [(1280.0, 800.0, 1.0), (1920.0, 1080.0, 1.12), (840.0, 680.0, 1.0)] {
             let rects = tile_rects(w, h, s);
             let (left, top) = (rects[0].0, rects[0].1);
             let (right, bottom) = (rects[1].2, rects[4].3);
@@ -1525,15 +1528,14 @@ mod tests {
     #[test]
     fn the_regular_grid_fits_the_window_with_margins_and_stays_centred() {
         use super::{GRID_H, GRID_W, layout, tile_rects};
-        let (w, h) = (936.0, 684.0);
+        let (w, h) = (842.0, 684.0);
         assert_eq!(layout(w, h).mode, super::Mode::Regular);
         let [hero, mark, a, _, c] = tile_rects(w, h, 1.0);
         let left = (w - GRID_W) / 2.0;
-        assert_eq!(hero, (left, (h - GRID_H) / 2.0, left + 588.0, (h - GRID_H) / 2.0 + 312.0));
+        assert_eq!(hero, (left, (h - GRID_H) / 2.0, left + 2.0 * super::COL + super::GAP, (h - GRID_H) / 2.0 + 312.0));
         assert!((hero.0 - (w - mark.2)).abs() < 0.5, "centred: the left margin {} equals the right margin {}", hero.0, w - mark.2);
         assert!((hero.1 - (h - c.3)).abs() < 0.5, "centred: the top margin {} equals the bottom margin {}", hero.1, h - c.3);
-        assert!(hero.0 >= 24.0 && w - mark.2 >= 24.0, "margins of 24 px or more at the sides: {} / {}", hero.0, w - mark.2);
-        assert_eq!(w - GRID_W, 48.0);
+        assert!((24.0..=32.0).contains(&hero.0) && (24.0..=32.0).contains(&(w - mark.2)), "margins of 24 to 32 px at the sides: {} / {}", hero.0, w - mark.2);
         assert!(a.1 > hero.3 && c.3 + 36.0 <= h, "the grid sits above the footer line");
         assert!(hero.1 >= 0.0, "and below the top edge");
     }
@@ -1636,7 +1638,7 @@ mod tests {
         // Around the old 700 px threshold the band now grows smoothly: no jump between 700 and 701.
         assert_eq!(layout(1280.0, 700.0).band, 656.0);
         assert_eq!(layout(1280.0, 701.0).band, 657.0);
-        assert_eq!((layout(899.0, 700.0).mode, layout(899.0, 701.0).mode), (Mode::Compact, Mode::Compact));
+        assert_eq!((layout(839.0, 700.0).mode, layout(839.0, 701.0).mode), (Mode::Compact, Mode::Compact));
         let mut last = 0.0;
         for h in (44..=4000).map(|h| h as f32) {
             let band = layout(1280.0, h).band;
