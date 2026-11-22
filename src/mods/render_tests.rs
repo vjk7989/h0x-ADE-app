@@ -12712,3 +12712,280 @@ fn settings_profile_tokens_card_saved_percent_with_zero_used_and_zero_saved(cx: 
         assert!(tree.contains(saved) && !tree.contains("NaN"), "{days}: {saved:?}: {tree}");
     }
 }
+
+// The text line drawn inside the element `id` (the `text "..."` line under it).
+fn text_under<'a>(tree: &'a str, id: &str) -> &'a str {
+    let mut lines = tree.lines().skip_while(|l| !l.contains(&format!(":id[Str({id:?})]")));
+    lines.next().unwrap_or_else(|| panic!("no {id:?}: {tree}"));
+    lines.next().map(str::trim).unwrap_or_default()
+}
+
+// The Tokens card's own lines: its root and everything drawn inside it.
+fn tokens_card_lines(tree: &str) -> Vec<&str> {
+    let lines: Vec<&str> = tree.lines().collect();
+    let at = lines.iter().position(|l| l.contains(r#":id[Str("st-prof-tokens")]"#)).unwrap_or_else(|| panic!("no card: {tree}"));
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let depth = indent(lines[at]);
+    std::iter::once(lines[at]).chain(lines[at + 1..].iter().copied().take_while(|l| indent(l) > depth)).collect()
+}
+
+// Each period button is clicked through its own handler (captured as the card draws it): the card redraws with that
+// period's numbers and marks that button, and clicking Today again goes back.
+#[gpui::test]
+fn settings_profile_tokens_card_period_buttons_redraw_the_card_when_clicked(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let scenario = format!(
+        "import {{ ActivityGraph, parseActivity }} from './frame/settings/activity.js';\n\
+         const p = (x) => String(x).padStart(2, '0');\n\
+         const ago = (n) => {{ const d = new Date(); d.setDate(d.getDate() - n); return `${{d.getFullYear()}}-${{p(d.getMonth() + 1)}}-${{p(d.getDate())}}`; }};\n\
+         export default class Scenario extends ActivityGraph {{\n\
+           init(props, cx) {{\n\
+             super.init({{ shown: true }}, cx);\n\
+             this.clicks = {{}};\n\
+             this.queue = ['week', 'month', 'all', 'today'];\n\
+             cx.timer.every(50, (cx) => {{ const click = this.clicks[this.queue[0]]; if (!click) return; this.queue.shift(); this.clicks = {{}}; click(null, cx); }});\n\
+           }}\n\
+           refresh() {{ const days = {{}}; for (const [n, v] of {TOKEN_DAYS}) days[ago(n)] = v; this.activity = {{ days: parseActivity(JSON.stringify({{ version: 1, days }})) }}; }}\n\
+           render(...args) {{\n\
+             const el = super.render(...args);\n\
+             if (!this.patched) {{\n\
+               this.patched = true;\n\
+               const view = this, proto = Object.getPrototypeOf(el), id = proto.id, onClick = proto.on_click;\n\
+               proto.id = function (name) {{ this.__tokenTab = name; return id.call(this, name); }};\n\
+               proto.on_click = function (handler) {{ const tab = this.__tokenTab; if (typeof tab === 'string' && tab.startsWith('st-prof-tokens-')) view.clicks[tab.slice(15)] = handler; return onClick.call(this, handler); }};\n\
+             }}\n\
+             return el;\n\
+           }}\n\
+         }}\n"
+    );
+    std::fs::write(staged.0.join("main.js"), scenario).unwrap();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    // The chosen button is drawn in the foreground colour, the others muted.
+    values.get_mut("theme").unwrap()["foreground"] = json!("#123456");
+    values.get_mut("theme").unwrap()["muted"] = json!("#654321");
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    let policy = Policy::new()
+        .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+        .with_host_module(module(values, calls.clone()))
+        .unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), staged.0.clone(), policy, window, cx))
+        .unwrap()
+        .unwrap();
+    let mut seen: Vec<(String, String)> = Vec::new();
+    for step in 0..10 {
+        advance(cx, 150);
+        let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+        let chosen: Vec<&str> = ["today", "week", "month", "all"]
+            .into_iter()
+            .filter(|p| tree.lines().any(|l| l.contains(&format!(":id[Str(\"st-prof-tokens-{p}\")]")) && l.contains(".text_color[Str(\"#123456\")]")))
+            .collect();
+        assert_eq!(chosen.len(), 1, "step {step}: one period is chosen: {tree}");
+        assert!(!tree.contains("NaN") && !tree.contains("999,999"), "step {step}: {tree}");
+        let now = (text_under(&tree, "st-prof-tokens-used").to_owned(), chosen[0].to_owned());
+        if seen.last() != Some(&now) {
+            seen.push(now);
+        }
+    }
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
+    let want: Vec<(String, String)> = [("1,500", "today"), ("3,500", "week"), ("8,560", "month"), ("108,580", "all"), ("1,500", "today")]
+        .into_iter()
+        .map(|(used, period)| (format!("text \"{used} tokens\""), period.to_owned()))
+        .collect();
+    assert_eq!(seen, want);
+}
+
+// Periods are local calendar days: one millisecond before and exactly at local midnight, today is the same day, the
+// next day (and 9999) is never counted, 7 and 30 days include today, and 1970 or malformed keys count only where valid.
+#[gpui::test]
+fn settings_profile_tokens_card_periods_at_local_midnight_with_far_and_malformed_dates(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let record = r#"{"version":1,"days":{
+        "1970-01-01":{"tokens":1000000},
+        "2026-02-06":{"tokens":100000},
+        "2026-02-07":{"tokens":10000},
+        "2026-03-01":{"tokens":1000},
+        "2026-03-02":{"tokens":100},
+        "2026-03-08":{"tokens":10},
+        "2026-03-09":{"tokens":20000000},
+        "9999-12-31":{"tokens":300000000},
+        "2026-3-8":{"tokens":5000000},
+        "20260308":{"tokens":5000000},
+        "not-a-date":{"tokens":5000000}}}"#;
+    for clock in ["23, 59, 59, 999", "0, 0, 0, 0"] {
+        for (period, used) in [("today", "10"), ("week", "110"), ("month", "11,110"), ("all", "1,111,110")] {
+            let setup = format!(
+                "const Real = Date; const now = new Real(2026, 2, 8, {clock}).getTime(); \
+                 globalThis.Date = class extends Real {{ constructor(...a) {{ if (a.length) super(...a); else super(now); }} static now() {{ return now; }} }}; \
+                 this.tokenPeriod = '{period}';"
+            );
+            let tree = describe_graph(cx, &staged, Some(record), &setup);
+            assert_eq!(text_under(&tree, "st-prof-tokens-used"), format!("text \"{used} tokens\""), "{clock} {period}: {tree}");
+        }
+    }
+}
+
+// The estimate's boundaries: exactly a cent, half a cent, nothing, a billion dollars, thousands, and a cost that
+// rounds up into the next dollar.
+#[gpui::test]
+fn settings_profile_tokens_card_cost_at_a_cent_half_a_cent_zero_and_huge(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (cost, want) in [("0.01", "$0.01"), ("0.005", "<$0.01"), ("0.0099", "<$0.01"), ("0", "$0.00"), ("1e9", "$1,000,000,000.00"), ("1234.5", "$1,234.50"), ("0.999", "$1.00"), ("1.999", "$2.00")] {
+        let record = format!(r#"{{"version":1,"days":{{"2020-01-01":{{"tokens":1,"cost_usd":{cost}}}}}}}"#);
+        let tree = describe_graph(cx, &staged, Some(&record), "this.tokenPeriod = 'all';");
+        assert_eq!(text_under(&tree, "st-prof-tokens-cost"), format!("text {want:?}"), "{cost}: {tree}");
+    }
+}
+
+// Saved % is saved over saved plus used, rounded: a third, half a percent, 99.95 % and saved above used.
+#[gpui::test]
+fn settings_profile_tokens_card_saved_percent_rounds_and_saved_may_exceed_used(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (days, saved) in [
+        ("[[0, { tokens: 2000, saved: 1000 }]]", "1,000 tokens (~$0.00) \u{b7} 33%"),
+        ("[[0, { tokens: 199000, saved: 1000 }]]", "1,000 tokens (~$0.00) \u{b7} 1%"),
+        ("[[0, { tokens: 1, saved: 1999 }]]", "1,999 tokens (~$0.01) \u{b7} 100%"),
+        ("[[0, { tokens: 1000, saved: 3000 }]]", "3,000 tokens (~$0.01) \u{b7} 75%"),
+    ] {
+        let tree = describe_tokens(cx, &staged, days, "today");
+        assert_eq!(text_under(&tree, "st-prof-tokens-saved"), format!("text {saved:?}"), "{days}: {tree}");
+    }
+}
+
+// Used is the days' own tokens, never the sum of the agent rows; each row is that agent's own count; a day with only
+// tokens saved shows 0 used and no agent rows.
+#[gpui::test]
+fn settings_profile_tokens_card_used_is_the_day_tokens_even_when_agents_add_up_differently(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tree = describe_tokens(cx, &staged, "[[0, { tokens: 100, by_agent: { claude: 70, codex: 500 } }], [1, { saved: 400 }]]", "week");
+    assert_eq!(text_under(&tree, "st-prof-tokens-used"), "text \"100 tokens\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-agent-claude"), "text \"70\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-agent-codex"), "text \"500\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-saved"), "text \"400 tokens (~$0.00) \u{b7} 80%\"", "{tree}");
+    let tree = describe_tokens(cx, &staged, "[[0, { saved: 400 }]]", "today");
+    assert_eq!(text_under(&tree, "st-prof-tokens-used"), "text \"0 tokens\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-cost"), "text \"$0.00\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-saved"), "text \"400 tokens (~$0.00) \u{b7} 100%\"", "{tree}");
+    assert!(!tree.contains("st-prof-tokens-agent-") && !tree.contains("\"\u{2014}\""), "{tree}");
+}
+
+// Agent names come from the file as they are: empty, very long, HTML-like, right-to-left and emoji names are drawn as
+// plain text, in full, sorted by count.
+#[gpui::test]
+fn settings_profile_tokens_card_draws_odd_agent_names_as_plain_text_sorted_by_count(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let long = "x".repeat(300);
+    let days = format!(
+        "[[0, {{ tokens: 100, by_agent: {{ claude: 70, codex: 500, '': 3, '<b>bold</b>': 4, '\u{645}\u{631}\u{62d}\u{628}\u{627}': 5, '\u{1f916} bot': 6, '{long}': 7 }} }}]]"
+    );
+    let tree = describe_tokens(cx, &staged, &days, "today");
+    let rows = [
+        ("codex", "500", "Codex".to_owned()),
+        ("claude", "70", "Claude Code".to_owned()),
+        (long.as_str(), "7", long.clone()),
+        ("\u{1f916} bot", "6", "\u{1f916} bot".to_owned()),
+        ("\u{645}\u{631}\u{62d}\u{628}\u{627}", "5", "\u{645}\u{631}\u{62d}\u{628}\u{627}".to_owned()),
+        ("<b>bold</b>", "4", "<b>bold</b>".to_owned()),
+        ("", "3", String::new()),
+    ];
+    let mut last = 0;
+    for (name, count, label) in rows {
+        let id = format!("st-prof-tokens-agent-{name}");
+        assert_eq!(text_under(&tree, &id), format!("text {count:?}"), "{id:?}: {tree}");
+        let at = tree.find(&format!(":id[Str({id:?})]")).unwrap();
+        assert!(at > last, "{id:?} is sorted by count: {tree}");
+        last = at;
+        assert!(label.is_empty() || tree.contains(&format!("text {label:?}")), "{label:?}: {tree}");
+    }
+    assert_eq!(text_under(&tree, "st-prof-tokens-used"), "text \"100 tokens\"", "{tree}");
+    assert!(!tree.contains("NaN") && !tree.contains("undefined"), "{tree}");
+}
+
+// An agent named like an Object method is counted like any other name, not added to the inherited function.
+#[gpui::test]
+fn settings_profile_tokens_card_counts_agents_named_like_object_methods(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tree = describe_tokens(cx, &staged, "[[0, { tokens: 20, by_agent: { constructor: 8, toString: 9, claude: 3 } }]]", "today");
+    assert_eq!(text_under(&tree, "st-prof-tokens-agent-toString"), "text \"9\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-agent-constructor"), "text \"8\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-agent-claude"), "text \"3\"", "{tree}");
+    assert!(!tree.contains("native code") && !tree.contains("NaN"), "{tree}");
+}
+
+// Token counts at and above Number.MAX_SAFE_INTEGER are written out with separators, never in e+ notation; an
+// overflowing number in the file (1e400) counts as 0.
+#[gpui::test]
+fn settings_profile_tokens_card_writes_huge_counts_in_full_without_exponents(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let record = r#"{"version":1,"days":{
+        "2020-01-01":{"tokens":9007199254740991,"by_agent":{"claude":9007199254740991}},
+        "2020-01-02":{"tokens":9007199254740991},
+        "2020-01-03":{"tokens":1e400,"saved":1e400,"cost_usd":1e400,"by_agent":{"codex":1e400}}}}"#;
+    let tree = describe_graph(cx, &staged, Some(record), "this.tokenPeriod = 'all';");
+    assert_eq!(text_under(&tree, "st-prof-tokens-used"), "text \"18,014,398,509,481,982 tokens\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-agent-claude"), "text \"9,007,199,254,740,991\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-cost"), "text \"$0.00\"", "{tree}");
+    assert!(!tree.contains("st-prof-tokens-agent-codex") && !tree.contains("Infinity") && !tree.contains("NaN"), "{tree}");
+    let record = r#"{"version":1,"days":{"2020-01-01":{"tokens":1e22,"saved":1e22,"by_agent":{"claude":1e22}}}}"#;
+    let tree = describe_graph(cx, &staged, Some(record), "this.tokenPeriod = 'all';");
+    let card = tokens_card_lines(&tree).join("\n");
+    assert!(!card.contains("e+") && !card.contains("NaN"), "{card}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-used"), "text \"10,000,000,000,000,000,000,000 tokens\"", "{tree}");
+}
+
+// More than two years of days: every period still sums right and the card stays a couple of dozen elements.
+#[gpui::test]
+fn settings_profile_tokens_card_sums_eight_hundred_days_and_stays_small(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let days = "Array.from({ length: 800 }, (_, n) => [n, { tokens: 1000, by_agent: { claude: 1000 }, cost_usd: 0.25, saved: 10 }])";
+    for (period, used, cost) in [("today", "1,000", "$0.25"), ("week", "7,000", "$1.75"), ("month", "30,000", "$7.50"), ("all", "800,000", "$200.00")] {
+        let tree = describe_tokens(cx, &staged, days, period);
+        assert_eq!(text_under(&tree, "st-prof-tokens-used"), format!("text \"{used} tokens\""), "{period}: {tree}");
+        assert_eq!(text_under(&tree, "st-prof-tokens-cost"), format!("text {cost:?}"), "{period}: {tree}");
+        assert_eq!(tree.matches("st-prof-tokens-agent-").count(), 1, "{period}: {tree}");
+        let elements = tokens_card_lines(&tree).iter().filter(|l| !l.trim_start().starts_with("text ")).count();
+        assert!(elements <= 30, "{period}: the card is {elements} elements: {tree}");
+    }
+}
+
+// The card takes every colour from the theme, in a dark and a light one: the chosen period on the raised colour in the
+// foreground colour, the others muted, labels dim.
+#[gpui::test]
+fn settings_profile_tokens_card_uses_only_theme_colours_in_dark_and_light(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let scenario = "import { ActivityGraph } from './frame/settings/activity.js';\nexport default class Scenario extends ActivityGraph { init(props, cx) { super.init({ shown: true }, cx); } }\n";
+    let record = full_record();
+    for (label, foreground, dim, muted, raised, hover) in
+        [("dark", "#ededed", "#8a8a8a", "#9b9b9b", "#222222", "#2a2a2a"), ("light", "#1c1c1c", "#6b6b6b", "#5a5a5a", "#eeeeee", "#e5e5e5")]
+    {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        for (key, colour) in [("foreground", foreground), ("dim", dim), ("muted", muted), ("raised", raised), ("hover", hover)] {
+            values.get_mut("theme").unwrap()[key] = json!(colour);
+        }
+        let tree = describe_activity(cx, &staged, values, Some(&record), Some(scenario), None);
+        let card = tokens_card_lines(&tree);
+        let theme = [foreground, dim, muted, raised, hover];
+        for line in &card {
+            for part in line.split("Str(\"#").skip(1) {
+                let colour = format!("#{}", part.split('"').next().unwrap());
+                assert!(theme.contains(&colour.as_str()), "{label}: {colour} is not a theme colour: {line}");
+            }
+        }
+        let has = |id: &str, style: &str| card.iter().any(|l| l.contains(&format!(":id[Str(\"{id}\")]")) && l.contains(style));
+        assert!(has("st-prof-tokens-today", &format!(".text_color[Str(\"{foreground}\")]")) && has("st-prof-tokens-today", &format!(".bg[Str(\"{raised}\")]")), "{label}: {tree}");
+        assert!(has("st-prof-tokens-week", &format!(".text_color[Str(\"{muted}\")]")) && has("st-prof-tokens-used", &format!(".text_color[Str(\"{foreground}\")]")), "{label}: {tree}");
+        assert!(card.iter().any(|l| l.contains(&format!(".text_color[Str(\"{dim}\")]"))), "{label}: labels are dim: {tree}");
+    }
+}
