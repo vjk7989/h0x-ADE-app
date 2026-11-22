@@ -762,4 +762,212 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
+
+    #[test]
+    fn any_agent_name_round_trips_through_the_file_as_its_own_row() {
+        let dir = scratch("agent-names");
+        let long = "a".repeat(4096);
+        let names = ["", "unknown-agent", "クロード 🤖", "C:\\Users\\me\\agent \"x\"", "line\nbreak", long.as_str()];
+        let mut d = Day::default();
+        for (i, name) in names.iter().enumerate() {
+            d.add_usage(name, i as u64 + 1, 0.0);
+        }
+        write_merged(&dir, &[("2026-11-14".to_string(), d.clone())].into(), "2026-11-14").unwrap();
+        let got = &read(&dir)["2026-11-14"];
+        assert_eq!(got, &d);
+        for (i, name) in names.iter().enumerate() {
+            assert_eq!(got.by_agent.get(*name), Some(&(i as u64 + 1)), "{name:?}");
+        }
+        assert_eq!(got.tokens, 21, "every row also counts toward the day");
+        let aside = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("activity.damaged-")).count();
+        assert_eq!(aside, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn zero_token_usage_adds_nothing_and_merged_agent_rows_and_saved_saturate() {
+        let mut d = day(1, 1, 5);
+        d.add_usage("claude", 0, 0.0);
+        assert_eq!((d.tokens, d.cost_usd, d.by_agent.values().sum::<u64>()), (5, 0.0, 0));
+        d.add_usage("claude", u64::MAX, 0.0);
+        d.add_usage("codex", 5, 0.0);
+        assert_eq!((d.tokens, d.by_agent["claude"], d.by_agent["codex"]), (u64::MAX, u64::MAX, 5));
+        let mut days: BTreeMap<String, Day> = [("2026-11-14".to_string(), Day { saved: u64::MAX - 1, ..d.clone() })].into();
+        let mut more = Day { saved: 9, ..Day::default() };
+        more.add_usage("claude", 3, 0.0);
+        more.add_usage("codex", u64::MAX, 0.0);
+        merge(&mut days, &[("2026-11-14".to_string(), more)].into());
+        let m = &days["2026-11-14"];
+        assert_eq!((m.saved, m.tokens, m.by_agent["claude"], m.by_agent["codex"]), (u64::MAX, u64::MAX, u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn a_huge_or_out_of_range_cost_in_the_file_never_loses_the_new_numbers() {
+        // Largest finite costs: kept, and an overflowing sum is never written as damage.
+        for (i, (file_cost, add)) in [(1e300, 0.25), (f64::MAX, f64::MAX)].into_iter().enumerate() {
+            let dir = scratch(&format!("huge-cost-{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let text = format!(r#"{{"version":1,"days":{{"2026-11-14":{{"tokens":4,"cost_usd":{file_cost:e},"by_agent":{{"claude":4}}}}}}}}"#);
+            std::fs::write(dir.join("activity.json"), text).unwrap();
+            let mut delta = Day::default();
+            delta.add_usage("claude", 1, add);
+            write_merged(&dir, &[("2026-11-14".to_string(), delta)].into(), "2026-11-14").unwrap();
+            let got = read(&dir)["2026-11-14"].clone();
+            assert_eq!((got.tokens, got.by_agent["claude"]), (5, 5), "{file_cost:e}");
+            assert!(got.cost_usd.is_finite() && got.cost_usd >= 0.0, "{file_cost:e}: {}", got.cost_usd);
+            if i == 0 {
+                assert_eq!(got.cost_usd, 1e300 + 0.25);
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        // Past f64, or not JSON at all (NaN, Infinity): the new numbers still land in a loadable file.
+        for (i, cost) in ["1e400", "-1e400", "NaN", "Infinity", "-Infinity"].into_iter().enumerate() {
+            let dir = scratch(&format!("bad-cost-{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("activity.json"), format!(r#"{{"version":1,"days":{{"2026-11-14":{{"seconds":2,"cost_usd":{cost}}}}}}}"#)).unwrap();
+            let mut delta = day(3, 1, 0);
+            delta.add_usage("codex", 6, 0.5);
+            write_merged(&dir, &[("2026-11-14".to_string(), delta)].into(), "2026-11-14").unwrap();
+            let got = read(&dir)["2026-11-14"].clone();
+            assert!(got.seconds >= 3 && got.sessions == 1 && got.by_agent["codex"] == 6, "{cost}: {got:?}");
+            assert!(got.cost_usd.is_finite() && got.cost_usd >= 0.5, "{cost}: {got:?}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn usage_across_a_year_end_and_a_clock_moved_back_stays_on_the_latest_day() {
+        let mut r = Recorder::new();
+        r.day("2026-12-31").add_usage("claude", 5, 0.5);
+        r.day("2027-01-01").add_usage("claude", 7, 0.25);
+        // Daylight saving ends just after midnight: the local date reads yesterday again.
+        r.day("2026-12-31").add_usage("codex", 2, 0.0);
+        assert_eq!(r.pending["2026-12-31"].by_agent, [("claude".to_string(), 5)].into());
+        assert_eq!(r.pending["2027-01-01"].by_agent, [("claude".to_string(), 7), ("codex".to_string(), 2)].into());
+        assert_eq!((r.pending["2026-12-31"].cost_usd, r.pending["2027-01-01"].cost_usd), (0.5, 0.25));
+        let dir = scratch("year-end-usage");
+        write_merged(&dir, &r.pending, "2027-01-01").unwrap();
+        assert_eq!(read(&dir), r.pending, "both days are inside the keep window");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_371_day_window_keeps_or_drops_a_day_with_all_its_new_fields() {
+        let today = "2027-01-02";
+        let now = day_number(today).unwrap();
+        let (kept, dropped) = (date_string((now - 371) * 86400, 0), date_string((now - 372) * 86400, 0));
+        let mut full = Day { saved: 42, ..day(1, 1, 0) };
+        full.add_usage("claude", 9, 1.5);
+        let dir = scratch("keep-new-fields");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = File { version: 1, days: [(kept.clone(), full.clone()), (dropped.clone(), full.clone())].into() };
+        std::fs::write(dir.join("activity.json"), serde_json::to_string(&file).unwrap()).unwrap();
+        write_merged(&dir, &[(today.to_string(), day(1, 0, 0))].into(), today).unwrap();
+        let days = read(&dir);
+        assert_eq!(days.get(&kept), Some(&full), "{kept} is the oldest day kept, with by_agent, cost_usd and saved");
+        assert!(!days.contains_key(&dropped), "{dropped} is dropped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_with_the_new_keys_loads_in_a_reader_that_knows_only_the_old_ones() {
+        #[derive(Deserialize, Default, PartialEq, Debug)]
+        #[serde(default)]
+        struct OldDay {
+            seconds: u64,
+            sessions: u64,
+            tokens: u64,
+        }
+        #[derive(Deserialize)]
+        struct OldFile {
+            version: u32,
+            days: BTreeMap<String, OldDay>,
+        }
+        let dir = scratch("old-reader");
+        let mut d = Day { saved: 3, ..day(4, 2, 0) };
+        d.add_usage("claude", 10, 0.75);
+        write_merged(&dir, &[("2026-11-14".to_string(), d)].into(), "2026-11-14").unwrap();
+        let old: OldFile = serde_json::from_str(&std::fs::read_to_string(dir.join("activity.json")).unwrap()).unwrap();
+        assert_eq!(old.version, 1);
+        assert_eq!(old.days["2026-11-14"], OldDay { seconds: 4, sessions: 2, tokens: 10 });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_saved_base_at_the_edges_of_u64_and_in_a_windows_style_folder() {
+        let dir = scratch("saved-edges").join("usage dir é 名");
+        let at = |tokens, outputs| Saved { tokens, outputs };
+        // Nothing stored and nothing saved: no change and no file.
+        assert_eq!(book_saved_in(&dir, at(0, 0)), at(0, 0));
+        assert!(!dir.join("saved.json").exists());
+        std::fs::create_dir_all(&dir).unwrap();
+        // The largest base there is: anything lower is a reset, booked as 0 and stored as the new base.
+        std::fs::write(dir.join("saved.json"), format!(r#"{{"tokens":{0},"outputs":{0}}}"#, u64::MAX)).unwrap();
+        assert_eq!(book_saved_in(&dir, at(5, 5)), at(0, 0));
+        assert_eq!(book_saved_in(&dir, at(6, 5)), at(1, 0));
+        // A lifetime counter that falls to zero and then climbs again counts only the climb.
+        assert_eq!(book_saved_in(&dir, at(0, 0)), at(0, 0));
+        assert_eq!(book_saved_in(&dir, at(u64::MAX, u64::MAX)), at(u64::MAX, u64::MAX));
+        // Beyond u64 is damage: nothing stored. A missing key is zero; an unknown key is ignored.
+        std::fs::write(dir.join("saved.json"), r#"{"tokens":18446744073709551616,"outputs":1}"#).unwrap();
+        assert_eq!(book_saved_in(&dir, at(8, 2)), at(8, 2));
+        std::fs::write(dir.join("saved.json"), r#"{"tokens":10,"bytes":99}"#).unwrap();
+        assert_eq!(book_saved_in(&dir, at(15, 2)), at(5, 2));
+        let kept: Saved = serde_json::from_str(&std::fs::read_to_string(dir.join("saved.json")).unwrap()).unwrap();
+        assert_eq!(kept, at(15, 2));
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn concurrent_usage_from_many_threads_loses_no_tokens() {
+        // The shared recorder: an agent name no other test uses keeps this row to this test.
+        const AGENT: &str = "concurrent-usage-test-agent";
+        let threads: Vec<_> = (0..8).map(|_| std::thread::spawn(|| (0..500).for_each(|_| add_usage(AGENT, 3, 0.0)))).collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let total: u64 = recorder().pending.values().filter_map(|d| d.by_agent.get(AGENT)).sum();
+        assert_eq!(total, 8 * 500 * 3);
+    }
+
+    #[test]
+    fn the_daily_saver_books_locally_with_sharing_off_and_ignores_an_old_core_or_bad_reply() {
+        const CHILD: &str = "H0X_TEST_ACTIVITY_OWN_HOME";
+        const NAME: &str = "the_daily_saver_books_locally_with_sharing_off_and_ignores_an_old_core_or_bad_reply";
+        if std::env::var_os(CHILD).is_none() {
+            // Runs again in a child process with its own app home: the saver writes `<home>/usage/saved.json`.
+            let home = std::env::temp_dir().join(format!("h0x-ade-activity-saver-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&home);
+            std::fs::create_dir_all(&home).unwrap();
+            let test = format!("activity::tests::{NAME}");
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test.as_str(), "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1")
+                .env("H0X_ADE_HOME", &home)
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&home);
+            let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && log.contains("1 passed"), "{log}");
+            return;
+        }
+        crate::analytics::set_sharing(false);
+        let base = crate::mods::app_dir().join("usage").join("saved.json");
+        let saved_today = || recorder().pending.values().map(|d| d.saved).sum::<u64>();
+        // An old core (no gate.stats) and answers that are not two whole numbers: nothing recorded.
+        crate::events::token_saver_daily(&Err(anyhow::anyhow!("unknown method")), true);
+        crate::events::token_saver_daily(&Ok(serde_json::json!({"tokens_saved": "300", "outputs": 4})), true);
+        crate::events::token_saver_daily(&Ok(serde_json::json!(null)), true);
+        assert!(!base.exists() && saved_today() == 0);
+        // Sharing is off: the event is dropped, the local record is not.
+        crate::events::token_saver_daily(&Ok(serde_json::json!({"tokens_saved": 300, "outputs": 4})), false);
+        assert_eq!(serde_json::from_str::<Saved>(&std::fs::read_to_string(&base).unwrap()).unwrap(), Saved { tokens: 300, outputs: 4 });
+        assert_eq!(saved_today(), 300);
+        crate::events::token_saver_daily(&Ok(serde_json::json!({"tokens_saved": 500, "outputs": 5})), true);
+        assert_eq!(saved_today(), 500);
+        // A reset counter adds nothing today and becomes the new base.
+        crate::events::token_saver_daily(&Ok(serde_json::json!({"tokens_saved": 20, "outputs": 1})), true);
+        assert_eq!(saved_today(), 500);
+        assert_eq!(serde_json::from_str::<Saved>(&std::fs::read_to_string(&base).unwrap()).unwrap(), Saved { tokens: 20, outputs: 1 });
+    }
 }
