@@ -463,11 +463,12 @@ fn content(state: State) -> Content {
     }
 }
 
-/// The footer's key hints for a state: (key, what it does); Tab always moves focus.
+/// What the consent-only form shows: one Continue button.
 fn content_only() -> Content {
     Content { status: None, primary: Some(CONTINUE), secondary: None, note: None, skip: false }
 }
 
+/// The footer's key hints for a state: (key, what it does); Tab always moves focus.
 fn hints(state: State) -> [(&'static str, &'static str); 2] {
     let first = match state {
         State::Idle => ("Enter", "sign in"),
@@ -846,11 +847,6 @@ fn open_with(url: &str, open: impl FnOnce(&crate::links::Target)) {
     open(&crate::links::Target::Url(url.to_string()))
 }
 
-/// The look of a button that cannot be used yet.
-fn disabled(button: Stateful<Div>, off: bool) -> Stateful<Div> {
-    button.when(off, |d| d.opacity(0.4).cursor_default().hover(|d| d))
-}
-
 /// The consent line: a box that ticks, "I agree to the", then the Terms and Privacy Policy links.
 fn consent_row(agreed: bool, focus: &FocusHandle, s: f32, light: bool, toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Div {
     let text = move || div().text_size(z(12.5, s)).line_height(z(18.0, s)).text_color(c("muted"));
@@ -910,7 +906,8 @@ fn consent_row(agreed: bool, focus: &FocusHandle, s: f32, light: bool, toggle: i
 
 /// The main action: a solid button with a lit top edge and a soft lift, and the focus ring while it has focus
 /// (not `focus_visible`: the ring must not hide after a mouse move).
-fn primary_button(id: &'static str, label: &'static str, s: f32) -> Stateful<Div> {
+/// `off`: it cannot be used yet (faded, no hover).
+fn primary_button(id: &'static str, label: &'static str, s: f32, off: bool) -> Stateful<Div> {
     let lift = BoxShadow::new(px(0.0), z(8.0, s), c("solid").opacity(0.7)).blur_radius(z(20.0, s)).spread_radius(z(-10.0, s));
     let mut focused = ring();
     focused.push(lift.clone());
@@ -932,7 +929,8 @@ fn primary_button(id: &'static str, label: &'static str, s: f32) -> Stateful<Div
         .cursor_pointer()
         .text_size(z(14.0, s))
         .font_weight(FontWeight::MEDIUM)
-        .hover(|d| d.opacity(0.92))
+        .when(off, |d| d.opacity(0.4).cursor_default())
+        .when(!off, |d| d.hover(|d| d.opacity(0.92)))
         .focus(move |mut d| {
             d.box_shadow = Some(focused);
             d
@@ -944,8 +942,8 @@ fn primary_button(id: &'static str, label: &'static str, s: f32) -> Stateful<Div
         .child(svg().data(OPEN_ICON).size(z(15.0, s)).flex_none().text_color(c("solid_foreground")))
 }
 
-/// Cancel and Skip: a quiet glass button.
-fn quiet_button(id: &'static str, label: &'static str, s: f32, light: bool) -> Stateful<Div> {
+/// Cancel and Skip: a quiet glass button. `off`: it cannot be used yet (faded, no hover).
+fn quiet_button(id: &'static str, label: &'static str, s: f32, light: bool, off: bool) -> Stateful<Div> {
     let ring = ring();
     div()
         .id(id)
@@ -963,7 +961,8 @@ fn quiet_button(id: &'static str, label: &'static str, s: f32, light: bool) -> S
         .cursor_pointer()
         .text_size(z(13.0, s))
         .font_weight(FontWeight::MEDIUM)
-        .hover(move |d| d.bg(veil(light, 0.10, 0.07)))
+        .when(off, |d| d.opacity(0.4).cursor_default())
+        .when(!off, |d| d.hover(move |d| d.bg(veil(light, 0.10, 0.07))))
         .focus(move |mut d| {
             d.box_shadow = Some(ring);
             d
@@ -1114,9 +1113,9 @@ impl Render for SignIn {
                     .when(self.ask && view.secondary.is_none(), |d| d.child(consent_row(self.agreed, &self.consent_focus, s, light, cx.listener(|this, _, _, cx| this.toggle_consent(cx)))))
                     .when_some(view.primary, |d, label| {
                         let id = if idle { "signin" } else { "retry" };
-                        d.child(disabled(primary_button(id, label, s), off).track_focus(&self.primary_focus).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
+                        d.child(primary_button(id, label, s, off).track_focus(&self.primary_focus).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
                     })
-                    .when_some(view.secondary, |d, label| d.child(quiet_button("cancel", label, s, light).on_click(cx.listener(|this, _, w, cx| this.cancel(w, cx)))))
+                    .when_some(view.secondary, |d, label| d.child(quiet_button("cancel", label, s, light, false).on_click(cx.listener(|this, _, w, cx| this.cancel(w, cx)))))
                     .when_some(view.note, |d, note| {
                         let row = div().flex().text_size(z(12.5, s)).line_height(z(18.0, s)).text_color(c("muted"));
                         d.child(match note.split_once(TEAM_DOMAIN) {
@@ -1143,7 +1142,7 @@ impl Render for SignIn {
                                 .flex()
                                 .items_center()
                                 .gap(z(14.0, s))
-                                .child(disabled(quiet_button("signin-skip", SKIP, s, light), off).track_focus(&self.skip_focus).on_click(cx.listener(|this, _, w, cx| this.skip(w, cx))))
+                                .child(quiet_button("signin-skip", SKIP, s, light, off).track_focus(&self.skip_focus).on_click(cx.listener(|this, _, w, cx| this.skip(w, cx))))
                                 .child(div().id("signin-skip-note").text_size(z(12.5, s)).line_height(z(18.0, s)).text_color(c("muted")).children(SKIP_NOTE.map(|line| div().child(line)))),
                         ),
                 )
