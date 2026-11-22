@@ -1535,7 +1535,9 @@ mod tests {
         let (w, h) = (936.0, 684.0);
         assert_eq!(layout(w, h).mode, super::Mode::Regular);
         let [hero, mark, a, _, c] = tile_rects(w, h, 1.0);
-        assert_eq!(hero, (76.0, (h - GRID_H) / 2.0, 664.0, (h - GRID_H) / 2.0 + 312.0));
+        let left = (w - GRID_W) / 2.0;
+        assert_eq!(hero, (left, (h - GRID_H) / 2.0, left + 588.0, (h - GRID_H) / 2.0 + 312.0));
+        assert!((hero.0 - (w - mark.2)).abs() < 0.5, "centred: the left margin {} equals the right margin {}", hero.0, w - mark.2);
         assert!((hero.1 - (h - c.3)).abs() < 0.5, "centred: the top margin {} equals the bottom margin {}", hero.1, h - c.3);
         assert!(hero.0 >= 24.0 && w - mark.2 >= 24.0, "margins of 24 px or more at the sides: {} / {}", hero.0, w - mark.2);
         assert_eq!(w - GRID_W, 48.0);
