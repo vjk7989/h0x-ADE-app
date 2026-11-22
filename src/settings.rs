@@ -1433,6 +1433,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn token_saver_reads_on_for_every_odd_value_and_only_a_real_false_survives_load_and_save() {
+        // Numbers, a nested object, a nested false and keys in another case are not a real false: on, and not written back.
+        for text in [r#"{"token_saver":1}"#, r#"{"token_saver":-0.0}"#, r#"{"token_saver":{"token_saver":false}}"#, r#"{"token_saver":[false]}"#, r#"{"Token_Saver":false}"#, r#"{"TOKEN_SAVER":false,"zoom":1.5}"#, r#"{"token_saver ":false}"#] {
+            let person = parse_person(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
+            assert!(person.token_saver, "{text:?}");
+            let back = serde_json::to_value(&person).unwrap();
+            assert!(back.get("token_saver").is_none(), "{text:?}: {back}");
+        }
+        // A duplicate key is refused as a whole (serde), never read as one of the two values.
+        for dup in [r#"{"token_saver":false,"token_saver":true}"#, r#"{"token_saver":true,"token_saver":false}"#] {
+            assert!(parse_person(dup).is_err(), "{dup:?}");
+        }
+        // A very large file (a 1 MB value under a key the app does not know) still reads the false.
+        let big = format!(r#"{{"notes":"{}","token_saver":false,"zoom":1.5}}"#, "x".repeat(1 << 20));
+        let person = parse_person(&big).unwrap();
+        assert!(!person.token_saver && person.zoom == 1.5);
+        // The file load_person writes when there is none has no token_saver key and reads back on; loading a file without the key adds none.
+        let fresh = serde_json::to_string_pretty(&Person::default()).unwrap() + "\n";
+        assert!(!fresh.contains("token_saver"), "{fresh}");
+        assert!(parse_person(&fresh).unwrap().token_saver);
+        for text in ["{}", "\u{feff}{}", r#"{"zoom":1.5}"#, "{\r\n}\r\n"] {
+            let loaded = parse_person(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
+            assert!(loaded.token_saver && serde_json::to_value(&loaded).unwrap().get("token_saver").is_none(), "{text:?}");
+        }
+        // Off then on, again and again: off is exactly false, on leaves no key, and each state survives a save and a load.
+        let mut person = Person::default();
+        for round in 0..5 {
+            person.token_saver = false;
+            let saved = serde_json::to_string_pretty(&person).unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&saved).unwrap()["token_saver"], serde_json::json!(false), "{round}");
+            person = parse_person(&saved).unwrap();
+            assert!(!person.token_saver, "{round}");
+            person.token_saver = true;
+            let saved = serde_json::to_string_pretty(&person).unwrap();
+            assert!(!saved.contains("token_saver"), "{round}: {saved}");
+            person = parse_person(&saved).unwrap();
+            assert!(person.token_saver, "{round}");
+        }
+        assert_eq!(serde_json::to_value(&person).unwrap(), serde_json::to_value(Person::default()).unwrap());
+        // Settings follow the person: on by default with Smart routing off; an explicit false is off however Smart routing is set.
+        let look = crate::layout::Look::default();
+        let default = Settings::compose(&Person::default(), &look, false);
+        assert!(default.token_saver && !default.smart_routing);
+        let inert = Settings::compose(&parse_person(r#"{"token_saver":false,"smart_routing":true}"#).unwrap(), &look, true);
+        assert!(!inert.token_saver && inert.smart_routing);
+    }
+
     /// The guide's stated defaults are what an empty settings.json gives, and
     /// every key it documents is one settings.json keeps.
     #[test]

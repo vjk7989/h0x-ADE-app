@@ -5757,6 +5757,45 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_with_the_default_settings_gets_the_token_saver_here_and_on_another_machine() {
+        // Nothing set on this thread: the default settings, so Token Saver is on.
+        assert!(crate::settings::get().token_saver);
+        for program in [words(&["claude"]), words(&[r"C:\Program Files\claude\claude.exe", "--resume"])] {
+            let hooked = crate::programs::with_token_saver(true, program.clone());
+            assert_ne!(hooked, program, "{program:?}");
+            let local = super::AppWindow::agent_argv(Some(program.clone()), None, None, None);
+            assert_eq!(local, Some(local_agent_argv(hooked.clone())), "{program:?}");
+            let remote = super::AppWindow::agent_argv(Some(program.clone()), Some(" "), Some("box"), None);
+            assert_eq!(remote, Some(crate::remote_shell::launch(hooked)), "{program:?}");
+        }
+        // settings.json as read from disk: no key (or a non-bool) is on; only an explicit false launches the bare program.
+        let look = crate::layout::Look::default();
+        for (text, on) in [("{}", true), (r#"{"token_saver":"false"}"#, true), (r#"{"token_saver":null}"#, true), (r#"{"token_saver":false}"#, false)] {
+            let person: crate::settings::Person = serde_json::from_str(text).unwrap();
+            let original = crate::settings::get();
+            crate::settings::set(crate::settings::Settings::compose(&person, &look, false));
+            let run = super::AppWindow::agent_argv(Some(words(&["claude"])), None, None, None);
+            crate::settings::set((*original).clone());
+            let want = if on { crate::programs::with_token_saver(true, words(&["claude"])) } else { words(&["claude"]) };
+            assert_eq!(run, Some(local_agent_argv(want)), "{text}");
+        }
+    }
+
+    #[test]
+    fn smart_routing_is_asked_with_token_saver_on_by_default_and_never_with_an_explicit_false() {
+        let look = crate::layout::Look::default();
+        for (text, asks) in [(r#"{"smart_routing":true}"#, true), (r#"{"smart_routing":true,"token_saver":true}"#, true), (r#"{"smart_routing":true,"token_saver":false}"#, false), ("{}", false)] {
+            let person: crate::settings::Person = serde_json::from_str(text).unwrap();
+            let original = crate::settings::get();
+            crate::settings::set(crate::settings::Settings::compose(&person, &look, false));
+            let mut called = false;
+            let route = super::AppWindow::route_for(|_| { called = true; Ok(haiku_route()) }, &words(&["claude"]), "/work", Some("go"), None);
+            crate::settings::set((*original).clone());
+            assert_eq!((called, route.is_some()), (asks, asks), "{text}");
+        }
+    }
+
+    #[test]
     fn token_saver_settings_never_reach_the_agent_labels() {
         let plain = words(&["claude", "fix it"]);
         let hooked = crate::programs::with_token_saver(true, plain.clone());

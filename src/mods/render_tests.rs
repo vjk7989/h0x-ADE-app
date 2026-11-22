@@ -3279,6 +3279,58 @@ fn settings_token_saver_switch_never_overwrites_a_settings_file_it_could_not_rea
     }
 }
 
+#[gpui::test]
+fn settings_token_saver_toggled_off_and_on_again_and_again_leaves_no_key_and_no_stray_false(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // settings.json, the file without Token Saver's own state, and whether the switch starts on.
+    // A key in another case is someone else's; a duplicate key reads as its last value (JSON.parse) and is written once.
+    for (file, base, starts_on) in [
+        (None, json!({}), true),
+        (Some("{}"), json!({}), true),
+        (Some("\u{feff}{\"zoom\": 1.25}"), json!({"zoom": 1.25}), true),
+        (Some(r#"{"token_saver": false, "zoom": 1.25}"#), json!({"zoom": 1.25}), false),
+        (Some(r#"{"token_saver": "false", "zoom": 1.25}"#), json!({"zoom": 1.25}), true),
+        (Some(r#"{"Token_Saver": false}"#), json!({"Token_Saver": false}), true),
+        (Some(r#"{"token_saver": false, "token_saver": true}"#), json!({}), true),
+        (Some(r#"{"token_saver": true, "token_saver": false}"#), json!({}), false),
+    ] {
+        let mut off = base.clone();
+        off["token_saver"] = json!(false);
+        let presses = 6;
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, TOKEN_SAVER_PRESS, presses);
+        let want: Vec<Value> = (0..presses).map(|i| if starts_on == (i % 2 == 0) { off.clone() } else { base.clone() }).collect();
+        assert_eq!(written(&calls, "/fixture/app/settings.json"), want, "{file:?}");
+        for (i, tree) in trees.iter().enumerate() {
+            let on = starts_on == (i % 2 == 0);
+            let (shown, hidden) = if on { ("st-token-saver-on", "st-token-saver-off") } else { ("st-token-saver-off", "st-token-saver-on") };
+            assert!(tree.contains(shown) && !tree.contains(hidden) && !tree.contains("can't be read"), "{file:?} after {i} presses: {tree}");
+        }
+        assert!(calls.borrow().writes.iter().all(|(_, text)| !text.contains("\"token_saver\": true")), "{file:?}: {:?}", calls.borrow().writes);
+        assert!(calls.borrow().cores.is_empty() && calls.borrow().unexpected.is_empty(), "{file:?}: {:?} {:?}", calls.borrow().cores, calls.borrow().unexpected);
+    }
+}
+
+#[gpui::test]
+fn settings_token_saver_clicked_twice_before_it_redraws_writes_one_state_only(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Both clicks act on the state they were drawn with: the same change twice, never on then off.
+    let double = "const toggle = this.toggle.bind(this); \
+        this.toggle = (t, id, on, onClick, asTag) => { if (id !== 'st-token-saver') return toggle(t, id, on, onClick, asTag); \
+        this.press = (e, cx) => { onClick(e, cx); onClick(e, cx); }; return toggle(t, on ? 'st-token-saver-on' : 'st-token-saver-off', on, onClick, asTag); };";
+    for (file, write, after) in [
+        (Some(r#"{"zoom": 1.25}"#), json!({"token_saver": false, "zoom": 1.25}), "st-token-saver-off"),
+        (Some(r#"{"token_saver": false, "zoom": 1.25}"#), json!({"zoom": 1.25}), "st-token-saver-on"),
+    ] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, double, 1);
+        let writes = written(&calls, "/fixture/app/settings.json");
+        assert!(!writes.is_empty() && writes.iter().all(|w| *w == write), "{file:?}: {writes:?}");
+        assert!(trees[1].contains(after) && !trees[1].contains("can't be read"), "{file:?}: {}", trees[1]);
+        assert!(calls.borrow().unexpected.is_empty(), "{file:?}: {:?}", calls.borrow().unexpected);
+    }
+}
+
 // Names the Smart routing switch by its state (st-smart-routing-on or -off) and keeps its click.
 const SMART_ROUTING_PRESS: &str = "const toggle = this.toggle.bind(this); \
     this.toggle = (t, id, on, onClick, asTag) => { if (id !== 'st-smart-routing') return toggle(t, id, on, onClick, asTag); \
