@@ -123,10 +123,10 @@ fn window_height(visible: Option<f32>) -> f32 {
     visible.filter(|h| !h.is_nan()).map_or(684.0, |h| (h - 80.0).clamp(460.0, 684.0))
 }
 
-/// The window width: 936, or less on a narrow screen (visible width minus 80, never below 620).
+/// The window width: 842, or less on a narrow screen (visible width minus 80, never below 620).
 /// From 900 wide and 680 high the screen shows the regular grid, below that the compact one.
 fn window_width(visible: Option<f32>) -> f32 {
-    visible.filter(|w| !w.is_nan()).map_or(936.0, |w| (w - 80.0).clamp(620.0, 936.0))
+    visible.filter(|w| !w.is_nan()).map_or(842.0, |w| (w - 80.0).clamp(620.0, 842.0))
 }
 
 /// The window's size on a screen with `visible` room (width, height).
@@ -148,17 +148,16 @@ fn window_options(bounds: WindowBounds) -> WindowOptions {
     }
 }
 
-/// The settings the main window will start with, as far as the theme goes: settings.json's
-/// appearance (the system's when it says so), then its light or dark theme, else darkmatter or paper.
-fn theme_settings(person: &crate::settings::Person, system_dark: bool) -> crate::settings::Settings {
-    crate::settings::Settings::compose(person, &crate::layout::Look::default(), system_dark)
+/// The settings this screen uses: always the light theme (settings.json's light one, else paper), whatever the appearance
+/// setting says. The main window loads its own settings later.
+fn theme_settings(person: &crate::settings::Person) -> crate::settings::Settings {
+    crate::settings::Settings::compose(&crate::settings::Person { appearance: crate::settings::Appearance::Light, ..person.clone() }, &crate::layout::Look::default(), false)
 }
 
 pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver<Request>, cx: &mut App) {
     // This screen opens before the main window loads settings and themes: until then the colors are the built-in graphite.
     let person = crate::settings::load_person().unwrap_or_default();
-    let system_dark = matches!(cx.window_appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark);
-    crate::settings::set(theme_settings(&person, system_dark));
+    crate::settings::set(theme_settings(&person));
     let visible = cx.primary_display().map(|d| (f32::from(d.visible_bounds().size.width), f32::from(d.visible_bounds().size.height)));
     // The operating system's reduced-motion setting, for the code texture.
     gpui_base::apply_system_reduce_motion(cx);
@@ -730,11 +729,11 @@ fn inset(radius: Pixels) -> Div {
 /// diagonal sheen, a bright hairline edge, a highlight along the top and a soft drop shadow (cook/SPEC-v2.md section 2).
 fn glass(id: &'static str, radius: f32, s: f32, light: bool) -> Stateful<Div> {
     let r = z(radius, s);
-    let mut tile = div().id(id).relative().rounded(r).border_1().border_color(white().opacity(if light { 0.55 } else { 0.18 }));
+    let mut tile = div().id(id).relative().rounded(r).border_1().border_color(if light { c("muted").opacity(0.30) } else { white().opacity(0.18) });
     tile.style().box_shadow = Some(if light {
         vec![
-            BoxShadow::new(px(0.0), z(24.0, s), black().opacity(0.14)).blur_radius(z(60.0, s)).spread_radius(z(-28.0, s)),
-            BoxShadow::new(px(0.0), z(1.0, s), black().opacity(0.06)).blur_radius(z(2.0, s)),
+            BoxShadow::new(px(0.0), z(24.0, s), black().opacity(0.22)).blur_radius(z(60.0, s)).spread_radius(z(-28.0, s)),
+            BoxShadow::new(px(0.0), z(1.0, s), black().opacity(0.10)).blur_radius(z(2.0, s)),
         ]
     } else {
         vec![
@@ -742,10 +741,10 @@ fn glass(id: &'static str, radius: f32, s: f32, light: bool) -> Stateful<Div> {
             BoxShadow::new(px(0.0), z(1.0, s), black().opacity(0.30)).blur_radius(z(2.0, s)),
         ]
     });
-    let (top, bottom) = if light { (0.30, 0.08) } else { (0.14, 0.03) };
+    let (top, bottom) = if light { (0.22, 0.05) } else { (0.14, 0.03) };
     // A shadow paints under the whole tile in GPUI, not only outside it: light tiles sit on the page's own
     // color first, so the shadow does not grey them (dark ones get their body from the raised fill).
-    tile.when(light, |d| d.child(inset(r).bg(c("background").opacity(0.38))))
+    tile.when(light, |d| d.child(inset(r).bg(c("muted").opacity(0.12))))
         .when(!light, |d| d.child(inset(r).bg(c("raised").opacity(0.25))))
         .child(inset(r).bg(linear_gradient(135.0, linear_color_stop(white().opacity(top), 0.0), linear_color_stop(white().opacity(bottom), 1.0))))
         .child(div().absolute().top(px(0.0)).left(r).right(r).h(px(1.0)).bg(white().opacity(if light { 1.0 } else { 0.45 })))
@@ -1174,12 +1173,12 @@ mod tests {
             let s = super::window_size(visible);
             (f32::from(s.width), f32::from(s.height))
         };
-        assert_eq!(dims(None), (936.0, 684.0));
-        assert_eq!(dims(Some((1920.0, 1040.0))), (936.0, 684.0));
-        assert_eq!(dims(Some((1366.0, 728.0))), (936.0, 648.0), "a short laptop screen");
+        assert_eq!(dims(None), (842.0, 684.0));
+        assert_eq!(dims(Some((1920.0, 1040.0))), (842.0, 684.0));
+        assert_eq!(dims(Some((1366.0, 728.0))), (842.0, 648.0), "a short laptop screen");
         assert_eq!(dims(Some((500.0, 500.0))), (620.0, 460.0));
-        // The window's own size picks the grid: regular on a normal screen, compact on a small one.
-        for (visible, regular) in [(None, true), (Some((1920.0, 1080.0)), true), (Some((1366.0, 768.0)), true), (Some((1024.0, 700.0)), false), (Some((979.0, 1000.0)), false), (Some((980.0, 1000.0)), true)] {
+        // At 842 wide the window is under the regular grid's 900: every screen gets the compact grid.
+        for (visible, regular) in [(None, false), (Some((1920.0, 1080.0)), false), (Some((1366.0, 768.0)), false), (Some((1024.0, 700.0)), false), (Some((979.0, 1000.0)), false), (Some((980.0, 1000.0)), false)] {
             let (w, h) = dims(visible);
             assert_eq!(super::layout(w, h).mode == super::Mode::Regular, regular, "{visible:?} gives {w}x{h}");
         }
@@ -1267,22 +1266,16 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_takes_the_theme_the_main_window_will_use() {
+    fn the_screen_is_light_in_every_appearance() {
         use crate::settings::{Appearance, Person, color, parse_hex, set};
-        let dark = |system_dark, appearance| {
-            set(super::theme_settings(&Person { appearance, ..Default::default() }, system_dark));
-            (color("accent"), color("background"))
-        };
-        let (accent, background) = dark(false, Appearance::Dark);
-        assert_eq!(accent, parse_hex("#e78a53").unwrap(), "a dark settings file: darkmatter's orange");
-        assert_eq!(background, parse_hex("#121113").unwrap());
-        let (_, background) = dark(true, Appearance::Light);
-        assert_eq!(background, parse_hex("#ffffff").unwrap(), "a light settings file: paper");
-        // The system's mode counts only when the person did not choose.
-        assert_eq!(dark(true, Appearance::System).1, parse_hex("#121113").unwrap());
-        assert_eq!(dark(false, Appearance::System).1, parse_hex("#ffffff").unwrap());
-        assert_eq!(super::theme_settings(&Person::default(), true).theme, "darkmatter");
-        assert_eq!(super::theme_settings(&Person::default(), false).theme, "paper");
+        // Light whatever the settings file or the system say; the dark theme is never used here.
+        for appearance in [Appearance::Dark, Appearance::Light, Appearance::System] {
+            set(super::theme_settings(&Person { appearance, ..Default::default() }));
+            assert_eq!(color("background"), parse_hex("#ffffff").unwrap(), "{appearance:?}: paper's white page");
+            assert!(super::light(), "{appearance:?}");
+        }
+        assert_eq!(super::theme_settings(&Person::default()).theme, "paper");
+        assert!(!super::theme_settings(&Person { appearance: Appearance::Dark, ..Default::default() }).dark);
     }
 
     #[test]
@@ -1513,20 +1506,20 @@ mod tests {
     }
 
     #[test]
-    fn the_window_is_936_wide_and_shrinks_on_a_narrow_screen_but_never_below_620() {
-        assert_eq!(window_width(None), 936.0);
-        assert_eq!(window_width(Some(1920.0)), 936.0);
-        assert_eq!(window_width(Some(1120.0)), 936.0);
-        assert_eq!(window_width(Some(1366.0)), 936.0);
-        assert_eq!(window_width(Some(1024.0)), 936.0);
-        assert_eq!(window_width(Some(1000.0)), 920.0);
+    fn the_window_is_842_wide_and_shrinks_on_a_narrow_screen_but_never_below_620() {
+        assert_eq!(window_width(None), 842.0);
+        assert_eq!(window_width(Some(1920.0)), 842.0);
+        assert_eq!(window_width(Some(1120.0)), 842.0);
+        assert_eq!(window_width(Some(1366.0)), 842.0);
+        assert_eq!(window_width(Some(1024.0)), 842.0);
+        assert_eq!(window_width(Some(900.0)), 820.0);
         assert_eq!(window_width(Some(700.0)), 620.0);
         assert_eq!(window_width(Some(0.0)), 620.0);
-        for (visible, want) in [(699.0, 620.0), (700.0, 620.0), (701.0, 621.0), (1015.0, 935.0), (1016.0, 936.0), (1017.0, 936.0), (1121.0, 936.0), (f32::MAX, 936.0), (f32::INFINITY, 936.0), (f32::NEG_INFINITY, 620.0), (f32::MIN, 620.0)] {
+        for (visible, want) in [(699.0, 620.0), (700.0, 620.0), (701.0, 621.0), (921.0, 841.0), (922.0, 842.0), (923.0, 842.0), (1121.0, 842.0), (f32::MAX, 842.0), (f32::INFINITY, 842.0), (f32::NEG_INFINITY, 620.0), (f32::MIN, 620.0)] {
             assert_eq!(window_width(Some(visible)), want, "{visible}");
         }
         let w = window_width(Some(f32::NAN));
-        assert!(w.is_finite() && (620.0..=936.0).contains(&w), "{w}");
+        assert!(w.is_finite() && (620.0..=842.0).contains(&w), "{w}");
     }
 
     #[test]
