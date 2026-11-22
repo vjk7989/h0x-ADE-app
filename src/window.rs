@@ -2510,10 +2510,13 @@ impl AppWindow {
 
     /// An agent with its first message, in a shell that stays when the agent exits
     /// (on another machine: that machine's shell).
-    fn agent_argv(argv: Option<Vec<String>>, task: Option<&str>, on: Option<&str>) -> Option<Vec<String>> {
+    fn agent_argv(argv: Option<Vec<String>>, task: Option<&str>, on: Option<&str>, route: Option<&crate::programs::Route>) -> Option<Vec<String>> {
         let task = task.map(str::trim).filter(|t| !t.is_empty());
         argv.filter(|a| !a.is_empty()).map(|cmd| {
             let mut cmd = crate::programs::with_token_saver(crate::settings::get().token_saver, cmd);
+            if let Some(route) = route {
+                cmd = crate::programs::with_routing(route, cmd);
+            }
             cmd.extend(task.map(str::to_owned));
             if on.is_some() {
                 return crate::remote_shell::launch(cmd);
@@ -2526,6 +2529,32 @@ impl AppWindow {
             // macOS terminal sessions load login profiles (including Homebrew's PATH).
             unix_agent_argv(sh, cmd, cfg!(target_os = "macos"))
         })
+    }
+
+    /// The core's routing for a task launch: only with Token Saver and Smart routing
+    /// both on. Any failure (error, timeout, a core without "route", bad JSON) is no routing.
+    /// A remote machine gets no folder (the local path means nothing there) and no code
+    /// map hint (the map is not on that machine). Only Claude launches ask, and the
+    /// answer is a JSON object. `ask` is a short synchronous call (300 ms), paid only by a
+    /// Claude launch with a task and both settings on.
+    fn route_for(ask: impl FnOnce(Value) -> anyhow::Result<Value>, argv: &[String], folder: &str, task: Option<&str>, on: Option<&str>) -> Option<crate::programs::Route> {
+        let settings = crate::settings::get();
+        if !(settings.token_saver && settings.smart_routing) || !crate::programs::starts_claude(argv) {
+            return None;
+        }
+        let prompt = task.map(str::trim).filter(|t| !t.is_empty())?;
+        let params = if on.is_some() || folder.trim().is_empty() { json!({ "prompt": prompt }) } else { json!({ "cwd": folder, "prompt": prompt }) };
+        let parsed = ask(params).and_then(|v| if v.is_object() { Ok(serde_json::from_value::<crate::programs::Route>(v)?) } else { Err(anyhow::anyhow!("route: reply is not an object")) });
+        match parsed {
+            Ok(mut route) => {
+                route.graft &= on.is_none();
+                Some(route)
+            }
+            Err(error) => {
+                tracing::debug!("smart routing skipped: {error:#}");
+                None
+            }
+        }
     }
 
     /// A space with its first tab and terminal, shown at once.
@@ -2541,7 +2570,8 @@ impl AppWindow {
         let (space, ctx, pane) = (self.model.fresh_id_on("sp", on), self.model.fresh_id_on("tb", on), self.model.fresh_id_on("p", on));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
         let program = argv.clone().unwrap_or_default();
-        let (addr, folder) = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), &program, folder, follow, &space, &ctx, on, size, window)?;
+        let route = Self::route_for(|p| self.core.call_timeout("route", p, std::time::Duration::from_millis(300)), argv.as_deref().unwrap_or_default(), &folder, task, on);
+        let (addr, folder) = self.spawn(Self::agent_argv(argv.clone(), task, on, route.as_ref()).or(argv), &program, folder, follow, &space, &ctx, on, size, window)?;
         let ctx_name = ctx_name.map(str::trim).unwrap_or_default();
         self.model.add_space(&space, name.trim(), &folder, Tab::new(&ctx, ctx_name, &pane, &addr));
         if let Some(p) = self.model.space_mut(&space) {
@@ -2562,7 +2592,8 @@ impl AppWindow {
         let (ctx, pane) = (self.model.fresh_id_on("tb", on.as_deref()), self.model.fresh_id_on("p", on.as_deref()));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
         let program = argv.clone().unwrap_or_default();
-        let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), &program, folder, follow, &space, &ctx, on.as_deref(), size, window)?;
+        let route = Self::route_for(|p| self.core.call_timeout("route", p, std::time::Duration::from_millis(300)), argv.as_deref().unwrap_or_default(), &folder, task, on.as_deref());
+        let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref(), route.as_ref()).or(argv), &program, folder, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.model.add_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr));
         self.model.active = Some(space.clone());
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
@@ -5659,11 +5690,11 @@ mod tests {
         // A task that mentions `--settings` is text, not the person's flag: the hook still goes in.
         let task = "fix the \"build\" for $USER's sake --settings {} `whoami`";
         let asked = format!("  {task}\n");
-        let run = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(words(&["claude", "--model", "opus"])), Some(asked.as_str()), None)).unwrap();
+        let run = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(words(&["claude", "--model", "opus"])), Some(asked.as_str()), None, None)).unwrap();
         assert_eq!(run, local_agent_argv(words(&["claude", "--settings", &hook[2], "--model", "opus", task])));
         assert_eq!(crate::programs::agent(&run).as_deref(), Some("claude"));
         // Off: the person's command and task, nothing more.
-        let run = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(words(&["claude", "--model", "opus"])), Some(asked.as_str()), None)).unwrap();
+        let run = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(words(&["claude", "--model", "opus"])), Some(asked.as_str()), None, None)).unwrap();
         assert_eq!(run, local_agent_argv(words(&["claude", "--model", "opus", task])));
     }
 
@@ -5672,20 +5703,20 @@ mod tests {
         let hook = crate::programs::with_token_saver(true, words(&["claude"]));
         let task = "say \"hi\" to $env:USERNAME's 'box'; $(rm -rf ~)";
         let want = words(&["claude", "--settings", &hook[2], task]);
-        let run = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(task), Some("box"))).unwrap();
+        let run = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(task), Some("box"), None)).unwrap();
         assert_eq!(run, crate::remote_shell::launch(want.clone()));
         assert_eq!(run[..4], crate::remote_shell::launch(Vec::new())[..], "the wrapper is the same");
         assert_eq!(run[4..], want[..]);
         assert_eq!(run[6], hook[2], "the JSON is one argument, untouched");
         assert_eq!(crate::programs::agent(&run).as_deref(), Some("claude"));
         // A blank task adds nothing after the hook.
-        let blank = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(" \n\t"), Some("box"))).unwrap();
+        let blank = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(" \n\t"), Some("box"), None)).unwrap();
         assert_eq!(blank[4..], hook[..]);
         // No `sh` there (Windows): its PowerShell starts the same words, quotes and `$` in the task included.
         let ps = super::AppWindow::powershell_argv(&run);
         assert_eq!(ps, words(&["powershell.exe", "-NoLogo", "-NoExit", "-Command", &crate::programs::powershell_line(&want)]));
         // Off: as before.
-        let off = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(task), Some("box"))).unwrap();
+        let off = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(task), Some("box"), None)).unwrap();
         assert_eq!(off, crate::remote_shell::launch(words(&["claude", task])));
     }
 
@@ -5699,24 +5730,24 @@ mod tests {
             cmd.extend(task.map(str::to_owned));
             for on in [None, Some("box")] {
                 let before = if on.is_some() { crate::remote_shell::launch(cmd.clone()) } else { local_agent_argv(cmd.clone()) };
-                let default = super::AppWindow::agent_argv(Some(argv.clone()), *task, on);
+                let default = super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None);
                 assert_eq!(default.as_ref(), Some(&before), "default {argv:?} {on:?}");
-                let off = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(argv.clone()), *task, on));
+                let off = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None));
                 assert_eq!(off.as_ref(), Some(&before), "off {argv:?} {on:?}");
             }
         }
         for (argv, task) in &others {
             for on in [None, Some("box")] {
-                let off = super::AppWindow::agent_argv(Some(argv.clone()), *task, on);
-                let run = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(argv.clone()), *task, on));
+                let off = super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None);
+                let run = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None));
                 assert_eq!(run, off, "on {argv:?} {on:?}");
             }
         }
         // No program or an empty one: nothing to start either way.
         for on in [false, true] {
             with_token_saver_setting(on, || {
-                assert_eq!(super::AppWindow::agent_argv(None, Some("task"), None), None);
-                assert_eq!(super::AppWindow::agent_argv(Some(Vec::new()), Some("task"), Some("box")), None);
+                assert_eq!(super::AppWindow::agent_argv(None, Some("task"), None, None), None);
+                assert_eq!(super::AppWindow::agent_argv(Some(Vec::new()), Some("task"), Some("box"), None), None);
             });
         }
     }
@@ -5734,8 +5765,234 @@ mod tests {
         assert_eq!(crate::programs::of(None, &hooked), crate::programs::of(None, &plain));
         // The shell around a hooked Claude still names Claude, here and on another machine.
         for on in [None, Some("box")] {
-            let run = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(plain.clone()), None, on)).unwrap();
+            let run = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(plain.clone()), None, on, None)).unwrap();
             assert_eq!(crate::programs::agent(&run).as_deref(), Some("claude"), "{on:?}");
+        }
+    }
+
+    fn with_routing_settings<T>(token_saver: bool, smart_routing: bool, f: impl FnOnce() -> T) -> T {
+        let original = crate::settings::get();
+        let mut settings = (*original).clone();
+        settings.token_saver = token_saver;
+        settings.smart_routing = smart_routing;
+        crate::settings::set(settings);
+        let out = f();
+        crate::settings::set((*original).clone());
+        out
+    }
+
+    fn haiku_route() -> serde_json::Value {
+        serde_json::json!({ "graft": true, "tools": ["Bash", "Read"], "model": "haiku" })
+    }
+
+    #[test]
+    fn smart_routing_applies_on_a_prompt_launch_with_both_settings_on() {
+        let mut asked = None;
+        let route = with_routing_settings(true, true, || {
+            super::AppWindow::route_for(|p| { asked = Some(p); Ok(haiku_route()) }, &words(&["claude"]), "/work/app", Some("  fix it \n"), None)
+        })
+        .expect("routed");
+        assert_eq!(asked, Some(serde_json::json!({ "cwd": "/work/app", "prompt": "fix it" })));
+        let plain = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some("fix it"), None, None)).unwrap();
+        let routed = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some("fix it"), None, Some(&route))).unwrap();
+        assert_ne!(routed, plain);
+        let hook = crate::programs::with_token_saver(true, words(&["claude"]));
+        let want = crate::programs::with_routing(&route, hook);
+        let mut cmd = want;
+        cmd.push("fix it".into());
+        assert_eq!(routed, local_agent_argv(cmd));
+    }
+
+    #[test]
+    fn smart_routing_is_not_asked_when_either_setting_is_off_or_there_is_no_prompt() {
+        for (saver, smart) in [(false, false), (true, false), (false, true)] {
+            let mut called = false;
+            let route = with_routing_settings(saver, smart, || super::AppWindow::route_for(|_| { called = true; Ok(haiku_route()) }, &words(&["claude"]), "/work", Some("go"), None));
+            assert!(route.is_none() && !called, "{saver} {smart}");
+        }
+        for task in [None, Some(""), Some(" \n\t")] {
+            let mut called = false;
+            let route = with_routing_settings(true, true, || super::AppWindow::route_for(|_| { called = true; Ok(haiku_route()) }, &words(&["claude"]), "/work", task, None));
+            assert!(route.is_none() && !called, "{task:?}");
+        }
+        // Interactive launch: argv is the Token Saver one.
+        let hook = crate::programs::with_token_saver(true, words(&["claude"]));
+        let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), None, None, None)).unwrap();
+        assert_eq!(run, local_agent_argv(hook));
+    }
+
+    #[test]
+    fn smart_routing_falls_back_to_plain_token_saver_on_any_failure() {
+        let failures: Vec<anyhow::Result<serde_json::Value>> = vec![
+            Err(anyhow::anyhow!("route: no reply from core")),
+            Err(anyhow::Error::new(crate::core_link::RpcError(serde_json::json!({ "code": -32601, "message": "method not found" })))),
+            Ok(serde_json::json!("not a route")),
+            Ok(serde_json::json!({ "tools": 3 })),
+        ];
+        for failure in failures {
+            let route = with_routing_settings(true, true, || super::AppWindow::route_for(|_| failure, &words(&["claude"]), "/work", Some("go"), None));
+            assert!(route.is_none());
+            let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some("go"), None, route.as_ref())).unwrap();
+            let mut want = crate::programs::with_token_saver(true, words(&["claude"]));
+            want.push("go".into());
+            assert_eq!(run, local_agent_argv(want));
+        }
+    }
+
+    #[test]
+    fn smart_routing_sends_no_folder_for_a_remote_machine_and_keeps_a_windows_folder_whole() {
+        let mut asked = None;
+        with_routing_settings(true, true, || super::AppWindow::route_for(|p| { asked = Some(p); Ok(haiku_route()) }, &words(&["claude"]), "/home/me", Some("go"), Some("box")));
+        assert_eq!(asked, Some(serde_json::json!({ "prompt": "go" })));
+        let folder = r"C:\Users\Jo Doe\My Project";
+        let mut asked = None;
+        with_routing_settings(true, true, || super::AppWindow::route_for(|p| { asked = Some(p); Ok(haiku_route()) }, &words(&["claude"]), folder, Some("go"), None));
+        assert_eq!(asked.unwrap()["cwd"], folder);
+        // Remote launch: the wrapper stays and the settings JSON stays one argument.
+        let route: crate::programs::Route = serde_json::from_value(haiku_route()).unwrap();
+        let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some("go"), Some("box"), Some(&route))).unwrap();
+        let mut want = crate::programs::with_routing(&route, crate::programs::with_token_saver(true, words(&["claude"])));
+        want.push("go".into());
+        assert_eq!(run, crate::remote_shell::launch(want.clone()));
+        assert_eq!(run[..4], crate::remote_shell::launch(Vec::new())[..]);
+        assert_eq!(run[4..].iter().filter(|a| *a == "--settings").count(), 1);
+    }
+
+    #[test]
+    fn smart_routing_is_not_asked_for_a_task_of_only_line_breaks_tabs_or_unicode_spaces() {
+        for task in ["\n", "\r\n\r\n", "\t\t", "\n\t\r\n \u{a0}\u{3000}"] {
+            let mut called = false;
+            let route = with_routing_settings(true, true, || super::AppWindow::route_for(|_| { called = true; Ok(haiku_route()) }, &words(&["claude"]), "/work", Some(task), None));
+            assert!(route.is_none() && !called, "{task:?}");
+            // No first message either: the plain Token Saver launch.
+            let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(task), None, None)).unwrap();
+            assert_eq!(run, local_agent_argv(crate::programs::with_token_saver(true, words(&["claude"]))), "{task:?}");
+        }
+    }
+
+    #[test]
+    fn smart_routing_sends_a_100_kb_task_whole_and_passes_it_as_one_argument() {
+        let task = format!("{}\nend", "x".repeat(100 * 1024));
+        let padded = format!("\n {task}\t\n");
+        let mut asked = None;
+        let route = with_routing_settings(true, true, || super::AppWindow::route_for(|p| { asked = Some(p); Ok(haiku_route()) }, &words(&["claude"]), "/work", Some(padded.as_str()), None)).expect("routed");
+        assert_eq!(asked.unwrap()["prompt"].as_str(), Some(task.as_str()), "trimmed, never cut");
+        for on in [None, Some("box")] {
+            let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(padded.as_str()), on, Some(&route))).unwrap();
+            let mut want = crate::programs::with_routing(&route, crate::programs::with_token_saver(true, words(&["claude"])));
+            want.push(task.clone());
+            let expected = if on.is_some() { crate::remote_shell::launch(want) } else { local_agent_argv(want) };
+            assert_eq!(run, expected, "{on:?}");
+        }
+    }
+
+    #[test]
+    fn smart_routing_on_a_remote_machine_keeps_quotes_dollars_backticks_and_newlines_through_the_wrapper_and_powershell() {
+        let task = "say \"hi\" to $USER's `box`;\n$(rm -rf ~) 'done' & del C:\\Users\\*";
+        let mut asked = None;
+        // The core asks for the code map even with no folder: it is dropped for another machine.
+        let route = with_routing_settings(true, true, || {
+            super::AppWindow::route_for(|p| { asked = Some(p); Ok(haiku_route()) }, &words(&["claude"]), r"C:\Users\Jo Doe\My Project", Some(task), Some("box"))
+        })
+        .expect("routed");
+        assert_eq!(asked, Some(serde_json::json!({ "prompt": task })), "no local folder for another machine");
+        assert!(!route.graft, "no code map hint for another machine");
+        let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(task), Some("box"), Some(&route))).unwrap();
+        let mut want = crate::programs::with_routing(&route, crate::programs::with_token_saver(true, words(&["claude"])));
+        want.push(task.into());
+        assert_eq!(run[..4], crate::remote_shell::launch(Vec::new())[..], "the wrapper is the same");
+        assert_eq!(run[4..], want[..]);
+        let cmd = &run[4..];
+        assert_eq!(cmd[..2], words(&["claude", "--settings"])[..]);
+        let settings: serde_json::Value = serde_json::from_str(&cmd[2]).expect("the settings JSON is one argument");
+        assert!(settings["hooks"]["PostToolUse"].is_array() && settings["hooks"]["SessionStart"].is_array());
+        assert_eq!(cmd[3..7], words(&["--tools", "Bash,Read", "--model", "haiku"])[..]);
+        assert!(!cmd.iter().any(|a| a == "--append-system-prompt"), "no map hint on another machine");
+        assert_eq!(cmd[7], task, "the task is last, untouched");
+        assert_eq!(cmd.len(), 8);
+        // No `sh` there (Windows): the same words through PowerShell.
+        let ps = super::AppWindow::powershell_argv(&run);
+        assert_eq!(ps, words(&["powershell.exe", "-NoLogo", "-NoExit", "-Command", &crate::programs::powershell_line(&want)]));
+    }
+
+    #[test]
+    fn smart_routing_with_no_tools_and_no_model_adds_no_flags_only_the_handoff_hook() {
+        let replies = [
+            serde_json::json!({ "graft": false, "tools": [], "model": null }),
+            serde_json::json!({}),
+            serde_json::json!({ "tools": [], "model": "sonnet", "reason": "unknown fields are ignored" }),
+        ];
+        for reply in replies {
+            let route = with_routing_settings(true, true, || super::AppWindow::route_for(|_| Ok(reply.clone()), &words(&["claude"]), "/work", Some("go"), None)).expect("an empty route is still a route");
+            let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some("go"), Some("box"), Some(&route))).unwrap();
+            let cmd = &run[4..];
+            assert_eq!(cmd.len(), 4, "{reply}: {cmd:?}");
+            assert_eq!((cmd[0].as_str(), cmd[1].as_str(), cmd[3].as_str()), ("claude", "--settings", "go"), "{reply}");
+            for flag in ["--tools", "--model", "--append-system-prompt"] {
+                assert!(!cmd.iter().any(|a| a == flag), "{reply}: {flag}");
+            }
+            let settings: serde_json::Value = serde_json::from_str(&cmd[2]).unwrap();
+            assert!(settings["hooks"]["PostToolUse"].is_array() && settings["hooks"]["SessionStart"].is_array(), "{reply}");
+        }
+    }
+
+    #[test]
+    fn smart_routing_treats_a_null_or_mistyped_reply_as_no_route() {
+        let replies = [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!(true),
+            serde_json::json!({ "graft": null }),
+            serde_json::json!({ "tools": ["Read", 1] }),
+            serde_json::json!({ "model": 5 }),
+        ];
+        for reply in replies {
+            let shown = reply.to_string();
+            let route = with_routing_settings(true, true, || super::AppWindow::route_for(|_| Ok(reply), &words(&["claude"]), "/work", Some("go"), None));
+            assert!(route.is_none(), "{shown}");
+        }
+    }
+
+    #[test]
+    fn smart_routing_is_asked_only_for_claude_and_omits_a_blank_folder() {
+        for argv in [words(&["codex"]), words(&["claude-code"]), Vec::new()] {
+            let mut called = false;
+            let route = with_routing_settings(true, true, || super::AppWindow::route_for(|_| { called = true; Ok(haiku_route()) }, &argv, "/work", Some("go"), None));
+            assert!(route.is_none() && !called, "{argv:?}");
+        }
+        for folder in ["", "  \t"] {
+            let mut asked = None;
+            with_routing_settings(true, true, || super::AppWindow::route_for(|p| { asked = Some(p); Ok(haiku_route()) }, &words(&["claude"]), folder, Some("go"), None));
+            assert_eq!(asked, Some(serde_json::json!({ "prompt": "go" })), "{folder:?}");
+        }
+    }
+
+    #[test]
+    fn smart_routing_keeps_the_persons_own_model_over_a_haiku_route() {
+        let route: crate::programs::Route = serde_json::from_value(haiku_route()).unwrap();
+        for own in [words(&["claude", "--model", "opus"]), words(&["claude", "--model=opus"]), words(&["claude", "--agent", "reviewer"])] {
+            let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(own.clone()), Some("go"), Some("box"), Some(&route))).unwrap();
+            let cmd = &run[4..];
+            assert!(!cmd.iter().any(|a| a == "haiku"), "{own:?}: {cmd:?}");
+            assert_eq!(cmd.iter().filter(|a| a.starts_with("--model")).count(), own.iter().filter(|a| a.starts_with("--model")).count(), "{own:?}");
+            assert!(cmd.iter().any(|a| a == "--tools"), "the rest of the route still applies: {own:?}");
+            assert_eq!(cmd[cmd.len() - own.len()..cmd.len() - 1], own[1..], "theirs, in order, before the task");
+            assert_eq!(cmd.last().map(String::as_str), Some("go"));
+            // Here too.
+            let local = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(own.clone()), Some("go"), None, Some(&route))).unwrap();
+            assert_eq!(local, local_agent_argv(cmd.to_vec()), "{own:?}");
+        }
+    }
+
+    #[test]
+    fn smart_routing_leaves_programs_other_than_claude_exactly_as_asked() {
+        let route: crate::programs::Route = serde_json::from_value(haiku_route()).unwrap();
+        for argv in [words(&["codex"]), words(&["claude-code"]), words(&["pwsh.exe"]), words(&[r"C:\Tools\codex.exe", "--full-auto"])] {
+            for on in [None, Some("box")] {
+                let plain = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(argv.clone()), Some("go"), on, None));
+                let routed = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(argv.clone()), Some("go"), on, Some(&route)));
+                assert_eq!(routed, plain, "{argv:?} {on:?}");
+            }
         }
     }
 

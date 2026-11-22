@@ -257,10 +257,77 @@ const TOKEN_SAVER_SETTINGS: &str = r#"{"hooks":{"PostToolUse":[{"matcher":"^(Bas
 /// else, and a Claude that already has `--settings` (the person's choice wins),
 /// stays exactly as asked.
 pub fn with_token_saver(on: bool, mut argv: Vec<String>) -> Vec<String> {
-    let claude = argv.first().is_some_and(|a| base(a).eq_ignore_ascii_case("claude")) && agent(&argv).as_deref() == Some("claude");
-    if on && claude && !argv.iter().any(|a| a == "--settings" || a.starts_with("--settings=")) {
+    if on && starts_claude(&argv) && !has_settings(&argv) {
         argv.splice(1..1, ["--settings".to_owned(), TOKEN_SAVER_SETTINGS.to_owned()]);
     }
+    argv
+}
+
+pub(crate) fn starts_claude(argv: &[String]) -> bool {
+    argv.first().is_some_and(|a| base(a).eq_ignore_ascii_case("claude")) && agent(argv).as_deref() == Some("claude")
+}
+
+fn has_settings(argv: &[String]) -> bool {
+    argv.iter().any(|a| a == "--settings" || a.starts_with("--settings="))
+}
+
+/// The core "route" output for a session: which tools it needs, whether the code
+/// map helps, and a cheaper model for read-only work. Other fields are ignored.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Route {
+    pub graft: bool,
+    pub tools: Vec<String>,
+    pub model: Option<String>,
+}
+
+/// Tells the agent about the code map, which the core binary serves.
+const MAP_HINT: &str = r#"Code map: `"$H0X_CORE_EXE" map` (Bash), use before reading code.
+- `"$H0X_CORE_EXE" map callers <sym>`: callers with file:line and enclosing fn
+- `"$H0X_CORE_EXE" map grep <word>`: hits by enclosing symbol
+Then Read only the needed lines (offset/limit)."#;
+
+/// `claude`'s hook that hands the previous session's work to a cleared one.
+const HANDOFF_COMMAND: &str = "\"$H0X_CORE_EXE\" handoff";
+
+/// Whether the person already gave a flag, as `--flag value` or `--flag=value`.
+fn gave(argv: &[String], flags: &[&str]) -> bool {
+    argv.iter().any(|a| flags.iter().any(|f| a == f || a.strip_prefix(f).is_some_and(|r| r.starts_with('='))))
+}
+
+/// `argv` for a Claude Code terminal, with the session's `route` applied after
+/// `with_token_saver`: `--tools` (never `--allowedTools`: permission prompts stay),
+/// `--model haiku`, the code map hint, and a `SessionStart` (`clear`) handoff hook
+/// merged into Token Saver's inline `--settings`. A flag the person already gave
+/// is left alone; so are hooks when they gave their own `--settings`. Anything
+/// that is not `claude` stays exactly as asked.
+pub fn with_routing(route: &Route, mut argv: Vec<String>) -> Vec<String> {
+    if !starts_claude(&argv) {
+        return argv;
+    }
+    let mut add: Vec<String> = Vec::new();
+    if !route.tools.is_empty() && !gave(&argv, &["--tools", "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools"]) {
+        add.extend(["--tools".to_owned(), route.tools.join(",")]);
+    }
+    if route.model.as_deref() == Some("haiku") && !gave(&argv, &["--model", "--agent"]) {
+        add.extend(["--model".to_owned(), "haiku".to_owned()]);
+    }
+    if route.graft && !argv.iter().any(|a| a.starts_with("--append-system-prompt")) {
+        add.extend(["--append-system-prompt".to_owned(), MAP_HINT.to_owned()]);
+    }
+    let ours = argv.get(1).is_some_and(|a| a == "--settings") && argv.get(2).is_some_and(|a| a == TOKEN_SAVER_SETTINGS);
+    if ours || !has_settings(&argv) {
+        let mut settings: Value = serde_json::from_str(if ours { TOKEN_SAVER_SETTINGS } else { "{}" }).unwrap_or_default();
+        settings["hooks"]["SessionStart"] = json!([{"matcher": "clear", "hooks": [{"type": "command", "command": HANDOFF_COMMAND}]}]);
+        let json = settings.to_string();
+        if ours {
+            argv[2] = json;
+        } else {
+            add.splice(0..0, ["--settings".to_owned(), json]);
+        }
+    }
+    let at = if ours { 3 } else { 1 };
+    argv.splice(at..at, add);
     argv
 }
 
@@ -951,5 +1018,226 @@ mod tests {
             }
         }
         assert!(!inside, "the quotes close");
+    }
+
+    fn route(tools: &[&str], graft: bool, model: Option<&str>) -> Route {
+        Route { graft, tools: tools.iter().map(|s| s.to_string()).collect(), model: model.map(str::to_owned) }
+    }
+    fn settings_of(v: &[String]) -> Value {
+        let i = v.iter().position(|a| a == "--settings").expect("--settings");
+        serde_json::from_str(&v[i + 1]).unwrap()
+    }
+    fn full() -> Route {
+        route(&["Bash", "Read"], true, Some("haiku"))
+    }
+
+    #[test]
+    fn routing_adds_tools_model_hint_and_one_merged_settings() {
+        let out = with_routing(&full(), with_token_saver(true, argv(&["claude", "go"])));
+        assert_eq!(out.iter().filter(|a| *a == "--settings").count(), 1);
+        assert_eq!(out[0], "claude");
+        assert_eq!(out[1], "--settings");
+        assert_eq!(out[3..], argv(&["--tools", "Bash,Read", "--model", "haiku", "--append-system-prompt", MAP_HINT, "go"])[..]);
+        let s = settings_of(&out);
+        assert_eq!(s["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "\"$H0X_CORE_EXE\" gate", "token saver kept");
+        assert_eq!(s["hooks"]["SessionStart"][0]["matcher"], "clear");
+        assert_eq!(s["hooks"]["SessionStart"][0]["hooks"][0]["command"], "\"$H0X_CORE_EXE\" handoff");
+        assert!(!out.iter().any(|a| a == "--allowedTools"), "permission prompts stay");
+        assert!(MAP_HINT.contains("map callers <sym>") && MAP_HINT.contains("map grep <word>") && !MAP_HINT.contains("graft"));
+    }
+
+    #[test]
+    fn routing_without_token_saver_adds_its_own_single_settings() {
+        let out = with_routing(&route(&[], false, None), argv(&["claude", "go"]));
+        assert_eq!(out.iter().filter(|a| *a == "--settings").count(), 1);
+        assert_eq!(out[0], "claude");
+        assert_eq!(out[3], "go");
+        assert_eq!(out.len(), 4);
+        let s = settings_of(&out);
+        assert_eq!(s["hooks"]["SessionStart"][0]["matcher"], "clear");
+        assert!(s["hooks"].get("PostToolUse").is_none());
+    }
+
+    #[test]
+    fn routing_flags_follow_the_profile() {
+        let out = with_routing(&route(&[], false, None), with_token_saver(true, argv(&["claude"])));
+        assert!(!out.iter().any(|a| a == "--tools" || a == "--model" || a == "--append-system-prompt"), "empty tools, no model, no graft: {out:?}");
+        for model in [None, Some("sonnet"), Some("Haiku"), Some("")] {
+            let out = with_routing(&route(&["Read"], false, model), argv(&["claude"]));
+            assert!(!out.iter().any(|a| a == "--model"), "{model:?}");
+            assert!(!out.iter().any(|a| a == "--append-system-prompt"));
+            assert!(out.iter().any(|a| a == "--tools"));
+        }
+        let out = with_routing(&route(&["Read"], true, None), argv(&["claude"]));
+        assert!(out.iter().any(|a| a == "--append-system-prompt"));
+    }
+
+    #[test]
+    fn routing_defers_to_flags_the_person_gave() {
+        for given in [&["--model", "opus"][..], &["--model=opus"], &["--agent", "x"], &["--agent=x"]] {
+            let mut a = argv(&["claude"]);
+            a.extend(argv(given));
+            let out = with_routing(&route(&[], false, Some("haiku")), a);
+            assert!(!out.iter().any(|a| a == "haiku"), "{given:?}");
+        }
+        for given in [&["--tools", "Bash"][..], &["--tools="], &["--allowedTools", "Bash"], &["--allowedTools=Bash"], &["--disallowedTools", "Edit"], &["--disallowed-tools=Edit"]] {
+            let mut a = argv(&["claude"]);
+            a.extend(argv(given));
+            let out = with_routing(&route(&["Read"], false, None), a);
+            assert!(!out.iter().any(|a| a == "Read"), "{given:?}");
+        }
+        for given in [&["--append-system-prompt", "x"][..], &["--append-system-prompt=x"], &["--append-system-prompt-file", "f"]] {
+            let mut a = argv(&["claude"]);
+            a.extend(argv(given));
+            let out = with_routing(&route(&[], true, None), a);
+            assert!(!out.iter().any(|a| a.contains("Code map")), "{given:?}");
+        }
+        // Each flag is judged alone: the person's model does not block our tools.
+        let out = with_routing(&route(&["Read"], false, Some("haiku")), argv(&["claude", "--model", "opus"]));
+        assert!(out.iter().any(|a| a == "Read"));
+        assert!(!out.iter().any(|a| a == "haiku"));
+    }
+
+    #[test]
+    fn routing_adds_no_hooks_when_the_person_gave_settings() {
+        for given in [&["--settings", "{}"][..], &["--settings=x.json"], &["--settings"]] {
+            let mut a = argv(&["claude"]);
+            a.extend(argv(given));
+            let out = with_routing(&route(&["Read"], false, None), a.clone());
+            assert!(!out.iter().any(|x| x.contains("SessionStart")), "{given:?}");
+            assert_eq!(out.iter().filter(|x| *x == "--settings" || x.starts_with("--settings=")).count(), 1);
+            assert_eq!(out[1..3], argv(&["--tools", "Read"])[..], "flags still apply");
+            assert_eq!(out[3..], a[1..], "{given:?}");
+        }
+        // The person's own `--settings` after Token Saver's means Token Saver stayed out too.
+        let a = with_token_saver(true, argv(&["claude", "--settings=x.json"]));
+        assert!(!with_routing(&full(), a).iter().any(|x| x.contains("SessionStart")));
+    }
+
+    #[test]
+    fn routing_leaves_other_programs_alone() {
+        for a in [argv(&[]), argv(&["codex"]), argv(&["pwsh"]), argv(&["claude-code"]), argv(&["npx", "claude"]), argv(&["claudex"]), argv(&[r"C:\Users\me\npm\claude.cmd"])] {
+            assert_eq!(with_routing(&full(), a.clone()), a, "{a:?}");
+        }
+    }
+
+    #[test]
+    fn routing_matches_claude_in_any_case_and_windows_paths() {
+        for name in ["CLAUDE.EXE", "Claude", "claude.exe", r"C:\Program Files\claude\claude.exe", r"C:\Tools\CLAUDE.EXE", r"\\server\share\claude.exe", "/usr/local/bin/claude"] {
+            let out = with_routing(&full(), with_token_saver(true, argv(&[name, "go"])));
+            assert_eq!(out[0], name);
+            assert_eq!(out[1], "--settings", "{name}");
+            assert_eq!(out.last().unwrap(), "go");
+            assert!(out.iter().any(|a| a == "--tools"), "{name}");
+            assert_eq!(out.iter().filter(|a| *a == "--settings").count(), 1);
+        }
+    }
+
+    #[test]
+    fn routing_prompt_and_settings_survive_the_powershell_line() {
+        let cmd = with_routing(&full(), with_token_saver(true, argv(&[r"C:\Program Files\claude\claude.exe", "do \"it\" $x\nnext"])));
+        assert_eq!(powershell_words(&powershell_line(&cmd)), Some(cmd.clone()));
+        let hint = cmd.iter().position(|a| a == "--append-system-prompt").unwrap() + 1;
+        assert_eq!(cmd[hint], MAP_HINT);
+        assert!(cmd[hint].contains('"') && cmd[hint].contains('$') && cmd[hint].contains('\n'));
+        let json = &cmd[cmd.iter().position(|a| a == "--settings").unwrap() + 1];
+        assert_eq!(windows_unquote(&windows_arg(json)), *json);
+        assert_eq!(windows_unquote(&windows_arg(MAP_HINT)), MAP_HINT);
+    }
+
+    #[test]
+    fn route_reads_the_core_json_and_ignores_the_rest() {
+        let r: Route = serde_json::from_str(r#"{"kind":"code","code":true,"read_only":false,"nav":true,"graft":true,"tools":["Bash","Read"],"model":null}"#).unwrap();
+        assert!(r.graft && r.model.is_none());
+        assert_eq!(r.tools, ["Bash", "Read"]);
+        let r: Route = serde_json::from_str(r#"{"tools":[],"model":"haiku"}"#).unwrap();
+        assert!(!r.graft && r.tools.is_empty() && r.model.as_deref() == Some("haiku"));
+    }
+
+    #[test]
+    fn routing_on_bare_claude_gives_the_exact_argv_and_valid_merged_json() {
+        let out = with_routing(&full(), with_token_saver(true, argv(&["claude"])));
+        assert_eq!(out.len(), 9, "{out:?}");
+        assert_eq!(out[..2], argv(&["claude", "--settings"])[..]);
+        assert_eq!(out[3..], argv(&["--tools", "Bash,Read", "--model", "haiku", "--append-system-prompt", MAP_HINT])[..]);
+        let s: Value = serde_json::from_str(&out[2]).expect("valid json");
+        let hooks = s["hooks"].as_object().unwrap();
+        assert_eq!(hooks.keys().map(String::as_str).collect::<Vec<_>>(), ["PostToolUse", "SessionStart"]);
+        let saver: Value = serde_json::from_str(TOKEN_SAVER_SETTINGS).unwrap();
+        assert_eq!(s["hooks"]["PostToolUse"], saver["hooks"]["PostToolUse"], "token saver hook unchanged");
+        assert_eq!(s["hooks"]["SessionStart"], json!([{"matcher": "clear", "hooks": [{"type": "command", "command": "\"$H0X_CORE_EXE\" handoff"}]}]));
+        // Token Saver off: the same flags, and a settings JSON with only the handoff hook.
+        let out = with_routing(&full(), argv(&["claude"]));
+        assert_eq!(out.len(), 9, "{out:?}");
+        let s = settings_of(&out);
+        assert_eq!(s["hooks"].as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(), ["SessionStart"]);
+    }
+
+    #[test]
+    fn routing_twice_adds_nothing_more() {
+        for start in [with_token_saver(true, argv(&["claude", "go"])), argv(&["claude", "go"]), argv(&["claude", "--model", "opus", "go"]), argv(&["claude", "--settings", "{}"])] {
+            let once = with_routing(&full(), start.clone());
+            let twice = with_routing(&full(), once.clone());
+            assert_eq!(twice, once, "{start:?}");
+            assert_eq!(twice.iter().filter(|a| *a == "--settings").count(), 1);
+            assert!(twice.iter().filter(|a| a.contains("SessionStart")).count() <= 1);
+        }
+    }
+
+    #[test]
+    fn routing_keeps_the_persons_args_in_order_after_ours() {
+        let person = argv(&["--resume", "abc", "--verbose", "-p", "fix it", "--", "--tail"]);
+        let mut a = argv(&["/usr/local/bin/claude"]);
+        a.extend(person.clone());
+        let out = with_routing(&full(), with_token_saver(true, a.clone()));
+        assert_eq!(out[0], "/usr/local/bin/claude");
+        assert_eq!(out[out.len() - person.len()..], person[..], "{out:?}");
+        assert_eq!(out.len(), 1 + 2 + 6 + person.len());
+        // With the person's own model, ours are only the missing ones and theirs keep place.
+        let out = with_routing(&full(), argv(&["claude", "go", "--model", "opus", "--verbose"]));
+        assert_eq!(out[out.len() - 4..], argv(&["go", "--model", "opus", "--verbose"])[..]);
+        assert_eq!(out.iter().filter(|a| *a == "--model").count(), 1);
+    }
+
+    #[test]
+    fn routing_counts_empty_and_kebab_flag_values_as_given() {
+        // `--flag=` with an empty value is still the person's flag.
+        for given in ["--model=", "--agent="] {
+            let out = with_routing(&route(&[], false, Some("haiku")), argv(&["claude", given]));
+            assert_eq!(out[3..], argv(&[given])[..], "{given}");
+        }
+        for given in [&["--allowed-tools", "Bash"][..], &["--allowed-tools="], &["--allowedTools="], &["--disallowedTools="], &["--disallowed-tools", "Edit"]] {
+            let mut a = argv(&["claude"]);
+            a.extend(argv(given));
+            let out = with_routing(&route(&["Read"], false, None), a);
+            assert!(!out.iter().any(|x| x == "--tools"), "{given:?}");
+        }
+        let out = with_routing(&route(&[], true, None), argv(&["claude", "--append-system-prompt="]));
+        assert!(!out.iter().any(|a| a.contains("Code map")));
+        // Look-alikes are not the flag: `--agents` defines agents but picks none, so haiku still applies.
+        for other in ["--agents", "--modelx", "--toolsx"] {
+            let out = with_routing(&route(&["Read"], false, Some("haiku")), argv(&["claude", other, "{}"]));
+            assert!(out.iter().any(|a| a == "haiku"), "{other}");
+            assert!(out.iter().any(|a| a == "--tools"), "{other}");
+        }
+    }
+
+    #[test]
+    fn routing_passes_a_tools_list_with_spaces_as_one_argument() {
+        let cmd = with_routing(&route(&["Bash(git log:*)", "Read"], false, None), argv(&[r"C:\Program Files\claude\claude.exe", "go"]));
+        let i = cmd.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(cmd[i + 1], "Bash(git log:*),Read");
+        assert_eq!(cmd[i + 2], "go");
+        assert_eq!(powershell_words(&powershell_line(&cmd)), Some(cmd.clone()));
+        let one = with_routing(&route(&["Read"], false, None), argv(&["claude"]));
+        assert_eq!(one[one.len() - 2..], argv(&["--tools", "Read"])[..], "one tool, no trailing comma");
+    }
+
+    #[test]
+    fn routing_leaves_remote_and_wrapped_claude_alone() {
+        // Only the local `claude` command is changed; a remote or wrapped one is not ours to rewrite.
+        for a in [argv(&["ssh", "host", "claude"]), argv(&["ssh", "-t", "me@host", "claude", "--model", "opus"]), argv(&["wsl", "claude"]), argv(&["wsl.exe", "-e", "claude"]), argv(&[r"C:\Windows\System32\OpenSSH\ssh.exe", "host", "claude"]), argv(&[""])] {
+            assert_eq!(with_routing(&full(), with_token_saver(true, a.clone())), a, "{a:?}");
+        }
     }
 }
