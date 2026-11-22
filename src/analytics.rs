@@ -113,6 +113,15 @@ pub fn event(name: &str, props: Value) {
     }
 }
 
+/// `event` for something that happened at `at` (Unix milliseconds), such as a turn read late.
+pub fn event_at(name: &str, props: Value, at: u64) {
+    if SHARING.load(Ordering::Relaxed)
+        && let Some(a) = GLOBAL.get()
+    {
+        a.record_at(false, name, props, Some(at));
+    }
+}
+
 /// Events belong to this account from now on (`None`: signed out, back to the install id).
 /// Signing in also links the install id to the account, but only while sharing is on.
 pub fn identify(account: Option<&crate::auth::Account>) {
@@ -271,6 +280,11 @@ impl Analytics {
 
     /// Queues one scrubbed event. Nothing is written without a token.
     fn record(&self, failure: bool, name: &str, props: Value) {
+        self.record_at(failure, name, props, None);
+    }
+
+    /// `record` for something that happened at `at` (Unix ms) rather than now.
+    fn record_at(&self, failure: bool, name: &str, props: Value, at: Option<u64>) {
         if self.token.is_none() {
             return;
         }
@@ -288,7 +302,7 @@ impl Analytics {
         } else {
             name.to_string()
         };
-        let event = json!({ "event": name, "distinct_id": self.distinct_id(), "timestamp": iso8601(ms), "properties": props });
+        let event = json!({ "event": name, "distinct_id": self.distinct_id(), "timestamp": iso8601(at.unwrap_or(ms)), "properties": props });
         let _guard = FILES.lock().unwrap_or_else(|e| e.into_inner());
         let wrote = if failure {
             let file = self.reports().join(format!(
@@ -730,6 +744,15 @@ mod tests {
         assert_eq!(iso8601(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(iso8601(1_709_164_800_123), "2024-02-29T00:00:00.123Z");
         assert_eq!(iso8601(1_794_563_400_000), "2026-11-13T09:50:00.000Z");
+    }
+
+    #[test]
+    fn an_event_keeps_the_time_it_happened_through_the_queue_and_the_batch() {
+        let dir = home_dir("event-at");
+        let a = make(&dir, Some("phc_test"));
+        a.record_at(false, "late", json!({}), Some(1_709_164_800_123));
+        let sent = sent_batches(&a, true);
+        assert_eq!(sent[0]["body"]["batch"][0]["timestamp"], "2024-02-29T00:00:00.123Z");
     }
 
     #[test]

@@ -516,7 +516,7 @@ fn read_in_background(core: &Arc<crate::core_link::Core>, job: Job, finish: bool
             sharing: crate::analytics::sharing(),
             token_saver,
             redact: &redact,
-            emit: &|name, props| event(name, props),
+            emit: &|name, props, at| crate::analytics::event_at(name, props, at),
             usage: &crate::activity::add_usage,
         };
         read_run(&ctx, &job, finish);
@@ -532,7 +532,7 @@ struct Ctx<'a> {
     sharing: bool,
     token_saver: bool,
     redact: &'a dyn Fn(&str) -> Option<String>,
-    emit: &'a dyn Fn(&str, Value),
+    emit: &'a dyn Fn(&str, Value, u64),
     usage: &'a dyn Fn(&str, u64, f64),
 }
 
@@ -555,7 +555,7 @@ fn read_with(ctx: &Ctx, job: &Job, finish: bool, read: impl FnOnce(&mut TurnCurs
         (ctx.usage)(job.kind, t.input.saturating_add(t.output), t.cost_usd.unwrap_or(0.0));
         if ctx.sharing {
             let input = t.prompt.as_deref().filter(|p| !p.trim().is_empty()).and_then(|p| (ctx.redact)(p));
-            (ctx.emit)("$ai_generation", generation_props(&job.trace, job.kind, t, input.as_deref(), ctx.token_saver));
+            (ctx.emit)("$ai_generation", generation_props(&job.trace, job.kind, t, input.as_deref(), ctx.token_saver), u64::try_from(t.timestamp_ms).unwrap_or(0));
         }
     }
     if !finish {
@@ -569,7 +569,7 @@ impl Ctx<'_> {
     /// The run is over: `$ai_trace` with the run's length and how many turns were sent.
     fn trace_ended(&self, job: &Job) {
         if self.sharing {
-            (self.emit)("$ai_trace", trace_props(&job.trace, job.kind, job.seconds, job.turns.load(Ordering::Relaxed)));
+            (self.emit)("$ai_trace", trace_props(&job.trace, job.kind, job.seconds, job.turns.load(Ordering::Relaxed)), unix_secs() * 1000);
         }
     }
 }
@@ -580,6 +580,7 @@ fn generation_props(trace: &str, agent: &str, t: &Turn, input: Option<&str>, tok
     let mut p = json!({
         "$ai_trace_id": trace,
         "$ai_provider": t.provider,
+        "$ai_output_choices": [],
         "$ai_input_tokens": t.input,
         "$ai_output_tokens": t.output,
         "$ai_cache_read_input_tokens": t.cache_read,
@@ -761,7 +762,7 @@ mod tests {
     /// One `read_with` with fakes: `redact` is the fake core, `sent` and `booked` record the outputs.
     #[allow(clippy::too_many_arguments)]
     fn run(d: &Path, sharing: bool, redact: &dyn Fn(&str) -> Option<String>, sent: &Sent, booked: &Booked, trace: &str, finish: bool, turns: Vec<Turn>) -> usize {
-        let emit = |n: &str, p: Value| sent.borrow_mut().push((n.into(), p));
+        let emit = |n: &str, p: Value, _at: u64| sent.borrow_mut().push((n.into(), p));
         let usage = |a: &str, t: u64, c: f64| booked.borrow_mut().push((a.into(), t, c));
         let ctx = Ctx { dir: d, sharing, token_saver: true, redact, emit: &emit, usage: &usage };
         read_with(&ctx, &job(trace), finish, |_| turns)
@@ -778,7 +779,7 @@ mod tests {
         assert_eq!(
             sent[0].1,
             json!({
-                "$ai_trace_id": "t1", "$ai_provider": "anthropic", "$ai_model": "claude-sonnet",
+                "$ai_trace_id": "t1", "$ai_provider": "anthropic", "$ai_model": "claude-sonnet", "$ai_output_choices": [],
                 "$ai_input_tokens": 10, "$ai_output_tokens": 20, "$ai_cache_read_input_tokens": 30,
                 "$ai_cache_creation_input_tokens": 40, "$ai_total_cost_usd": 0.5, "$ai_latency": 2.5,
                 "$ai_input": [{ "role": "user", "content": "use [redacted] now" }],
@@ -845,7 +846,7 @@ mod tests {
     fn the_cursor_is_stored_only_after_the_events_are_queued_and_dropped_at_the_end() {
         let d = dir("cursor");
         let seen_before = std::cell::Cell::new(None);
-        let emit = |_: &str, _: Value| seen_before.set(Some(Cursors::load(&d).runs.contains_key("t1")));
+        let emit = |_: &str, _: Value, _: u64| seen_before.set(Some(Cursors::load(&d).runs.contains_key("t1")));
         let usage = |_: &str, _: u64, _: f64| ();
         let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
         read_with(&ctx, &job("t1"), false, |c| {
@@ -871,7 +872,7 @@ mod tests {
     fn a_turn_is_never_sent_twice_across_ten_minute_reads_and_the_final_read() {
         let (d, sent, booked) = (dir("dedup"), Sent::default(), Booked::default());
         let all = [turn(Some("one")), turn(Some("two")), turn(Some("three"))];
-        let emit = |n: &str, p: Value| sent.borrow_mut().push((n.into(), p));
+        let emit = |n: &str, p: Value, _at: u64| sent.borrow_mut().push((n.into(), p));
         let usage = |a: &str, t: u64, c: f64| booked.borrow_mut().push((a.into(), t, c));
         let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|t| Some(t.into()), emit: &emit, usage: &usage };
         // The cursor offset stands in for the transcript position: how many turns were read.
@@ -898,5 +899,35 @@ mod tests {
             json!({ "$ai_trace_id": "t1", "$ai_span_name": "codex", "$ai_latency": 125, "turns": 4, "remote": false })
         );
         assert_ne!(new_trace_id(), new_trace_id());
+    }
+
+    #[test]
+    fn trace_ids_use_only_the_characters_posthog_allows() {
+        let allowed = |c: char| c.is_ascii_alphanumeric() || "-_~.@()!':|".contains(c);
+        let id = new_trace_id();
+        assert!(!id.is_empty() && id.len() <= 100 && id.chars().all(allowed), "{id}");
+    }
+
+    #[test]
+    fn events_carry_the_time_they_happened_and_no_person_set() {
+        let (d, booked) = (dir("when"), Booked::default());
+        let got = std::cell::RefCell::new(Vec::new());
+        let emit = |n: &str, p: Value, at: u64| got.borrow_mut().push((n.to_string(), p, at));
+        let usage = |a: &str, t: u64, c: f64| booked.borrow_mut().push((a.into(), t, c));
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|t| Some(t.into()), emit: &emit, usage: &usage };
+        let (mut early, mut odd) = (turn(Some("p")), turn(None));
+        (early.timestamp_ms, odd.timestamp_ms) = (1_700_000_000_123, -5);
+        read_with(&ctx, &job("tw"), false, |_| vec![early, odd]);
+        let mut j = job("tw");
+        j.seconds = 9;
+        let before = unix_secs() * 1000;
+        ctx.trace_ended(&j);
+        let got = got.into_inner();
+        assert_eq!((got[0].2, got[1].2), (1_700_000_000_123, 0), "a bad time is 0, never a panic");
+        assert!(got[2].2 >= before && got[2].0 == "$ai_trace");
+        for (_, p, _) in &got {
+            assert!(p.get("$set").is_none() && p.get("$set_once").is_none());
+        }
+        assert_eq!(got[0].1["$ai_output_choices"], json!([]));
     }
 }
