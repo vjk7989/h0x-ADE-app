@@ -1484,4 +1484,383 @@ mod tests {
         assert!(go(&mut cur, true).is_empty());
         let _ = std::fs::remove_dir_all(&home);
     }
+
+    #[test]
+    fn prompt_keeps_typed_text_blocks_and_drops_images_reminders_and_tool_results() {
+        let folder = Path::new("/home/u/app");
+        let lines = vec![
+            // pasted file content in a text block was typed by the person: kept
+            user(
+                "2026-01-01T00:00:01Z",
+                r#"[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"SECRET-IMG"}},{"type":"text","text":" \n\t<system-reminder>SECRET-REMINDER</system-reminder>"},{"type":"text","text":"look at this"},{"type":"text","text":"pasted file:\nfn main() {}"}]"#,
+            ),
+            asst("2026-01-01T00:00:02Z", "a", 1, r#"[{"type":"tool_use","name":"Read","input":{}}]"#),
+            // a message that is only a tool_result continues the turn
+            user(
+                "2026-01-01T00:00:03Z",
+                r#"[{"type":"tool_result","tool_use_id":"t","content":[{"type":"text","text":"SECRET-RESULT"}]}]"#,
+            ),
+            asst("2026-01-01T00:00:04Z", "b", 2, "[]"),
+            // image only: a new turn without a prompt
+            user(
+                "2026-01-01T00:00:05Z",
+                r#"[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"SECRET-IMG2"}}]"#,
+            ),
+            asst("2026-01-01T00:00:06Z", "c", 4, "[]"),
+        ];
+        let (home, _) = claude_home("t-blocks", folder, &lines);
+        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0].prompt.as_deref(), Some("look at this\npasted file:\nfn main() {}"));
+        assert_eq!((t[0].output, t[0].latency_ms), (3, Some(3000)));
+        assert_eq!(t[0].tools, ["Read"]);
+        assert_eq!((t[1].prompt.as_deref(), t[1].output), (None, 4));
+        assert!(!format!("{t:?}").contains("SECRET"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn compact_summary_sidechain_hook_and_bash_lines_never_become_the_prompt() {
+        let folder = Path::new("/home/u/app");
+        let lines = vec![
+            r#"{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. SECRET-SUMMARY"}}"#.to_string(),
+            r#"{"type":"user","isSidechain":true,"timestamp":"2026-01-01T00:00:02Z","message":{"role":"user","content":"SECRET-SIDECHAIN task prompt"}}"#.to_string(),
+            r#"{"type":"user","sourceToolUseID":"toolu_1","timestamp":"2026-01-01T00:00:03Z","message":{"role":"user","content":[{"type":"text","text":"SECRET-SKILL-BODY"}]}}"#.to_string(),
+            r#"{"type":"system","subtype":"stop_hook_summary","timestamp":"2026-01-01T00:00:04Z","content":"SECRET-HOOK"}"#.to_string(),
+            r#"{"type":"attachment","timestamp":"2026-01-01T00:00:05Z","attachment":{"type":"hook_additional_context","content":["SECRET-HOOK-CONTEXT"]}}"#.to_string(),
+            user("2026-01-01T00:00:06Z", r#""<bash-input>cat .env</bash-input>""#),
+            user(
+                "2026-01-01T00:00:07Z",
+                r#""<bash-stdout>SECRET-STDOUT</bash-stdout><bash-stderr></bash-stderr>""#,
+            ),
+            asst("2026-01-01T00:00:08Z", "a", 1, "[]"),
+            user("2026-01-01T00:00:09Z", r#""[Request interrupted by user for tool use]""#),
+            asst("2026-01-01T00:00:10Z", "b", 1, "[]"),
+            // whitespace only
+            user("2026-01-01T00:00:11Z", r#""  \n  ""#),
+            asst("2026-01-01T00:00:12Z", "c", 1, "[]"),
+            user("2026-01-01T00:00:13Z", r#""real prompt""#),
+            asst("2026-01-01T00:00:14Z", "d", 1, "[]"),
+        ];
+        let (home, _) = claude_home("t-meta", folder, &lines);
+        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        let prompts: Vec<_> = t.iter().map(|t| t.prompt.as_deref()).collect();
+        assert_eq!(prompts, [None, None, None, Some("real prompt")]);
+        assert!(!format!("{t:?}").contains("SECRET"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn user_prompt_submit_hook_text_never_becomes_the_prompt() {
+        let folder = Path::new("/home/u/app");
+        let lines = vec![
+            user(
+                "2026-01-01T00:00:01Z",
+                r#"[{"type":"text","text":"fix the build"},{"type":"text","text":"<user-prompt-submit-hook>SECRET-HOOK-OUTPUT</user-prompt-submit-hook>"}]"#,
+            ),
+            asst("2026-01-01T00:00:02Z", "a", 1, "[]"),
+        ];
+        let (home, _) = claude_home("t-hook", folder, &lines);
+        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].prompt.as_deref(), Some("fix the build"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn injected_command_output_after_typed_text_never_becomes_the_prompt() {
+        let folder = Path::new("/home/u/app");
+        let lines = vec![
+            user(
+                "2026-01-01T00:00:01Z",
+                r#""check this\n<local-command-stdout>SECRET-OUT</local-command-stdout>""#,
+            ),
+            asst("2026-01-01T00:00:02Z", "a", 1, "[]"),
+        ];
+        let (home, _) = claude_home("t-midtag", folder, &lines);
+        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        assert_eq!(t.len(), 1);
+        assert!(!format!("{t:?}").contains("SECRET"), "{:?}", t[0].prompt);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn two_interleaved_sessions_in_one_folder_keep_their_own_turns() {
+        let folder = Path::new(r"G:\my proj\app");
+        let a = vec![
+            user("2026-01-01T00:00:10Z", r#""a1""#),
+            asst("2026-01-01T00:00:20Z", "x1", 1, "[]"),
+            user("2026-01-01T00:00:40Z", r#""a2""#),
+            asst("2026-01-01T00:00:45Z", "x2", 2, "[]"),
+        ];
+        let (home, file) = claude_home("t-interleave", folder, &a);
+        let b = [
+            user("2026-01-01T00:00:15Z", r#""b1""#),
+            asst("2026-01-01T00:00:30Z", "y1", 10, "[]"),
+        ];
+        std::fs::write(file.with_file_name("t.jsonl"), b.join("\n") + "\n").unwrap();
+        let mut cur = TurnCursor::default();
+        let t = run(&home, folder, &mut cur, false);
+        assert_eq!(t.len(), 1);
+        assert_eq!(
+            (t[0].prompt.as_deref(), t[0].output, t[0].latency_ms),
+            (Some("a1"), 1, Some(10_000))
+        );
+        let t = run(&home, folder, &mut cur, true);
+        let got: Vec<_> = t.iter().map(|t| (t.prompt.as_deref(), t.output, t.latency_ms)).collect();
+        assert_eq!(got, [(Some("b1"), 10, Some(15_000)), (Some("a2"), 2, Some(5_000))]);
+        assert!(run(&home, folder, &mut cur, true).is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn turn_copied_into_a_resumed_session_file_is_counted_once() {
+        // A resumed Claude session copies earlier lines (same message ids) into a
+        // new file; `usage` counts each message id once, `turns` must agree.
+        let folder = Path::new("/home/u/app");
+        let (home, file) = claude_home("t-resume", folder, &two_turns());
+        std::fs::write(file.with_file_name("resumed.jsonl"), two_turns().join("\n") + "\n").unwrap();
+        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        let u = usage_in(&home, AgentKind::Claude, folder, at(T0), at(T0 + 3600)).unwrap();
+        assert_eq!(t.len(), 2, "{t:?}");
+        assert_eq!(t.iter().map(|t| t.output).sum::<u64>(), u.output);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_turn_without_token_count_mcp_names_and_model_switch() {
+        let home = tmp("t-codex-edge");
+        let day = home.join(".codex/sessions/2026/01/01");
+        std::fs::create_dir_all(&day).unwrap();
+        let ev = |ts: &str, kind: &str, payload: &str| {
+            format!(r#"{{"timestamp":"{ts}","type":"{kind}","payload":{payload}}}"#)
+        };
+        let lines = [
+            ev("2026-01-01T00:00:01Z", "session_meta", r#"{"cwd":"C:\\Users\\Jörg Müller\\my app"}"#),
+            ev("2026-01-01T00:00:02Z", "turn_context", r#"{"model":"gpt-5"}"#),
+            // no token usage at all: the turn is dropped, never merged into the next
+            ev("2026-01-01T00:00:10Z", "event_msg", r#"{"type":"user_message","message":"one"}"#),
+            ev("2026-01-01T00:00:11Z", "event_msg", r#"{"type":"token_count","info":null}"#),
+            ev("2026-01-01T00:00:20Z", "event_msg", r#"{"type":"user_message","message":"two"}"#),
+            ev("2026-01-01T00:00:21Z", "response_item", r#"{"type":"function_call","name":"mcp__srv__do"}"#),
+            ev("2026-01-01T00:00:21Z", "response_item", r#"{"type":"function_call","name":"mcp____empty"}"#),
+            ev("2026-01-01T00:00:21Z", "response_item", r#"{"type":"custom_tool_call","name":"mcp__"}"#),
+            ev("2026-01-01T00:00:21Z", "response_item", r#"{"type":"function_call","name":"docs__search"}"#),
+            ev(
+                "2026-01-01T00:00:22Z",
+                "event_msg",
+                r#"{"type":"token_count","info":{"total_token_usage":{"input_tokens":100},"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}}"#,
+            ),
+            ev("2026-01-01T00:00:30Z", "event_msg", r#"{"type":"user_message","message":"three"}"#),
+            ev("2026-01-01T00:00:30Z", "turn_context", r#"{"model":"gpt-5-mini"}"#),
+            ev(
+                "2026-01-01T00:00:31Z",
+                "event_msg",
+                r#"{"type":"token_count","info":{"total_token_usage":{"input_tokens":200},"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}}"#,
+            ),
+        ];
+        std::fs::write(day.join("rollout-x.jsonl"), lines.join("\n") + "\n").unwrap();
+        let t = turns_in(
+            &home,
+            AgentKind::Codex,
+            Path::new(r"c:\users\JÖRG MÜLLER\my app\"),
+            (at(T0), at(T0 + 3600)),
+            &mut TurnCursor::default(),
+            true,
+            MAX_BYTES,
+        );
+        let got: Vec<_> = t.iter().map(|t| (t.prompt.as_deref(), t.model.as_deref())).collect();
+        assert_eq!(got, [(Some("two"), Some("gpt-5")), (Some("three"), Some("gpt-5-mini"))]);
+        assert_eq!(t[0].tools, ["mcp__srv__do", "mcp____empty", "mcp__", "docs__search"]);
+        assert_eq!(t[0].mcp_servers, ["srv"]);
+        assert_eq!((t[0].input, t[0].output, t[0].latency_ms), (100, 10, Some(2000)));
+        assert!(t[1].cost_usd.unwrap() < t[0].cost_usd.unwrap());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn claude_model_switch_between_turns_keeps_each_turns_model() {
+        let folder = Path::new("/home/u/app");
+        let lines = vec![
+            user("2026-01-01T00:00:01Z", r#""p1""#),
+            asst("2026-01-01T00:00:02Z", "a", 5, "[]"),
+            user("2026-01-01T00:00:10Z", r#""p2""#),
+            asst("2026-01-01T00:00:11Z", "b", 5, "[]").replace("claude-sonnet-4-5", "claude-opus-4-1"),
+            user("2026-01-01T00:00:20Z", r#""p3""#),
+            asst("2026-01-01T00:00:21Z", "c", 5, "[]"),
+        ];
+        let (home, _) = claude_home("t-model", folder, &lines);
+        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        let models: Vec<_> = t.iter().map(|t| t.model.as_deref()).collect();
+        assert_eq!(
+            models,
+            [Some("claude-sonnet-4-5"), Some("claude-opus-4-1"), Some("claude-sonnet-4-5")]
+        );
+        assert!(t[1].cost_usd.unwrap() > t[0].cost_usd.unwrap());
+        assert_eq!(t[0].cost_usd, t[2].cost_usd);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn synthetic_error_reply_does_not_replace_the_turns_model() {
+        // Claude Code logs API errors as an assistant message with model
+        // "<synthetic>" and zero usage after the real reply.
+        let folder = Path::new("/home/u/app");
+        let lines = vec![
+            user("2026-01-01T00:00:01Z", r#""p1""#),
+            asst("2026-01-01T00:00:02Z", "a", 5, "[]"),
+            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:03Z","message":{"id":"syn","model":"<synthetic>","content":[{"type":"text","text":"API Error"}],"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#.to_string(),
+        ];
+        let (home, _) = claude_home("t-synthetic", folder, &lines);
+        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].model.as_deref(), Some("claude-sonnet-4-5"));
+        assert!(t[0].cost_usd.is_some());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn window_by_prompt_time_is_inclusive_at_both_edges_across_midnight() {
+        let folder = Path::new("/home/u/app");
+        let lines = vec![
+            // prompt before midnight, reply after: outside, the window is by prompt time
+            user("2025-12-31T23:59:59.999Z", r#""before midnight""#),
+            asst("2026-01-01T00:00:00.000Z", "a", 1, "[]"),
+            user("2026-01-01T00:00:00.000Z", r#""at start""#),
+            asst("2026-01-01T00:30:00Z", "b", 1, "[]"),
+            user("2026-01-01T01:00:00.000Z", r#""at end""#),
+            asst("2026-01-01T01:00:00.500Z", "c", 1, "[]"),
+            user("2026-01-01T01:00:00.001Z", r#""after end""#),
+            asst("2026-01-01T01:00:01Z", "d", 1, "[]"),
+        ];
+        let (home, _) = claude_home("t-edges", folder, &lines);
+        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        let got: Vec<_> = t.iter().map(|t| (t.prompt.as_deref(), t.latency_ms)).collect();
+        assert_eq!(got, [(Some("at start"), Some(1_800_000)), (Some("at end"), Some(500))]);
+        // inverted window: nothing
+        let none = turns_in(
+            &home,
+            AgentKind::Claude,
+            folder,
+            (at(T0 + 3600), at(T0)),
+            &mut TurnCursor::default(),
+            true,
+            MAX_BYTES,
+        );
+        assert!(none.is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn missing_or_malformed_timestamps_and_content_are_skipped_without_leaking() {
+        let folder = Path::new("/home/u/app");
+        let lines = vec![
+            user("2026-01-01T00:00:01Z", r#""first""#),
+            asst("2026-01-01T00:00:02Z", "a", 1, "[]"),
+            r#"{"type":"user","message":{"role":"user","content":"SECRET-NO-TS"}}"#.to_string(),
+            user("2026-13-01T00:00:00Z", r#""SECRET-BAD-MONTH""#),
+            user("2026-01-01T00:00:03+05:30", r#""SECRET-OFFSET""#),
+            user("not a time", r#""SECRET-GARBAGE""#),
+            r#"{"type":"user","timestamp":42,"message":{"role":"user","content":"SECRET-NUMBER-TS"}}"#.to_string(),
+            r#"{"type":"user","timestamp":"2026-01-01T00:00:04Z","message":{"role":"user","content":null}}"#.to_string(),
+            r#"{"type":"user","timestamp":"2026-01-01T00:00:04Z"}"#.to_string(),
+            "not json at all".to_string(),
+            asst("2026-01-01T00:00:05Z", "b", 2, "[]"),
+        ];
+        let (home, _) = claude_home("t-badts", folder, &lines);
+        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].prompt.as_deref(), Some("first"));
+        assert!(!format!("{t:?}").contains("SECRET"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn deleted_then_shorter_rewritten_file_is_read_from_the_start() {
+        let folder = Path::new("/home/u/app");
+        let (home, file) = claude_home("t-rotate", folder, &two_turns());
+        let mut cur = TurnCursor::default();
+        assert_eq!(run(&home, folder, &mut cur, true).len(), 2);
+        // the cursor still names the deleted file: harmless
+        std::fs::remove_file(&file).unwrap();
+        assert!(run(&home, folder, &mut cur, true).is_empty());
+        let fresh = [
+            user("2026-01-01T00:02:00Z", r#""after rotate""#),
+            asst("2026-01-01T00:02:01Z", "n", 1, "[]"),
+        ];
+        std::fs::write(&file, fresh.join("\n") + "\n").unwrap();
+        let t = run(&home, folder, &mut cur, true);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].prompt.as_deref(), Some("after rotate"));
+        assert!(run(&home, folder, &mut cur, true).is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn finish_after_a_budget_stop_does_not_close_a_half_read_turn() {
+        let folder = Path::new("/home/u/app");
+        let lines = vec![
+            user("2026-01-01T00:00:01Z", r#""p1""#),
+            asst("2026-01-01T00:00:02Z", "m1", 5, "[]"),
+            asst("2026-01-01T00:00:03Z", "m2", 7, "[]"),
+            user("2026-01-01T00:00:04Z", r#""p2""#),
+            asst("2026-01-01T00:00:05Z", "m3", 1, "[]"),
+        ];
+        let (home, file) = claude_home("t-budget", folder, &lines);
+        let window = (at(T0), at(T0 + 3600));
+        // a budget of exactly the file size reads everything
+        let len = std::fs::metadata(&file).unwrap().len();
+        let t = turns_in(&home, AgentKind::Claude, folder, window, &mut TurnCursor::default(), true, len);
+        assert_eq!(t.len(), 2);
+        // the budget runs out after p1's first reply; the rest comes next call
+        let cut = (lines[0].len() + lines[1].len() + 2) as u64;
+        let mut cur = TurnCursor::default();
+        let mut all = turns_in(&home, AgentKind::Claude, folder, window, &mut cur, true, cut);
+        all.extend(turns_in(&home, AgentKind::Claude, folder, window, &mut cur, true, MAX_BYTES));
+        let got: Vec<_> = all.iter().map(|t| (t.prompt.as_deref(), t.output)).collect();
+        assert_eq!(got, [(Some("p1"), 12), (Some("p2"), 1)]);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn ten_thousand_tiny_turns_parse_in_a_few_seconds() {
+        let folder = Path::new("/home/u/app");
+        let ts = |s: u64| format!("2026-01-01T{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60);
+        let mut lines = Vec::with_capacity(20_000);
+        for i in 0..10_000u64 {
+            lines.push(user(&ts(2 * i), r#""p""#));
+            lines.push(asst(&ts(2 * i + 1), &format!("m{i}"), 1, "[]"));
+        }
+        let (home, _) = claude_home("t-many", folder, &lines);
+        let window = (at(T0), at(T0 + 86_399));
+        let started = std::time::Instant::now();
+        let mut cur = TurnCursor::default();
+        let t = turns_in(&home, AgentKind::Claude, folder, window, &mut cur, true, MAX_BYTES);
+        assert_eq!(t.len(), 10_000);
+        assert_eq!(t.iter().map(|t| t.output).sum::<u64>(), 10_000);
+        assert!(turns_in(&home, AgentKind::Claude, folder, window, &mut cur, true, MAX_BYTES).is_empty());
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn cursor_json_round_trip_with_windows_non_ascii_paths_resumes_exactly_once() {
+        let folder = Path::new(r"C:\Users\Jörg Müller\my app");
+        let (home, _) = claude_home("t-cursor-jörg müller", folder, &two_turns());
+        let mut cur = TurnCursor::default();
+        assert_eq!(run(&home, folder, &mut cur, false).len(), 1);
+        let mut cur: TurnCursor = serde_json::from_str(&serde_json::to_string(&cur).unwrap()).unwrap();
+        let t = run(&home, folder, &mut cur, true);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].prompt.as_deref(), Some("second prompt"));
+        assert!(run(&home, folder, &mut cur, true).is_empty());
+        // a stale entry for a file that is gone is harmless
+        let mut stale: TurnCursor =
+            serde_json::from_str(r#"{"offsets":{"C:\\Users\\Jörg Müller\\gone.jsonl":42}}"#).unwrap();
+        assert_eq!(stale.offsets.get(Path::new(r"C:\Users\Jörg Müller\gone.jsonl")), Some(&42));
+        let empty = tmp("t-cursor-empty");
+        assert!(run(&empty, folder, &mut stale, true).is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&empty);
+    }
 }
