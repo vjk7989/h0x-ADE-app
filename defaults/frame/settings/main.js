@@ -1284,7 +1284,7 @@ export default class Settings extends View {
         this.row(
           t,
           "Token Saver",
-          "Shrinks big tool outputs (long logs, large files, JSON) before your agent reads them, so sessions use fewer tokens. Applies to new Claude Code terminals; Codex and OpenCode coming soon.",
+          "Helps your agents use fewer tokens.",
           this.toggle(t, "st-token-saver", on, (_e, cx) => this.change((p) => { if (on) delete p.token_saver; else p.token_saver = true; }, cx)),
         ),
       )
