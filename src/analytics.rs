@@ -25,6 +25,8 @@ const QUEUE_MAX: u64 = 1_000_000;
 /// Events per request.
 const BATCH: usize = 100;
 const STRING_MAX: usize = 500;
+/// Only `$ai_input` (a redacted prompt) may be longer than `STRING_MAX`.
+const AI_INPUT_MAX: usize = 2000;
 const TICK: Duration = Duration::from_secs(60);
 
 struct Analytics {
@@ -97,7 +99,12 @@ pub fn session_seconds() -> u64 {
     STARTED.get().map_or(0, |t| t.elapsed().as_secs())
 }
 
-/// A usage event, dropped when sharing is off. `props` must hold no free text from a terminal.
+/// Whether usage events are being kept (the Settings switch).
+pub fn sharing() -> bool {
+    SHARING.load(Ordering::Relaxed)
+}
+
+/// A usage event, dropped when sharing is off. `props` must hold no free text from a terminal (the redacted typed prompt in `$ai_input` apart).
 pub fn event(name: &str, props: Value) {
     if SHARING.load(Ordering::Relaxed)
         && let Some(a) = GLOBAL.get()
@@ -193,8 +200,8 @@ fn replace_home(s: &str, pat: &str) -> String {
 }
 
 /// One line of `s` with the traces of this machine removed: the home folder (either separator
-/// form) becomes `~`, every path-like word becomes `[path]`, and the result is cut to 500 characters.
-fn scrub_text(s: &str, home: &str) -> String {
+/// form) becomes `~`, every path-like word becomes `[path]`, and the result is cut to `max` characters.
+fn scrub_text_max(s: &str, home: &str, max: usize) -> String {
     let mut text = s.to_string();
     if !home.is_empty() && home != "/" {
         let backslashed = home.replace('/', "\\");
@@ -209,17 +216,29 @@ fn scrub_text(s: &str, home: &str) -> String {
         .map(|w| if path_like(w) { "[path]" } else { w })
         .collect::<Vec<_>>()
         .join(" ");
-    line.chars().take(STRING_MAX).collect()
+    line.chars().take(max).collect()
 }
 
-/// `v` with every string (and object key) passed through `scrub_text`.
+fn scrub_text(s: &str, home: &str) -> String {
+    scrub_text_max(s, home, STRING_MAX)
+}
+
+/// `v` with every string (and object key) passed through `scrub_text`. The value of `$ai_input`
+/// (the redacted prompt) may be 2,000 characters; every other string stops at 500.
 fn scrub(v: Value, home: &str) -> Value {
+    scrub_max(v, home, STRING_MAX)
+}
+
+fn scrub_max(v: Value, home: &str, max: usize) -> Value {
     match v {
-        Value::String(s) => Value::String(scrub_text(&s, home)),
-        Value::Array(a) => Value::Array(a.into_iter().map(|x| scrub(x, home)).collect()),
+        Value::String(s) => Value::String(scrub_text_max(&s, home, max)),
+        Value::Array(a) => Value::Array(a.into_iter().map(|x| scrub_max(x, home, max)).collect()),
         Value::Object(o) => Value::Object(
             o.into_iter()
-                .map(|(k, x)| (scrub_text(&k, home), scrub(x, home)))
+                .map(|(k, x)| {
+                    let max = if k == "$ai_input" { AI_INPUT_MAX } else { max };
+                    (scrub_text(&k, home), scrub_max(x, home, max))
+                })
                 .collect(),
         ),
         other => other,
@@ -922,5 +941,25 @@ mod tests {
                 "{url}"
             );
         }
+    }
+
+    #[test]
+    fn only_the_ai_input_may_pass_500_characters_and_it_is_cut_on_a_character_boundary() {
+        // Two-byte characters: a byte cut at 2,000 would split one.
+        let long = "é".repeat(2500);
+        let v = scrub(
+            json!({
+                "$ai_input": [{ "role": "user", "content": long }],
+                "other": "y".repeat(900),
+                "nested": { "$ai_input_note": "z".repeat(900) },
+            }),
+            "",
+        );
+        assert_eq!(v["$ai_input"][0]["content"].as_str().unwrap().chars().count(), 2000);
+        assert_eq!(v["other"].as_str().unwrap().chars().count(), 500);
+        assert_eq!(v["nested"]["$ai_input_note"].as_str().unwrap().chars().count(), 500);
+        // The path scrub still applies inside the prompt.
+        let v = scrub(json!({ "$ai_input": [{ "content": "open C:\\Users\\me\\a.txt and /home/me/x/y" }] }), "");
+        assert_eq!(v["$ai_input"][0]["content"], "open [path] and [path]");
     }
 }

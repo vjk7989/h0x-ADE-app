@@ -2137,7 +2137,7 @@ impl AppWindow {
             changed |= self.model.set_turn(addr, turn, label.max(self.written_seen.get(addr).copied()));
         }
         self.written_seen.retain(|a, _| self.live.contains_key(a));
-        crate::events::agents(&running, !self.listed_once);
+        crate::events::agents(&running, !self.listed_once, &self.core);
         let working = self.live.values().any(|rec| rec["status"] == "working");
         crate::update::note_agents(working);
         crate::activity::tick(working);
