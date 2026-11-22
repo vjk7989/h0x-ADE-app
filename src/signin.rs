@@ -1537,12 +1537,13 @@ mod tests {
     }
 
     #[test]
-    fn the_regular_grid_fits_the_window_with_margins_and_stays_centred_below_the_middle() {
-        use super::{GRID_W, layout, tile_rects};
+    fn the_regular_grid_fits_the_window_with_margins_and_stays_centred() {
+        use super::{GRID_H, GRID_W, layout, tile_rects};
         let (w, h) = (1040.0, 760.0);
         assert_eq!(layout(w, h).mode, super::Mode::Regular);
         let [hero, mark, a, _, c] = tile_rects(w, h, 1.0);
-        assert_eq!(hero, (76.0, 0.03 * h + h / 2.0 - 250.0, 664.0, 0.03 * h + h / 2.0 - 250.0 + 312.0));
+        assert_eq!(hero, (76.0, (h - GRID_H) / 2.0, 664.0, (h - GRID_H) / 2.0 + 312.0));
+        assert!((hero.1 - (h - c.3)).abs() < 0.5, "centred: the top margin {} equals the bottom margin {}", hero.1, h - c.3);
         assert!(hero.0 >= 40.0 && w - mark.2 >= 40.0, "margins of 40 px or more at the sides: {} / {}", hero.0, w - mark.2);
         assert_eq!(w - GRID_W, 152.0);
         assert!(a.1 > hero.3 && c.3 + 36.0 <= h, "the grid sits above the footer line");
