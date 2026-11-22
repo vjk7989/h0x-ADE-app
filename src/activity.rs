@@ -97,6 +97,12 @@ fn tame(text: &str) -> String {
     out
 }
 
+#[derive(Serialize, Deserialize)]
+struct File {
+    version: u32,
+    days: BTreeMap<String, Day>,
+}
+
 /// What has happened since the last write; each flush adds it to the file.
 struct Recorder {
     pending: BTreeMap<String, Day>,
