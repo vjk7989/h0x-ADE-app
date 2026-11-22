@@ -38,35 +38,63 @@ fn is_zero_u64(v: &u64) -> bool {
     *v == 0
 }
 
-// The new fields are read as raw text: a number serde_json cannot hold (`1e400`) is an error in any typed or
-// `Value` read, and would put the whole file aside. As text it is just a bad value, and reads as 0.
-
-/// A whole number; anything else (text, a negative, a fraction, `1e400`, null) is 0.
-fn raw_count(raw: &serde_json::value::RawValue) -> u64 {
-    raw.get().trim().parse().unwrap_or(0)
-}
+// The new fields never put the file aside: whatever they hold, they read as 0. A number past f64 (`1e400`) is
+// a syntax error for serde_json in any read, so `tame` first turns such numbers into 0.
 
 /// A finite, non-negative number; anything else is 0 (a bad number never loses the rest of the file).
 fn cost_or_zero<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
-    let raw = Box::<serde_json::value::RawValue>::deserialize(d)?;
-    Ok(raw.get().trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0))
+    Ok(serde_json::Value::deserialize(d)?.as_f64().filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0))
 }
 
+/// A whole number; anything else (text, a negative, a fraction, null) is 0.
 fn count_or_zero<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
-    Ok(raw_count(&Box::<serde_json::value::RawValue>::deserialize(d)?))
+    Ok(serde_json::Value::deserialize(d)?.as_u64().unwrap_or(0))
 }
 
 /// Tokens per agent; a value that is not a whole number is 0 (the row is dropped), and anything but an object is empty.
 fn agents_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BTreeMap<String, u64>, D::Error> {
-    let raw = Box::<serde_json::value::RawValue>::deserialize(d)?;
-    let rows: BTreeMap<String, Box<serde_json::value::RawValue>> = serde_json::from_str(raw.get()).unwrap_or_default();
-    Ok(rows.into_iter().map(|(agent, v)| (agent, raw_count(&v))).filter(|(_, tokens)| *tokens > 0).collect())
+    let rows = match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Object(rows) => rows,
+        _ => return Ok(BTreeMap::new()),
+    };
+    Ok(rows.into_iter().filter_map(|(agent, v)| v.as_u64().filter(|t| *t > 0).map(|t| (agent, t))).collect())
 }
 
-#[derive(Serialize, Deserialize)]
-struct File {
-    version: u32,
-    days: BTreeMap<String, Day>,
+/// The file's text with every number serde_json cannot hold (an exponent past 308, or 300 characters or more)
+/// replaced by 0, outside strings. Such a number is damage to its own field only.
+fn tame(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut in_string, mut escaped) = (false, false);
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, ch)) = chars.next() {
+        if in_string {
+            out.push(ch);
+            (in_string, escaped) = match (ch, escaped) {
+                ('\\', false) => (true, true),
+                ('"', false) => (false, false),
+                _ => (true, false),
+            };
+        } else if ch == '"' {
+            in_string = true;
+            out.push(ch);
+        } else if ch.is_ascii_digit() || ch == '-' {
+            let mut end = i + ch.len_utf8();
+            while let Some(&(j, c)) = chars.peek() {
+                if !(c.is_ascii_digit() || matches!(c, '+' | '-' | '.' | 'e' | 'E')) {
+                    break;
+                }
+                end = j + c.len_utf8();
+                chars.next();
+            }
+            let token = &text[i..end];
+            let exponent = token.split(['e', 'E']).nth(1).map(|e| e.trim_start_matches(['+', '-', '0']));
+            let too_big = token.len() >= 300 || exponent.is_some_and(|e| e.len() > 3 || e.parse::<u32>().is_ok_and(|n| n > 308));
+            out.push_str(if too_big { "0" } else { token });
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// What has happened since the last write; each flush adds it to the file.
@@ -252,7 +280,7 @@ fn write_merged(dir: &Path, delta: &BTreeMap<String, Day>, today: &str) -> std::
     // (Two HyperOx processes flushing at the very same moment can still lose one update: read and
     // write are not locked together.)
     let read = match std::fs::read_to_string(&path) {
-        Ok(text) => Some(serde_json::from_str::<File>(&text).ok().filter(|f| f.version == 1)),
+        Ok(text) => Some(serde_json::from_str::<File>(&tame(&text)).ok().filter(|f| f.version == 1)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Some(None),
         Err(e) => return Err(e),
@@ -831,20 +859,25 @@ mod tests {
 
     #[test]
     fn a_bad_new_field_reads_as_zero_and_the_rest_of_the_day_and_file_is_kept() {
-        for cost in ["1e400", "-1e400", "-1", "\"x\"", "null", "[]", "{}", "true"] {
-            let d: Day = serde_json::from_str(&format!(r#"{{"seconds":4,"tokens":9,"cost_usd":{cost}}}"#)).unwrap_or_else(|e| panic!("{cost}: {e}"));
+        // A day as the file reader sees it (`tame`, then serde).
+        let in_file = |day: &str| serde_json::from_str::<File>(&tame(&format!(r#"{{"version":1,"days":{{"d":{day}}}}}"#))).map(|f| f.days["d"].clone());
+        for cost in ["1e400", "-1e400", "-1", "\"x\"", "null", "[]", "{}", "true", "1E+0400", "1e00000400"] {
+            let d = in_file(&format!(r#"{{"seconds":4,"tokens":9,"cost_usd":{cost}}}"#)).unwrap_or_else(|e| panic!("{cost}: {e}"));
             assert_eq!((d.seconds, d.tokens, d.cost_usd), (4, 9, 0.0), "{cost}");
         }
         for saved in ["1e400", "-1", "1.5", "\"7\"", "null", "[]", "{}", "18446744073709551616"] {
-            let d: Day = serde_json::from_str(&format!(r#"{{"seconds":4,"saved":{saved}}}"#)).unwrap_or_else(|e| panic!("{saved}: {e}"));
+            let d = in_file(&format!(r#"{{"seconds":4,"saved":{saved}}}"#)).unwrap_or_else(|e| panic!("{saved}: {e}"));
             assert_eq!((d.seconds, d.saved), (4, 0), "{saved}");
         }
         for agents in ["1e400", "\"x\"", "null", "[1,2]", "5", "{\"claude\":1e400}"] {
-            let d: Day = serde_json::from_str(&format!(r#"{{"seconds":4,"by_agent":{agents}}}"#)).unwrap_or_else(|e| panic!("{agents}: {e}"));
+            let d = in_file(&format!(r#"{{"seconds":4,"by_agent":{agents}}}"#)).unwrap_or_else(|e| panic!("{agents}: {e}"));
             assert_eq!((d.seconds, d.by_agent), (4, BTreeMap::new()), "{agents}");
         }
         // One bad row costs only that row.
-        let d: Day = serde_json::from_str(r#"{"by_agent":{"claude":3,"codex":-1,"gemini":"x","aider":1e400,"zero":0,"big":18446744073709551615}}"#).unwrap();
+        let d = in_file(r#"{"by_agent":{"claude":3,"codex":-1,"gemini":"x","aider":1e400,"zero":0,"big":18446744073709551615}}"#).unwrap();
+        // The biggest numbers f64 holds are not touched, and a "1e400" inside text is just text.
+        let d2 = in_file(r#"{"cost_usd":1.7976931348623157e308,"by_agent":{"1e400":2}}"#).unwrap();
+        assert_eq!((d2.cost_usd, d2.by_agent["1e400"]), (f64::MAX, 2));
         assert_eq!(d.by_agent, [("claude".to_string(), 3), ("big".to_string(), u64::MAX)].into());
         // In a whole file: the good day and the bad day both load, and nothing is put aside.
         let dir = scratch("lenient-file");
