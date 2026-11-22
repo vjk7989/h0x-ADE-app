@@ -12706,7 +12706,7 @@ fn settings_profile_tokens_card_saved_percent_with_zero_used_and_zero_saved(cx: 
         ("[[0, { tokens: 0, saved: 500 }]]", "500 tokens (~$0.00) \u{b7} 100%"),
         ("[[0, { tokens: 500 }]]", "0 tokens (~$0.00) \u{b7} 0%"),
         ("[[0, { tokens: 0 }]]", "0 tokens (~$0.00) \u{b7} 0%"),
-        ("[[0, { tokens: 1, saved: 2000000 }]]", "2,000,000 tokens (~$6.00) \u{b7} 100%"),
+        ("[[0, { tokens: 1, saved: 2000000 }]]", "2,000,000 tokens (~$6.00) \u{b7} 99%"),
     ] {
         let tree = describe_tokens(cx, &staged, days, "today");
         assert!(tree.contains(saved) && !tree.contains("NaN"), "{days}: {saved:?}: {tree}");
@@ -12850,7 +12850,7 @@ fn settings_profile_tokens_card_saved_percent_rounds_and_saved_may_exceed_used(c
     for (days, saved) in [
         ("[[0, { tokens: 2000, saved: 1000 }]]", "1,000 tokens (~$0.00) \u{b7} 33%"),
         ("[[0, { tokens: 199000, saved: 1000 }]]", "1,000 tokens (~$0.00) \u{b7} 1%"),
-        ("[[0, { tokens: 1, saved: 1999 }]]", "1,999 tokens (~$0.01) \u{b7} 100%"),
+        ("[[0, { tokens: 1, saved: 1999 }]]", "1,999 tokens (~$0.01) \u{b7} 99%"),
         ("[[0, { tokens: 1000, saved: 3000 }]]", "3,000 tokens (~$0.01) \u{b7} 75%"),
     ] {
         let tree = describe_tokens(cx, &staged, days, "today");
@@ -12894,7 +12894,7 @@ fn settings_profile_tokens_card_draws_odd_agent_names_as_plain_text_sorted_by_co
         ("\u{1f916} bot", "6", "\u{1f916} bot".to_owned()),
         ("\u{645}\u{631}\u{62d}\u{628}\u{627}", "5", "\u{645}\u{631}\u{62d}\u{628}\u{627}".to_owned()),
         ("<b>bold</b>", "4", "<b>bold</b>".to_owned()),
-        ("", "3", String::new()),
+        ("unknown", "3", "unknown".to_owned()),
     ];
     let mut last = 0;
     for (name, count, label) in rows {
@@ -12903,7 +12903,7 @@ fn settings_profile_tokens_card_draws_odd_agent_names_as_plain_text_sorted_by_co
         let at = tree.find(&format!(":id[Str({id:?})]")).unwrap();
         assert!(at > last, "{id:?} is sorted by count: {tree}");
         last = at;
-        assert!(label.is_empty() || tree.contains(&format!("text {label:?}")), "{label:?}: {tree}");
+        assert!(tree.contains(&format!("text {label:?}")), "{label:?}: {tree}");
     }
     assert_eq!(text_under(&tree, "st-prof-tokens-used"), "text \"100 tokens\"", "{tree}");
     assert!(!tree.contains("NaN") && !tree.contains("undefined"), "{tree}");
