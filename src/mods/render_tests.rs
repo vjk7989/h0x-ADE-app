@@ -3140,18 +3140,19 @@ fn settings_nav_lists_0x_modes_between_alerts_and_mods_and_it_opens_on_click(cx:
 }
 
 #[gpui::test]
-fn settings_0x_modes_page_renders_token_saver_off_for_the_default_person_without_calling_the_core(cx: &mut TestAppContext) {
+fn settings_0x_modes_page_renders_token_saver_on_for_the_default_person_and_off_only_for_an_explicit_false_without_calling_the_core(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    // No file, an empty one, one with other keys and one with token_saver false: all the default person.
-    for file in [None, Some("{}"), Some(r#"{"zoom": 1.25}"#), Some(r#"{"token_saver": false}"#)] {
+    // No file, an empty one, one with other keys and one with token_saver true: the default person, on. Only an explicit false is off.
+    for (file, on) in [(None, true), (Some("{}"), true), (Some(r#"{"zoom": 1.25}"#), true), (Some(r#"{"token_saver": true}"#), true), (Some(r#"{"token_saver": false}"#), false)] {
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, TOKEN_SAVER_PRESS, 0);
         let tree = &trees[0];
-        for text in ["0X MODES", "Token Saver", "st-token-saver-off", "Tokens saved: ", "Security", "ZK Proofs", "Observability"] {
+        let (shown, hidden) = if on { ("st-token-saver-on", "st-token-saver-off") } else { ("st-token-saver-off", "st-token-saver-on") };
+        for text in ["0X MODES", "Token Saver", "Optional power-ups for your agents. Turn each one on or off here.", shown, "Tokens saved: ", "Security", "ZK Proofs", "Observability"] {
             assert!(tree.contains(text), "{file:?}: {text:?}: {tree}");
         }
         assert_eq!(tree.matches("Coming soon").count(), 3, "{file:?}: {tree}");
-        assert!(!tree.contains("st-token-saver-on") && !tree.contains("can't be read"), "{file:?}: {tree}");
+        assert!(!tree.contains(hidden) && !tree.contains("can't be read"), "{file:?}: {tree}");
         let c = calls.borrow();
         assert!(c.cores.is_empty() && c.execs.is_empty(), "{file:?}: rendering never calls the core: {:?} {:?}", c.cores, c.execs);
         assert!(c.writes.is_empty() && c.unexpected.is_empty(), "{file:?}: {:?} {:?}", c.writes, c.unexpected);
@@ -3224,17 +3225,18 @@ fn settings_0x_modes_coming_soon_rows_have_nothing_to_click(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn settings_token_saver_switch_on_writes_true_and_off_removes_the_key_keeping_every_other_key(cx: &mut TestAppContext) {
+fn settings_token_saver_switch_off_writes_false_and_on_removes_the_key_keeping_every_other_key(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     // settings.json, what one press writes, and whether the switch was on before it.
     for (file, write, was_on) in [
-        (None, json!({"token_saver": true}), false),
-        (Some("{}"), json!({"token_saver": true}), false),
-        (Some(r#"{"token_saver": false, "zoom": 1.25}"#), json!({"token_saver": true, "zoom": 1.25}), false),
-        (Some(r#"{"token_saver": true, "zoom": 1.25, "share_analytics": false}"#), json!({"zoom": 1.25, "share_analytics": false}), true),
-        (Some(r#"{"token_saver": true}"#), json!({}), true),
-        (Some("\u{feff}{\"token_saver\": true}"), json!({}), true),
+        (None, json!({"token_saver": false}), true),
+        (Some("{}"), json!({"token_saver": false}), true),
+        (Some(r#"{"token_saver": true, "zoom": 1.25}"#), json!({"token_saver": false, "zoom": 1.25}), true),
+        (Some(r#"{"zoom": 1.25, "share_analytics": false}"#), json!({"token_saver": false, "zoom": 1.25, "share_analytics": false}), true),
+        (Some(r#"{"token_saver": false, "zoom": 1.25, "share_analytics": false}"#), json!({"zoom": 1.25, "share_analytics": false}), false),
+        (Some(r#"{"token_saver": false}"#), json!({}), false),
+        (Some("\u{feff}{\"token_saver\": false}"), json!({}), false),
     ] {
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, TOKEN_SAVER_PRESS, 1);
         assert_eq!(written(&calls, "/fixture/app/settings.json"), [write], "{file:?}");
@@ -3248,20 +3250,20 @@ fn settings_token_saver_switch_on_writes_true_and_off_removes_the_key_keeping_ev
     let mut values = modes_values();
     values.insert("appHome".into(), json!(home));
     let (_, calls) = describe_pressing(cx, &staged, "frame/settings", values, Some(r#"{"zoom": 1.25}"#), TOKEN_SAVER_PRESS, 1);
-    assert_eq!(written(&calls, &format!("{home}/settings.json")), [json!({"token_saver": true, "zoom": 1.25})]);
+    assert_eq!(written(&calls, &format!("{home}/settings.json")), [json!({"token_saver": false, "zoom": 1.25})]);
 }
 
 #[gpui::test]
-fn settings_token_saver_with_a_value_that_is_not_true_shows_off_and_one_press_writes_true(cx: &mut TestAppContext) {
+fn settings_token_saver_with_a_value_that_is_not_false_shows_on_and_one_press_writes_false(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    // Only true is on; a wrong type (which the app reads as off, see bool_or_false in settings.rs) neither crashes the page nor reads as on.
-    for value in [r#""yes""#, "1", "0", "null", r#""true""#, "[]"] {
+    // Only false is off; a wrong type (which the app reads as the default, on, see bool_or_true in settings.rs) neither crashes the page nor reads as off.
+    for value in [r#""no""#, "1", "0", "null", r#""false""#, "[]"] {
         let file = format!(r#"{{"token_saver": {value}, "zoom": 1.25}}"#);
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(&file), TOKEN_SAVER_PRESS, 1);
-        assert!(trees[0].contains("st-token-saver-off") && !trees[0].contains("can't be read"), "{value}: {}", trees[0]);
-        assert_eq!(written(&calls, "/fixture/app/settings.json"), [json!({"token_saver": true, "zoom": 1.25})], "{value}");
-        assert!(trees[1].contains("st-token-saver-on"), "{value}: {}", trees[1]);
+        assert!(trees[0].contains("st-token-saver-on") && !trees[0].contains("can't be read"), "{value}: {}", trees[0]);
+        assert_eq!(written(&calls, "/fixture/app/settings.json"), [json!({"token_saver": false, "zoom": 1.25})], "{value}");
+        assert!(trees[1].contains("st-token-saver-off"), "{value}: {}", trees[1]);
         assert!(calls.borrow().unexpected.is_empty(), "{value}: {:?}", calls.borrow().unexpected);
     }
 }
@@ -3273,7 +3275,7 @@ fn settings_token_saver_switch_never_overwrites_a_settings_file_it_could_not_rea
     for bad in ["", "{not json", "[]", "null", "true"] {
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(bad), TOKEN_SAVER_PRESS, 1);
         assert!(calls.borrow().writes.is_empty(), "{bad:?}: {:?}", calls.borrow().writes);
-        assert!(trees[1].contains("can't be read") && trees[1].contains("st-token-saver-off"), "{bad:?}: {}", trees[1]);
+        assert!(trees[1].contains("can't be read") && trees[1].contains("st-token-saver-on"), "{bad:?}: {}", trees[1]);
     }
 }
 
@@ -3286,8 +3288,8 @@ const SMART_ROUTING_PRESS: &str = "const toggle = this.toggle.bind(this); \
 fn settings_smart_routing_row_sits_under_token_saver_with_its_heading_and_is_off_by_default(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    // Token Saver on, and smart_routing absent, false or not a bool: the row is there, enabled, and off.
-    for file in [r#"{"token_saver": true}"#, r#"{"token_saver": true, "smart_routing": false}"#, r#"{"token_saver": true, "smart_routing": "yes"}"#, r#"{"token_saver": true, "smart_routing": 1}"#] {
+    // Token Saver on (the default, or explicit), and smart_routing absent, false or not a bool: the row is there, enabled, and off.
+    for file in ["{}", r#"{"token_saver": true}"#, r#"{"token_saver": true, "smart_routing": false}"#, r#"{"token_saver": true, "smart_routing": "yes"}"#, r#"{"token_saver": true, "smart_routing": 1}"#] {
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(file), SMART_ROUTING_PRESS, 0);
         let tree = &trees[0];
         for text in ["Smart routing", "Picks the right tools and model for tasks you start with a prompt (logs and data questions run on a cheaper model).", "st-smart-routing-off"] {
@@ -3324,8 +3326,9 @@ fn settings_smart_routing_switch_on_writes_true_and_off_removes_the_key_keeping_
 fn settings_smart_routing_is_disabled_with_a_note_when_token_saver_is_off(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    // Token Saver off, absent or not true: the row is shown, has no switch to press, and says why. A stored smart_routing true is kept, not shown on.
-    for file in [None, Some("{}"), Some(r#"{"token_saver": false}"#), Some(r#"{"token_saver": "yes"}"#), Some(r#"{"smart_routing": true}"#), Some(r#"{"token_saver": false, "smart_routing": true, "zoom": 1.25}"#)] {
+    // Token Saver explicitly off: the row is shown, has no switch to press, and says why. A stored smart_routing true is kept, not shown on.
+    for file in [r#"{"token_saver": false}"#, r#"{"token_saver": false, "smart_routing": true}"#, r#"{"token_saver": false, "smart_routing": true, "zoom": 1.25}"#] {
+        let file = Some(file);
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, SMART_ROUTING_PRESS, 0);
         let tree = &trees[0];
         assert!(tree.contains("Smart routing") && tree.contains("Turn on Token Saver to use this."), "{file:?}: {tree}");
@@ -3346,23 +3349,23 @@ fn settings_token_saver_off_makes_smart_routing_inert_and_keeps_its_stored_value
             Some(r#"{"token_saver": true, "smart_routing": true, "zoom": 1.25}"#),
             vec![saver, saver, routing, saver],
             vec![
+                json!({"token_saver": false, "smart_routing": true, "zoom": 1.25}),
                 json!({"smart_routing": true, "zoom": 1.25}),
-                json!({"token_saver": true, "smart_routing": true, "zoom": 1.25}),
-                json!({"token_saver": true, "zoom": 1.25}),
                 json!({"zoom": 1.25}),
+                json!({"token_saver": false, "zoom": 1.25}),
             ],
             vec![None, Some("st-smart-routing-on"), Some("st-smart-routing-off"), None],
         ),
         (
             None,
-            vec![saver, routing, saver],
-            vec![json!({"token_saver": true}), json!({"token_saver": true, "smart_routing": true}), json!({"smart_routing": true})],
-            vec![Some("st-smart-routing-off"), Some("st-smart-routing-on"), None],
+            vec![routing, saver, saver],
+            vec![json!({"smart_routing": true}), json!({"smart_routing": true, "token_saver": false}), json!({"smart_routing": true})],
+            vec![Some("st-smart-routing-on"), None, Some("st-smart-routing-on")],
         ),
         (
-            Some(r#"{"smart_routing": true}"#),
+            Some(r#"{"token_saver": false, "smart_routing": true}"#),
             vec![saver, routing],
-            vec![json!({"smart_routing": true, "token_saver": true}), json!({"token_saver": true})],
+            vec![json!({"smart_routing": true}), json!({})],
             vec![Some("st-smart-routing-on"), Some("st-smart-routing-off")],
         ),
     ];
@@ -3398,7 +3401,7 @@ fn settings_token_saver_off_makes_smart_routing_inert_and_keeps_its_stored_value
 fn settings_inert_smart_routing_row_has_nothing_to_click(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    for file in [None, Some(r#"{"smart_routing": true}"#)] {
+    for file in [Some(r#"{"token_saver": false}"#), Some(r#"{"token_saver": false, "smart_routing": true}"#)] {
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, "", 0);
         let tree = &trees[0];
         // From the row's title to the savings line below it: no id, click or hand cursor.
@@ -3433,13 +3436,13 @@ fn settings_smart_routing_reads_a_crlf_file_and_writes_a_windows_app_home(cx: &m
 }
 
 #[gpui::test]
-fn settings_smart_routing_stays_inert_and_writes_nothing_for_an_unreadable_settings_file(cx: &mut TestAppContext) {
+fn settings_smart_routing_reads_an_unreadable_settings_file_as_the_default_person_and_writes_nothing(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    // An unreadable file reads as the default person: Token Saver off, so the row is inert and there is nothing to press.
+    // An unreadable file reads as the default person: Token Saver on, so the row is enabled and off; nothing is written until a press.
     for bad in ["", "   ", "\r\n", "{not json", "[]", "null"] {
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(bad), SMART_ROUTING_PRESS, 0);
-        assert!(trees[0].contains("Turn on Token Saver to use this.") && !trees[0].contains("st-smart-routing"), "{bad:?}: {}", trees[0]);
+        assert!(trees[0].contains("st-smart-routing-off") && !trees[0].contains("Turn on Token Saver"), "{bad:?}: {}", trees[0]);
         assert!(calls.borrow().writes.is_empty(), "{bad:?}: {:?}", calls.borrow().writes);
     }
 }

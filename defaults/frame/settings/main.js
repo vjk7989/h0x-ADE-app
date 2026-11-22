@@ -1273,19 +1273,19 @@ export default class Settings extends View {
   }
 
   modes(t) {
-    const on = this.person.token_saver === true;
+    const on = this.person.token_saver !== false;
     const routing = this.person.smart_routing === true;
     const soon = (title) => this.row(t, title, null, div().text_size(12.5).text_color(t.dim).child("Coming soon"));
     return v_flex()
       .w_full()
       .child(this.heading(t, "0x Modes"))
-      .child(div().pb(6).text_size(12.5).line_height("18px").text_color(t.dim).child("Optional power-ups for your agents. Each one stays off until you turn it on."))
+      .child(div().pb(6).text_size(12.5).line_height("18px").text_color(t.dim).child("Optional power-ups for your agents. Turn each one on or off here."))
       .child(
         this.row(
           t,
           "Token Saver",
           "Helps your agents use fewer tokens.",
-          this.toggle(t, "st-token-saver", on, (_e, cx) => this.change((p) => { if (on) delete p.token_saver; else p.token_saver = true; }, cx)),
+          this.toggle(t, "st-token-saver", on, (_e, cx) => this.change((p) => { if (on) p.token_saver = false; else delete p.token_saver; }, cx)),
         ),
       )
       .child(

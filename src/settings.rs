@@ -409,8 +409,8 @@ pub struct Person {
     /// Send usage analytics (Settings > Info). Failure reports are not governed by this.
     #[serde(skip_serializing_if = "is_true", deserialize_with = "bool_or_true")]
     pub share_analytics: bool,
-    /// 0x Modes > Token Saver: shrink big tool outputs before an agent reads them. Off unless set.
-    #[serde(skip_serializing_if = "is_false", deserialize_with = "bool_or_false")]
+    /// 0x Modes > Token Saver: shrink big tool outputs before an agent reads them. On unless turned off.
+    #[serde(skip_serializing_if = "is_true", deserialize_with = "bool_or_true")]
     pub token_saver: bool,
     /// 0x Modes > Smart routing (needs Token Saver): pick the tools and model for a task started with a prompt. Off unless set.
     #[serde(skip_serializing_if = "is_false", deserialize_with = "bool_or_false")]
@@ -566,7 +566,7 @@ impl Default for Person {
             clipboard_write: false,
             check_updates: true,
             share_analytics: true,
-            token_saver: false,
+            token_saver: true,
             smart_routing: false,
             found_via: None,
             pane_scrollbars: true,
@@ -659,7 +659,7 @@ impl Default for Settings {
             clipboard_write: false,
             check_updates: true,
             share_analytics: true,
-            token_saver: false,
+            token_saver: true,
             smart_routing: false,
             minimum_contrast: 1.0,
             scrollback_lines: SCROLLBACK_DEFAULT,
@@ -1364,7 +1364,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), clipboard_write: false, token_saver: true, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), mods: [("m".into(), ModChoice::default())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), clipboard_write: false, token_saver: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), mods: [("m".into(), ModChoice::default())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
@@ -1373,30 +1373,30 @@ mod tests {
     }
 
     #[test]
-    fn token_saver_defaults_off_and_round_trips() {
+    fn token_saver_defaults_on_and_round_trips() {
         let absent: Person = serde_json::from_str(r#"{"zoom":1.5}"#).unwrap();
-        assert!(!absent.token_saver && !Person::default().token_saver && !Settings::default().token_saver);
+        assert!(absent.token_saver && Person::default().token_saver && Settings::default().token_saver);
         assert!(serde_json::to_value(&absent).unwrap().get("token_saver").is_none());
-        let on: Person = serde_json::from_str(r#"{"token_saver":true}"#).unwrap();
-        assert!(on.token_saver && Settings::compose(&on, &crate::layout::Look::default(), true).token_saver);
-        assert_eq!(serde_json::to_value(&on).unwrap()["token_saver"], serde_json::json!(true));
-        let back: Person = serde_json::from_value(serde_json::to_value(&on).unwrap()).unwrap();
-        assert!(back.token_saver);
+        let off: Person = serde_json::from_str(r#"{"token_saver":false}"#).unwrap();
+        assert!(!off.token_saver && !Settings::compose(&off, &crate::layout::Look::default(), true).token_saver);
+        assert_eq!(serde_json::to_value(&off).unwrap()["token_saver"], serde_json::json!(false));
+        let back: Person = serde_json::from_value(serde_json::to_value(&off).unwrap()).unwrap();
+        assert!(!back.token_saver);
     }
 
     #[test]
-    fn a_token_saver_that_is_not_a_bool_reads_as_off_and_keeps_the_file() {
-        // A wrong type is off, never a panic or a silent on, and the rest of the file is kept.
-        for bad in [r#"{"token_saver":"yes"}"#, r#"{"token_saver":1}"#, r#"{"token_saver":null}"#, r#"{"token_saver":"true"}"#, r#"{"token_saver":[]}"#, "\u{feff}{\"token_saver\":0,\"zoom\":1.5}"] {
+    fn a_token_saver_that_is_not_a_bool_reads_as_on_and_keeps_the_file() {
+        // A wrong type is the default (on), never a panic, and the rest of the file is kept.
+        for bad in [r#"{"token_saver":"no"}"#, r#"{"token_saver":0}"#, r#"{"token_saver":null}"#, r#"{"token_saver":"false"}"#, r#"{"token_saver":[]}"#, "\u{feff}{\"token_saver\":0,\"zoom\":1.5}"] {
             let person = parse_person(bad).unwrap_or_else(|e| panic!("{bad:?}: {e}"));
-            assert!(!person.token_saver, "{bad:?}");
+            assert!(person.token_saver, "{bad:?}");
             assert!(person.zoom == if bad.contains("zoom") { 1.5 } else { Person::default().zoom }, "{bad:?}");
         }
-        // Only a real bool is read; false is the default and is not written back, true survives a BOM.
-        let off = parse_person(r#"{"token_saver":false,"zoom":1.5}"#).unwrap();
-        assert!(!off.token_saver && serde_json::to_value(&off).unwrap().get("token_saver").is_none());
-        assert!(parse_person("\u{feff}{\"token_saver\":true}").unwrap().token_saver);
-        assert!(!parse_person("{}").unwrap().token_saver);
+        // Only a real false turns it off (also behind a BOM); true is the default and is not written back.
+        let on = parse_person(r#"{"token_saver":true,"zoom":1.5}"#).unwrap();
+        assert!(on.token_saver && serde_json::to_value(&on).unwrap().get("token_saver").is_none());
+        assert!(!parse_person("\u{feff}{\"token_saver\":false}").unwrap().token_saver);
+        assert!(parse_person("{}").unwrap().token_saver);
     }
 
     #[test]
@@ -1416,11 +1416,12 @@ mod tests {
 
     #[test]
     fn smart_routing_is_kept_apart_from_token_saver_and_reads_from_crlf_files() {
-        // Stored without Token Saver: it is read and written back as is, so turning Token Saver on again finds it.
-        let alone = parse_person(r#"{"smart_routing":true}"#).unwrap();
+        // Stored with Token Saver off: it is read and written back as is, so turning Token Saver on again finds it.
+        let alone = parse_person(r#"{"token_saver":false,"smart_routing":true}"#).unwrap();
         assert!(alone.smart_routing && !alone.token_saver);
         let back = serde_json::to_value(&alone).unwrap();
-        assert!(back["smart_routing"] == serde_json::json!(true) && back.get("token_saver").is_none(), "{back}");
+        assert!(back["smart_routing"] == serde_json::json!(true) && back["token_saver"] == serde_json::json!(false), "{back}");
+        assert!(parse_person(r#"{"smart_routing":true}"#).unwrap().token_saver);
         // CRLF line ends, with and without a BOM, read like LF.
         for text in ["{\r\n  \"token_saver\": true,\r\n  \"smart_routing\": true\r\n}\r\n", "\u{feff}{\r\n\"smart_routing\":true,\r\n\"token_saver\":true}\r\n"] {
             let person = parse_person(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
