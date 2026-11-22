@@ -472,22 +472,32 @@ impl WindowsPlatform {
                     let Some(all_windows) = all_windows.upgrade() else {
                         break;
                     };
+                    let mut any_visible = false;
                     for hwnd in all_windows.read().iter() {
                         unsafe {
+                            let visible = IsWindowVisible(hwnd.as_raw()).as_bool()
+                                && !IsIconic(hwnd.as_raw()).as_bool();
                             if let Some(signal_at) = signal_at {
-                                if IsWindowVisible(hwnd.as_raw()).as_bool()
-                                    && !IsIconic(hwnd.as_raw()).as_bool()
-                                {
+                                if visible {
                                     hwnd.frame_signal.record(signal_at, signal_source);
                                 } else {
                                     // Hidden windows may not consume WM_PAINT until shown again.
                                     hwnd.frame_signal.take();
                                 }
                             }
-                            RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE)
-                                .ok()
-                                .log_err();
+                            // HyperOx: no WM_PAINT at the refresh rate for hidden or minimized
+                            // windows; a restore re-arms the frame callback (WM_SIZE).
+                            if visible {
+                                any_visible = true;
+                                RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE)
+                                    .ok()
+                                    .log_err();
+                            }
                         }
+                    }
+                    // HyperOx: nothing to paint, so rest instead of spinning on DwmFlush.
+                    if !any_visible {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
                     }
                 }
             })
