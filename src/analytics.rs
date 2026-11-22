@@ -985,4 +985,47 @@ mod tests {
         let v = scrub(json!({ "$ai_input": [{ "content": "open C:\\Users\\me\\a.txt and /home/me/x/y" }] }), "");
         assert_eq!(v["$ai_input"][0]["content"], "open [path] and [path]");
     }
+
+    #[test]
+    fn a_prompt_loses_the_user_name_unc_paths_and_its_line_breaks() {
+        let home = "C:\\Users\\vijay";
+        let prompt = "fix C:\\Users\\vijay\\secret-proj\\a.rs\nand C:/Users/vijay/b.rs\r\n\tsee \\\\server\\share\\x.rs or ~/proj/c.rs\n\n";
+        let v = scrub(json!({ "$ai_input": [{ "role": "user", "content": prompt }] }), home);
+        let text = v["$ai_input"][0]["content"].as_str().unwrap();
+        assert!(!text.contains("vijay") && !text.contains("C:"), "{text}");
+        assert!(!text.contains("server") && text.contains("[path]"), "{text}");
+        assert!(!text.contains(['\n', '\r', '\t']) && !text.contains("  "), "{text:?}");
+        assert!(text.starts_with("fix ~\\") && text.ends_with("~/proj/c.rs"), "{text}");
+        assert_eq!(v["$ai_input"][0]["role"], "user");
+        // An empty or blank prompt stays empty, never a panic.
+        for blank in ["", " \n\t "] {
+            assert_eq!(scrub(json!({ "$ai_input": [{ "content": blank }] }), home)["$ai_input"][0]["content"], "");
+        }
+    }
+
+    #[test]
+    fn a_prompt_cut_at_2000_characters_inside_an_emoji_sequence_stays_valid_text() {
+        // A family emoji is five characters (three emoji joined by two zero-width joiners); the
+        // cut lands after its first joiner. A character cut never splits a surrogate pair.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let prompt = format!("{}{family}{}", "a".repeat(1998), "b".repeat(100_000));
+        let v = scrub(json!({ "$ai_input": [{ "content": prompt }] }), "");
+        let text = v["$ai_input"][0]["content"].as_str().unwrap();
+        assert_eq!(text.chars().count(), 2000);
+        assert!(prompt.starts_with(text));
+        assert!(text.ends_with("\u{1F468}\u{200D}"));
+        // 2,000 four-byte characters pass whole.
+        let wide = "\u{1F600}".repeat(2001);
+        let v = scrub(json!({ "$ai_input": [{ "content": wide }] }), "");
+        assert_eq!(v["$ai_input"][0]["content"], "\u{1F600}".repeat(2000));
+    }
+
+    #[test]
+    fn far_future_and_zero_turn_times_format_without_a_panic() {
+        assert_eq!(iso8601(0), "1970-01-01T00:00:00.000Z");
+        for ms in [i64::MAX as u64, u64::MAX] {
+            let s = iso8601(ms);
+            assert!(s.ends_with('Z') && s.contains('T'), "{s}");
+        }
+    }
 }

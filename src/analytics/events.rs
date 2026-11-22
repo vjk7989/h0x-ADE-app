@@ -931,4 +931,224 @@ mod tests {
         }
         assert_eq!(got[0].1["$ai_output_choices"], json!([]));
     }
+
+    #[test]
+    fn a_turn_without_a_known_model_still_carries_the_ai_model_posthog_requires() {
+        // PostHog's LLM analytics drops `$ai_generation` events that have no `$ai_model`.
+        let mut bare = turn(None);
+        bare.model = None;
+        let p = generation_props("t", "claude", &bare, None, false);
+        assert!(p["$ai_model"].as_str().is_some_and(|m| !m.is_empty()), "{p}");
+    }
+
+    #[test]
+    fn a_negative_or_infinite_cost_is_left_out_and_zero_is_kept() {
+        for bad in [-0.01, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let mut t = turn(None);
+            t.cost_usd = Some(bad);
+            let p = generation_props("t", "claude", &t, None, false);
+            assert!(p.get("$ai_total_cost_usd").is_none(), "{bad}: {p}");
+        }
+        let mut free = turn(None);
+        free.cost_usd = Some(0.0);
+        assert_eq!(generation_props("t", "claude", &free, None, false)["$ai_total_cost_usd"], 0.0);
+    }
+
+    #[test]
+    fn a_prompt_the_core_redacts_to_nothing_sends_no_ai_input() {
+        for reply in ["", "   ", "\n\t"] {
+            let (d, sent, booked) = (dir("empty-redact"), Sent::default(), Booked::default());
+            run(&d, true, &|_| Some(reply.to_string()), &sent, &booked, "t1", false, vec![turn(Some("hello"))]);
+            let sent = sent.into_inner();
+            assert_eq!(sent.len(), 1, "the numbers still go");
+            assert!(sent[0].1.get("$ai_input").is_none(), "{reply:?}: {}", sent[0].1);
+        }
+    }
+
+    #[test]
+    fn the_core_reply_is_trusted_as_is_and_its_extra_fields_are_ignored() {
+        // Extra fields and a text far past the 2,000 cap are accepted here: the cap is applied
+        // when the event is queued (`analytics::scrub`).
+        let huge = "x".repeat(100_000);
+        assert_eq!(parse_redacted(&Ok(json!({ "text": huge.clone(), "redacted": 3, "kinds": ["key"] }))), Some(huge));
+        for bad in [json!({ "text": null }), json!({ "text": ["a"] }), json!({ "text": { "a": 1 } }), json!([{ "text": "a" }])] {
+            assert_eq!(parse_redacted(&Ok(bad.clone())), None, "{bad}");
+        }
+        assert_eq!(parse_redacted(&Err(anyhow::anyhow!("timed out after 3s"))), None);
+        // Whatever the core returns is sent: a secret it missed is not caught by the app.
+        let (d, sent, booked) = (dir("trust"), Sent::default(), Booked::default());
+        run(&d, true, &|t| Some(t.into()), &sent, &booked, "t1", false, vec![turn(Some("key sk-live-123"))]);
+        assert_eq!(sent.into_inner()[0].1["$ai_input"], json!([{ "role": "user", "content": "key sk-live-123" }]));
+    }
+
+    #[test]
+    fn turn_times_in_the_future_at_zero_or_negative_reach_the_queue_without_a_panic() {
+        let d = dir("skew");
+        let got = std::cell::RefCell::new(Vec::new());
+        let emit = |_: &str, _: Value, at: u64| got.borrow_mut().push(at);
+        let usage = |_: &str, _: u64, _: f64| ();
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        let times = [i64::MAX, 0, -1, i64::MIN];
+        let turns: Vec<Turn> = times
+            .iter()
+            .map(|&ms| {
+                let mut t = turn(None);
+                t.timestamp_ms = ms;
+                t
+            })
+            .collect();
+        assert_eq!(read_with(&ctx, &job("ts"), false, |_| turns), 4);
+        assert_eq!(got.into_inner(), [i64::MAX as u64, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_quit_between_queueing_and_the_cursor_save_sends_the_turn_again_on_the_next_read() {
+        // At-least-once: the cursor is stored only after the events are queued, so a stop in
+        // between repeats the turn instead of losing it.
+        let d = dir("crash");
+        let sent = std::cell::Cell::new(0);
+        let crash = std::cell::Cell::new(true);
+        let emit = |_: &str, _: Value, _: u64| {
+            sent.set(sent.get() + 1);
+            if crash.get() {
+                panic!("app quit");
+            }
+        };
+        let usage = |_: &str, _: u64, _: f64| ();
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        let read = |ctx: &Ctx| {
+            read_with(ctx, &job("tc"), false, |c| {
+                let fresh = *c == TurnCursor::default();
+                *c = cursor_at(1);
+                if fresh { vec![turn(None)] } else { Vec::new() }
+            })
+        };
+        let quit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read(&ctx)));
+        assert!(quit.is_err());
+        assert!(!Cursors::load(&d).runs.contains_key("tc"), "no cursor was stored");
+        crash.set(false);
+        assert_eq!(read(&ctx), 1, "the turn is read again");
+        assert_eq!(read(&ctx), 0, "and only once more");
+        assert_eq!(sent.get(), 2);
+    }
+
+    #[test]
+    fn cursors_from_an_older_version_without_seen_ids_still_load() {
+        let d = dir("old-cursors");
+        std::fs::create_dir_all(&d).unwrap();
+        let now = unix_secs();
+        std::fs::write(
+            d.join("cursors.json"),
+            json!({ "runs": { "t1": { "at": now, "cursor": { "offsets": { "f.jsonl": 7 } } }, "t2": { "at": now, "cursor": {} } } }).to_string(),
+        )
+        .unwrap();
+        let store = Cursors::load(&d);
+        assert_eq!(store.runs["t1"].cursor, cursor_at(7));
+        assert_eq!(store.runs["t2"].cursor, TurnCursor::default());
+        // One entry of the wrong shape discards the whole file: every run starts over.
+        for bad in [
+            json!({ "runs": { "t1": { "cursor": {} } } }),
+            json!({ "runs": { "t1": { "at": -1, "cursor": {} } } }),
+            json!({ "runs": [] }),
+            json!({}),
+            json!(null),
+        ] {
+            std::fs::write(d.join("cursors.json"), bad.to_string()).unwrap();
+            assert!(Cursors::load(&d).runs.is_empty(), "{bad}");
+        }
+        std::fs::write(d.join("cursors.json"), "").unwrap();
+        assert!(Cursors::load(&d).runs.is_empty());
+    }
+
+    #[test]
+    fn two_runs_in_one_folder_keep_their_own_cursors_and_ending_one_keeps_the_other() {
+        let d = dir("two-runs");
+        let emit = |_: &str, _: Value, _: u64| ();
+        let usage = |_: &str, _: u64, _: f64| ();
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        read_with(&ctx, &job("a"), false, |c| {
+            *c = cursor_at(5);
+            vec![turn(None)]
+        });
+        read_with(&ctx, &job("b"), false, |c| {
+            assert_eq!(*c, TurnCursor::default(), "b does not start from a's cursor");
+            *c = cursor_at(9);
+            vec![turn(None)]
+        });
+        read_with(&ctx, &job("a"), true, |c| {
+            assert_eq!(*c, cursor_at(5));
+            Vec::new()
+        });
+        let store = Cursors::load(&d);
+        assert!(!store.runs.contains_key("a"));
+        assert_eq!(store.runs["b"].cursor, cursor_at(9));
+    }
+
+    #[test]
+    fn cursors_of_runs_not_read_for_seven_days_are_dropped_and_a_large_file_still_works() {
+        let d = dir("prune");
+        std::fs::create_dir_all(&d).unwrap();
+        let now = unix_secs();
+        let week = 7 * 24 * 3600;
+        let mut runs = serde_json::Map::new();
+        runs.insert("old".into(), json!({ "at": now - week - 60, "cursor": {} }));
+        runs.insert("edge".into(), json!({ "at": now - week + 60, "cursor": {} }));
+        runs.insert("zero".into(), json!({ "at": 0, "cursor": {} }));
+        runs.insert("future".into(), json!({ "at": u64::MAX, "cursor": {} }));
+        for i in 0..5000 {
+            runs.insert(format!("r{i}"), json!({ "at": now, "cursor": { "offsets": { "f.jsonl": i } } }));
+        }
+        std::fs::write(d.join("cursors.json"), json!({ "runs": runs }).to_string()).unwrap();
+        let emit = |_: &str, _: Value, _: u64| ();
+        let usage = |_: &str, _: u64, _: f64| ();
+        let ctx = Ctx { dir: &d, sharing: false, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        read_with(&ctx, &job("new"), false, |_| Vec::new());
+        let store = Cursors::load(&d);
+        for gone in ["old", "zero"] {
+            assert!(!store.runs.contains_key(gone), "{gone}");
+        }
+        for kept in ["edge", "future", "new", "r0", "r4999"] {
+            assert!(store.runs.contains_key(kept), "{kept}");
+        }
+        assert_eq!(store.runs.len(), 5003);
+        assert_eq!(store.runs["r4999"].cursor, cursor_at(4999));
+        assert!(!d.join("cursors.json.tmp").exists());
+    }
+
+    #[test]
+    fn trace_ids_stay_unique_and_within_posthogs_characters_across_100k_runs() {
+        let allowed = |c: char| c.is_ascii_alphanumeric() || "-_~.@()!':|".contains(c);
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..100_000 {
+            let id = new_trace_id();
+            assert!(!id.is_empty() && id.len() <= 100 && id.chars().all(allowed), "{id}");
+            assert!(ids.insert(id));
+        }
+    }
+
+    #[test]
+    fn only_local_claude_and_codex_runs_with_a_folder_are_read() {
+        let running = |kind: &'static str, folder: Option<&str>, remote: bool| Running {
+            kind,
+            since: Instant::now(),
+            started: SystemTime::now(),
+            folder: folder.map(Into::into),
+            trace: "t".into(),
+            last_read: Instant::now(),
+            turns: Arc::new(AtomicU64::new(0)),
+            remote,
+        };
+        let job = running("codex", Some("C:\\work\\repo"), false).job().unwrap();
+        assert_eq!((job.kind, job.usage_kind, job.folder), ("codex", AgentKind::Codex, PathBuf::from("C:\\work\\repo")));
+        assert!(running("claude", Some("/srv/x"), false).job().is_some());
+        for (kind, folder, remote) in [
+            ("claude", Some("/srv/x"), true),
+            ("claude", None, false),
+            ("gemini", Some("/srv/x"), false),
+            ("opencode", Some("/srv/x"), false),
+            ("other", Some("/srv/x"), false),
+        ] {
+            assert!(running(kind, folder, remote).job().is_none(), "{kind} {folder:?} {remote}");
+        }
+    }
 }
