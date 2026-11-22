@@ -1516,8 +1516,6 @@ mod tests {
         assert!(!inert.token_saver && inert.smart_routing);
     }
 
-    /// The guide's stated defaults are what an empty settings.json gives, and
-    /// every key it documents is one settings.json keeps.
     #[test]
     fn consent_round_trips_and_only_the_current_version_counts() {
         let none: Person = serde_json::from_str("{}").unwrap();
@@ -1546,6 +1544,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_consent_time_at_either_end_of_the_range_round_trips_and_one_past_it_asks_again() {
+        // A clock far in the future, the epoch itself, and the largest time there is: all kept as given.
+        for at in [0, 1, 4_102_444_800, u64::MAX] {
+            let mut person = Person::default();
+            assert!(person.accept_terms(at), "{at}");
+            let back = parse_person(&serde_json::to_string(&person).unwrap()).unwrap();
+            assert_eq!(back.consent, Some(Consent { version: TERMS_VERSION.into(), at }), "{at}");
+            assert!(back.consent_current(), "{at}");
+        }
+        // Not a whole unix second (beyond u64, a fraction, an exponent, a negative) is broken: asked again, rest kept.
+        for at in ["18446744073709551616", "1.5", "1e10", "-9223372036854775808", "\"1700000000\"", "true"] {
+            let text = format!(r#"{{"zoom":1.25,"consent":{{"version":"{TERMS_VERSION}","at":{at}}}}}"#);
+            let p = parse_person(&text).unwrap_or_else(|e| panic!("{at}: {e}"));
+            assert!(p.consent.is_none() && !p.consent_current() && p.zoom == 1.25, "{at}");
+        }
+        // A key a later version adds to the consent is not damage.
+        let later = parse_person(r#"{"consent":{"version":"beta-1","at":7,"via":"mobile"}}"#).unwrap();
+        assert_eq!(later.consent, Some(Consent { version: TERMS_VERSION.into(), at: 7 }));
+        assert!(later.consent_current());
+    }
+
+    #[test]
+    fn only_the_exact_terms_version_counts_and_accepting_twice_keeps_the_first_time() {
+        assert_eq!(TERMS_VERSION, "beta-1");
+        for near in ["beta-1 ", " beta-1", "beta-1\n", "BETA-1", "Beta-1", "beta-2", "beta-", "beta_1", "", "beta-1\u{0}"] {
+            let mut p: Person = serde_json::from_value(serde_json::json!({ "consent": { "version": near, "at": 3 } })).unwrap();
+            assert_eq!(p.consent.as_ref().map(|c| c.version.as_str()), Some(near), "{near:?} is stored as it was written");
+            assert!(!p.consent_current(), "{near:?} is not the current terms");
+            assert!(p.accept_terms(10), "{near:?}: agreeing now is news");
+            assert!(!p.accept_terms(11) && !p.accept_terms(0), "{near:?}: later agreements are not");
+            assert_eq!(p.consent, Some(Consent { version: TERMS_VERSION.into(), at: 10 }), "{near:?}");
+        }
+    }
+
+    /// The guide's stated defaults are what an empty settings.json gives, and
+    /// every key it documents is one settings.json keeps.
     #[test]
     fn share_analytics_defaults_on_and_round_trips() {
         let old: Person = serde_json::from_str(r#"{"telemetry":false}"#).unwrap();

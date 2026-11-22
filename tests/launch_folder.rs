@@ -348,6 +348,8 @@ fn a_shell_launch_opens_hyperox_in_its_folder() {
     }
     // This computer has already signed in or skipped: the marker lets the launch past the sign-in screen.
     std::fs::write(env.home.join("signin-done"), "1").unwrap();
+    // ...and has agreed to the current terms (otherwise the screen comes back in its consent-only form).
+    std::fs::write(env.home.join("settings.json"), r#"{"consent":{"version":"beta-1","at":1}}"#).unwrap();
     // Open and done tasks and steps for the To-do panel screenshot below (the app home's todo/
     // folder): the progress bar, step counts and the Completed count all have something to show.
     std::fs::create_dir_all(env.home.join("todo")).unwrap();

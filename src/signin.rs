@@ -45,6 +45,7 @@ const PERK_IDS: [&str; 3] = ["feat-tokens", "feat-observe", "feat-pii"];
 /// One line under each perk (the owner has seen them), in the same order.
 const BENEFITS: [&str; 3] =
     ["Leaner prompts, so agent sessions use fewer tokens.", "See what each agent ran, changed and spent.", "Personal data is masked before it leaves this computer."];
+const CONTINUE: &str = "Continue";
 const SKIP: &str = "Skip sign-in";
 const SKIP_NOTE: [&str; 2] = ["Skipping turns these off.", "Sign in later in Settings \u{2192} Profile."];
 const SIGN_IN_NOTE: &str = "Opens pavii.tech. Use Google, GitHub or email.";
@@ -68,20 +69,21 @@ const REJECTED: &str = "This account can't sign in right now (it may be disabled
 const OTHER: &str = "Something went wrong while signing in. Please try again.";
 const UNREACHABLE: &str = "Couldn't reach Pavii. Check your connection and try again.";
 
-/// Whether the sign-in screen comes first: only on a computer that has never signed in and
-/// never skipped. Test and debug builds can also skip it with `H0X_ADE_SKIP_SIGNIN=1`; that
+/// Whether the sign-in screen comes first: on a computer that has never signed in and never skipped, and (in a
+/// consent-only form) for anyone who has not agreed to the current terms. Test and debug builds can also skip it with `H0X_ADE_SKIP_SIGNIN=1`; that
 /// bypass is kept by user decision, although the e2e tests now write the marker instead.
 pub fn required() -> bool {
-    decide(bypass(), || !crate::auth::screen_needed())
+    decide(bypass(), || !crate::auth::screen_needed(), || crate::settings::load_person().unwrap_or_default().consent_current())
 }
 
 fn bypass() -> bool {
     cfg!(any(test, debug_assertions)) && std::env::var_os("H0X_ADE_SKIP_SIGNIN").is_some_and(|v| v == "1")
 }
 
-/// The marker is only looked up when there is no bypass; `done` is "signed in or skipped".
-fn decide(bypass: bool, done: impl FnOnce() -> bool) -> bool {
-    !bypass && !done()
+/// The marker and the settings are only looked up when there is no bypass; `done` is "signed in or skipped",
+/// `agreed` is "the stored agreement is to the current terms".
+fn decide(bypass: bool, done: impl FnOnce() -> bool, agreed: impl FnOnce() -> bool) -> bool {
+    !bypass && !(done() && agreed())
 }
 
 /// What to tell the person about a failed sign-in.
@@ -122,6 +124,8 @@ pub struct SignIn {
     ask: bool,
     /// The checkbox is ticked.
     agreed: bool,
+    /// Already signed in (or skipped): the screen only asks for the terms, with one Continue button.
+    only: bool,
     /// Requests that came in while this screen was up (the main window answers them once it opens).
     held: Vec<Request>,
     /// Code-texture ticks since the window opened (it only moves while `rain_runs`).
@@ -180,6 +184,7 @@ pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver
         let skip_focus = cx.focus_handle().tab_stop(true);
         let consent_focus = cx.focus_handle().tab_stop(true);
         let ask = !person.consent_current();
+        let only = !crate::auth::screen_needed();
         let view = cx.new(|_| SignIn {
             state: State::Idle,
             attempt: 0,
@@ -191,6 +196,7 @@ pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver
             consent_focus,
             ask,
             agreed: false,
+            only,
             held: Vec::new(),
             frame: 0,
             rain: Rc::new(RefCell::new(RainPaint::default())),
@@ -235,6 +241,10 @@ impl SignIn {
         if matches!(self.state, State::Waiting) || self.core.is_none() || blocked(self.ask, self.agreed) {
             return;
         }
+        if self.only {
+            self.finish_consent_only(window, cx);
+            return;
+        }
         self.record_consent();
         self.attempt += 1;
         let attempt = self.attempt;
@@ -270,6 +280,15 @@ impl SignIn {
             });
         })
         .detach();
+    }
+
+    /// Consent-only form: stores the agreement and opens the main window (nothing else to decide).
+    fn finish_consent_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(core), Some(requests)) = (self.core.take(), self.requests.take()) else { return };
+        self.record_consent();
+        self.hand_over();
+        window.remove_window();
+        crate::open_main(core, requests, cx);
     }
 
     /// Opens the main window signed out, the way a successful sign-in does (minus `identify`).
@@ -445,6 +464,10 @@ fn content(state: State) -> Content {
 }
 
 /// The footer's key hints for a state: (key, what it does); Tab always moves focus.
+fn content_only() -> Content {
+    Content { status: None, primary: Some(CONTINUE), secondary: None, note: None, skip: false }
+}
+
 fn hints(state: State) -> [(&'static str, &'static str); 2] {
     let first = match state {
         State::Idle => ("Enter", "sign in"),
@@ -1031,7 +1054,7 @@ impl Render for SignIn {
         let lay = layout(width, height);
         let (s, compact) = (lay.scale, lay.mode == Mode::Compact);
         let (light, tint) = (light(), tint());
-        let view = content(self.state);
+        let view = if self.only { content_only() } else { content(self.state) };
         let idle = matches!(self.state, State::Idle);
         let off = blocked(self.ask, self.agreed);
         let status = view.status.map(|status| {
@@ -1213,7 +1236,7 @@ impl Render for SignIn {
                 .child(perks)
         };
 
-        let hint_line = div().flex().items_center().gap(px(8.0)).font_family(crate::settings::DEFAULT_FONT).text_size(px(11.5)).children(hints(self.state).into_iter().enumerate().flat_map(
+        let hint_line = div().flex().items_center().gap(px(8.0)).font_family(crate::settings::DEFAULT_FONT).text_size(px(11.5)).children(if self.only { [("Enter", "continue"), ("Tab", "focus")] } else { hints(self.state) }.into_iter().enumerate().flat_map(
             |(i, (key, verb))| {
                 let sep = (i > 0).then(|| div().text_color(c("dim")).child("\u{b7}").into_any_element());
                 let item = div().flex().gap(px(6.0)).child(div().font_weight(FontWeight::MEDIUM).text_color(c("foreground")).child(key)).child(div().text_color(c("muted")).child(verb));
@@ -1665,13 +1688,44 @@ mod tests {
 
     #[test]
     fn signed_out_shows_the_screen_signed_in_opens_main() {
-        assert!(decide(false, || false));
-        assert!(!decide(false, || true));
+        assert!(decide(false, || false, || true));
+        assert!(!decide(false, || true, || true));
+    }
+
+    #[test]
+    fn signed_in_people_are_asked_again_until_they_agree_to_the_current_terms() {
+        use crate::settings::{Consent, Person};
+        let agreed = |p: &Person| p.consent_current();
+        let none = Person::default();
+        let mut old = Person::default();
+        old.consent = Some(Consent { version: "alpha-0".into(), at: 1 });
+        let mut current = Person::default();
+        assert!(current.accept_terms(1));
+        // Signed in (or skipped before) with no agreement, or an older one: the screen shows.
+        assert!(decide(false, || true, || agreed(&none)), "signed in, no consent");
+        assert!(decide(false, || true, || agreed(&old)), "an older version asks again");
+        // Signed in with the current version: no screen.
+        assert!(!decide(false, || true, || agreed(&current)));
+        // Never signed in: the screen shows whatever is stored (the full form).
+        assert!(decide(false, || false, || agreed(&current)));
+        assert!(decide(false, || false, || agreed(&none)));
+    }
+
+    #[test]
+    fn the_consent_only_form_has_one_continue_button_and_nothing_else_to_choose() {
+        use super::{CONTINUE, blocked, content_only};
+        let c = content_only();
+        assert_eq!((c.primary, c.secondary, c.note, c.skip, c.status), (Some(CONTINUE), None, None, false, None));
+        assert_eq!(CONTINUE, "Continue");
+        // Blocked until ticked: Enter (and a click, which `start` guards the same way) does nothing, then continues.
+        assert!(blocked(true, false) && !blocked(true, true));
+        assert_eq!(enter_action(State::Idle, false, blocked(true, false)), Action::None);
+        assert_eq!(enter_action(State::Idle, false, blocked(true, true)), Action::Start);
     }
 
     #[test]
     fn the_bypass_skips_the_screen_without_asking_the_account() {
-        assert!(!decide(true, || panic!("must not be asked")));
+        assert!(!decide(true, || panic!("must not be asked"), || panic!("must not be asked")));
     }
 
     #[test]
