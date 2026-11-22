@@ -50,6 +50,11 @@ const SKIP_NOTE: [&str; 2] = ["Skipping turns these off.", "Sign in later in Set
 const SIGN_IN_NOTE: &str = "Opens pavii.tech. Use Google, GitHub or email.";
 const WAITING_TITLE: &str = "Finish signing in using your browser";
 const WAITING_BODY: &str = "Then come back to this window.";
+const TERMS_URL: &str = "https://pavii.tech/hyperox/terms";
+const PRIVACY_URL: &str = "https://pavii.tech/hyperox/privacy";
+/// "I agree to the {Terms} and {Privacy Policy}": the two links' words and where they go.
+const LEGAL: [(&str, &str); 2] = [("Terms", TERMS_URL), ("Privacy Policy", PRIVACY_URL)];
+const CHECK_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5 10 17.5 19 7"/></svg>"##;
 const TEAM_URL: &str = "https://pavii.tech";
 const PARTNER_URL: &str = "https://buckleson.com";
 const TEAM_DOMAIN: &str = "pavii.tech";
@@ -111,6 +116,12 @@ pub struct SignIn {
     /// The main button (Sign in, Try again): it has focus whenever it is shown, so Enter and Tab start from it.
     primary_focus: FocusHandle,
     skip_focus: FocusHandle,
+    /// The consent checkbox's focus: Space and Enter tick it.
+    consent_focus: FocusHandle,
+    /// Whether the checkbox is shown: the stored agreement is not to the current terms.
+    ask: bool,
+    /// The checkbox is ticked.
+    agreed: bool,
     /// Requests that came in while this screen was up (the main window answers them once it opens).
     held: Vec<Request>,
     /// Code-texture ticks since the window opened (it only moves while `rain_runs`).
@@ -167,6 +178,8 @@ pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver
         let primary_focus = cx.focus_handle().tab_stop(true);
         window.focus(&primary_focus, cx);
         let skip_focus = cx.focus_handle().tab_stop(true);
+        let consent_focus = cx.focus_handle().tab_stop(true);
+        let ask = !person.consent_current();
         let view = cx.new(|_| SignIn {
             state: State::Idle,
             attempt: 0,
@@ -175,6 +188,9 @@ pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver
             focus,
             primary_focus,
             skip_focus,
+            consent_focus,
+            ask,
+            agreed: false,
             held: Vec::new(),
             frame: 0,
             rain: Rc::new(RefCell::new(RainPaint::default())),
@@ -216,9 +232,10 @@ impl Drop for SignIn {
 impl SignIn {
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Enter and a click can arrive together: one attempt at a time.
-        if matches!(self.state, State::Waiting) || self.core.is_none() {
+        if matches!(self.state, State::Waiting) || self.core.is_none() || blocked(self.ask, self.agreed) {
             return;
         }
+        self.record_consent();
         self.attempt += 1;
         let attempt = self.attempt;
         self.state = State::Waiting;
@@ -258,10 +275,11 @@ impl SignIn {
     /// Opens the main window signed out, the way a successful sign-in does (minus `identify`).
     fn skip(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A browser sign-in in flight must finish or be cancelled first.
-        if matches!(self.state, State::Waiting) {
+        if matches!(self.state, State::Waiting) || blocked(self.ask, self.agreed) {
             return;
         }
         let (Some(core), Some(requests)) = (self.core.take(), self.requests.take()) else { return };
+        self.record_consent();
         self.hand_over();
         if let Err(e) = crate::auth::skip_screen() {
             tracing::warn!("sign-in skip not remembered: {e}");
@@ -269,6 +287,31 @@ impl SignIn {
         crate::analytics::event("signin_skipped", serde_json::json!({}));
         window.remove_window();
         crate::open_main(core, requests, cx);
+    }
+
+    fn toggle_consent(&mut self, cx: &mut Context<Self>) {
+        if self.ask && !matches!(self.state, State::Waiting) {
+            self.agreed = !self.agreed;
+            cx.notify();
+        }
+    }
+
+    /// Stores the agreement to the current terms and queues `consent_set`, once: a retry after a failed sign-in does neither.
+    fn record_consent(&self) {
+        if !self.ask {
+            return;
+        }
+        let mut person = match crate::settings::load_person() {
+            Ok(person) => person,
+            Err(e) => return tracing::warn!("consent not remembered: {e}"),
+        };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        if person.accept_terms(now) {
+            match crate::settings::write_person(&person) {
+                Ok(()) => crate::analytics::event("consent_set", consent_event(crate::settings::TERMS_VERSION)),
+                Err(e) => tracing::warn!("consent not remembered: {e}"),
+            }
+        }
     }
 
     /// Gives the keys to what the state shows: the main button, or the bare screen while it is not shown.
@@ -316,7 +359,7 @@ impl SignIn {
 
     fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match ev.keystroke.key.as_str() {
-            "enter" => match enter_action(self.state, self.skip_focus.is_focused(window)) {
+            "enter" => match enter_action(self.state, self.skip_focus.is_focused(window), blocked(self.ask, self.agreed)) {
                 Action::Skip => self.skip(window, cx),
                 // A focused link activates itself; the bare screen and the main button sign in (a second start is ignored).
                 Action::Start if self.focus.is_focused(window) || self.primary_focus.is_focused(window) => self.start(window, cx),
@@ -337,10 +380,21 @@ enum Action {
     None,
 }
 
-/// What Enter does: nothing while waiting, Skip when Skip has focus, else sign in.
-fn enter_action(state: State, skip_focused: bool) -> Action {
+/// Whether sign-in and Skip are held back: the checkbox is shown and not ticked.
+fn blocked(ask: bool, agreed: bool) -> bool {
+    ask && !agreed
+}
+
+/// The `consent_set` event: the terms version, also kept on the person.
+fn consent_event(version: &str) -> serde_json::Value {
+    serde_json::json!({ "version": version, "$set": { "consent_version": version } })
+}
+
+/// What Enter does: nothing while waiting or until the terms are ticked, Skip when Skip has focus, else sign in.
+fn enter_action(state: State, skip_focused: bool, blocked: bool) -> Action {
     match state {
         State::Waiting => Action::None,
+        _ if blocked => Action::None,
         _ if skip_focused => Action::Skip,
         _ => Action::Start,
     }
@@ -761,7 +815,74 @@ fn duo(fill: &'static [u8], line: &'static [u8], size: Pixels, color: Hsla) -> D
 }
 
 fn open_url(url: &'static str) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
-    move |_, _, _| crate::links::open(&crate::links::Target::Url(url.to_string()))
+    move |_, _, _| open_with(url, crate::links::open)
+}
+
+/// Hands `url` to the opener (a parameter so a test can watch it).
+fn open_with(url: &str, open: impl FnOnce(&crate::links::Target)) {
+    open(&crate::links::Target::Url(url.to_string()))
+}
+
+/// The look of a button that cannot be used yet.
+fn disabled(button: Stateful<Div>, off: bool) -> Stateful<Div> {
+    button.when(off, |d| d.opacity(0.4).cursor_default().hover(|d| d))
+}
+
+/// The consent line: a box that ticks, "I agree to the", then the Terms and Privacy Policy links.
+fn consent_row(agreed: bool, focus: &FocusHandle, s: f32, light: bool, toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Div {
+    let text = move || div().text_size(z(12.5, s)).line_height(z(18.0, s)).text_color(c("muted"));
+    let link = |id: &'static str, (label, url): (&'static str, &'static str)| {
+        div()
+            .id(id)
+            .tab_index(0)
+            .rounded(z(4.0, s))
+            .cursor_pointer()
+            .text_size(z(12.5, s))
+            .line_height(z(18.0, s))
+            .text_color(c("foreground"))
+            .underline()
+            .focus(|mut d| {
+                d.box_shadow = Some(ring());
+                d
+            })
+            .on_click(open_url(url))
+            .child(label)
+    };
+    let tick = div()
+        .size(z(16.0, s))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(z(5.0, s))
+        .border_1()
+        .border_color(if agreed { c("solid") } else { veil(light, 0.35, 0.30) })
+        .bg(if agreed { c("solid") } else { veil(light, 0.06, 0.04) })
+        .when(agreed, |d| d.child(svg().data(CHECK_ICON).size(z(11.0, s)).text_color(c("solid_foreground"))));
+    div()
+        .flex()
+        .items_center()
+        .gap(z(4.0, s))
+        .child(
+            div()
+                .id("signin-consent")
+                .track_focus(focus)
+                .rounded(z(4.0, s))
+                .flex()
+                .items_center()
+                .gap(z(8.0, s))
+                .cursor_pointer()
+                .focus(|mut d| {
+                    d.box_shadow = Some(ring());
+                    d
+                })
+                .on_click(toggle)
+                .child(tick)
+                .child(text().child("I agree to the")),
+        )
+        .child(link("signin-terms", LEGAL[0]))
+        .child(text().child("and"))
+        .child(link("signin-privacy", LEGAL[1]))
 }
 
 /// The main action: a solid button with a lit top edge and a soft lift, and the focus ring while it has focus
@@ -912,6 +1033,7 @@ impl Render for SignIn {
         let (light, tint) = (light(), tint());
         let view = content(self.state);
         let idle = matches!(self.state, State::Idle);
+        let off = blocked(self.ask, self.agreed);
         let status = view.status.map(|status| {
             let (title, body, tone) = match &status {
                 Status::Waiting => (WAITING_TITLE, Some(WAITING_BODY), c("accent")),
@@ -966,9 +1088,10 @@ impl Render for SignIn {
                     .items_start()
                     .gap(z(10.0, s))
                     .when_some(status, |d, st| d.child(st))
+                    .when(self.ask && view.secondary.is_none(), |d| d.child(consent_row(self.agreed, &self.consent_focus, s, light, cx.listener(|this, _, _, cx| this.toggle_consent(cx)))))
                     .when_some(view.primary, |d, label| {
                         let id = if idle { "signin" } else { "retry" };
-                        d.child(primary_button(id, label, s).track_focus(&self.primary_focus).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
+                        d.child(disabled(primary_button(id, label, s), off).track_focus(&self.primary_focus).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
                     })
                     .when_some(view.secondary, |d, label| d.child(quiet_button("cancel", label, s, light).on_click(cx.listener(|this, _, w, cx| this.cancel(w, cx)))))
                     .when_some(view.note, |d, note| {
@@ -997,7 +1120,7 @@ impl Render for SignIn {
                                 .flex()
                                 .items_center()
                                 .gap(z(14.0, s))
-                                .child(quiet_button("signin-skip", SKIP, s, light).track_focus(&self.skip_focus).on_click(cx.listener(|this, _, w, cx| this.skip(w, cx))))
+                                .child(disabled(quiet_button("signin-skip", SKIP, s, light), off).track_focus(&self.skip_focus).on_click(cx.listener(|this, _, w, cx| this.skip(w, cx))))
                                 .child(div().id("signin-skip-note").text_size(z(12.5, s)).line_height(z(18.0, s)).text_color(c("muted")).children(SKIP_NOTE.map(|line| div().child(line)))),
                         ),
                 )
@@ -1488,12 +1611,12 @@ mod tests {
 
     #[test]
     fn enter_signs_in_at_the_root_skips_on_skip_and_does_nothing_while_waiting() {
-        assert_eq!(enter_action(State::Waiting, false), Action::None);
-        assert_eq!(enter_action(State::Waiting, true), Action::None);
-        assert_eq!(enter_action(State::Idle, false), Action::Start);
-        assert_eq!(enter_action(State::Idle, true), Action::Skip);
-        assert_eq!(enter_action(State::Failed(CANCELLED), false), Action::Start);
-        assert_eq!(enter_action(State::Failed(CANCELLED), true), Action::Skip);
+        assert_eq!(enter_action(State::Waiting, false, false), Action::None);
+        assert_eq!(enter_action(State::Waiting, true, false), Action::None);
+        assert_eq!(enter_action(State::Idle, false, false), Action::Start);
+        assert_eq!(enter_action(State::Idle, true, false), Action::Skip);
+        assert_eq!(enter_action(State::Failed(CANCELLED), false, false), Action::Start);
+        assert_eq!(enter_action(State::Failed(CANCELLED), true, false), Action::Skip);
     }
 
     #[test]
@@ -1575,12 +1698,62 @@ mod tests {
     #[test]
     fn enter_follows_the_skip_focus_after_every_failure_and_never_acts_while_waiting() {
         for error in [CANCELLED, TIMEOUT, REJECTED, OTHER, UNREACHABLE] {
-            assert_eq!(enter_action(State::Failed(error), false), Action::Start, "{error}");
-            assert_eq!(enter_action(State::Failed(error), true), Action::Skip, "{error}");
+            assert_eq!(enter_action(State::Failed(error), false, false), Action::Start, "{error}");
+            assert_eq!(enter_action(State::Failed(error), true, false), Action::Skip, "{error}");
         }
         for skip_focused in [false, true] {
-            assert_eq!(enter_action(State::Waiting, skip_focused), Action::None);
+            assert_eq!(enter_action(State::Waiting, skip_focused, false), Action::None);
         }
+    }
+
+    #[test]
+    fn sign_in_and_skip_are_held_back_until_the_box_is_ticked() {
+        use super::blocked;
+        assert!(blocked(true, false), "asked and not ticked");
+        assert!(!blocked(true, true), "ticked");
+        assert!(!blocked(false, false), "already agreed to this version: no box, no block");
+        assert!(!blocked(false, true));
+        // Enter does nothing, on the main button and on Skip, in every state, while blocked.
+        for state in [State::Idle, State::Waiting, State::Failed(CANCELLED), State::Failed(UNREACHABLE)] {
+            for skip_focused in [false, true] {
+                assert_eq!(enter_action(state, skip_focused, true), Action::None, "{:?} skip {skip_focused}", content(state).status);
+            }
+        }
+        assert_eq!(enter_action(State::Idle, false, false), Action::Start);
+        assert_eq!(enter_action(State::Idle, true, false), Action::Skip);
+    }
+
+    #[test]
+    fn the_terms_and_privacy_links_open_their_pages() {
+        use super::{LEGAL, PRIVACY_URL, TERMS_URL, open_with};
+        use crate::links::Target;
+        assert_eq!(LEGAL, [("Terms", "https://pavii.tech/hyperox/terms"), ("Privacy Policy", "https://pavii.tech/hyperox/privacy")]);
+        for (url, want) in [(TERMS_URL, "https://pavii.tech/hyperox/terms"), (PRIVACY_URL, "https://pavii.tech/hyperox/privacy")] {
+            let mut opened = Vec::new();
+            open_with(url, |t| opened.push(t.clone()));
+            assert_eq!(opened, [Target::Url(want.to_string())]);
+        }
+    }
+
+    #[test]
+    fn consent_set_carries_the_version_and_sets_it_on_the_person() {
+        let event = super::consent_event("beta-1");
+        assert_eq!(event, serde_json::json!({ "version": "beta-1", "$set": { "consent_version": "beta-1" } }));
+        assert_eq!(super::consent_event(crate::settings::TERMS_VERSION)["version"], crate::settings::TERMS_VERSION);
+    }
+
+    #[test]
+    fn the_event_is_for_the_first_agreement_only_and_an_old_version_asks_again() {
+        use crate::settings::{Consent, Person, TERMS_VERSION};
+        // What `record_consent` does: the event goes out only when `accept_terms` changed something.
+        let mut person = Person::default();
+        assert!(!person.consent_current(), "nothing stored: the box shows");
+        assert!(person.accept_terms(1), "ticked and continued: stored, event queued");
+        assert!(!person.accept_terms(2), "a retry after a failed sign-in: no second event");
+        assert!(person.consent_current(), "a current version: the box is skipped");
+        person.consent = Some(Consent { version: "alpha-0".into(), at: 1 });
+        assert!(!person.consent_current(), "an older version: the box shows again");
+        assert!(person.accept_terms(3) && person.consent.as_ref().unwrap().version == TERMS_VERSION);
     }
 
     #[test]
@@ -1588,10 +1761,10 @@ mod tests {
         let states = [State::Idle, State::Waiting, State::Failed(CANCELLED), State::Failed(TIMEOUT), State::Failed(UNREACHABLE)];
         for state in states {
             let shown = content(state).skip;
-            assert_eq!(enter_action(state, true) == Action::Skip, shown, "{:?}", content(state).status);
+            assert_eq!(enter_action(state, true, false) == Action::Skip, shown, "{:?}", content(state).status);
             // While waiting, a sign-in is in flight: no Skip shown, and Enter does nothing at all.
             if !shown {
-                assert_eq!(enter_action(state, false), Action::None);
+                assert_eq!(enter_action(state, false, false), Action::None);
             }
         }
     }
