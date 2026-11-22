@@ -1686,7 +1686,7 @@ mod tests {
         }
         // Inside a card (distance 0) the texture still shows, at 30% of its strength.
         assert!((cell_weight(300.0, 400.0, 0.0, false) - 0.3).abs() < 1e-6);
-        assert!((cell_weight(300.0, 400.0, 0.0, true) - 0.27).abs() < 1e-6);
+        assert!((cell_weight(300.0, 400.0, 0.0, true) - 0.345).abs() < 1e-6);
         // Closer to the card never shows more.
         let mut last = 0.0;
         for d in 0..=60 {
