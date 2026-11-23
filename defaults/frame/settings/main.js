@@ -3,11 +3,8 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
 import { agentsInit, loadAgents, agentsPage } from "./agents.js";
-import { ActivityGraph } from "./activity.js";
+import { ActivityGraph, SAVED_USD_PER_MILLION_TOKENS } from "./activity.js";
 import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, coreConfig, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, nextCommand, window, account, accountSignIn, accountCancelSignIn, accountSwitch, accountSignOut, accountRemove } from "h0x";
-
-// Dollars per million input tokens (Claude Sonnet's price): turns tokens saved into the "~$" shown beside them.
-const SAVED_USD_PER_MILLION_TOKENS = 3;
 
 const I = (name) => `frame/settings/${name}.svg`;
 
