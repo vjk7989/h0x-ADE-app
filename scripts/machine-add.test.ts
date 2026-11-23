@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const source = await readFile(new URL("../defaults/mods/machine-add/main.js", import.meta.url), "utf8");
 
@@ -235,4 +237,157 @@ test("ssh's own words under the unreachable kind still give instructions", async
   const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "unreachable", message: "Permission denied (publickey,password)" } }) });
   await s.add();
   expect(s.view.state["my-host"]).toContain("`h0x-core machine add my-host`");
+});
+
+// The ssh config reading with real files and a real sh, started the way HyperOx
+// starts programs, so a Windows home (C:\Users\...) behaves as it does there.
+async function hostsUnder(prefix: string) {
+  const home = await mkdtemp(join(tmpdir(), prefix));
+  try {
+    await mkdir(join(home, ".ssh", "config.d"), { recursive: true });
+    const config = "Include config.d/*\nHost direct\n";
+    await writeFile(join(home, ".ssh", "config"), config);
+    await writeFile(join(home, ".ssh", "config.d", "a-work"), "Host work\n  HostName 10.0.0.1\n");
+    await writeFile(join(home, ".ssh", "config.d", "b-lab"), "Host lab\n");
+    const values = {
+      View: class {}, div() {}, svg() {}, TextView: {}, v_flex() {}, h_flex() {}, InputState: {}, Input: {},
+      core() {}, theme() {}, props: () => ({}), closeOverlay() {}, openOverlay() {},
+      home: () => home,
+      readTextFile: (file: string) => readFile(file, "utf8"),
+      exec: async (program: string, args: string[]) => {
+        const p = Bun.spawnSync([program, ...args]);
+        return { code: p.exitCode, stdout: p.stdout.toString(), stderr: p.stderr.toString() };
+      },
+    };
+    const body = source.replace(/^import .*;\r?\n/gm, "").replace("export default class MachineAdd", "class MachineAdd");
+    const parseConfig = new Function(...Object.keys(values), `${body}; return parseConfig;`)(...Object.values(values));
+    return (await parseConfig(config)).map((h: any) => [h.alias, h.hostname]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+}
+
+test("every file a wildcard Include matches is listed", async () => {
+  expect(await hostsUnder("h0x-ssh-")).toEqual([["work", "10.0.0.1"], ["lab", null], ["direct", null]]);
+});
+
+test("a wildcard Include is listed under a home with a space", async () => {
+  expect(await hostsUnder("h0x ssh ")).toEqual([["work", "10.0.0.1"], ["lab", null], ["direct", null]]);
+});
+
+// Copyable login commands (UPSTREAM-SYNC-2 A8): what Copy puts on the clipboard is
+// exactly the quoted command the instructions show, and it parses as one argument.
+function recordingElements() {
+  const make = () => {
+    const node: any = { calls: {} as Record<string, unknown[]>, children: [] as any[] };
+    const el: any = new Proxy(node, { get: (_, method) => {
+      if (method === "node") return node;
+      return (...args: any[]) => {
+        if (method === "child") node.children.push(args[0]?.node ?? args[0]);
+        else if (method === "children") node.children.push(...args[0].map((c: any) => c?.node ?? c));
+        else if (method === "when") { if (args[0]) args[1](el); }
+        else node.calls[String(method)] = args;
+        return el;
+      };
+    } });
+    return el;
+  };
+  const all = (node: any): any[] => [node, ...(node?.children ?? []).flatMap(all)];
+  const byId = (root: any, id: string) => all(root).find((n: any) => n?.calls?.id?.[0] === id);
+  return { make, all, byId };
+}
+function messageView(platform: string) {
+  const { make, byId } = recordingElements();
+  const values = {
+    View: class {}, div: make, svg: make, TextView: { html: make }, v_flex: make, h_flex: make,
+    InputState: { new: () => ({ on() {}, focus() {}, set_value() {} }) }, Input: {},
+    home: () => "/home/test", readTextFile: async () => null, theme() {}, props: () => ({}), closeOverlay() {},
+    window: () => ({ platform }), openOverlay() {}, exec: async () => ({}), core: async () => ({}),
+  };
+  const MachineAdd = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class MachineAdd", "return class MachineAdd"))(...Object.values(values));
+  const view = new MachineAdd();
+  Object.assign(view, { state: {}, pending: new Set() });
+  return { view, byId };
+}
+
+const copyTargets = ["me@my host", "my user@host", "it's", "it\u2019s", "a$b", "$(whoami)", "a\"b", "host';echo $HOME", "C:\\Users\\me\\host"];
+for (const platform of ["linux", "windows"]) for (const target of copyTargets) {
+  test(`Copy on ${platform} puts the same quoted command as the instructions for ${JSON.stringify(target)}`, async () => {
+    const s = setup({ code: 1, stdout: JSON.stringify({ error: { kind: "host_key" } }) }, platform);
+    await s.add(target);
+    const quoted = s.view.state[target].match(/`h0x-core machine add (.*?)` in a terminal\./s)![1];
+    const m = messageView(platform);
+    Object.assign(m.view, { state: { [target]: s.view.state[target] }, pending: new Set([target]) });
+    const button = m.byId(m.view.message({}, target).node, `ma-copy-${target}`);
+    expect(button.children).toEqual(["Copy"]);
+    const clipboard: string[] = [];
+    let notified = 0;
+    button.calls.on_click[0](null, { write_to_clipboard: (text: string) => clipboard.push(text), notify: () => { notified++; } });
+    expect(clipboard).toEqual([`h0x-core machine add ${quoted}`]);
+    expect(notified).toBe(1);
+    expect(m.byId(m.view.message({}, target).node, `ma-copy-${target}`).children).toEqual(["Copied"]);
+    if (platform !== "linux" || !Bun.which("sh")) return;
+    // The copied line is the command plus exactly one argument: the target as typed.
+    const shell = Bun.spawnSync(["sh", "-c", `set -- ${clipboard[0]}; printf '%s|%s' "$#" "$4"`]);
+    expect(shell.stdout.toString()).toBe(`4|${target}`);
+  });
+}
+
+test("no Copy button once nothing is pending for the target", () => {
+  const m = messageView("linux");
+  Object.assign(m.view, { state: { "my host": "it didn't work" }, pending: new Set() });
+  expect(m.byId(m.view.message({}, "my host").node, "ma-copy-my host")).toBeUndefined();
+});
+
+// The machine-login toast: only a name the core accepts becomes a copyable command.
+const toastSource = (await readFile(new URL("../defaults/mods/toast/main.js", import.meta.url), "utf8"))
+  .replace(/^import .*;\n/gm, "").replace("export default class Toast", "class Toast");
+function toast(p: Record<string, unknown>) {
+  const { make, all, byId } = recordingElements();
+  const globals = {
+    View: class {}, div: make, image: make, v_flex: make, h_flex: make,
+    props: () => p, closeOverlay() {}, run() {}, theme: () => new Proxy({}, { get: () => "#000000" }),
+  };
+  const Toast = new Function(...Object.keys(globals), `${toastSource}; return Toast;`)(...Object.values(globals));
+  const view = new Toast();
+  const render = () => view.render({}).node;
+  const texts = () => all(render()).filter((n: any) => typeof n === "string");
+  return { view, render, texts, byId };
+}
+// The core names the machine twice: "<name> needs login; run h0x-core machine login <name>".
+const loginBody = (name: string) => `${name} needs login; run h0x-core machine login ${name}`;
+
+for (const name of ["box", "my-box.lan", "a", "9lives_2", "a".repeat(32)]) test(`a login toast for ${name} offers its command to copy`, () => {
+  const t = toast({ title: "Machine", body: loginBody(name) });
+  expect(t.texts()).toContain(`${name} needs a login: run`);
+  expect(t.texts()).toContain(`h0x-core machine login ${name}`);
+  expect(t.texts()).not.toContain(loginBody(name));
+  const clipboard: string[] = [];
+  let stopped = 0;
+  t.byId(t.render(), "toast-login-copy").calls.on_click[0](null, { stop_propagation: () => { stopped++; }, write_to_clipboard: (s: string) => clipboard.push(s), notify() {} });
+  expect(clipboard).toEqual([`h0x-core machine login ${name}`]);
+  expect(stopped).toBe(1);
+  expect(t.byId(t.render(), "toast-login-copy").children).toEqual(["Copied"]);
+});
+
+for (const name of ["my box", "it's", "a$b", "$(whoami)", "a\"b", "Box", "-box", ".box", "a".repeat(33), "box\nrm -rf ~", ""]) test(`a login toast naming ${JSON.stringify(name)} offers no command to copy`, () => {
+  const t = toast({ title: "Machine", body: loginBody(name) });
+  expect(t.byId(t.render(), "toast-login-copy")).toBeUndefined();
+  expect(t.texts()).toContain("Machine");
+  expect(t.texts()).toContain(loginBody(name));
+});
+
+test("a toast without a body, or with another body, is a plain toast", () => {
+  for (const body of [undefined, null, "", "Build finished"]) {
+    const t = toast({ title: "Done", body });
+    expect(t.byId(t.render(), "toast-login-copy")).toBeUndefined();
+    expect(t.texts()).toContain("Done");
+  }
+});
+
+test("a login toast whose two names differ, or with text after the name, offers no command", () => {
+  for (const body of ["box needs login; run h0x-core machine login other", `${loginBody("box")} now`, `${loginBody("box")}\n`, "box needs login; run h0x-core machine login "]) {
+    const t = toast({ title: "Machine", body });
+    expect(t.byId(t.render(), "toast-login-copy")).toBeUndefined();
+  }
 });

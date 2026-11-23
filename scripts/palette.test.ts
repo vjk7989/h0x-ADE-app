@@ -22,7 +22,13 @@ const source = await readFile(new URL("../defaults/frame/palette/main.js", impor
 const element = () => new Element();
 let platform = "linux";
 const icons: string[] = [];
-const values = { View: class {}, div: element, svg: (path: string) => { icons.push(path); return element(); }, v_flex: element, h_flex: element, Input: { new: element }, theme: () => ({}), keys: () => [], win: () => ({ platform }) };
+let dark = true;
+const shipped = [["graphite", false], ["ink", false], ["moss", false], ["paper", true], ["atom-one-dark", false], ["mine-light", true], ["win98", true]];
+const values = {
+  View: class {}, div: element, svg: (path: string) => { icons.push(path); return element(); }, v_flex: element, h_flex: element, Input: { new: element }, theme: () => ({}), keys: () => [], win: () => ({ platform }),
+  commands: () => [{ name: "app.theme", args: [{ name: "name", required: true }], about: "Use a theme." }], layouts: () => ["main", "win98"], shared: () => "main",
+  themes: () => shipped.map(([name, light]) => ({ name, light })), settings: () => ({ dark }),
+};
 const Palette = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Palette", "return class Palette"))(...Object.values(values));
 function find(root: Element, id: string): Element | undefined {
   if (root?.calls?.id?.[0] === id) return root;
@@ -69,4 +75,74 @@ test("palette scrolls past group titles with small movements", () => {
     }
     expect(view.scroll).toBe(view.maxScroll);
   }
+});
+
+test("palette offers only the themes that can show in the current appearance", () => {
+  const offered = () => {
+    const view = new Palette();
+    view.query = ""; view.recent = []; view.agents = []; // as init() starts it
+    return view.rows().map((r: any) => r.e).filter((e: any) => e.name === "app.theme").map((e: any) => e.args.name);
+  };
+  dark = true;
+  expect(offered()).toEqual(["graphite", "ink", "moss", "atom-one-dark"]);
+  dark = false;
+  // win98 is the HyperOx 98 layout's own theme, so it isn't offered here.
+  expect(offered()).toEqual(["paper", "mine-light"]);
+});
+
+// Edge cases (UPSTREAM-SYNC-2 A7): themes() and settings() at their limits, and the agent rows.
+function paletteRows(agents: unknown[] = []) {
+  const view = new Palette();
+  view.query = ""; view.recent = []; view.agents = agents;
+  return view.rows().map((r: any) => r.e);
+}
+const themeNames = () => paletteRows().filter((e: any) => e.name === "app.theme").map((e: any) => e.args.name);
+
+test("palette offers no theme rows when there are no themes", () => {
+  const saved = shipped.splice(0);
+  try {
+    dark = true;
+    expect(themeNames()).toEqual([]);
+    dark = false;
+    expect(themeNames()).toEqual([]);
+  } finally {
+    shipped.push(...saved);
+    dark = true;
+  }
+});
+
+test("a theme without a lightness counts as dark, and no dark setting counts as light", () => {
+  const saved = shipped.splice(0, shipped.length, ["unmarked", undefined as unknown as boolean], ["paper", true]);
+  try {
+    dark = true;
+    expect(themeNames()).toEqual(["unmarked"]);
+    dark = undefined as unknown as boolean;
+    expect(themeNames()).toEqual(["paper"]);
+  } finally {
+    shipped.splice(0, shipped.length, ...saved);
+    dark = true;
+  }
+});
+
+test("theme titles read with spaces for dashes", () => {
+  dark = true;
+  const theme = paletteRows().find((e: any) => e.name === "app.theme" && e.args.name === "atom-one-dark");
+  expect(theme.title).toBe("Theme: atom one dark");
+  expect(theme.group).toBe("App");
+});
+
+test("the palette keeps a new-session row for each installed or custom agent, by its slot", () => {
+  const rows = paletteRows([
+    { slot: 1, installed: true, name: "Claude", key: "claude" },
+    { slot: 2, installed: false, name: "Missing", key: "missing" },
+    { slot: 3, custom: true, name: "Mine", key: "mine" },
+    { slot: 0, installed: true, name: "No slot", key: "none" },
+    { installed: true, name: "Unslotted", key: "unslotted" },
+  ]).filter((e: any) => e.name === "agent.new");
+  expect(rows.map((e: any) => [e.args.index, e.title])).toEqual([[1, "New Claude session"], [3, "New Mine session"]]);
+  expect(rows.every((e: any) => e.group === "Agent")).toBe(true);
+});
+
+test("no agents found leaves no new-session rows", () => {
+  expect(paletteRows([]).filter((e: any) => e.name === "agent.new")).toEqual([]);
 });
