@@ -2137,13 +2137,15 @@ impl AppWindow {
             changed |= self.model.set_turn(addr, turn, label.max(self.written_seen.get(addr).copied()));
         }
         self.written_seen.retain(|a, _| self.live.contains_key(a));
-        crate::events::agents(&running, !self.listed_once);
+        crate::events::agents(&running, !self.listed_once, &self.core);
         let working = self.live.values().any(|rec| rec["status"] == "working");
         crate::update::note_agents(working);
         crate::activity::tick(working);
         crate::events::hourly();
         if crate::events::daily_due() {
             crate::events::daily_device(self.workspace_shape(window));
+            let (core, on) = (self.core.clone(), crate::settings::get().token_saver);
+            cx.background_executor().spawn(async move { crate::events::token_saver_daily(&core.call("gate.stats", json!({})), on) }).detach();
         }
         changed |= self.share_seen(cx);
         // Changes already made before HyperOx started aren't news.
@@ -5726,7 +5728,6 @@ mod tests {
 
     #[test]
     fn agent_argv_is_unchanged_with_token_saver_off_and_for_programs_other_than_claude() {
-        assert!(!crate::settings::get().token_saver, "off unless the person turns it on");
         let claude = [(words(&["claude"]), None), (words(&["claude", "--resume"]), Some("go")), (words(&["CLAUDE.EXE"]), Some("go")), (words(&[r"C:\Program Files\claude\claude.exe"]), Some("go"))];
         let others = [(words(&["codex"]), Some("go")), (words(&["claude-code"]), None), (words(&["pwsh.exe"]), None), (words(&["claude", "--settings", "{}"]), Some("go"))];
         for (argv, task) in claude.iter().chain(others.iter()) {
@@ -5734,15 +5735,17 @@ mod tests {
             cmd.extend(task.map(str::to_owned));
             for on in [None, Some("box")] {
                 let before = if on.is_some() { crate::remote_shell::launch(cmd.clone()) } else { local_agent_argv(cmd.clone()) };
-                let default = super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None);
-                assert_eq!(default.as_ref(), Some(&before), "default {argv:?} {on:?}");
+                if others.iter().any(|(o, _)| o == argv) {
+                    let default = super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None);
+                    assert_eq!(default.as_ref(), Some(&before), "default {argv:?} {on:?}");
+                }
                 let off = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None));
                 assert_eq!(off.as_ref(), Some(&before), "off {argv:?} {on:?}");
             }
         }
         for (argv, task) in &others {
             for on in [None, Some("box")] {
-                let off = super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None);
+                let off = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None));
                 let run = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None));
                 assert_eq!(run, off, "on {argv:?} {on:?}");
             }
@@ -5753,6 +5756,45 @@ mod tests {
                 assert_eq!(super::AppWindow::agent_argv(None, Some("task"), None, None), None);
                 assert_eq!(super::AppWindow::agent_argv(Some(Vec::new()), Some("task"), Some("box"), None), None);
             });
+        }
+    }
+
+    #[test]
+    fn a_launch_with_the_default_settings_gets_the_token_saver_here_and_on_another_machine() {
+        // Nothing set on this thread: the default settings, so Token Saver is on.
+        assert!(crate::settings::get().token_saver);
+        for program in [words(&["claude"]), words(&[r"C:\Program Files\claude\claude.exe", "--resume"])] {
+            let hooked = crate::programs::with_token_saver(true, program.clone());
+            assert_ne!(hooked, program, "{program:?}");
+            let local = super::AppWindow::agent_argv(Some(program.clone()), None, None, None);
+            assert_eq!(local, Some(local_agent_argv(hooked.clone())), "{program:?}");
+            let remote = super::AppWindow::agent_argv(Some(program.clone()), Some(" "), Some("box"), None);
+            assert_eq!(remote, Some(crate::remote_shell::launch(hooked)), "{program:?}");
+        }
+        // settings.json as read from disk: no key (or a non-bool) is on; only an explicit false launches the bare program.
+        let look = crate::layout::Look::default();
+        for (text, on) in [("{}", true), (r#"{"token_saver":"false"}"#, true), (r#"{"token_saver":null}"#, true), (r#"{"token_saver":false}"#, false)] {
+            let person: crate::settings::Person = serde_json::from_str(text).unwrap();
+            let original = crate::settings::get();
+            crate::settings::set(crate::settings::Settings::compose(&person, &look, false));
+            let run = super::AppWindow::agent_argv(Some(words(&["claude"])), None, None, None);
+            crate::settings::set((*original).clone());
+            let want = if on { crate::programs::with_token_saver(true, words(&["claude"])) } else { words(&["claude"]) };
+            assert_eq!(run, Some(local_agent_argv(want)), "{text}");
+        }
+    }
+
+    #[test]
+    fn smart_routing_is_asked_with_token_saver_on_by_default_and_never_with_an_explicit_false() {
+        let look = crate::layout::Look::default();
+        for (text, asks) in [(r#"{"smart_routing":true}"#, true), (r#"{"smart_routing":true,"token_saver":true}"#, true), (r#"{"smart_routing":true,"token_saver":false}"#, false), ("{}", false)] {
+            let person: crate::settings::Person = serde_json::from_str(text).unwrap();
+            let original = crate::settings::get();
+            crate::settings::set(crate::settings::Settings::compose(&person, &look, false));
+            let mut called = false;
+            let route = super::AppWindow::route_for(|_| { called = true; Ok(haiku_route()) }, &words(&["claude"]), "/work", Some("go"), None);
+            crate::settings::set((*original).clone());
+            assert_eq!((called, route.is_some()), (asks, asks), "{text}");
         }
     }
 

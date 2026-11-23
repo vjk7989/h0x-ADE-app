@@ -18,8 +18,6 @@ use std::time::Duration;
 const MARK: &[u8] = include_bytes!("../defaults/mods/workspace-chrome/hyperox-mark.svg");
 // Lucide, stroke 1.5 (cook/SPEC.md section 9).
 // Duotone icons (cook/SPEC-v2.md section 5): a soft fill layer and a line layer, painted in two tints.
-const TOKENS_FILL: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000"><rect x="3" y="4" width="18" height="4.5" rx="2.25"/></svg>"##;
-const TOKENS_LINE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4.5" rx="2.25"/><rect x="5.5" y="10.25" width="13" height="4.5" rx="2.25"/><rect x="8.5" y="16.5" width="7" height="4.5" rx="2.25"/></svg>"##;
 const OBSERVE_FILL: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000"><rect x="3" y="4.5" width="18" height="15" rx="3.5"/></svg>"##;
 const OBSERVE_LINE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="3.5"/><path d="M6.5 14h2.5l1.75-4 2.5 7 1.75-3H17.5"/><circle cx="17.5" cy="14" r="1.25" fill="#000" stroke="none"/></svg>"##;
 const PII_FILL: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000"><path d="M12 3 5 5.8v5.4c0 4.6 2.9 8.1 7 9.8 4.1-1.7 7-5.2 7-9.8V5.8z"/></svg>"##;
@@ -39,17 +37,23 @@ const SIGN_IN: &str = "Sign in with your browser";
 const TRY_AGAIN: &str = "Try again";
 const PERKS_LEAD: &str = "Signing in turns on";
 /// The line layer of each perk's icon and its name; `PERK_FILLS` holds the fill layers, `PERK_IDS` the tile ids.
-const PERKS: [(&[u8], &str); 3] = [(TOKENS_LINE, "Token saving"), (OBSERVE_LINE, "Observability engine"), (PII_LINE, "Blockchain security for PII masking")];
-const PERK_FILLS: [&[u8]; 3] = [TOKENS_FILL, OBSERVE_FILL, PII_FILL];
-const PERK_IDS: [&str; 3] = ["feat-tokens", "feat-observe", "feat-pii"];
+const PERKS: [(&[u8], &str); 2] = [(OBSERVE_LINE, "Observability engine"), (PII_LINE, "Blockchain security for PII masking")];
+const PERK_FILLS: [&[u8]; 2] = [OBSERVE_FILL, PII_FILL];
+const PERK_IDS: [&str; 2] = ["feat-observe", "feat-pii"];
 /// One line under each perk (the owner has seen them), in the same order.
-const BENEFITS: [&str; 3] =
-    ["Leaner prompts, so agent sessions use fewer tokens.", "See what each agent ran, changed and spent.", "Personal data is masked before it leaves this computer."];
+const BENEFITS: [&str; 2] =
+    ["See what each agent ran, changed and spent.", "Personal data is masked before it leaves this computer."];
+const CONTINUE: &str = "Continue";
 const SKIP: &str = "Skip sign-in";
 const SKIP_NOTE: [&str; 2] = ["Skipping turns these off.", "Sign in later in Settings \u{2192} Profile."];
 const SIGN_IN_NOTE: &str = "Opens pavii.tech. Use Google, GitHub or email.";
 const WAITING_TITLE: &str = "Finish signing in using your browser";
 const WAITING_BODY: &str = "Then come back to this window.";
+const TERMS_URL: &str = "https://pavii.tech/hyperox/terms";
+const PRIVACY_URL: &str = "https://pavii.tech/hyperox/privacy";
+/// "I agree to the {Terms} and {Privacy Policy}": the two links' words and where they go.
+const LEGAL: [(&str, &str); 2] = [("Terms", TERMS_URL), ("Privacy Policy", PRIVACY_URL)];
+const CHECK_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5 10 17.5 19 7"/></svg>"##;
 const TEAM_URL: &str = "https://pavii.tech";
 const PARTNER_URL: &str = "https://buckleson.com";
 const TEAM_DOMAIN: &str = "pavii.tech";
@@ -63,20 +67,21 @@ const REJECTED: &str = "This account can't sign in right now (it may be disabled
 const OTHER: &str = "Something went wrong while signing in. Please try again.";
 const UNREACHABLE: &str = "Couldn't reach Pavii. Check your connection and try again.";
 
-/// Whether the sign-in screen comes first: only on a computer that has never signed in and
-/// never skipped. Test and debug builds can also skip it with `H0X_ADE_SKIP_SIGNIN=1`; that
+/// Whether the sign-in screen comes first: on a computer that has never signed in and never skipped, and (in a
+/// consent-only form) for anyone who has not agreed to the current terms. Test and debug builds can also skip it with `H0X_ADE_SKIP_SIGNIN=1`; that
 /// bypass is kept by user decision, although the e2e tests now write the marker instead.
 pub fn required() -> bool {
-    decide(bypass(), || !crate::auth::screen_needed())
+    decide(bypass(), || !crate::auth::screen_needed(), || crate::settings::load_person().unwrap_or_default().consent_current())
 }
 
 fn bypass() -> bool {
     cfg!(any(test, debug_assertions)) && std::env::var_os("H0X_ADE_SKIP_SIGNIN").is_some_and(|v| v == "1")
 }
 
-/// The marker is only looked up when there is no bypass; `done` is "signed in or skipped".
-fn decide(bypass: bool, done: impl FnOnce() -> bool) -> bool {
-    !bypass && !done()
+/// The marker and the settings are only looked up when there is no bypass; `done` is "signed in or skipped",
+/// `agreed` is "the stored agreement is to the current terms".
+fn decide(bypass: bool, done: impl FnOnce() -> bool, agreed: impl FnOnce() -> bool) -> bool {
+    !bypass && !(done() && agreed())
 }
 
 /// What to tell the person about a failed sign-in.
@@ -111,6 +116,14 @@ pub struct SignIn {
     /// The main button (Sign in, Try again): it has focus whenever it is shown, so Enter and Tab start from it.
     primary_focus: FocusHandle,
     skip_focus: FocusHandle,
+    /// The consent checkbox's focus: Space and Enter tick it.
+    consent_focus: FocusHandle,
+    /// Whether the checkbox is shown: the stored agreement is not to the current terms.
+    ask: bool,
+    /// The checkbox is ticked.
+    agreed: bool,
+    /// Already signed in (or skipped): the screen only asks for the terms, with one Continue button.
+    only: bool,
     /// Requests that came in while this screen was up (the main window answers them once it opens).
     held: Vec<Request>,
     /// Code-texture ticks since the window opened (it only moves while `rain_runs`).
@@ -167,6 +180,9 @@ pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver
         let primary_focus = cx.focus_handle().tab_stop(true);
         window.focus(&primary_focus, cx);
         let skip_focus = cx.focus_handle().tab_stop(true);
+        let consent_focus = cx.focus_handle().tab_stop(true);
+        let ask = !person.consent_current();
+        let only = !crate::auth::screen_needed();
         let view = cx.new(|_| SignIn {
             state: State::Idle,
             attempt: 0,
@@ -175,6 +191,10 @@ pub fn open(core: Arc<crate::core_link::Core>, requests: async_channel::Receiver
             focus,
             primary_focus,
             skip_focus,
+            consent_focus,
+            ask,
+            agreed: false,
+            only,
             held: Vec::new(),
             frame: 0,
             rain: Rc::new(RefCell::new(RainPaint::default())),
@@ -216,9 +236,14 @@ impl Drop for SignIn {
 impl SignIn {
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Enter and a click can arrive together: one attempt at a time.
-        if matches!(self.state, State::Waiting) || self.core.is_none() {
+        if matches!(self.state, State::Waiting) || self.core.is_none() || blocked(self.ask, self.agreed) {
             return;
         }
+        if self.only {
+            self.finish_consent_only(window, cx);
+            return;
+        }
+        self.record_consent();
         self.attempt += 1;
         let attempt = self.attempt;
         self.state = State::Waiting;
@@ -255,13 +280,23 @@ impl SignIn {
         .detach();
     }
 
+    /// Consent-only form: stores the agreement and opens the main window (nothing else to decide).
+    fn finish_consent_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(core), Some(requests)) = (self.core.take(), self.requests.take()) else { return };
+        self.record_consent();
+        self.hand_over();
+        window.remove_window();
+        crate::open_main(core, requests, cx);
+    }
+
     /// Opens the main window signed out, the way a successful sign-in does (minus `identify`).
     fn skip(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A browser sign-in in flight must finish or be cancelled first.
-        if matches!(self.state, State::Waiting) {
+        if matches!(self.state, State::Waiting) || blocked(self.ask, self.agreed) {
             return;
         }
         let (Some(core), Some(requests)) = (self.core.take(), self.requests.take()) else { return };
+        self.record_consent();
         self.hand_over();
         if let Err(e) = crate::auth::skip_screen() {
             tracing::warn!("sign-in skip not remembered: {e}");
@@ -269,6 +304,31 @@ impl SignIn {
         crate::analytics::event("signin_skipped", serde_json::json!({}));
         window.remove_window();
         crate::open_main(core, requests, cx);
+    }
+
+    fn toggle_consent(&mut self, cx: &mut Context<Self>) {
+        if self.ask && !matches!(self.state, State::Waiting) {
+            self.agreed = !self.agreed;
+            cx.notify();
+        }
+    }
+
+    /// Stores the agreement to the current terms and queues `consent_set`, once: a retry after a failed sign-in does neither.
+    fn record_consent(&self) {
+        if !self.ask {
+            return;
+        }
+        let mut person = match crate::settings::load_person() {
+            Ok(person) => person,
+            Err(e) => return tracing::warn!("consent not remembered: {e}"),
+        };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        if person.accept_terms(now) {
+            match crate::settings::write_person(&person) {
+                Ok(()) => crate::analytics::event("consent_set", consent_event(crate::settings::TERMS_VERSION)),
+                Err(e) => tracing::warn!("consent not remembered: {e}"),
+            }
+        }
     }
 
     /// Gives the keys to what the state shows: the main button, or the bare screen while it is not shown.
@@ -316,7 +376,7 @@ impl SignIn {
 
     fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match ev.keystroke.key.as_str() {
-            "enter" => match enter_action(self.state, self.skip_focus.is_focused(window)) {
+            "enter" => match enter_action(self.state, self.skip_focus.is_focused(window), blocked(self.ask, self.agreed)) {
                 Action::Skip => self.skip(window, cx),
                 // A focused link activates itself; the bare screen and the main button sign in (a second start is ignored).
                 Action::Start if self.focus.is_focused(window) || self.primary_focus.is_focused(window) => self.start(window, cx),
@@ -337,10 +397,21 @@ enum Action {
     None,
 }
 
-/// What Enter does: nothing while waiting, Skip when Skip has focus, else sign in.
-fn enter_action(state: State, skip_focused: bool) -> Action {
+/// Whether sign-in and Skip are held back: the checkbox is shown and not ticked.
+fn blocked(ask: bool, agreed: bool) -> bool {
+    ask && !agreed
+}
+
+/// The `consent_set` event: the terms version, also kept on the person.
+fn consent_event(version: &str) -> serde_json::Value {
+    serde_json::json!({ "version": version, "$set": { "consent_version": version } })
+}
+
+/// What Enter does: nothing while waiting or until the terms are ticked, Skip when Skip has focus, else sign in.
+fn enter_action(state: State, skip_focused: bool, blocked: bool) -> Action {
     match state {
         State::Waiting => Action::None,
+        _ if blocked => Action::None,
         _ if skip_focused => Action::Skip,
         _ => Action::Start,
     }
@@ -390,6 +461,11 @@ fn content(state: State) -> Content {
     }
 }
 
+/// What the consent-only form shows: one Continue button.
+fn content_only() -> Content {
+    Content { status: None, primary: Some(CONTINUE), secondary: None, note: None, skip: false }
+}
+
 /// The footer's key hints for a state: (key, what it does); Tab always moves focus.
 fn hints(state: State) -> [(&'static str, &'static str); 2] {
     let first = match state {
@@ -429,25 +505,27 @@ fn layout(width: f32, height: f32) -> Layout {
     }
 }
 
-/// The regular grid, in px at scale 1: three columns, the hero 312 high, the lead line, the feature row.
+/// The regular grid, in px at scale 1: three columns, the hero 312 high, the lead line, the feature row (two tiles).
 const COL: f32 = 256.0;
 const GAP: f32 = 12.0;
 const HERO_H: f32 = 312.0;
 const LEAD_H: f32 = 16.0;
 const FEATURE_H: f32 = 148.0;
+/// The two feature tiles share the grid width.
+const FEATURE_W: f32 = (3.0 * COL + 2.0 * GAP - GAP) / 2.0;
 const GRID_W: f32 = 3.0 * COL + 2.0 * GAP;
 const GRID_H: f32 = HERO_H + GAP + LEAD_H + GAP + FEATURE_H;
 
-/// The five tiles of the regular grid in window coordinates as (left, top, right, bottom): hero, mark,
-/// then the three features. The grid is centred.
-fn tile_rects(width: f32, height: f32, scale: f32) -> [(f32, f32, f32, f32); 5] {
+/// The four tiles of the regular grid in window coordinates as (left, top, right, bottom): hero, mark,
+/// then the two features. The grid is centred.
+fn tile_rects(width: f32, height: f32, scale: f32) -> [(f32, f32, f32, f32); 4] {
     let (x0, y0) = ((width - GRID_W * scale) / 2.0, height / 2.0 - GRID_H * scale / 2.0);
     let rect = |col: f32, row_top: f32, cols: f32, h: f32| {
         let (left, top) = (x0 + col * (COL + GAP) * scale, y0 + row_top * scale);
         (left, top, left + (cols * COL + (cols - 1.0) * GAP) * scale, top + h * scale)
     };
     let features = HERO_H + GAP + LEAD_H + GAP;
-    [rect(0.0, 0.0, 2.0, HERO_H), rect(2.0, 0.0, 1.0, HERO_H), rect(0.0, features, 1.0, FEATURE_H), rect(1.0, features, 1.0, FEATURE_H), rect(2.0, features, 1.0, FEATURE_H)]
+    [rect(0.0, 0.0, 2.0, HERO_H), rect(2.0, 0.0, 1.0, HERO_H), rect(0.0, features, 1.5, FEATURE_H), rect(1.5, features, 1.5, FEATURE_H)]
 }
 
 /// The compact grid's width: 712, or the window less 16 on each side.
@@ -761,12 +839,75 @@ fn duo(fill: &'static [u8], line: &'static [u8], size: Pixels, color: Hsla) -> D
 }
 
 fn open_url(url: &'static str) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
-    move |_, _, _| crate::links::open(&crate::links::Target::Url(url.to_string()))
+    move |_, _, _| open_with(url, crate::links::open)
+}
+
+/// Hands `url` to the opener (a parameter so a test can watch it).
+fn open_with(url: &str, open: impl FnOnce(&crate::links::Target)) {
+    open(&crate::links::Target::Url(url.to_string()))
+}
+
+/// The consent line: a box that ticks, "I agree to the", then the Terms and Privacy Policy links.
+fn consent_row(agreed: bool, focus: &FocusHandle, s: f32, light: bool, toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Div {
+    let text = move || div().text_size(z(12.5, s)).line_height(z(18.0, s)).text_color(c("muted"));
+    let link = |id: &'static str, (label, url): (&'static str, &'static str)| {
+        div()
+            .id(id)
+            .tab_index(0)
+            .rounded(z(4.0, s))
+            .cursor_pointer()
+            .text_size(z(12.5, s))
+            .line_height(z(18.0, s))
+            .text_color(c("foreground"))
+            .underline()
+            .focus(|mut d| {
+                d.box_shadow = Some(ring());
+                d
+            })
+            .on_click(open_url(url))
+            .child(label)
+    };
+    let tick = div()
+        .size(z(16.0, s))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(z(5.0, s))
+        .border_1()
+        .border_color(if agreed { c("solid") } else { veil(light, 0.35, 0.30) })
+        .bg(if agreed { c("solid") } else { veil(light, 0.06, 0.04) })
+        .when(agreed, |d| d.child(svg().data(CHECK_ICON).size(z(11.0, s)).text_color(c("solid_foreground"))));
+    div()
+        .flex()
+        .items_center()
+        .gap(z(4.0, s))
+        .child(
+            div()
+                .id("signin-consent")
+                .track_focus(focus)
+                .rounded(z(4.0, s))
+                .flex()
+                .items_center()
+                .gap(z(8.0, s))
+                .cursor_pointer()
+                .focus(|mut d| {
+                    d.box_shadow = Some(ring());
+                    d
+                })
+                .on_click(toggle)
+                .child(tick)
+                .child(text().child("I agree to the")),
+        )
+        .child(link("signin-terms", LEGAL[0]))
+        .child(text().child("and"))
+        .child(link("signin-privacy", LEGAL[1]))
 }
 
 /// The main action: a solid button with a lit top edge and a soft lift, and the focus ring while it has focus
 /// (not `focus_visible`: the ring must not hide after a mouse move).
-fn primary_button(id: &'static str, label: &'static str, s: f32) -> Stateful<Div> {
+/// `off`: it cannot be used yet (faded, no hover). `external`: it opens the browser, so it shows the link glyph.
+fn primary_button(id: &'static str, label: &'static str, s: f32, off: bool, external: bool) -> Stateful<Div> {
     let lift = BoxShadow::new(px(0.0), z(8.0, s), c("solid").opacity(0.7)).blur_radius(z(20.0, s)).spread_radius(z(-10.0, s));
     let mut focused = ring();
     focused.push(lift.clone());
@@ -788,7 +929,8 @@ fn primary_button(id: &'static str, label: &'static str, s: f32) -> Stateful<Div
         .cursor_pointer()
         .text_size(z(14.0, s))
         .font_weight(FontWeight::MEDIUM)
-        .hover(|d| d.opacity(0.92))
+        .when(off, |d| d.opacity(0.4).cursor_default())
+        .when(!off, |d| d.hover(|d| d.opacity(0.92)))
         .focus(move |mut d| {
             d.box_shadow = Some(focused);
             d
@@ -797,11 +939,16 @@ fn primary_button(id: &'static str, label: &'static str, s: f32) -> Stateful<Div
     button
         .child(div().absolute().top(px(0.0)).left(z(12.0, s)).right(z(12.0, s)).h(px(1.0)).bg(white().opacity(0.25)))
         .child(label)
-        .child(svg().data(OPEN_ICON).size(z(15.0, s)).flex_none().text_color(c("solid_foreground")))
+        .when(external, |d| d.child(svg().data(OPEN_ICON).size(z(15.0, s)).flex_none().text_color(c("solid_foreground"))))
 }
 
-/// Cancel and Skip: a quiet glass button.
-fn quiet_button(id: &'static str, label: &'static str, s: f32, light: bool) -> Stateful<Div> {
+/// Every primary label opens the browser except Continue, which only records the agreement.
+fn opens_browser(label: &str) -> bool {
+    label != CONTINUE
+}
+
+/// Cancel and Skip: a quiet glass button. `off`: it cannot be used yet (faded, no hover).
+fn quiet_button(id: &'static str, label: &'static str, s: f32, light: bool, off: bool) -> Stateful<Div> {
     let ring = ring();
     div()
         .id(id)
@@ -819,7 +966,8 @@ fn quiet_button(id: &'static str, label: &'static str, s: f32, light: bool) -> S
         .cursor_pointer()
         .text_size(z(13.0, s))
         .font_weight(FontWeight::MEDIUM)
-        .hover(move |d| d.bg(veil(light, 0.10, 0.07)))
+        .when(off, |d| d.opacity(0.4).cursor_default())
+        .when(!off, |d| d.hover(move |d| d.bg(veil(light, 0.10, 0.07))))
         .focus(move |mut d| {
             d.box_shadow = Some(ring);
             d
@@ -910,8 +1058,9 @@ impl Render for SignIn {
         let lay = layout(width, height);
         let (s, compact) = (lay.scale, lay.mode == Mode::Compact);
         let (light, tint) = (light(), tint());
-        let view = content(self.state);
+        let view = if self.only { content_only() } else { content(self.state) };
         let idle = matches!(self.state, State::Idle);
+        let off = blocked(self.ask, self.agreed);
         let status = view.status.map(|status| {
             let (title, body, tone) = match &status {
                 Status::Waiting => (WAITING_TITLE, Some(WAITING_BODY), c("accent")),
@@ -966,11 +1115,12 @@ impl Render for SignIn {
                     .items_start()
                     .gap(z(10.0, s))
                     .when_some(status, |d, st| d.child(st))
+                    .when(self.ask && view.secondary.is_none(), |d| d.child(consent_row(self.agreed, &self.consent_focus, s, light, cx.listener(|this, _, _, cx| this.toggle_consent(cx)))))
                     .when_some(view.primary, |d, label| {
                         let id = if idle { "signin" } else { "retry" };
-                        d.child(primary_button(id, label, s).track_focus(&self.primary_focus).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
+                        d.child(primary_button(id, label, s, off, opens_browser(label)).track_focus(&self.primary_focus).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
                     })
-                    .when_some(view.secondary, |d, label| d.child(quiet_button("cancel", label, s, light).on_click(cx.listener(|this, _, w, cx| this.cancel(w, cx)))))
+                    .when_some(view.secondary, |d, label| d.child(quiet_button("cancel", label, s, light, false).on_click(cx.listener(|this, _, w, cx| this.cancel(w, cx)))))
                     .when_some(view.note, |d, note| {
                         let row = div().flex().text_size(z(12.5, s)).line_height(z(18.0, s)).text_color(c("muted"));
                         d.child(match note.split_once(TEAM_DOMAIN) {
@@ -997,7 +1147,7 @@ impl Render for SignIn {
                                 .flex()
                                 .items_center()
                                 .gap(z(14.0, s))
-                                .child(quiet_button("signin-skip", SKIP, s, light).track_focus(&self.skip_focus).on_click(cx.listener(|this, _, w, cx| this.skip(w, cx))))
+                                .child(quiet_button("signin-skip", SKIP, s, light, off).track_focus(&self.skip_focus).on_click(cx.listener(|this, _, w, cx| this.skip(w, cx))))
                                 .child(div().id("signin-skip-note").text_size(z(12.5, s)).line_height(z(18.0, s)).text_color(c("muted")).children(SKIP_NOTE.map(|line| div().child(line)))),
                         ),
                 )
@@ -1053,10 +1203,10 @@ impl Render for SignIn {
                 )
         };
 
-        // "Signing in turns on" and the three features.
-        let features = (0..3).map(|i| {
+        // "Signing in turns on" and the two features.
+        let features = (0..2).map(|i| {
             let tile = feature(i, s, compact, tint, light);
-            if compact { tile.flex_1().min_w(px(0.0)).h(px(122.0)) } else { tile.flex_none().w(z(COL, s)).h(z(FEATURE_H, s)) }
+            if compact { tile.flex_1().min_w(px(0.0)).h(px(122.0)) } else { tile.flex_none().w(z(FEATURE_W, s)).h(z(FEATURE_H, s)) }
         });
         let gap = if compact { 10.0 } else { GAP };
         let perks = div()
@@ -1090,7 +1240,7 @@ impl Render for SignIn {
                 .child(perks)
         };
 
-        let hint_line = div().flex().items_center().gap(px(8.0)).font_family(crate::settings::DEFAULT_FONT).text_size(px(11.5)).children(hints(self.state).into_iter().enumerate().flat_map(
+        let hint_line = div().flex().items_center().gap(px(8.0)).font_family(crate::settings::DEFAULT_FONT).text_size(px(11.5)).children(if self.only { [("Enter", "continue"), ("Tab", "focus")] } else { hints(self.state) }.into_iter().enumerate().flat_map(
             |(i, (key, verb))| {
                 let sep = (i > 0).then(|| div().text_color(c("dim")).child("\u{b7}").into_any_element());
                 let item = div().flex().gap(px(6.0)).child(div().font_weight(FontWeight::MEDIUM).text_color(c("foreground")).child(key)).child(div().text_color(c("muted")).child(verb));
@@ -1226,21 +1376,22 @@ mod tests {
 
     #[test]
     fn the_tiles_sit_in_a_grid_centred_in_the_window() {
-        use super::{COL, FEATURE_H, GAP, GRID_H, GRID_W, HERO_H, LEAD_H, tile_rects};
-        let [hero, mark, a, b, c] = tile_rects(1280.0, 800.0, 1.0);
+        use super::{COL, FEATURE_H, FEATURE_W, GAP, GRID_H, GRID_W, HERO_H, LEAD_H, tile_rects};
+        let [hero, mark, a, b] = tile_rects(1280.0, 800.0, 1.0);
         // The 1280 x 800 window: the hero is two columns and a gap, the mark tile the third column, the features sit below.
         let (x0, y0, step) = ((1280.0 - GRID_W) / 2.0, (800.0 - GRID_H) / 2.0, COL + GAP);
         let hero_w = 2.0 * COL + GAP;
         assert_eq!(hero, (x0, y0, x0 + hero_w, y0 + HERO_H));
         assert_eq!(mark, (x0 + 2.0 * step, y0, x0 + 2.0 * step + COL, y0 + HERO_H));
         let row = y0 + HERO_H + GAP + LEAD_H + GAP;
-        assert_eq!((a, b, c), ((x0, row, x0 + COL, row + FEATURE_H), (x0 + step, row, x0 + step + COL, row + FEATURE_H), (x0 + 2.0 * step, row, x0 + 2.0 * step + COL, row + FEATURE_H)));
+        assert_eq!((a, b), ((x0, row, x0 + FEATURE_W, row + FEATURE_H), (x0 + FEATURE_W + GAP, row, x0 + GRID_W, row + FEATURE_H)));
+        assert_eq!(FEATURE_W * 2.0 + GAP, GRID_W, "two tiles span the grid");
         assert_eq!((GRID_W, GRID_H), (3.0 * COL + 2.0 * GAP, HERO_H + GAP + LEAD_H + GAP + FEATURE_H));
         // Centred as a unit at any size and scale.
         for (w, h, s) in [(1280.0, 800.0, 1.0), (1920.0, 1080.0, 1.12), (840.0, 680.0, 1.0)] {
             let rects = tile_rects(w, h, s);
             let (left, top) = (rects[0].0, rects[0].1);
-            let (right, bottom) = (rects[1].2, rects[4].3);
+            let (right, bottom) = (rects[1].2, rects[3].3);
             assert!(((left + right) / 2.0 - w / 2.0).abs() < 0.01, "{w}x{h}");
             assert!(((top + bottom) / 2.0 - h / 2.0).abs() < 0.01, "{w}x{h}");
             assert!((right - left - GRID_W * s).abs() < 0.01 && (bottom - top - GRID_H * s).abs() < 0.01);
@@ -1249,9 +1400,9 @@ mod tests {
 
     #[test]
     fn the_icons_are_duotone_pairs_a_soft_fill_and_a_line() {
-        use super::{ALERT_ICON, ARROW_ICON, CHAIN_FILL, CHAIN_LINE, GLOBE_FILL, GLOBE_LINE, OBSERVE_FILL, OBSERVE_LINE, OPEN_ICON, PERK_FILLS, PERKS, PII_FILL, PII_LINE, TOKENS_FILL, TOKENS_LINE};
+        use super::{ALERT_ICON, ARROW_ICON, CHAIN_FILL, CHAIN_LINE, GLOBE_FILL, GLOBE_LINE, OBSERVE_FILL, OBSERVE_LINE, OPEN_ICON, PERK_FILLS, PERKS, PII_FILL, PII_LINE};
         let text = |b: &[u8]| std::str::from_utf8(b).unwrap().to_owned();
-        for (fill, line) in [(TOKENS_FILL, TOKENS_LINE), (OBSERVE_FILL, OBSERVE_LINE), (PII_FILL, PII_LINE), (GLOBE_FILL, GLOBE_LINE), (CHAIN_FILL, CHAIN_LINE)] {
+        for (fill, line) in [(OBSERVE_FILL, OBSERVE_LINE), (PII_FILL, PII_LINE), (GLOBE_FILL, GLOBE_LINE), (CHAIN_FILL, CHAIN_LINE)] {
             let (fill, line) = (text(fill), text(line));
             assert!(fill.contains("viewBox=\"0 0 24 24\"") && fill.contains("fill=\"#000\"") && !fill.contains("stroke"), "{fill}");
             assert!(line.contains("viewBox=\"0 0 24 24\"") && line.contains("stroke-width=\"1.5\"") && line.contains("fill=\"none\""), "{line}");
@@ -1263,9 +1414,9 @@ mod tests {
             assert!(text(single).contains("stroke-width=\"1.5\""));
         }
         assert_eq!(PERK_FILLS.len(), PERKS.len());
-        assert_eq!(PERK_FILLS[0], TOKENS_FILL);
-        assert_eq!(PERKS[1].0, OBSERVE_LINE);
-        assert_eq!(PERKS[2].0, PII_LINE);
+        assert_eq!(PERK_FILLS[0], OBSERVE_FILL);
+        assert_eq!(PERKS[0].0, OBSERVE_LINE);
+        assert_eq!(PERKS[1].0, PII_LINE);
     }
 
     #[test]
@@ -1427,13 +1578,12 @@ mod tests {
         assert_eq!((super::PARTNER_URL, super::PARTNER_DOMAIN, super::PARTNER_NOTE), ("https://buckleson.com", "buckleson.com", "Blockchain & security partner"));
         // Only the screen's own code counts, not this list.
         let source = include_str!("signin.rs").split("#[cfg(test)]").next().unwrap();
-        for id in ["signin-root", "signin-card", "signin-perks", "\"signin\"", "\"retry\"", "\"cancel\"", "\"signin-skip\"", "signin-skip-note", "\"team\"", "\"partner\"", "signin-rain", "signin-mark", "feat-tokens", "feat-observe", "feat-pii"] {
+        for id in ["signin-root", "signin-card", "signin-perks", "\"signin\"", "\"retry\"", "\"cancel\"", "\"signin-skip\"", "signin-skip-note", "\"team\"", "\"partner\"", "signin-rain", "signin-mark", "feat-observe", "feat-pii"] {
             assert!(source.contains(id), "{id}");
         }
         assert_eq!(BENEFITS.len(), PERKS.len());
-        assert_eq!(BENEFITS[0], "Leaner prompts, so agent sessions use fewer tokens.");
-        assert_eq!(BENEFITS[1], "See what each agent ran, changed and spent.");
-        assert_eq!(BENEFITS[2], "Personal data is masked before it leaves this computer.");
+        assert_eq!(BENEFITS[0], "See what each agent ran, changed and spent.");
+        assert_eq!(BENEFITS[1], "Personal data is masked before it leaves this computer.");
     }
 
     #[test]
@@ -1466,7 +1616,7 @@ mod tests {
     fn the_perks_come_in_the_owners_words_and_order() {
         assert_eq!(PERKS_LEAD, "Signing in turns on");
         let labels: Vec<&str> = PERKS.iter().map(|(_, l)| *l).collect();
-        assert_eq!(labels, ["Token saving", "Observability engine", "Blockchain security for PII masking"]);
+        assert_eq!(labels, ["Observability engine", "Blockchain security for PII masking"], "Token saving is on by default, so it is not a sign-in perk");
     }
 
     #[test]
@@ -1488,12 +1638,12 @@ mod tests {
 
     #[test]
     fn enter_signs_in_at_the_root_skips_on_skip_and_does_nothing_while_waiting() {
-        assert_eq!(enter_action(State::Waiting, false), Action::None);
-        assert_eq!(enter_action(State::Waiting, true), Action::None);
-        assert_eq!(enter_action(State::Idle, false), Action::Start);
-        assert_eq!(enter_action(State::Idle, true), Action::Skip);
-        assert_eq!(enter_action(State::Failed(CANCELLED), false), Action::Start);
-        assert_eq!(enter_action(State::Failed(CANCELLED), true), Action::Skip);
+        assert_eq!(enter_action(State::Waiting, false, false), Action::None);
+        assert_eq!(enter_action(State::Waiting, true, false), Action::None);
+        assert_eq!(enter_action(State::Idle, false, false), Action::Start);
+        assert_eq!(enter_action(State::Idle, true, false), Action::Skip);
+        assert_eq!(enter_action(State::Failed(CANCELLED), false, false), Action::Start);
+        assert_eq!(enter_action(State::Failed(CANCELLED), true, false), Action::Skip);
     }
 
     #[test]
@@ -1530,7 +1680,7 @@ mod tests {
         use super::{GRID_H, GRID_W, layout, tile_rects};
         let (w, h) = (842.0, 684.0);
         assert_eq!(layout(w, h).mode, super::Mode::Regular);
-        let [hero, mark, a, _, c] = tile_rects(w, h, 1.0);
+        let [hero, mark, a, c] = tile_rects(w, h, 1.0);
         let left = (w - GRID_W) / 2.0;
         assert_eq!(hero, (left, (h - GRID_H) / 2.0, left + 2.0 * super::COL + super::GAP, (h - GRID_H) / 2.0 + 312.0));
         assert!((hero.0 - (w - mark.2)).abs() < 0.5, "centred: the left margin {} equals the right margin {}", hero.0, w - mark.2);
@@ -1542,13 +1692,216 @@ mod tests {
 
     #[test]
     fn signed_out_shows_the_screen_signed_in_opens_main() {
-        assert!(decide(false, || false));
-        assert!(!decide(false, || true));
+        assert!(decide(false, || false, || true));
+        assert!(!decide(false, || true, || true));
+    }
+
+    #[test]
+    fn signed_in_people_are_asked_again_until_they_agree_to_the_current_terms() {
+        use crate::settings::{Consent, Person};
+        let agreed = |p: &Person| p.consent_current();
+        let none = Person::default();
+        let mut old = Person::default();
+        old.consent = Some(Consent { version: "alpha-0".into(), at: 1 });
+        let mut current = Person::default();
+        assert!(current.accept_terms(1));
+        // Signed in (or skipped before) with no agreement, or an older one: the screen shows.
+        assert!(decide(false, || true, || agreed(&none)), "signed in, no consent");
+        assert!(decide(false, || true, || agreed(&old)), "an older version asks again");
+        // Signed in with the current version: no screen.
+        assert!(!decide(false, || true, || agreed(&current)));
+        // Never signed in: the screen shows whatever is stored (the full form).
+        assert!(decide(false, || false, || agreed(&current)));
+        assert!(decide(false, || false, || agreed(&none)));
+    }
+
+    #[test]
+    fn the_consent_only_form_has_one_continue_button_and_nothing_else_to_choose() {
+        use super::{CONTINUE, SIGN_IN, TRY_AGAIN, blocked, content_only, opens_browser};
+        let c = content_only();
+        assert_eq!((c.primary, c.secondary, c.note, c.skip, c.status), (Some(CONTINUE), None, None, false, None));
+        assert_eq!(CONTINUE, "Continue");
+        // Continue is local: no external-link glyph. The browser buttons keep theirs.
+        assert!(!opens_browser(CONTINUE));
+        for label in [SIGN_IN, TRY_AGAIN] {
+            assert!(opens_browser(label), "{label}");
+        }
+        // Blocked until ticked: Enter (and a click, which `start` guards the same way) does nothing, then continues.
+        assert!(blocked(true, false) && !blocked(true, true));
+        assert_eq!(enter_action(State::Idle, false, blocked(true, false)), Action::None);
+        assert_eq!(enter_action(State::Idle, false, blocked(true, true)), Action::Start);
+    }
+
+    #[test]
+    fn only_the_consent_only_continue_drops_the_link_glyph_in_every_state_and_layout() {
+        use super::{CONTINUE, content_only, opens_browser};
+        // Every primary label the screen can show: each failure offers Try again, which opens the browser; waiting has none.
+        for state in [State::Idle, State::Waiting, State::Failed(CANCELLED), State::Failed(OTHER), State::Failed(REJECTED), State::Failed(TIMEOUT), State::Failed(UNREACHABLE)] {
+            if let Some(label) = content(state).primary {
+                assert!(opens_browser(label), "{label}");
+            }
+        }
+        assert_eq!(content_only().primary.map(opens_browser), Some(false));
+        assert!(opens_browser(SIGN_IN) && opens_browser(TRY_AGAIN) && !opens_browser(CONTINUE));
+        // One code path for both layouts: the glyph only under `external`, and the only primary button decides it from the label.
+        let source = include_str!("signin.rs").split("#[cfg(test)]").next().unwrap();
+        assert_eq!(source.matches("data(OPEN_ICON)").count(), 1, "one link glyph");
+        assert!(source.contains(".when(external, |d| d.child(svg().data(OPEN_ICON)"), "the glyph is drawn only for a browser button");
+        let calls: Vec<&str> = source.match_indices("primary_button(").map(|(i, _)| &source[i..i + source[i..].find('\n').unwrap()]).collect();
+        assert_eq!(calls.len(), 2, "the definition and one call: {calls:?}");
+        assert!(calls[1].contains("primary_button(id, label, s, off, opens_browser(label))") && !calls[1].contains("compact"), "{calls:?}");
+    }
+
+    #[test]
+    fn the_two_feature_tiles_fill_the_row_without_overlap_at_every_regular_size() {
+        use super::{FEATURE_H, FEATURE_W, GAP, GRID_W, HERO_H, LEAD_H, Mode, layout, tile_rects};
+        assert_eq!(FEATURE_W, 390.0);
+        // The smallest regular windows (840 x 680), the default (842 x 684), both sides of the 1.12 scale step, a large screen.
+        for (w, h) in [(840.0, 680.0), (842.0, 684.0), (1599.0, 949.0), (1600.0, 950.0), (2560.0, 1440.0)] {
+            let lay = layout(w, h);
+            assert_eq!(lay.mode, Mode::Regular, "{w}x{h}");
+            let s = lay.scale;
+            let [hero, mark, a, b] = tile_rects(w, h, s);
+            let close = |x: f32, y: f32| (x - y).abs() < 0.01;
+            // The rendered width (z(FEATURE_W, s)) is the rect's width, and both tiles are the same size.
+            assert!(close(a.2 - a.0, FEATURE_W * s) && close(b.2 - b.0, FEATURE_W * s), "{w}x{h}: {a:?} {b:?}");
+            assert!(close(a.3 - a.1, FEATURE_H * s) && close(b.3 - b.1, FEATURE_H * s) && a.1 == b.1, "{w}x{h}: one row");
+            // Edge to edge under the hero and the mark tile, one gap between them.
+            assert!(close(a.0, hero.0) && close(b.2, mark.2) && close(b.2 - a.0, GRID_W * s), "{w}x{h}: the row is filled");
+            assert!(close(b.0 - a.2, GAP * s), "{w}x{h}: no overlap, one gap: {a:?} {b:?}");
+            // Below the hero, the mark and the lead line; inside the window and above the 36 px footer.
+            assert!(close(a.1, hero.3 + (GAP + LEAD_H + GAP) * s) && close(hero.3, hero.1 + HERO_H * s) && a.1 > mark.3, "{w}x{h}");
+            assert!(a.0 >= 0.0 && hero.1 >= 0.0 && b.2 <= w && b.3 + 36.0 <= h, "{w}x{h}: inside the window: {hero:?} {b:?}");
+        }
+    }
+
+    #[test]
+    fn the_compact_feature_row_splits_its_width_in_two_down_to_the_620_minimum() {
+        use super::{Mode, compact_width, layout};
+        // The narrowest and shortest windows the screen opens at, and just inside the compact layout.
+        let (min_w, min_h) = (window_width(Some(0.0)), window_height(Some(0.0)));
+        assert_eq!((min_w, min_h), (620.0, 460.0));
+        for (w, h) in [(min_w, min_h), (min_w, 684.0), (839.0, 684.0), (842.0, 679.0), (842.0, min_h)] {
+            assert_eq!(layout(w, h).mode, Mode::Compact, "{w}x{h}");
+            let row = compact_width(w);
+            // Two flex_1 tiles and one 10 px gap: each gets half of the rest, and neither is squeezed to nothing.
+            let tile = (row - 10.0) / 2.0;
+            assert!(tile * 2.0 + 10.0 == row && tile >= 289.0, "{w}x{h}: {tile}");
+            assert!(row <= w - 32.0 && (w - row) / 2.0 >= 16.0, "{w}x{h}: 16 px or more each side: {row}");
+        }
+    }
+
+    // The full form (not the consent-only one) with two feature tiles, at the regular size, just inside compact and at the
+    // smallest window: Tab and Shift-Tab reach the box, the main button and Skip, in that order from the box, whether
+    // ticked or not and after a failure. Then the consent-only form at the smallest window: Tab reaches the box and Continue.
+    #[gpui::test]
+    fn tab_reaches_every_control_of_the_sign_in_screen_at_every_window_size(cx: &mut gpui::TestAppContext) {
+        use super::{Mode, SignIn, layout};
+        use gpui::{FocusHandle, InputEvent as _, KeyUpEvent, Keystroke, VisualTestContext, px, size};
+        use std::{cell::RefCell, rc::Rc};
+        fn press(cx: &mut VisualTestContext, key: &str) {
+            cx.simulate_keystrokes(key);
+            let keystroke = Keystroke::parse(key).unwrap();
+            cx.update(|window, cx| {
+                window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        // The Tab presses until `target` has focus, or None; `seen` gets every other handle met on the way.
+        fn presses_to(cx: &mut VisualTestContext, key: &str, target: &FocusHandle, others: &[&FocusHandle], seen: &mut Vec<usize>) -> Option<usize> {
+            for n in 0..24 {
+                if cx.update(|window, _| target.is_focused(window)) {
+                    return Some(n);
+                }
+                for (i, other) in others.iter().enumerate() {
+                    if cx.update(|window, _| other.is_focused(window)) && !seen.contains(&i) {
+                        seen.push(i);
+                    }
+                }
+                press(cx, key);
+            }
+            None
+        }
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let primary_focus = cx.focus_handle().tab_stop(true);
+            window.focus(&primary_focus, cx);
+            SignIn {
+                state: State::Idle,
+                attempt: 0,
+                core: None,
+                requests: None,
+                focus: cx.focus_handle(),
+                primary_focus,
+                skip_focus: cx.focus_handle().tab_stop(true),
+                consent_focus: cx.focus_handle().tab_stop(true),
+                ask: true,
+                agreed: false,
+                only: false,
+                held: Vec::new(),
+                frame: 0,
+                rain: Rc::new(RefCell::new(super::RainPaint::default())),
+            }
+        });
+        let (primary, skip, consent) = cx.update(|_, app| {
+            let v = view.read(app);
+            (v.primary_focus.clone(), v.skip_focus.clone(), v.consent_focus.clone())
+        });
+        for (w, h, mode) in [(842.0, 684.0, Mode::Regular), (839.0, 684.0, Mode::Compact), (620.0, 460.0, Mode::Compact)] {
+            cx.simulate_resize(size(px(w), px(h)));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(cx.update(|window, _| window.viewport_size()), size(px(w), px(h)));
+            assert_eq!(layout(w, h).mode, mode, "{w}x{h}");
+            for (state, agreed) in [(State::Idle, false), (State::Idle, true), (State::Failed(CANCELLED), true)] {
+                cx.update(|_, app| {
+                    view.update(app, |v, _| {
+                        v.state = state;
+                        v.agreed = agreed;
+                    })
+                });
+                let what = format!("{w}x{h} {:?} agreed {agreed}", content(state).primary);
+                cx.update(|window, app| window.focus(&consent, app));
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                // Forward from the box: the main button, then Skip, then round to the box again.
+                let mut seen = Vec::new();
+                assert!(presses_to(cx, "tab", &primary, &[&skip], &mut seen).is_some(), "{what}: Tab reaches the main button");
+                assert!(seen.is_empty(), "{what}: the main button comes before Skip");
+                assert!(presses_to(cx, "tab", &skip, &[&consent], &mut seen).is_some(), "{what}: Tab reaches Skip");
+                assert!(seen.is_empty(), "{what}: Skip comes before the box again");
+                assert!(presses_to(cx, "tab", &consent, &[], &mut seen).is_some(), "{what}: Tab comes round to the box");
+                // Backward from the box: Skip first (round the end), then the main button.
+                assert!(presses_to(cx, "shift-tab", &skip, &[&primary], &mut seen).is_some(), "{what}: Shift-Tab reaches Skip");
+                assert!(seen.is_empty(), "{what}: Shift-Tab meets Skip before the main button");
+                assert!(presses_to(cx, "shift-tab", &primary, &[], &mut seen).is_some(), "{what}: Shift-Tab reaches the main button");
+                // Tab never ticks the box nor starts a sign-in.
+                let (now_agreed, idle_or_failed) = cx.update(|_, app| {
+                    let v = view.read(app);
+                    (v.agreed, !matches!(v.state, State::Waiting))
+                });
+                assert!(now_agreed == agreed && idle_or_failed, "{what}");
+            }
+        }
+        // The consent-only form at the smallest window: no Skip, and Tab still reaches the box and Continue.
+        cx.update(|_, app| {
+            view.update(app, |v, _| {
+                v.only = true;
+                v.state = State::Idle;
+                v.agreed = false;
+            })
+        });
+        cx.update(|window, app| window.focus(&primary, app));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let mut seen = Vec::new();
+        assert!(presses_to(cx, "tab", &consent, &[&skip], &mut seen).is_some(), "620x460 consent-only: Tab reaches the box");
+        assert!(presses_to(cx, "tab", &primary, &[&skip], &mut seen).is_some(), "620x460 consent-only: Tab reaches Continue");
+        assert!(seen.is_empty(), "620x460 consent-only: no Skip to reach");
+        cx.update(|_, app| view.update(app, |v, _| v.state = State::Idle));
     }
 
     #[test]
     fn the_bypass_skips_the_screen_without_asking_the_account() {
-        assert!(!decide(true, || panic!("must not be asked")));
+        assert!(!decide(true, || panic!("must not be asked"), || panic!("must not be asked")));
     }
 
     #[test]
@@ -1575,12 +1928,62 @@ mod tests {
     #[test]
     fn enter_follows_the_skip_focus_after_every_failure_and_never_acts_while_waiting() {
         for error in [CANCELLED, TIMEOUT, REJECTED, OTHER, UNREACHABLE] {
-            assert_eq!(enter_action(State::Failed(error), false), Action::Start, "{error}");
-            assert_eq!(enter_action(State::Failed(error), true), Action::Skip, "{error}");
+            assert_eq!(enter_action(State::Failed(error), false, false), Action::Start, "{error}");
+            assert_eq!(enter_action(State::Failed(error), true, false), Action::Skip, "{error}");
         }
         for skip_focused in [false, true] {
-            assert_eq!(enter_action(State::Waiting, skip_focused), Action::None);
+            assert_eq!(enter_action(State::Waiting, skip_focused, false), Action::None);
         }
+    }
+
+    #[test]
+    fn sign_in_and_skip_are_held_back_until_the_box_is_ticked() {
+        use super::blocked;
+        assert!(blocked(true, false), "asked and not ticked");
+        assert!(!blocked(true, true), "ticked");
+        assert!(!blocked(false, false), "already agreed to this version: no box, no block");
+        assert!(!blocked(false, true));
+        // Enter does nothing, on the main button and on Skip, in every state, while blocked.
+        for state in [State::Idle, State::Waiting, State::Failed(CANCELLED), State::Failed(UNREACHABLE)] {
+            for skip_focused in [false, true] {
+                assert_eq!(enter_action(state, skip_focused, true), Action::None, "{:?} skip {skip_focused}", content(state).status);
+            }
+        }
+        assert_eq!(enter_action(State::Idle, false, false), Action::Start);
+        assert_eq!(enter_action(State::Idle, true, false), Action::Skip);
+    }
+
+    #[test]
+    fn the_terms_and_privacy_links_open_their_pages() {
+        use super::{LEGAL, PRIVACY_URL, TERMS_URL, open_with};
+        use crate::links::Target;
+        assert_eq!(LEGAL, [("Terms", "https://pavii.tech/hyperox/terms"), ("Privacy Policy", "https://pavii.tech/hyperox/privacy")]);
+        for (url, want) in [(TERMS_URL, "https://pavii.tech/hyperox/terms"), (PRIVACY_URL, "https://pavii.tech/hyperox/privacy")] {
+            let mut opened = Vec::new();
+            open_with(url, |t| opened.push(t.clone()));
+            assert_eq!(opened, [Target::Url(want.to_string())]);
+        }
+    }
+
+    #[test]
+    fn consent_set_carries_the_version_and_sets_it_on_the_person() {
+        let event = super::consent_event("beta-1");
+        assert_eq!(event, serde_json::json!({ "version": "beta-1", "$set": { "consent_version": "beta-1" } }));
+        assert_eq!(super::consent_event(crate::settings::TERMS_VERSION)["version"], crate::settings::TERMS_VERSION);
+    }
+
+    #[test]
+    fn the_event_is_for_the_first_agreement_only_and_an_old_version_asks_again() {
+        use crate::settings::{Consent, Person, TERMS_VERSION};
+        // What `record_consent` does: the event goes out only when `accept_terms` changed something.
+        let mut person = Person::default();
+        assert!(!person.consent_current(), "nothing stored: the box shows");
+        assert!(person.accept_terms(1), "ticked and continued: stored, event queued");
+        assert!(!person.accept_terms(2), "a retry after a failed sign-in: no second event");
+        assert!(person.consent_current(), "a current version: the box is skipped");
+        person.consent = Some(Consent { version: "alpha-0".into(), at: 1 });
+        assert!(!person.consent_current(), "an older version: the box shows again");
+        assert!(person.accept_terms(3) && person.consent.as_ref().unwrap().version == TERMS_VERSION);
     }
 
     #[test]
@@ -1588,10 +1991,10 @@ mod tests {
         let states = [State::Idle, State::Waiting, State::Failed(CANCELLED), State::Failed(TIMEOUT), State::Failed(UNREACHABLE)];
         for state in states {
             let shown = content(state).skip;
-            assert_eq!(enter_action(state, true) == Action::Skip, shown, "{:?}", content(state).status);
+            assert_eq!(enter_action(state, true, false) == Action::Skip, shown, "{:?}", content(state).status);
             // While waiting, a sign-in is in flight: no Skip shown, and Enter does nothing at all.
             if !shown {
-                assert_eq!(enter_action(state, false), Action::None);
+                assert_eq!(enter_action(state, false, false), Action::None);
             }
         }
     }
@@ -1731,5 +2134,183 @@ mod tests {
             let after = &fill[fill.find("\")").expect("token end") + 2..];
             assert!(after.starts_with(".opacity("), "an opaque glass fill: {}", &fill[..40.min(fill.len())]);
         }
+    }
+
+    // Runs itself again in a child process with its own app home (`H0X_ADE_HOME`, a folder name with a space and a
+    // non-ASCII letter, as a Windows profile folder can have) and no bypass: `required()` reads the real marker and
+    // settings.json there.
+    #[test]
+    fn the_screen_asks_once_for_the_current_terms_whatever_settings_json_holds() {
+        use crate::settings::{Consent, Person, TERMS_VERSION, load_person, path, write_person};
+        const CHILD: &str = "H0X_TEST_SIGNIN_OWN_HOME";
+        const NAME: &str = "signin::tests::the_screen_asks_once_for_the_current_terms_whatever_settings_json_holds";
+        if std::env::var_os(CHILD).is_none() {
+            let home = std::env::temp_dir().join(format!("h0x ade signin \u{e9}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&home);
+            std::fs::create_dir_all(home.join("empty-path")).unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", NAME, "--nocapture", "--test-threads=1"]).env(CHILD, "1").env("H0X_ADE_HOME", &home).env_remove("H0X_ADE_SKIP_SIGNIN");
+            if cfg!(not(windows)) {
+                // No browser opener can be found (Windows opens links through the shell: not run from a test).
+                child.env("PATH", home.join("empty-path"));
+            }
+            let out = child.output().unwrap();
+            let _ = std::fs::remove_dir_all(&home);
+            let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && log.contains("1 passed"), "{log}");
+            return;
+        }
+        assert!(crate::mods::app_dir().to_string_lossy().contains("h0x ade signin \u{e9}"), "the child's own home");
+        // A new computer: the full screen, even with the current terms already stored.
+        assert!(crate::auth::screen_needed() && super::required(), "never signed in, nothing stored");
+        let mut current = Person::default();
+        assert!(current.accept_terms(1));
+        write_person(&current).unwrap();
+        assert!(super::required(), "agreed but never signed in or skipped: still the full screen");
+        // Skipped (or signed in) once: from now on only the consent-only form can show.
+        std::fs::remove_file(path()).unwrap();
+        crate::auth::skip_screen().unwrap();
+        assert!(!crate::auth::screen_needed(), "the consent-only form");
+        assert!(super::required(), "skipped before, no settings.json at all");
+        let v = TERMS_VERSION;
+        for (stored, why) in [
+            (r#"{"consent":{"version":"alpha-0","at":1}}"#.to_string(), "an older version"),
+            (format!(r#"{{"consent":{{"version":"{v} ","at":1}}}}"#), "the version with a trailing space"),
+            (r#"{"consent":{"version":"","at":0}}"#.to_string(), "an empty version"),
+            (format!(r#"{{"consent":"{v}"}}"#), "malformed: the version alone"),
+            (format!(r#"{{"consent":{{"version":"{v}"}}}}"#), "malformed: no time"),
+            (format!(r#"{{"consent":{{"version":"{v}","at":-1}}}}"#), "malformed: a negative time"),
+            (r#"{"consent":null}"#.to_string(), "null"),
+            (format!(r#"{{"consent":{{"version":"{v}","at":1}},"zoom":99}}"#), "settings.json that does not load (zoom out of range)"),
+            ("{not json".to_string(), "settings.json that is not JSON"),
+            (String::new(), "an empty settings.json"),
+        ] {
+            std::fs::write(path(), &stored).unwrap();
+            assert!(super::required(), "{why}: the consent-only form");
+            assert_eq!(std::fs::read_to_string(path()).unwrap(), stored, "{why}: the person's file is left as it was");
+        }
+        // The current terms stored: no screen at all.
+        write_person(&current).unwrap();
+        assert!(!super::required(), "skipped before and agreed to the current terms");
+        std::fs::write(path(), format!("\u{feff}{{\"consent\":{{\"version\":\"{v}\",\"at\":1}}}}")).unwrap();
+        assert!(!super::required(), "a BOM some editors add does not hide the agreement");
+        // TERMS_VERSION raised after the agreement (simulated: the stored version is the previous one): asked again
+        // once, and the new agreement replaces the old one.
+        let mut bumped = load_person().unwrap();
+        bumped.consent = Some(Consent { version: format!("{v}-previous"), at: 1 });
+        write_person(&bumped).unwrap();
+        assert!(super::required(), "a raised version asks again");
+        assert!(bumped.accept_terms(2));
+        write_person(&bumped).unwrap();
+        assert!(!super::required(), "agreed again: no screen");
+        assert_eq!(load_person().unwrap().consent, Some(Consent { version: v.into(), at: 2 }));
+        // settings.json that cannot be read at all (a folder in its place): the screen shows, nothing panics.
+        std::fs::remove_file(path()).unwrap();
+        std::fs::create_dir_all(path()).unwrap();
+        assert!(load_person().is_err(), "unreadable");
+        assert!(super::required(), "unreadable settings.json: the consent-only form");
+        // The Terms and Privacy links with no browser opener to run: nothing panics.
+        if cfg!(not(windows)) {
+            for (_, url) in super::LEGAL {
+                crate::links::open(&crate::links::Target::Url(url.to_string()));
+            }
+        }
+    }
+
+    // The consent-only form in a real (test) window, at 842 x 684 and just inside the compact layout: Tab reaches the
+    // box and Continue, Space and Enter tick the focused box, and neither Enter on an unticked Continue nor Escape
+    // ticks it or leaves the screen. No core is attached, so nothing can open the main window from here.
+    #[gpui::test]
+    fn the_consent_only_form_answers_tab_space_enter_and_escape_in_both_layouts(cx: &mut gpui::TestAppContext) {
+        use super::{Mode, SignIn, layout};
+        use gpui::{FocusHandle, InputEvent as _, KeyUpEvent, Keystroke, VisualTestContext, px, size};
+        use std::{cell::RefCell, rc::Rc};
+        fn press(cx: &mut VisualTestContext, key: &str) {
+            cx.simulate_keystrokes(key);
+            let keystroke = Keystroke::parse(key).unwrap();
+            cx.update(|window, cx| {
+                window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        fn tab_to(cx: &mut VisualTestContext, target: &FocusHandle) -> bool {
+            for _ in 0..24 {
+                if cx.update(|window, _| target.is_focused(window)) {
+                    return true;
+                }
+                press(cx, "tab");
+            }
+            false
+        }
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let primary_focus = cx.focus_handle().tab_stop(true);
+            window.focus(&primary_focus, cx);
+            SignIn {
+                state: State::Idle,
+                attempt: 0,
+                core: None,
+                requests: None,
+                focus: cx.focus_handle(),
+                primary_focus,
+                skip_focus: cx.focus_handle().tab_stop(true),
+                consent_focus: cx.focus_handle().tab_stop(true),
+                ask: true,
+                agreed: false,
+                only: true,
+                held: Vec::new(),
+                frame: 0,
+                rain: Rc::new(RefCell::new(super::RainPaint::default())),
+            }
+        });
+        let (primary, consent) = cx.update(|_, app| {
+            let v = view.read(app);
+            (v.primary_focus.clone(), v.consent_focus.clone())
+        });
+        let agreed = |cx: &mut VisualTestContext| cx.update(|_, app| view.read(app).agreed);
+        let idle = |cx: &mut VisualTestContext| cx.update(|_, app| matches!(view.read(app).state, State::Idle));
+        for (w, h, mode) in [(842.0, 684.0, Mode::Regular), (839.0, 684.0, Mode::Compact)] {
+            cx.simulate_resize(size(px(w), px(h)));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(cx.update(|window, _| window.viewport_size()), size(px(w), px(h)));
+            assert_eq!(layout(w, h).mode, mode, "{w}x{h}");
+            cx.update(|_, app| view.update(app, |v, _| v.agreed = false));
+            cx.update(|window, app| window.focus(&primary, app));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            // Continue has the keys; unticked, Enter does nothing, and Escape neither ticks the box nor moves on.
+            press(cx, "enter");
+            assert!(!agreed(cx) && idle(cx), "{w}x{h}: Enter on an unticked Continue");
+            press(cx, "escape");
+            assert!(!agreed(cx) && idle(cx), "{w}x{h}: Escape");
+            // Tab reaches the box, which Space ticks and unticks and Enter ticks (Enter on the box never continues).
+            assert!(tab_to(cx, &consent), "{w}x{h}: Tab reaches the checkbox");
+            press(cx, "space");
+            assert!(agreed(cx), "{w}x{h}: Space ticks");
+            press(cx, "space");
+            assert!(!agreed(cx), "{w}x{h}: Space unticks");
+            press(cx, "enter");
+            assert!(agreed(cx) && idle(cx), "{w}x{h}: Enter on the box ticks it");
+            assert!(tab_to(cx, &primary), "{w}x{h}: Tab reaches Continue again");
+            press(cx, "escape");
+            assert!(agreed(cx) && idle(cx), "{w}x{h}: Escape keeps the tick");
+        }
+        // The full form while a sign-in is under way: no checkbox to reach (it is hidden while waiting).
+        cx.update(|_, app| {
+            view.update(app, |v, _| {
+                v.only = false;
+                v.agreed = true;
+                v.state = State::Waiting;
+            })
+        });
+        let root = cx.update(|_, app| view.read(app).focus.clone());
+        cx.update(|window, app| window.focus(&root, app));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        for _ in 0..24 {
+            press(cx, "tab");
+            assert!(!cx.update(|window, _| consent.is_focused(window)), "the checkbox is not shown while waiting");
+        }
+        // Back to idle so closing the test window does not cancel a sign-in.
+        cx.update(|_, app| view.update(app, |v, _| v.state = State::Idle));
     }
 }

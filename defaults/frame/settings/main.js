@@ -3,11 +3,8 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
 import { agentsInit, loadAgents, agentsPage } from "./agents.js";
-import { ActivityGraph } from "./activity.js";
+import { ActivityGraph, SAVED_USD_PER_MILLION_TOKENS } from "./activity.js";
 import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, coreConfig, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, nextCommand, window, account, accountSignIn, accountCancelSignIn, accountSwitch, accountSignOut, accountRemove } from "h0x";
-
-// Dollars per million input tokens (Claude Sonnet's price): turns tokens saved into the "~$" shown beside them.
-const SAVED_USD_PER_MILLION_TOKENS = 3;
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -56,9 +53,8 @@ const DEFAULT_UI_FONT = "Geist";
 const PROVIDERS = { "google.com": "Google", "github.com": "GitHub", password: "Email" };
 const accountName = (a) => a.name || a.email || "Account";
 
-// What signing in turns on: [row id, title, what it is for]. The wording says what each is for, not that it already works.
+// What signing in turns on (Token saving is on for everyone, so it has its own row): [row id, title, what it is for]. The wording says what each is for, not that it already works.
 const FEATURES = [
-  ["st-prof-tokens", "Token saving", "For helping your agents spend fewer tokens on each task.", "gauge"],
   ["st-prof-observe", "Observability engine", "For seeing what your agents and machines did, and when.", "activity"],
   ["st-prof-pii", "Blockchain security for PII masking", "For masking personal data before it leaves this computer.", "shield-check"],
 ];
@@ -1273,19 +1269,19 @@ export default class Settings extends View {
   }
 
   modes(t) {
-    const on = this.person.token_saver === true;
+    const on = this.person.token_saver !== false;
     const routing = this.person.smart_routing === true;
     const soon = (title) => this.row(t, title, null, div().text_size(12.5).text_color(t.dim).child("Coming soon"));
     return v_flex()
       .w_full()
       .child(this.heading(t, "0x Modes"))
-      .child(div().pb(6).text_size(12.5).line_height("18px").text_color(t.dim).child("Optional power-ups for your agents. Each one stays off until you turn it on."))
+      .child(div().pb(6).text_size(12.5).line_height("18px").text_color(t.dim).child("Optional power-ups for your agents. Turn each one on or off here."))
       .child(
         this.row(
           t,
           "Token Saver",
-          "Shrinks big tool outputs (long logs, large files, JSON) before your agent reads them, so sessions use fewer tokens. Applies to new Claude Code terminals; Codex and OpenCode coming soon.",
-          this.toggle(t, "st-token-saver", on, (_e, cx) => this.change((p) => { if (on) delete p.token_saver; else p.token_saver = true; }, cx)),
+          "Helps your agents use fewer tokens.",
+          this.toggle(t, "st-token-saver", on, (_e, cx) => this.change((p) => { if (on) p.token_saver = false; else delete p.token_saver; }, cx)),
         ),
       )
       .child(
@@ -1500,6 +1496,12 @@ export default class Settings extends View {
         div().text_color(t.foreground).child("Add account"))));
   }
 
+  // Token saving is on unless its setting is explicitly false, signed in or not.
+  tokenRow(t) {
+    const on = this.person.token_saver !== false;
+    return this.profileRow(t, "st-prof-tokens", "Token saving", "For helping your agents spend fewer tokens on each task.", this.stateTag(t, on, on ? "on" : "off"), "gauge");
+  }
+
   // Settings > Profile: who is signed in (or that nobody is), this computer's agent activity, and what signing in turns on.
   profile(t) {
     const acct = account();
@@ -1525,6 +1527,7 @@ export default class Settings extends View {
             // Accounts are saved but none is current: they can still be switched to.
             .when(acct.accounts.length > 0 && !this.signingIn, (el) => el.child(h_flex().pt(6).child(this.acctBusy ? busy : this.switchButton(t)))))))
         .child(div().id("st-prof-activity").w_full().child(this.graph))
+        .child(this.tokenRow(t))
         .child(this.subheading(t, "Turned on when you sign in"))
         .children(FEATURES.map(([id, title, about, icon]) => this.profileRow(t, id, title, about, this.stateTag(t, false, "off"), icon)))
         .child(pairing(this.stateTag(t, false, "needs sign-in")));
@@ -1541,6 +1544,7 @@ export default class Settings extends View {
           .child(this.button(t, "st-acct-signout", "Sign out", (_e, cx) => this.accountDo(() => accountSignOut(cur.uid), cx), "log-out", "first"))))
       .when(this.signingIn, (el) => el.child(h_flex().w_full().pt(12).child(this.waitingLine(t)))))
       .child(div().id("st-prof-activity").w_full().child(this.graph))
+      .child(this.tokenRow(t))
       .child(this.subheading(t, "Included with your account"))
       .children(FEATURES.map(([id, title, about, icon]) => this.profileRow(t, id, title, about, this.stateTag(t, true, "included"), icon)))
       .child(pairing(this.button(t, "st-prof-remote", "Set up in Remote", (_e, cx) => this.openSection("remote", cx), "arrow-right")))
@@ -1625,14 +1629,14 @@ export default class Settings extends View {
           .on_click((_e, cx) => { this.analyticsAbout = !this.analyticsAbout; cx.notify(); })
           .child(svg(I("info")).size(12).text_color(this.analyticsAbout ? t.accent : t.dim)))
         .child(this.toggle(t, "st-analytics", on, (_e, cx) => this.change((p) => { if (on) p.share_analytics = false; else delete p.share_analytics; }, cx), true)))
-      .child(para("Usage data and failure reports, tied to a random install ID. Never what you type."))
+      .child(para("Usage, agent and prompt data with secrets removed, plus failure reports. Tap i for details."))
       .when(Boolean(this.analyticsAbout), (el) => el.child(v_flex().w_full().gap(8).p(12).rounded(6).border_1().border_color(t.border).bg(t.background)
         .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("How HyperOx handles your data (beta)"))
-        .child(para("During the beta, HyperOx sends usage data and failure reports so we can fix problems and improve the app. You are identified by a random install ID, not your name or email. We never send what you type, your prompts, agent replies, terminal contents, file or folder names, or your keys. IP addresses are not stored; your approximate location (country and city) is."))
+        .child(para("During the beta, HyperOx sends app and device info, the features and agents you use, model and tool names, token counts and estimated cost, and the prompts you type to agents with secrets removed (long text is cut short). Never agent replies, terminal output or file contents. Failure reports are sent too. You are identified by a random install ID or your account ID, not your name or email."))
         .child(para("When you're signed in, your usage is linked to your HyperOx account ID (not your email)."))
         .child(para("After the beta we plan to move data collection to zero-knowledge proofs."))
-        .child(para("You can turn usage analytics off any time. Failure reports stay on so we can fix crashes and update problems."))
-        .child(h_flex().child(this.button(t, "st-analytics-more", "Click here", open("https://pavii.tech"))))));
+        .child(para("You can turn this off any time with the switch above, or by email (see the Privacy Policy). Failure reports stay on so we can fix crashes and update problems."))
+        .child(h_flex().child(this.button(t, "st-analytics-more", "Privacy Policy", open("https://pavii.tech/hyperox/privacy"))))));
   }
 
   // ----------------------------------------------------------------------

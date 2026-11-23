@@ -2816,6 +2816,54 @@ fn logo_menu_waits_while_an_account_change_runs_and_the_user_mod_only_opens_the_
 }
 
 #[gpui::test]
+fn settings_profile_token_saving_row_shows_the_real_state_signed_in_or_out_and_is_not_a_sign_in_feature(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let signed_in = account_value(&[("u1", "google.com", "vijay")], Some("u1"));
+    // Default (no file, empty file, true) is on; only an explicit false is off.
+    for (label, account, heading) in [("signed in", signed_in, "Included with your account"), ("signed out", account_value(&[], None), "Turned on when you sign in")] {
+        for (file, on) in [(None, true), (Some("{}"), true), (Some(r#"{"token_saver": true}"#), true), (Some(r#"{"token_saver": false}"#), false)] {
+            let (trees, _) = describe_pressing(cx, &staged, "frame/settings", profile_values(account.clone()), file, "", 0);
+            let tree = &trees[0];
+            let at = tree.find("st-prof-tokens").unwrap_or_else(|| panic!("{label} {file:?}: {tree}"));
+            let row = &tree[at..tree.find("st-prof-observe").unwrap_or(tree.len())];
+            let (shown, hidden) = if on { ("text \"on\"", "text \"off\"") } else { ("text \"off\"", "text \"on\"") };
+            assert!(row.contains("Token saving") && row.contains(shown) && !row.contains(hidden), "{label} {file:?}: {row}");
+            assert!(at < tree.find(heading).unwrap(), "{label} {file:?}: Token saving sits above the sign-in list: {tree}");
+        }
+    }
+}
+
+#[gpui::test]
+fn settings_profile_token_saving_agrees_with_0x_modes_and_the_app_for_values_that_are_not_a_boolean(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let signed_in = account_value(&[("u1", "google.com", "vijay")], Some("u1"));
+    // Only false is off. A wrong type is the default, on: in Profile, on the 0x Modes switch, and where the app reads it (bool_or_true).
+    let wrong: Vec<String> = [r#"null"#, "0", "1", r#""false""#, r#""off""#, r#""""#, "[]", "{}", "[false]"].iter().map(|v| format!(r#"{{"token_saver": {v}}}"#)).collect();
+    for file in &wrong {
+        let person: crate::settings::Person = serde_json::from_str(file).unwrap_or_else(|e| panic!("{file}: {e}"));
+        assert!(person.token_saver, "{file}: the app reads it as on");
+    }
+    // A file the page can't read (empty, not JSON, not an object) is the default person too.
+    let unreadable = ["", "{not json", "null", "[]", "true", "\u{feff}"];
+    for file in wrong.iter().map(String::as_str).chain(unreadable) {
+        let (modes, _) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(file), TOKEN_SAVER_PRESS, 0);
+        assert!(modes[0].contains("st-token-saver-on") && !modes[0].contains("st-token-saver-off"), "{file:?}: 0x Modes: {}", modes[0]);
+        for (label, account) in [("signed in", signed_in.clone()), ("signed out", account_value(&[], None))] {
+            let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", profile_values(account), Some(file), "", 0);
+            let tree = &trees[0];
+            // One Token saving row, on, and it is never listed with the sign-in features.
+            assert_eq!((tree.matches("st-prof-tokens").count(), tree.matches("Token saving").count()), (1, 1), "{label} {file:?}: {tree}");
+            let at = tree.find("st-prof-tokens").unwrap();
+            let row = &tree[at..tree.find("st-prof-observe").unwrap_or_else(|| panic!("{label} {file:?}: {tree}"))];
+            assert!(row.contains("text \"on\"") && !row.contains("text \"off\""), "{label} {file:?}: {row}");
+            assert!(calls.borrow().writes.is_empty(), "{label} {file:?}: showing the row writes nothing: {:?}", calls.borrow().writes);
+        }
+    }
+}
+
+#[gpui::test]
 fn settings_profile_with_saved_accounts_but_none_current_lists_them_all_with_no_check(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
@@ -3140,18 +3188,19 @@ fn settings_nav_lists_0x_modes_between_alerts_and_mods_and_it_opens_on_click(cx:
 }
 
 #[gpui::test]
-fn settings_0x_modes_page_renders_token_saver_off_for_the_default_person_without_calling_the_core(cx: &mut TestAppContext) {
+fn settings_0x_modes_page_renders_token_saver_on_for_the_default_person_and_off_only_for_an_explicit_false_without_calling_the_core(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    // No file, an empty one, one with other keys and one with token_saver false: all the default person.
-    for file in [None, Some("{}"), Some(r#"{"zoom": 1.25}"#), Some(r#"{"token_saver": false}"#)] {
+    // No file, an empty one, one with other keys and one with token_saver true: the default person, on. Only an explicit false is off.
+    for (file, on) in [(None, true), (Some("{}"), true), (Some(r#"{"zoom": 1.25}"#), true), (Some(r#"{"token_saver": true}"#), true), (Some(r#"{"token_saver": false}"#), false)] {
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, TOKEN_SAVER_PRESS, 0);
         let tree = &trees[0];
-        for text in ["0X MODES", "Token Saver", "st-token-saver-off", "Tokens saved: ", "Security", "ZK Proofs", "Observability"] {
+        let (shown, hidden) = if on { ("st-token-saver-on", "st-token-saver-off") } else { ("st-token-saver-off", "st-token-saver-on") };
+        for text in ["0X MODES", "Token Saver", "Optional power-ups for your agents. Turn each one on or off here.", shown, "Tokens saved: ", "Security", "ZK Proofs", "Observability"] {
             assert!(tree.contains(text), "{file:?}: {text:?}: {tree}");
         }
         assert_eq!(tree.matches("Coming soon").count(), 3, "{file:?}: {tree}");
-        assert!(!tree.contains("st-token-saver-on") && !tree.contains("can't be read"), "{file:?}: {tree}");
+        assert!(!tree.contains(hidden) && !tree.contains("can't be read"), "{file:?}: {tree}");
         let c = calls.borrow();
         assert!(c.cores.is_empty() && c.execs.is_empty(), "{file:?}: rendering never calls the core: {:?} {:?}", c.cores, c.execs);
         assert!(c.writes.is_empty() && c.unexpected.is_empty(), "{file:?}: {:?} {:?}", c.writes, c.unexpected);
@@ -3224,17 +3273,18 @@ fn settings_0x_modes_coming_soon_rows_have_nothing_to_click(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn settings_token_saver_switch_on_writes_true_and_off_removes_the_key_keeping_every_other_key(cx: &mut TestAppContext) {
+fn settings_token_saver_switch_off_writes_false_and_on_removes_the_key_keeping_every_other_key(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     // settings.json, what one press writes, and whether the switch was on before it.
     for (file, write, was_on) in [
-        (None, json!({"token_saver": true}), false),
-        (Some("{}"), json!({"token_saver": true}), false),
-        (Some(r#"{"token_saver": false, "zoom": 1.25}"#), json!({"token_saver": true, "zoom": 1.25}), false),
-        (Some(r#"{"token_saver": true, "zoom": 1.25, "share_analytics": false}"#), json!({"zoom": 1.25, "share_analytics": false}), true),
-        (Some(r#"{"token_saver": true}"#), json!({}), true),
-        (Some("\u{feff}{\"token_saver\": true}"), json!({}), true),
+        (None, json!({"token_saver": false}), true),
+        (Some("{}"), json!({"token_saver": false}), true),
+        (Some(r#"{"token_saver": true, "zoom": 1.25}"#), json!({"token_saver": false, "zoom": 1.25}), true),
+        (Some(r#"{"zoom": 1.25, "share_analytics": false}"#), json!({"token_saver": false, "zoom": 1.25, "share_analytics": false}), true),
+        (Some(r#"{"token_saver": false, "zoom": 1.25, "share_analytics": false}"#), json!({"zoom": 1.25, "share_analytics": false}), false),
+        (Some(r#"{"token_saver": false}"#), json!({}), false),
+        (Some("\u{feff}{\"token_saver\": false}"), json!({}), false),
     ] {
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, TOKEN_SAVER_PRESS, 1);
         assert_eq!(written(&calls, "/fixture/app/settings.json"), [write], "{file:?}");
@@ -3248,20 +3298,20 @@ fn settings_token_saver_switch_on_writes_true_and_off_removes_the_key_keeping_ev
     let mut values = modes_values();
     values.insert("appHome".into(), json!(home));
     let (_, calls) = describe_pressing(cx, &staged, "frame/settings", values, Some(r#"{"zoom": 1.25}"#), TOKEN_SAVER_PRESS, 1);
-    assert_eq!(written(&calls, &format!("{home}/settings.json")), [json!({"token_saver": true, "zoom": 1.25})]);
+    assert_eq!(written(&calls, &format!("{home}/settings.json")), [json!({"token_saver": false, "zoom": 1.25})]);
 }
 
 #[gpui::test]
-fn settings_token_saver_with_a_value_that_is_not_true_shows_off_and_one_press_writes_true(cx: &mut TestAppContext) {
+fn settings_token_saver_with_a_value_that_is_not_false_shows_on_and_one_press_writes_false(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    // Only true is on; a wrong type (which the app reads as off, see bool_or_false in settings.rs) neither crashes the page nor reads as on.
-    for value in [r#""yes""#, "1", "0", "null", r#""true""#, "[]"] {
+    // Only false is off; a wrong type (which the app reads as the default, on, see bool_or_true in settings.rs) neither crashes the page nor reads as off.
+    for value in [r#""no""#, "1", "0", "null", r#""false""#, "[]"] {
         let file = format!(r#"{{"token_saver": {value}, "zoom": 1.25}}"#);
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(&file), TOKEN_SAVER_PRESS, 1);
-        assert!(trees[0].contains("st-token-saver-off") && !trees[0].contains("can't be read"), "{value}: {}", trees[0]);
-        assert_eq!(written(&calls, "/fixture/app/settings.json"), [json!({"token_saver": true, "zoom": 1.25})], "{value}");
-        assert!(trees[1].contains("st-token-saver-on"), "{value}: {}", trees[1]);
+        assert!(trees[0].contains("st-token-saver-on") && !trees[0].contains("can't be read"), "{value}: {}", trees[0]);
+        assert_eq!(written(&calls, "/fixture/app/settings.json"), [json!({"token_saver": false, "zoom": 1.25})], "{value}");
+        assert!(trees[1].contains("st-token-saver-off"), "{value}: {}", trees[1]);
         assert!(calls.borrow().unexpected.is_empty(), "{value}: {:?}", calls.borrow().unexpected);
     }
 }
@@ -3273,7 +3323,59 @@ fn settings_token_saver_switch_never_overwrites_a_settings_file_it_could_not_rea
     for bad in ["", "{not json", "[]", "null", "true"] {
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(bad), TOKEN_SAVER_PRESS, 1);
         assert!(calls.borrow().writes.is_empty(), "{bad:?}: {:?}", calls.borrow().writes);
-        assert!(trees[1].contains("can't be read") && trees[1].contains("st-token-saver-off"), "{bad:?}: {}", trees[1]);
+        assert!(trees[1].contains("can't be read") && trees[1].contains("st-token-saver-on"), "{bad:?}: {}", trees[1]);
+    }
+}
+
+#[gpui::test]
+fn settings_token_saver_toggled_off_and_on_again_and_again_leaves_no_key_and_no_stray_false(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // settings.json, the file without Token Saver's own state, and whether the switch starts on.
+    // A key in another case is someone else's; a duplicate key reads as its last value (JSON.parse) and is written once.
+    for (file, base, starts_on) in [
+        (None, json!({}), true),
+        (Some("{}"), json!({}), true),
+        (Some("\u{feff}{\"zoom\": 1.25}"), json!({"zoom": 1.25}), true),
+        (Some(r#"{"token_saver": false, "zoom": 1.25}"#), json!({"zoom": 1.25}), false),
+        (Some(r#"{"token_saver": "false", "zoom": 1.25}"#), json!({"zoom": 1.25}), true),
+        (Some(r#"{"Token_Saver": false}"#), json!({"Token_Saver": false}), true),
+        (Some(r#"{"token_saver": false, "token_saver": true}"#), json!({}), true),
+        (Some(r#"{"token_saver": true, "token_saver": false}"#), json!({}), false),
+    ] {
+        let mut off = base.clone();
+        off["token_saver"] = json!(false);
+        let presses = 6;
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, TOKEN_SAVER_PRESS, presses);
+        let want: Vec<Value> = (0..presses).map(|i| if starts_on == (i % 2 == 0) { off.clone() } else { base.clone() }).collect();
+        assert_eq!(written(&calls, "/fixture/app/settings.json"), want, "{file:?}");
+        for (i, tree) in trees.iter().enumerate() {
+            let on = starts_on == (i % 2 == 0);
+            let (shown, hidden) = if on { ("st-token-saver-on", "st-token-saver-off") } else { ("st-token-saver-off", "st-token-saver-on") };
+            assert!(tree.contains(shown) && !tree.contains(hidden) && !tree.contains("can't be read"), "{file:?} after {i} presses: {tree}");
+        }
+        assert!(calls.borrow().writes.iter().all(|(_, text)| !text.contains("\"token_saver\": true")), "{file:?}: {:?}", calls.borrow().writes);
+        assert!(calls.borrow().cores.is_empty() && calls.borrow().unexpected.is_empty(), "{file:?}: {:?} {:?}", calls.borrow().cores, calls.borrow().unexpected);
+    }
+}
+
+#[gpui::test]
+fn settings_token_saver_clicked_twice_before_it_redraws_writes_one_state_only(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Both clicks act on the state they were drawn with: the same change twice, never on then off.
+    let double = "const toggle = this.toggle.bind(this); \
+        this.toggle = (t, id, on, onClick, asTag) => { if (id !== 'st-token-saver') return toggle(t, id, on, onClick, asTag); \
+        this.press = (e, cx) => { onClick(e, cx); onClick(e, cx); }; return toggle(t, on ? 'st-token-saver-on' : 'st-token-saver-off', on, onClick, asTag); };";
+    for (file, write, after) in [
+        (Some(r#"{"zoom": 1.25}"#), json!({"token_saver": false, "zoom": 1.25}), "st-token-saver-off"),
+        (Some(r#"{"token_saver": false, "zoom": 1.25}"#), json!({"zoom": 1.25}), "st-token-saver-on"),
+    ] {
+        let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, double, 1);
+        let writes = written(&calls, "/fixture/app/settings.json");
+        assert!(!writes.is_empty() && writes.iter().all(|w| *w == write), "{file:?}: {writes:?}");
+        assert!(trees[1].contains(after) && !trees[1].contains("can't be read"), "{file:?}: {}", trees[1]);
+        assert!(calls.borrow().unexpected.is_empty(), "{file:?}: {:?}", calls.borrow().unexpected);
     }
 }
 
@@ -3286,8 +3388,8 @@ const SMART_ROUTING_PRESS: &str = "const toggle = this.toggle.bind(this); \
 fn settings_smart_routing_row_sits_under_token_saver_with_its_heading_and_is_off_by_default(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    // Token Saver on, and smart_routing absent, false or not a bool: the row is there, enabled, and off.
-    for file in [r#"{"token_saver": true}"#, r#"{"token_saver": true, "smart_routing": false}"#, r#"{"token_saver": true, "smart_routing": "yes"}"#, r#"{"token_saver": true, "smart_routing": 1}"#] {
+    // Token Saver on (the default, or explicit), and smart_routing absent, false or not a bool: the row is there, enabled, and off.
+    for file in ["{}", r#"{"token_saver": true}"#, r#"{"token_saver": true, "smart_routing": false}"#, r#"{"token_saver": true, "smart_routing": "yes"}"#, r#"{"token_saver": true, "smart_routing": 1}"#] {
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(file), SMART_ROUTING_PRESS, 0);
         let tree = &trees[0];
         for text in ["Smart routing", "Picks the right tools and model for tasks you start with a prompt (logs and data questions run on a cheaper model).", "st-smart-routing-off"] {
@@ -3324,8 +3426,9 @@ fn settings_smart_routing_switch_on_writes_true_and_off_removes_the_key_keeping_
 fn settings_smart_routing_is_disabled_with_a_note_when_token_saver_is_off(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    // Token Saver off, absent or not true: the row is shown, has no switch to press, and says why. A stored smart_routing true is kept, not shown on.
-    for file in [None, Some("{}"), Some(r#"{"token_saver": false}"#), Some(r#"{"token_saver": "yes"}"#), Some(r#"{"smart_routing": true}"#), Some(r#"{"token_saver": false, "smart_routing": true, "zoom": 1.25}"#)] {
+    // Token Saver explicitly off: the row is shown, has no switch to press, and says why. A stored smart_routing true is kept, not shown on.
+    for file in [r#"{"token_saver": false}"#, r#"{"token_saver": false, "smart_routing": true}"#, r#"{"token_saver": false, "smart_routing": true, "zoom": 1.25}"#] {
+        let file = Some(file);
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, SMART_ROUTING_PRESS, 0);
         let tree = &trees[0];
         assert!(tree.contains("Smart routing") && tree.contains("Turn on Token Saver to use this."), "{file:?}: {tree}");
@@ -3346,23 +3449,23 @@ fn settings_token_saver_off_makes_smart_routing_inert_and_keeps_its_stored_value
             Some(r#"{"token_saver": true, "smart_routing": true, "zoom": 1.25}"#),
             vec![saver, saver, routing, saver],
             vec![
+                json!({"token_saver": false, "smart_routing": true, "zoom": 1.25}),
                 json!({"smart_routing": true, "zoom": 1.25}),
-                json!({"token_saver": true, "smart_routing": true, "zoom": 1.25}),
-                json!({"token_saver": true, "zoom": 1.25}),
                 json!({"zoom": 1.25}),
+                json!({"token_saver": false, "zoom": 1.25}),
             ],
             vec![None, Some("st-smart-routing-on"), Some("st-smart-routing-off"), None],
         ),
         (
             None,
-            vec![saver, routing, saver],
-            vec![json!({"token_saver": true}), json!({"token_saver": true, "smart_routing": true}), json!({"smart_routing": true})],
-            vec![Some("st-smart-routing-off"), Some("st-smart-routing-on"), None],
+            vec![routing, saver, saver],
+            vec![json!({"smart_routing": true}), json!({"smart_routing": true, "token_saver": false}), json!({"smart_routing": true})],
+            vec![Some("st-smart-routing-on"), None, Some("st-smart-routing-on")],
         ),
         (
-            Some(r#"{"smart_routing": true}"#),
+            Some(r#"{"token_saver": false, "smart_routing": true}"#),
             vec![saver, routing],
-            vec![json!({"smart_routing": true, "token_saver": true}), json!({"token_saver": true})],
+            vec![json!({"smart_routing": true}), json!({})],
             vec![Some("st-smart-routing-on"), Some("st-smart-routing-off")],
         ),
     ];
@@ -3398,7 +3501,7 @@ fn settings_token_saver_off_makes_smart_routing_inert_and_keeps_its_stored_value
 fn settings_inert_smart_routing_row_has_nothing_to_click(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    for file in [None, Some(r#"{"smart_routing": true}"#)] {
+    for file in [Some(r#"{"token_saver": false}"#), Some(r#"{"token_saver": false, "smart_routing": true}"#)] {
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), file, "", 0);
         let tree = &trees[0];
         // From the row's title to the savings line below it: no id, click or hand cursor.
@@ -3433,48 +3536,48 @@ fn settings_smart_routing_reads_a_crlf_file_and_writes_a_windows_app_home(cx: &m
 }
 
 #[gpui::test]
-fn settings_smart_routing_stays_inert_and_writes_nothing_for_an_unreadable_settings_file(cx: &mut TestAppContext) {
+fn settings_smart_routing_reads_an_unreadable_settings_file_as_the_default_person_and_writes_nothing(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    // An unreadable file reads as the default person: Token Saver off, so the row is inert and there is nothing to press.
+    // An unreadable file reads as the default person: Token Saver on, so the row is enabled and off; nothing is written until a press.
     for bad in ["", "   ", "\r\n", "{not json", "[]", "null"] {
         let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(bad), SMART_ROUTING_PRESS, 0);
-        assert!(trees[0].contains("Turn on Token Saver to use this.") && !trees[0].contains("st-smart-routing"), "{bad:?}: {}", trees[0]);
+        assert!(trees[0].contains("st-smart-routing-off") && !trees[0].contains("Turn on Token Saver"), "{bad:?}: {}", trees[0]);
         assert!(calls.borrow().writes.is_empty(), "{bad:?}: {:?}", calls.borrow().writes);
     }
 }
 
 const ANALYTICS_TITLE: &str = "How HyperOx handles your data (beta)";
 const ANALYTICS_ABOUT: [&str; 3] = [
-    "During the beta, HyperOx sends usage data and failure reports so we can fix problems and improve the app. You are identified by a random install ID, not your name or email. We never send what you type, your prompts, agent replies, terminal contents, file or folder names, or your keys. IP addresses are not stored; your approximate location (country and city) is.",
+    "During the beta, HyperOx sends app and device info, the features and agents you use, model and tool names, token counts and estimated cost, and the prompts you type to agents with secrets removed (long text is cut short). Never agent replies, terminal output or file contents. Failure reports are sent too. You are identified by a random install ID or your account ID, not your name or email.",
     "After the beta we plan to move data collection to zero-knowledge proofs.",
-    "You can turn usage analytics off any time. Failure reports stay on so we can fix crashes and update problems.",
+    "You can turn this off any time with the switch above, or by email (see the Privacy Policy). Failure reports stay on so we can fix crashes and update problems.",
 ];
 
 #[gpui::test]
-fn settings_analytics_about_is_closed_until_asked_and_click_here_opens_only_pavii_tech(cx: &mut TestAppContext) {
+fn settings_analytics_about_is_closed_until_asked_and_privacy_policy_opens_only_the_privacy_page(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     // Closed at first, whatever the switch says.
     for file in [None, Some(r#"{"share_analytics": false}"#)] {
         let (trees, _) = describe_pressing(cx, &staged, "frame/settings", info_values(), file, "", 0);
         assert!(trees[0].contains("st-analytics-info"), "{file:?}: the i button is there: {}", trees[0]);
-        assert!(!trees[0].contains(ANALYTICS_TITLE) && !trees[0].contains("st-analytics-more") && !trees[0].contains("Click here"), "{file:?}: {}", trees[0]);
+        assert!(!trees[0].contains(ANALYTICS_TITLE) && !trees[0].contains("st-analytics-more") && !trees[0].contains("Privacy Policy"), "{file:?}: {}", trees[0]);
         assert!(ANALYTICS_ABOUT.iter().all(|p| !trees[0].contains(p)), "{file:?}: {}", trees[0]);
     }
-    // Open: the title, the three paragraphs word for word, and Click here, which opens pavii.tech.
+    // Open: the title, the three paragraphs word for word, and the Privacy Policy button, which opens the privacy page.
     let setup = "this.analyticsAbout = true; const button = this.button.bind(this); \
         this.button = (t, id, label, onClick) => { if (id === 'st-analytics-more') this.press = onClick; return button(t, id, label, onClick); };";
     let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", info_values(), None, setup, 1);
     for tree in &trees {
-        for text in [ANALYTICS_TITLE, ANALYTICS_ABOUT[0], ANALYTICS_ABOUT[1], ANALYTICS_ABOUT[2], "Click here", "st-analytics-more"] {
+        for text in [ANALYTICS_TITLE, ANALYTICS_ABOUT[0], ANALYTICS_ABOUT[1], ANALYTICS_ABOUT[2], "Privacy Policy", "st-analytics-more"] {
             assert!(tree.contains(text), "the open panel shows {text:?}: {tree}");
         }
     }
     let c = calls.borrow();
     let links: Vec<&Value> = c.effects.iter().filter(|(n, _)| n == "openLink").map(|(_, a)| &a[0]).collect();
-    assert_eq!(links, [&json!("https://pavii.tech")], "{:?}", c.effects);
-    assert!(allowed_link("https://pavii.tech"));
+    assert_eq!(links, [&json!("https://pavii.tech/hyperox/privacy")], "{:?}", c.effects);
+    assert!(allowed_link("https://pavii.tech/hyperox/privacy"));
     assert!(!c.effects.iter().any(|(n, _)| n == "notify"), "no \"Can't open the link\": {:?}", c.effects);
     assert!(c.writes.is_empty() && c.unexpected.is_empty(), "{:?} {:?}", c.writes, c.unexpected);
 }
@@ -12497,7 +12600,7 @@ fn settings_activity_graph_levels_colours_tooltip_and_parsing(cx: &mut TestAppCo
     // A Saturday ends the grid: all 371 days are real and the first is the Sunday 52 weeks before its week.
     assert_eq!((probe["slots"].clone(), probe["real"].clone()), (json!(371), json!(371)));
     assert_eq!(probe["first"], json!("Sun Nov 09 2025"));
-    assert_eq!(probe["parsed"], json!([{}, {}, {}, {"2026-11-03": {"seconds": 5, "sessions": 0, "tokens": 0}}]));
+    assert_eq!(probe["parsed"], json!([{}, {}, {}, {"2026-11-03": {"seconds": 5, "sessions": 0, "tokens": 0, "by_agent": {}, "cost_usd": 0, "saved": 0}}]));
     // A column is runs of days in a row with the same level (days after today are not drawn).
     assert_eq!(probe["runs"], json!([[[2, 0], [3, 2], [1, 0], [1, 3]], [[3, 1]]]));
     // One geometry: 9 px cells and a 2 px gap at the 634 px column; a wider row grows the cells to fill it (700: 53 columns
@@ -12557,5 +12660,380 @@ fn settings_profile_and_info_keep_every_id(cx: &mut TestAppContext) {
     for id in ["st-info-version", "st-info-learn", "st-info-install", "st-info-docs", "st-info-feedback", "st-info-pavii", "st-info-buckleson", "st-analytics", "st-analytics-info"] {
         assert!(info.contains(id), "{id}: {info}");
     }
-    assert!(info.contains("Usage data and failure reports, tied to a random install ID. Never what you type."), "{info}");
+    assert!(info.contains("Usage, agent and prompt data with secrets removed, plus failure reports. Tap i for details."), "{info}");
+}
+
+// The Tokens card under the activity graph. `days` is a JS list of [days ago, day] pairs, dated by the scenario with
+// the local clock (like the app) and read through the same parser as the file; `period` is the card's period.
+fn describe_tokens(cx: &mut TestAppContext, staged: &Staged, days: &str, period: &str) -> String {
+    let scenario = format!(
+        "import {{ ActivityGraph, parseActivity }} from './frame/settings/activity.js';\n\
+         const p = (x) => String(x).padStart(2, '0');\n\
+         const ago = (n) => {{ const d = new Date(); d.setDate(d.getDate() - n); return `${{d.getFullYear()}}-${{p(d.getMonth() + 1)}}-${{p(d.getDate())}}`; }};\n\
+         export default class Scenario extends ActivityGraph {{\n\
+           init(props, cx) {{ super.init({{ shown: true }}, cx); this.tokenPeriod = '{period}'; }}\n\
+           refresh() {{ const days = {{}}; for (const [n, v] of {days}) days[ago(n)] = v; this.activity = {{ days: parseActivity(JSON.stringify({{ version: 1, days }})) }}; }}\n\
+         }}\n"
+    );
+    describe_activity(cx, staged, fixture(true, props(), updates("current", "current")), None, Some(&scenario), None)
+}
+
+const TOKEN_DAYS: &str = r#"[
+  [0, { tokens: 1500, by_agent: { claude: 1000, codex: 500 }, cost_usd: 0.5, saved: 300 }],
+  [3, { tokens: 2000, by_agent: { claude: 2000 }, cost_usd: 1.25, saved: 700 }],
+  [7, { tokens: 50, by_agent: { claude: 50 } }],
+  [10, { tokens: 5000, by_agent: { codex: 4000, zed: 1000 }, cost_usd: 2, saved: 0 }],
+  [29, { tokens: 10, by_agent: { claude: 10 } }],
+  [30, { tokens: 20, by_agent: { codex: 20 } }],
+  [35, { tokens: 100000, by_agent: { claude: 100000 }, cost_usd: 10, saved: 20000 }],
+  [-1, { tokens: 999999, by_agent: { claude: 999999 }, cost_usd: 99, saved: 999 }]
+]"#;
+
+#[gpui::test]
+fn settings_profile_tokens_card_sums_each_period_over_forty_days_and_splits_by_agent(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let cases: [(&str, &[&str], &[&str]); 4] = [
+        ("today", &["1,500 tokens", "Claude Code", "Codex", "$0.50", "300 tokens (~$0.00) \u{b7} 17%"], &["zed", "$1.75"]),
+        ("week", &["3,500 tokens", "$1.75", "1,000 tokens (~$0.00) \u{b7} 22%"], &["zed"]),
+        ("month", &["8,560 tokens", "$3.75", "1,000 tokens (~$0.00) \u{b7} 10%", "st-prof-tokens-agent-zed", "\"3,060\"", "\"4,500\""], &[]),
+        ("all", &["108,580 tokens", "$13.75", "21,000 tokens (~$0.06) \u{b7} 16%", "\"103,060\"", "\"4,520\""], &[]),
+    ];
+    for (period, present, absent) in cases {
+        let tree = describe_tokens(cx, &staged, TOKEN_DAYS, period);
+        for text in ["st-prof-tokens", "Tokens", "Today", "7 days", "30 days", "All time", "API-equivalent est.", "Counted for agents started in HyperOx."] {
+            assert!(tree.contains(text), "{period}: {text:?}: {tree}");
+        }
+        for text in present {
+            assert!(tree.contains(text), "{period}: {text:?}: {tree}");
+        }
+        for text in absent {
+            assert!(!tree.contains(text), "{period}: {text:?} must not be there: {tree}");
+        }
+        // The future day never counts.
+        assert!(!tree.contains("999,999") && !tree.contains("$99"), "{period}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_profile_tokens_card_defaults_to_today_and_shows_dashes_without_a_record(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tree = describe_graph(cx, &staged, Some(&full_record()), "");
+    assert!(tree.contains("st-prof-tokens-used") && tree.contains("18,200 tokens"), "today is the default: {tree}");
+    for record in [None, Some(""), Some("{not json"), Some(r#"{"version":1,"days":{}}"#)] {
+        let tree = describe_graph(cx, &staged, record, "");
+        for id in ["st-prof-tokens", "st-prof-tokens-today", "st-prof-tokens-all"] {
+            assert!(tree.contains(id), "{record:?}: {id}: {tree}");
+        }
+        assert!(tree.matches("\"\u{2014}\"").count() == 3 && !tree.contains(" tokens"), "{record:?}: {tree}");
+        assert!(!tree.contains("st-prof-tokens-agent-") && !tree.contains("NaN"), "{record:?}: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_profile_tokens_card_counts_bad_values_as_zero_and_groups_big_numbers(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let record = r#"{"version":1,"days":{
+        "2026-01-01":{"tokens":-5,"saved":"x","cost_usd":-1,"by_agent":{"claude":-3,"codex":"7"}},
+        "2026-01-02":{"tokens":1234567,"cost_usd":0.004,"by_agent":{"claude":1234567}},
+        "2026-01-03":{"tokens":null,"cost_usd":"1","by_agent":[1,2]}}}"#;
+    let tree = describe_graph(cx, &staged, Some(record), "this.tokenPeriod = 'all';");
+    for text in ["1,234,567 tokens", "\"1,234,567\"", "Claude Code", "<$0.01", "0 tokens (~$0.00) \u{b7} 0%"] {
+        assert!(tree.contains(text), "{text:?}: {tree}");
+    }
+    assert!(!tree.contains("Codex") && !tree.contains("NaN") && !tree.contains("undefined"), "{tree}");
+}
+
+#[gpui::test]
+fn settings_profile_tokens_card_saved_percent_with_zero_used_and_zero_saved(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (days, saved) in [
+        ("[[0, { tokens: 0, saved: 500 }]]", "500 tokens (~$0.00) \u{b7} 100%"),
+        ("[[0, { tokens: 500 }]]", "0 tokens (~$0.00) \u{b7} 0%"),
+        ("[[0, { tokens: 0 }]]", "0 tokens (~$0.00) \u{b7} 0%"),
+        ("[[0, { tokens: 1, saved: 2000000 }]]", "2,000,000 tokens (~$6.00) \u{b7} 99%"),
+    ] {
+        let tree = describe_tokens(cx, &staged, days, "today");
+        assert!(tree.contains(saved) && !tree.contains("NaN"), "{days}: {saved:?}: {tree}");
+    }
+}
+
+// The text line drawn inside the element `id` (the `text "..."` line under it).
+fn text_under<'a>(tree: &'a str, id: &str) -> &'a str {
+    let mut lines = tree.lines().skip_while(|l| !l.contains(&format!(":id[Str({id:?})]")));
+    lines.next().unwrap_or_else(|| panic!("no {id:?}: {tree}"));
+    lines.next().map(str::trim).unwrap_or_default()
+}
+
+// The Tokens card's own lines: its root and everything drawn inside it.
+fn tokens_card_lines(tree: &str) -> Vec<&str> {
+    let lines: Vec<&str> = tree.lines().collect();
+    let at = lines.iter().position(|l| l.contains(r#":id[Str("st-prof-tokens")]"#)).unwrap_or_else(|| panic!("no card: {tree}"));
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let depth = indent(lines[at]);
+    std::iter::once(lines[at]).chain(lines[at + 1..].iter().copied().take_while(|l| indent(l) > depth)).collect()
+}
+
+// Each period button is clicked through its own handler (captured as the card draws it): the card redraws with that
+// period's numbers and marks that button, and clicking Today again goes back.
+#[gpui::test]
+fn settings_profile_tokens_card_period_buttons_redraw_the_card_when_clicked(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let scenario = format!(
+        "import {{ ActivityGraph, parseActivity }} from './frame/settings/activity.js';\n\
+         const p = (x) => String(x).padStart(2, '0');\n\
+         const ago = (n) => {{ const d = new Date(); d.setDate(d.getDate() - n); return `${{d.getFullYear()}}-${{p(d.getMonth() + 1)}}-${{p(d.getDate())}}`; }};\n\
+         export default class Scenario extends ActivityGraph {{\n\
+           init(props, cx) {{\n\
+             super.init({{ shown: true }}, cx);\n\
+             this.clicks = {{}};\n\
+             this.queue = ['week', 'month', 'all', 'today'];\n\
+             cx.timer.every(50, (cx) => {{ const click = this.clicks[this.queue[0]]; if (!click) return; this.queue.shift(); this.clicks = {{}}; click(null, cx); }});\n\
+           }}\n\
+           refresh() {{ const days = {{}}; for (const [n, v] of {TOKEN_DAYS}) days[ago(n)] = v; this.activity = {{ days: parseActivity(JSON.stringify({{ version: 1, days }})) }}; }}\n\
+           render(...args) {{\n\
+             const el = super.render(...args);\n\
+             if (!this.patched) {{\n\
+               this.patched = true;\n\
+               const view = this, proto = Object.getPrototypeOf(el), id = proto.id, onClick = proto.on_click;\n\
+               proto.id = function (name) {{ this.__tokenTab = name; return id.call(this, name); }};\n\
+               proto.on_click = function (handler) {{ const tab = this.__tokenTab; if (typeof tab === 'string' && tab.startsWith('st-prof-tokens-')) view.clicks[tab.slice(15)] = handler; return onClick.call(this, handler); }};\n\
+             }}\n\
+             return el;\n\
+           }}\n\
+         }}\n"
+    );
+    std::fs::write(staged.0.join("main.js"), scenario).unwrap();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    // The chosen button is drawn in the foreground colour, the others muted.
+    values.get_mut("theme").unwrap()["foreground"] = json!("#123456");
+    values.get_mut("theme").unwrap()["muted"] = json!("#654321");
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    let policy = Policy::new()
+        .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+        .with_host_module(module(values, calls.clone()))
+        .unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), staged.0.clone(), policy, window, cx))
+        .unwrap()
+        .unwrap();
+    let mut seen: Vec<(String, String)> = Vec::new();
+    for step in 0..10 {
+        advance(cx, 150);
+        let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+        let chosen: Vec<&str> = ["today", "week", "month", "all"]
+            .into_iter()
+            .filter(|p| tree.lines().any(|l| l.contains(&format!(":id[Str(\"st-prof-tokens-{p}\")]")) && l.contains(".text_color[Str(\"#123456\")]")))
+            .collect();
+        assert_eq!(chosen.len(), 1, "step {step}: one period is chosen: {tree}");
+        assert!(!tree.contains("NaN") && !tree.contains("999,999"), "step {step}: {tree}");
+        let now = (text_under(&tree, "st-prof-tokens-used").to_owned(), chosen[0].to_owned());
+        if seen.last() != Some(&now) {
+            seen.push(now);
+        }
+    }
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
+    let want: Vec<(String, String)> = [("1,500", "today"), ("3,500", "week"), ("8,560", "month"), ("108,580", "all"), ("1,500", "today")]
+        .into_iter()
+        .map(|(used, period)| (format!("text \"{used} tokens\""), period.to_owned()))
+        .collect();
+    assert_eq!(seen, want);
+}
+
+// Periods are local calendar days: one millisecond before and exactly at local midnight, today is the same day, the
+// next day (and 9999) is never counted, 7 and 30 days include today, and 1970 or malformed keys count only where valid.
+#[gpui::test]
+fn settings_profile_tokens_card_periods_at_local_midnight_with_far_and_malformed_dates(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let record = r#"{"version":1,"days":{
+        "1970-01-01":{"tokens":1000000},
+        "2026-02-06":{"tokens":100000},
+        "2026-02-07":{"tokens":10000},
+        "2026-03-01":{"tokens":1000},
+        "2026-03-02":{"tokens":100},
+        "2026-03-08":{"tokens":10},
+        "2026-03-09":{"tokens":20000000},
+        "9999-12-31":{"tokens":300000000},
+        "2026-3-8":{"tokens":5000000},
+        "20260308":{"tokens":5000000},
+        "not-a-date":{"tokens":5000000}}}"#;
+    for clock in ["23, 59, 59, 999", "0, 0, 0, 0"] {
+        for (period, used) in [("today", "10"), ("week", "110"), ("month", "11,110"), ("all", "1,111,110")] {
+            let setup = format!(
+                "const Real = Date; const now = new Real(2026, 2, 8, {clock}).getTime(); \
+                 globalThis.Date = class extends Real {{ constructor(...a) {{ if (a.length) super(...a); else super(now); }} static now() {{ return now; }} }}; \
+                 this.tokenPeriod = '{period}';"
+            );
+            let tree = describe_graph(cx, &staged, Some(record), &setup);
+            assert_eq!(text_under(&tree, "st-prof-tokens-used"), format!("text \"{used} tokens\""), "{clock} {period}: {tree}");
+        }
+    }
+}
+
+// The estimate's boundaries: exactly a cent, half a cent, nothing, a billion dollars, thousands, and a cost that
+// rounds up into the next dollar.
+#[gpui::test]
+fn settings_profile_tokens_card_cost_at_a_cent_half_a_cent_zero_and_huge(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (cost, want) in [("0.01", "$0.01"), ("0.005", "<$0.01"), ("0.0099", "<$0.01"), ("0", "$0.00"), ("1e9", "$1,000,000,000.00"), ("1234.5", "$1,234.50"), ("0.999", "$1.00"), ("1.999", "$2.00")] {
+        let record = format!(r#"{{"version":1,"days":{{"2020-01-01":{{"tokens":1,"cost_usd":{cost}}}}}}}"#);
+        let tree = describe_graph(cx, &staged, Some(&record), "this.tokenPeriod = 'all';");
+        assert_eq!(text_under(&tree, "st-prof-tokens-cost"), format!("text {want:?}"), "{cost}: {tree}");
+    }
+}
+
+// Saved % is saved over saved plus used, rounded: a third, half a percent, 99.95 % and saved above used.
+#[gpui::test]
+fn settings_profile_tokens_card_saved_percent_rounds_and_saved_may_exceed_used(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (days, saved) in [
+        ("[[0, { tokens: 2000, saved: 1000 }]]", "1,000 tokens (~$0.00) \u{b7} 33%"),
+        ("[[0, { tokens: 199000, saved: 1000 }]]", "1,000 tokens (~$0.00) \u{b7} 1%"),
+        ("[[0, { tokens: 1, saved: 1999 }]]", "1,999 tokens (~$0.01) \u{b7} 99%"),
+        ("[[0, { tokens: 1000, saved: 3000 }]]", "3,000 tokens (~$0.01) \u{b7} 75%"),
+    ] {
+        let tree = describe_tokens(cx, &staged, days, "today");
+        assert_eq!(text_under(&tree, "st-prof-tokens-saved"), format!("text {saved:?}"), "{days}: {tree}");
+    }
+}
+
+// Used is the days' own tokens, never the sum of the agent rows; each row is that agent's own count; a day with only
+// tokens saved shows 0 used and no agent rows.
+#[gpui::test]
+fn settings_profile_tokens_card_used_is_the_day_tokens_even_when_agents_add_up_differently(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tree = describe_tokens(cx, &staged, "[[0, { tokens: 100, by_agent: { claude: 70, codex: 500 } }], [1, { saved: 400 }]]", "week");
+    assert_eq!(text_under(&tree, "st-prof-tokens-used"), "text \"100 tokens\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-agent-claude"), "text \"70\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-agent-codex"), "text \"500\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-saved"), "text \"400 tokens (~$0.00) \u{b7} 80%\"", "{tree}");
+    let tree = describe_tokens(cx, &staged, "[[0, { saved: 400 }]]", "today");
+    assert_eq!(text_under(&tree, "st-prof-tokens-used"), "text \"0 tokens\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-cost"), "text \"$0.00\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-saved"), "text \"400 tokens (~$0.00) \u{b7} 100%\"", "{tree}");
+    assert!(!tree.contains("st-prof-tokens-agent-") && !tree.contains("\"\u{2014}\""), "{tree}");
+}
+
+// Agent names come from the file as they are: empty, very long, HTML-like, right-to-left and emoji names are drawn as
+// plain text, in full, sorted by count.
+#[gpui::test]
+fn settings_profile_tokens_card_draws_odd_agent_names_as_plain_text_sorted_by_count(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let long = "x".repeat(300);
+    let days = format!(
+        "[[0, {{ tokens: 100, by_agent: {{ claude: 70, codex: 500, '': 3, '<b>bold</b>': 4, '\u{645}\u{631}\u{62d}\u{628}\u{627}': 5, '\u{1f916} bot': 6, '{long}': 7 }} }}]]"
+    );
+    let tree = describe_tokens(cx, &staged, &days, "today");
+    let rows = [
+        ("codex", "500", "Codex".to_owned()),
+        ("claude", "70", "Claude Code".to_owned()),
+        (long.as_str(), "7", long.clone()),
+        ("\u{1f916} bot", "6", "\u{1f916} bot".to_owned()),
+        ("\u{645}\u{631}\u{62d}\u{628}\u{627}", "5", "\u{645}\u{631}\u{62d}\u{628}\u{627}".to_owned()),
+        ("<b>bold</b>", "4", "<b>bold</b>".to_owned()),
+        ("unknown", "3", "unknown".to_owned()),
+    ];
+    let mut last = 0;
+    for (name, count, label) in rows {
+        let id = format!("st-prof-tokens-agent-{name}");
+        assert_eq!(text_under(&tree, &id), format!("text {count:?}"), "{id:?}: {tree}");
+        let at = tree.find(&format!(":id[Str({id:?})]")).unwrap();
+        assert!(at > last, "{id:?} is sorted by count: {tree}");
+        last = at;
+        assert!(tree.contains(&format!("text {label:?}")), "{label:?}: {tree}");
+    }
+    assert_eq!(text_under(&tree, "st-prof-tokens-used"), "text \"100 tokens\"", "{tree}");
+    assert!(!tree.contains("NaN") && !tree.contains("undefined"), "{tree}");
+}
+
+// An agent named like an Object method is counted like any other name, not added to the inherited function.
+#[gpui::test]
+fn settings_profile_tokens_card_counts_agents_named_like_object_methods(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tree = describe_tokens(cx, &staged, "[[0, { tokens: 20, by_agent: { constructor: 8, toString: 9, claude: 3 } }]]", "today");
+    assert_eq!(text_under(&tree, "st-prof-tokens-agent-toString"), "text \"9\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-agent-constructor"), "text \"8\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-agent-claude"), "text \"3\"", "{tree}");
+    assert!(!tree.contains("native code") && !tree.contains("NaN"), "{tree}");
+}
+
+// Token counts at and above Number.MAX_SAFE_INTEGER are written out with separators, never in e+ notation; an
+// overflowing number in the file (1e400) counts as 0.
+#[gpui::test]
+fn settings_profile_tokens_card_writes_huge_counts_in_full_without_exponents(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let record = r#"{"version":1,"days":{
+        "2020-01-01":{"tokens":9007199254740991,"by_agent":{"claude":9007199254740991}},
+        "2020-01-02":{"tokens":9007199254740991},
+        "2020-01-03":{"tokens":1e400,"saved":1e400,"cost_usd":1e400,"by_agent":{"codex":1e400}}}}"#;
+    let tree = describe_graph(cx, &staged, Some(record), "this.tokenPeriod = 'all';");
+    assert_eq!(text_under(&tree, "st-prof-tokens-used"), "text \"18,014,398,509,481,982 tokens\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-agent-claude"), "text \"9,007,199,254,740,991\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-cost"), "text \"$0.00\"", "{tree}");
+    assert!(!tree.contains("st-prof-tokens-agent-codex") && !tree.contains("Infinity") && !tree.contains("NaN"), "{tree}");
+    let record = r#"{"version":1,"days":{"2020-01-01":{"tokens":1e22,"saved":1e22,"by_agent":{"claude":1e22}}}}"#;
+    let tree = describe_graph(cx, &staged, Some(record), "this.tokenPeriod = 'all';");
+    let card = tokens_card_lines(&tree).join("\n");
+    assert!(!card.contains("e+") && !card.contains("NaN"), "{card}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-used"), "text \"10,000,000,000,000,000,000,000 tokens\"", "{tree}");
+}
+
+// More than two years of days: every period still sums right and the card stays a couple of dozen elements.
+#[gpui::test]
+fn settings_profile_tokens_card_sums_eight_hundred_days_and_stays_small(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let days = "Array.from({ length: 800 }, (_, n) => [n, { tokens: 1000, by_agent: { claude: 1000 }, cost_usd: 0.25, saved: 10 }])";
+    for (period, used, cost) in [("today", "1,000", "$0.25"), ("week", "7,000", "$1.75"), ("month", "30,000", "$7.50"), ("all", "800,000", "$200.00")] {
+        let tree = describe_tokens(cx, &staged, days, period);
+        assert_eq!(text_under(&tree, "st-prof-tokens-used"), format!("text \"{used} tokens\""), "{period}: {tree}");
+        assert_eq!(text_under(&tree, "st-prof-tokens-cost"), format!("text {cost:?}"), "{period}: {tree}");
+        assert_eq!(tree.matches("st-prof-tokens-agent-").count(), 1, "{period}: {tree}");
+        let elements = tokens_card_lines(&tree).iter().filter(|l| !l.trim_start().starts_with("text ")).count();
+        assert!(elements <= 30, "{period}: the card is {elements} elements: {tree}");
+    }
+}
+
+// The card takes every colour from the theme, in a dark and a light one: the chosen period on the raised colour in the
+// foreground colour, the others muted, labels dim.
+#[gpui::test]
+fn settings_profile_tokens_card_uses_only_theme_colours_in_dark_and_light(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let scenario = "import { ActivityGraph } from './frame/settings/activity.js';\nexport default class Scenario extends ActivityGraph { init(props, cx) { super.init({ shown: true }, cx); } }\n";
+    let record = full_record();
+    for (label, foreground, dim, muted, raised, hover) in
+        [("dark", "#ededed", "#8a8a8a", "#9b9b9b", "#222222", "#2a2a2a"), ("light", "#1c1c1c", "#6b6b6b", "#5a5a5a", "#eeeeee", "#e5e5e5")]
+    {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        for (key, colour) in [("foreground", foreground), ("dim", dim), ("muted", muted), ("raised", raised), ("hover", hover)] {
+            values.get_mut("theme").unwrap()[key] = json!(colour);
+        }
+        let tree = describe_activity(cx, &staged, values, Some(&record), Some(scenario), None);
+        let card = tokens_card_lines(&tree);
+        let theme = [foreground, dim, muted, raised, hover];
+        for line in &card {
+            for part in line.split("Str(\"#").skip(1) {
+                let colour = format!("#{}", part.split('"').next().unwrap());
+                assert!(theme.contains(&colour.as_str()), "{label}: {colour} is not a theme colour: {line}");
+            }
+        }
+        let has = |id: &str, style: &str| card.iter().any(|l| l.contains(&format!(":id[Str(\"{id}\")]")) && l.contains(style));
+        assert!(has("st-prof-tokens-today", &format!(".text_color[Str(\"{foreground}\")]")) && has("st-prof-tokens-today", &format!(".bg[Str(\"{raised}\")]")), "{label}: {tree}");
+        assert!(has("st-prof-tokens-week", &format!(".text_color[Str(\"{muted}\")]")) && has("st-prof-tokens-used", &format!(".text_color[Str(\"{foreground}\")]")), "{label}: {tree}");
+        assert!(card.iter().any(|l| l.contains(&format!(".text_color[Str(\"{dim}\")]"))), "{label}: labels are dim: {tree}");
+    }
 }

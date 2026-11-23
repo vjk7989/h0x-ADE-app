@@ -409,8 +409,8 @@ pub struct Person {
     /// Send usage analytics (Settings > Info). Failure reports are not governed by this.
     #[serde(skip_serializing_if = "is_true", deserialize_with = "bool_or_true")]
     pub share_analytics: bool,
-    /// 0x Modes > Token Saver: shrink big tool outputs before an agent reads them. Off unless set.
-    #[serde(skip_serializing_if = "is_false", deserialize_with = "bool_or_false")]
+    /// 0x Modes > Token Saver: shrink big tool outputs before an agent reads them. On unless turned off.
+    #[serde(skip_serializing_if = "is_true", deserialize_with = "bool_or_true")]
     pub token_saver: bool,
     /// 0x Modes > Smart routing (needs Token Saver): pick the tools and model for a task started with a prompt. Off unless set.
     #[serde(skip_serializing_if = "is_false", deserialize_with = "bool_or_false")]
@@ -418,6 +418,9 @@ pub struct Person {
     /// The welcome's one-time "How did you find HyperOx?": the choice, or "skip". Set means asked.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "string_or_none")]
     pub found_via: Option<String>,
+    /// The terms the person agreed to on the sign-in screen: the version and when (unix seconds). Absent means never.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "consent_or_none")]
+    pub consent: Option<Consent>,
     /// A draggable scroll position thumb at a terminal pane's right edge.
     #[serde(skip_serializing_if = "is_true")]
     pub pane_scrollbars: bool,
@@ -545,6 +548,37 @@ fn string_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Strin
     })
 }
 
+/// The version of the Terms and Privacy Policy shown on the sign-in screen; raising it asks everyone again.
+pub const TERMS_VERSION: &str = "beta-1";
+
+/// An agreement to the terms: which version, and when (unix seconds).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Consent {
+    pub version: String,
+    pub at: u64,
+}
+
+/// A well-formed consent; anything else is None (asked again).
+fn consent_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Consent>, D::Error> {
+    Ok(Consent::deserialize(serde_json::Value::deserialize(d)?).ok())
+}
+
+impl Person {
+    /// Whether the stored agreement is to the current terms.
+    pub fn consent_current(&self) -> bool {
+        self.consent.as_ref().is_some_and(|c| c.version == TERMS_VERSION)
+    }
+
+    /// Records the agreement to the current terms at `now`; false (nothing changed) when it was already given.
+    pub fn accept_terms(&mut self, now: u64) -> bool {
+        if self.consent_current() {
+            return false;
+        }
+        self.consent = Some(Consent { version: TERMS_VERSION.into(), at: now });
+        true
+    }
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -566,9 +600,10 @@ impl Default for Person {
             clipboard_write: false,
             check_updates: true,
             share_analytics: true,
-            token_saver: false,
+            token_saver: true,
             smart_routing: false,
             found_via: None,
+            consent: None,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
             scrollback_lines: SCROLLBACK_DEFAULT,
@@ -659,7 +694,7 @@ impl Default for Settings {
             clipboard_write: false,
             check_updates: true,
             share_analytics: true,
-            token_saver: false,
+            token_saver: true,
             smart_routing: false,
             minimum_contrast: 1.0,
             scrollback_lines: SCROLLBACK_DEFAULT,
@@ -1364,7 +1399,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), clipboard_write: false, token_saver: true, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), mods: [("m".into(), ModChoice::default())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), clipboard_write: false, token_saver: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), mods: [("m".into(), ModChoice::default())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
@@ -1373,30 +1408,30 @@ mod tests {
     }
 
     #[test]
-    fn token_saver_defaults_off_and_round_trips() {
+    fn token_saver_defaults_on_and_round_trips() {
         let absent: Person = serde_json::from_str(r#"{"zoom":1.5}"#).unwrap();
-        assert!(!absent.token_saver && !Person::default().token_saver && !Settings::default().token_saver);
+        assert!(absent.token_saver && Person::default().token_saver && Settings::default().token_saver);
         assert!(serde_json::to_value(&absent).unwrap().get("token_saver").is_none());
-        let on: Person = serde_json::from_str(r#"{"token_saver":true}"#).unwrap();
-        assert!(on.token_saver && Settings::compose(&on, &crate::layout::Look::default(), true).token_saver);
-        assert_eq!(serde_json::to_value(&on).unwrap()["token_saver"], serde_json::json!(true));
-        let back: Person = serde_json::from_value(serde_json::to_value(&on).unwrap()).unwrap();
-        assert!(back.token_saver);
+        let off: Person = serde_json::from_str(r#"{"token_saver":false}"#).unwrap();
+        assert!(!off.token_saver && !Settings::compose(&off, &crate::layout::Look::default(), true).token_saver);
+        assert_eq!(serde_json::to_value(&off).unwrap()["token_saver"], serde_json::json!(false));
+        let back: Person = serde_json::from_value(serde_json::to_value(&off).unwrap()).unwrap();
+        assert!(!back.token_saver);
     }
 
     #[test]
-    fn a_token_saver_that_is_not_a_bool_reads_as_off_and_keeps_the_file() {
-        // A wrong type is off, never a panic or a silent on, and the rest of the file is kept.
-        for bad in [r#"{"token_saver":"yes"}"#, r#"{"token_saver":1}"#, r#"{"token_saver":null}"#, r#"{"token_saver":"true"}"#, r#"{"token_saver":[]}"#, "\u{feff}{\"token_saver\":0,\"zoom\":1.5}"] {
+    fn a_token_saver_that_is_not_a_bool_reads_as_on_and_keeps_the_file() {
+        // A wrong type is the default (on), never a panic, and the rest of the file is kept.
+        for bad in [r#"{"token_saver":"no"}"#, r#"{"token_saver":0}"#, r#"{"token_saver":null}"#, r#"{"token_saver":"false"}"#, r#"{"token_saver":[]}"#, "\u{feff}{\"token_saver\":0,\"zoom\":1.5}"] {
             let person = parse_person(bad).unwrap_or_else(|e| panic!("{bad:?}: {e}"));
-            assert!(!person.token_saver, "{bad:?}");
+            assert!(person.token_saver, "{bad:?}");
             assert!(person.zoom == if bad.contains("zoom") { 1.5 } else { Person::default().zoom }, "{bad:?}");
         }
-        // Only a real bool is read; false is the default and is not written back, true survives a BOM.
-        let off = parse_person(r#"{"token_saver":false,"zoom":1.5}"#).unwrap();
-        assert!(!off.token_saver && serde_json::to_value(&off).unwrap().get("token_saver").is_none());
-        assert!(parse_person("\u{feff}{\"token_saver\":true}").unwrap().token_saver);
-        assert!(!parse_person("{}").unwrap().token_saver);
+        // Only a real false turns it off (also behind a BOM); true is the default and is not written back.
+        let on = parse_person(r#"{"token_saver":true,"zoom":1.5}"#).unwrap();
+        assert!(on.token_saver && serde_json::to_value(&on).unwrap().get("token_saver").is_none());
+        assert!(!parse_person("\u{feff}{\"token_saver\":false}").unwrap().token_saver);
+        assert!(parse_person("{}").unwrap().token_saver);
     }
 
     #[test]
@@ -1416,11 +1451,12 @@ mod tests {
 
     #[test]
     fn smart_routing_is_kept_apart_from_token_saver_and_reads_from_crlf_files() {
-        // Stored without Token Saver: it is read and written back as is, so turning Token Saver on again finds it.
-        let alone = parse_person(r#"{"smart_routing":true}"#).unwrap();
+        // Stored with Token Saver off: it is read and written back as is, so turning Token Saver on again finds it.
+        let alone = parse_person(r#"{"token_saver":false,"smart_routing":true}"#).unwrap();
         assert!(alone.smart_routing && !alone.token_saver);
         let back = serde_json::to_value(&alone).unwrap();
-        assert!(back["smart_routing"] == serde_json::json!(true) && back.get("token_saver").is_none(), "{back}");
+        assert!(back["smart_routing"] == serde_json::json!(true) && back["token_saver"] == serde_json::json!(false), "{back}");
+        assert!(parse_person(r#"{"smart_routing":true}"#).unwrap().token_saver);
         // CRLF line ends, with and without a BOM, read like LF.
         for text in ["{\r\n  \"token_saver\": true,\r\n  \"smart_routing\": true\r\n}\r\n", "\u{feff}{\r\n\"smart_routing\":true,\r\n\"token_saver\":true}\r\n"] {
             let person = parse_person(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
@@ -1429,6 +1465,117 @@ mod tests {
         // An empty or blank file is not a person at all, so it is refused rather than read as off.
         for empty in ["", "   ", "\r\n", "\u{feff}"] {
             assert!(parse_person(empty).is_err(), "{empty:?}");
+        }
+    }
+
+    #[test]
+    fn token_saver_reads_on_for_every_odd_value_and_only_a_real_false_survives_load_and_save() {
+        // Numbers, a nested object, a nested false and keys in another case are not a real false: on, and not written back.
+        for text in [r#"{"token_saver":1}"#, r#"{"token_saver":-0.0}"#, r#"{"token_saver":{"token_saver":false}}"#, r#"{"token_saver":[false]}"#, r#"{"Token_Saver":false}"#, r#"{"TOKEN_SAVER":false,"zoom":1.5}"#, r#"{"token_saver ":false}"#] {
+            let person = parse_person(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
+            assert!(person.token_saver, "{text:?}");
+            let back = serde_json::to_value(&person).unwrap();
+            assert!(back.get("token_saver").is_none(), "{text:?}: {back}");
+        }
+        // A duplicate key is refused as a whole (serde), never read as one of the two values.
+        for dup in [r#"{"token_saver":false,"token_saver":true}"#, r#"{"token_saver":true,"token_saver":false}"#] {
+            assert!(parse_person(dup).is_err(), "{dup:?}");
+        }
+        // A very large file (a 1 MB value under a key the app does not know) still reads the false.
+        let big = format!(r#"{{"notes":"{}","token_saver":false,"zoom":1.5}}"#, "x".repeat(1 << 20));
+        let person = parse_person(&big).unwrap();
+        assert!(!person.token_saver && person.zoom == 1.5);
+        // The file load_person writes when there is none has no token_saver key and reads back on; loading a file without the key adds none.
+        let fresh = serde_json::to_string_pretty(&Person::default()).unwrap() + "\n";
+        assert!(!fresh.contains("token_saver"), "{fresh}");
+        assert!(parse_person(&fresh).unwrap().token_saver);
+        for text in ["{}", "\u{feff}{}", r#"{"zoom":1.5}"#, "{\r\n}\r\n"] {
+            let loaded = parse_person(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
+            assert!(loaded.token_saver && serde_json::to_value(&loaded).unwrap().get("token_saver").is_none(), "{text:?}");
+        }
+        // Off then on, again and again: off is exactly false, on leaves no key, and each state survives a save and a load.
+        let mut person = Person::default();
+        for round in 0..5 {
+            person.token_saver = false;
+            let saved = serde_json::to_string_pretty(&person).unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&saved).unwrap()["token_saver"], serde_json::json!(false), "{round}");
+            person = parse_person(&saved).unwrap();
+            assert!(!person.token_saver, "{round}");
+            person.token_saver = true;
+            let saved = serde_json::to_string_pretty(&person).unwrap();
+            assert!(!saved.contains("token_saver"), "{round}: {saved}");
+            person = parse_person(&saved).unwrap();
+            assert!(person.token_saver, "{round}");
+        }
+        assert_eq!(serde_json::to_value(&person).unwrap(), serde_json::to_value(Person::default()).unwrap());
+        // Settings follow the person: on by default with Smart routing off; an explicit false is off however Smart routing is set.
+        let look = crate::layout::Look::default();
+        let default = Settings::compose(&Person::default(), &look, false);
+        assert!(default.token_saver && !default.smart_routing);
+        let inert = Settings::compose(&parse_person(r#"{"token_saver":false,"smart_routing":true}"#).unwrap(), &look, true);
+        assert!(!inert.token_saver && inert.smart_routing);
+    }
+
+    #[test]
+    fn consent_round_trips_and_only_the_current_version_counts() {
+        let none: Person = serde_json::from_str("{}").unwrap();
+        assert!(none.consent.is_none() && !none.consent_current());
+        assert!(serde_json::to_value(&none).unwrap().get("consent").is_none());
+        let mut person = Person::default();
+        assert!(person.accept_terms(1_700_000_000), "the first agreement is news");
+        assert!(!person.accept_terms(1_800_000_000), "a second one is not");
+        assert_eq!(person.consent, Some(Consent { version: TERMS_VERSION.into(), at: 1_700_000_000 }), "the first time stays");
+        let v = serde_json::to_value(&person).unwrap();
+        assert_eq!(v["consent"], serde_json::json!({"version": TERMS_VERSION, "at": 1_700_000_000u64}));
+        let back: Person = serde_json::from_value(v).unwrap();
+        assert!(back.consent_current() && back == person);
+    }
+
+    #[test]
+    fn an_older_or_broken_consent_asks_again_and_a_new_agreement_replaces_it() {
+        let old: Person = serde_json::from_str(r#"{"consent":{"version":"alpha-0","at":5},"zoom":1.5}"#).unwrap();
+        assert!(!old.consent_current() && old.zoom == 1.5);
+        let mut renewed = old.clone();
+        assert!(renewed.accept_terms(9));
+        assert_eq!(renewed.consent, Some(Consent { version: TERMS_VERSION.into(), at: 9 }));
+        for bad in [r#"{"consent":null}"#, r#"{"consent":"beta-1"}"#, r#"{"consent":{}}"#, r#"{"consent":{"version":"beta-1"}}"#, r#"{"consent":{"version":1,"at":2}}"#, r#"{"consent":{"version":"beta-1","at":-1}}"#, r#"{"consent":[]}"#] {
+            let p: Person = serde_json::from_str(&format!(r#"{{"zoom":1.25,{}"#, &bad[1..])).unwrap_or_else(|e| panic!("{bad}: {e}"));
+            assert!(p.consent.is_none() && !p.consent_current() && p.zoom == 1.25, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_consent_time_at_either_end_of_the_range_round_trips_and_one_past_it_asks_again() {
+        // A clock far in the future, the epoch itself, and the largest time there is: all kept as given.
+        for at in [0, 1, 4_102_444_800, u64::MAX] {
+            let mut person = Person::default();
+            assert!(person.accept_terms(at), "{at}");
+            let back = parse_person(&serde_json::to_string(&person).unwrap()).unwrap();
+            assert_eq!(back.consent, Some(Consent { version: TERMS_VERSION.into(), at }), "{at}");
+            assert!(back.consent_current(), "{at}");
+        }
+        // Not a whole unix second (beyond u64, a fraction, an exponent, a negative) is broken: asked again, rest kept.
+        for at in ["18446744073709551616", "1.5", "1e10", "-9223372036854775808", "\"1700000000\"", "true"] {
+            let text = format!(r#"{{"zoom":1.25,"consent":{{"version":"{TERMS_VERSION}","at":{at}}}}}"#);
+            let p = parse_person(&text).unwrap_or_else(|e| panic!("{at}: {e}"));
+            assert!(p.consent.is_none() && !p.consent_current() && p.zoom == 1.25, "{at}");
+        }
+        // A key a later version adds to the consent is not damage.
+        let later = parse_person(r#"{"consent":{"version":"beta-1","at":7,"via":"mobile"}}"#).unwrap();
+        assert_eq!(later.consent, Some(Consent { version: TERMS_VERSION.into(), at: 7 }));
+        assert!(later.consent_current());
+    }
+
+    #[test]
+    fn only_the_exact_terms_version_counts_and_accepting_twice_keeps_the_first_time() {
+        assert_eq!(TERMS_VERSION, "beta-1");
+        for near in ["beta-1 ", " beta-1", "beta-1\n", "BETA-1", "Beta-1", "beta-2", "beta-", "beta_1", "", "beta-1\u{0}"] {
+            let mut p: Person = serde_json::from_value(serde_json::json!({ "consent": { "version": near, "at": 3 } })).unwrap();
+            assert_eq!(p.consent.as_ref().map(|c| c.version.as_str()), Some(near), "{near:?} is stored as it was written");
+            assert!(!p.consent_current(), "{near:?} is not the current terms");
+            assert!(p.accept_terms(10), "{near:?}: agreeing now is news");
+            assert!(!p.accept_terms(11) && !p.accept_terms(0), "{near:?}: later agreements are not");
+            assert_eq!(p.consent, Some(Consent { version: TERMS_VERSION.into(), at: 10 }), "{near:?}");
         }
     }
 

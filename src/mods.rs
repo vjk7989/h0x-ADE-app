@@ -990,7 +990,7 @@ const ANDROID_APK_URL: &str = "https://github.com/buckleson/h0x-ADE-Releases/rel
 
 /// The only web pages a mod may open: the ones the Info page links to, and the Android app.
 fn allowed_link(url: &str) -> bool {
-    matches!(url, "https://pavii.tech" | "https://www.pavii.tech/products/dev-tools/docs/" | "https://buckleson.com" | ANDROID_APK_URL)
+    matches!(url, "https://pavii.tech" | "https://www.pavii.tech/products/dev-tools/docs/" | "https://buckleson.com" | "https://pavii.tech/hyperox/privacy" | ANDROID_APK_URL)
 }
 
 fn opt_str(v: Option<&HostValue>, key: &str) -> Option<String> {
@@ -1992,7 +1992,7 @@ mod tests {
 
     #[test]
     fn allowed_link_accepts_only_the_info_page_and_android_app_addresses() {
-        for url in ["https://pavii.tech", "https://www.pavii.tech/products/dev-tools/docs/", "https://buckleson.com", ANDROID_APK_URL] {
+        for url in ["https://pavii.tech", "https://www.pavii.tech/products/dev-tools/docs/", "https://buckleson.com", "https://pavii.tech/hyperox/privacy", ANDROID_APK_URL] {
             assert!(allowed_link(url), "{url}");
         }
         for url in [

@@ -12,11 +12,19 @@
 //! `H0X_E2E=1 H0X_E2E_CORE_ARCHIVE=... cargo test --test launch_folder -- --ignored --nocapture`.
 
 use serde_json::Value;
+
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// The terms version the app asks for (`TERMS_VERSION` in src/settings.rs): this binary-only crate cannot be imported here.
+fn terms_version() -> String {
+    let source = include_str!("../src/settings.rs");
+    let after = source.split("pub const TERMS_VERSION: &str = \"").nth(1).expect("TERMS_VERSION in src/settings.rs");
+    after.split('"').next().unwrap().to_string()
+}
 
 const EXE: &str = env!("CARGO_BIN_EXE_h0x-ade");
 /// The release key every app and core release file is signed with (src/update.rs).
@@ -348,6 +356,8 @@ fn a_shell_launch_opens_hyperox_in_its_folder() {
     }
     // This computer has already signed in or skipped: the marker lets the launch past the sign-in screen.
     std::fs::write(env.home.join("signin-done"), "1").unwrap();
+    // ...and has agreed to the current terms (otherwise the screen comes back in its consent-only form).
+    std::fs::write(env.home.join("settings.json"), serde_json::json!({"consent": {"version": terms_version(), "at": 1}}).to_string()).unwrap();
     // Open and done tasks and steps for the To-do panel screenshot below (the app home's todo/
     // folder): the progress bar, step counts and the Completed count all have something to show.
     std::fs::create_dir_all(env.home.join("todo")).unwrap();

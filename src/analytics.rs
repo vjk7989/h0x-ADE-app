@@ -25,6 +25,8 @@ const QUEUE_MAX: u64 = 1_000_000;
 /// Events per request.
 const BATCH: usize = 100;
 const STRING_MAX: usize = 500;
+/// Only `$ai_input` (a redacted prompt) may be longer than `STRING_MAX`.
+const AI_INPUT_MAX: usize = 2000;
 const TICK: Duration = Duration::from_secs(60);
 
 struct Analytics {
@@ -97,12 +99,26 @@ pub fn session_seconds() -> u64 {
     STARTED.get().map_or(0, |t| t.elapsed().as_secs())
 }
 
-/// A usage event, dropped when sharing is off. `props` must hold no free text from a terminal.
+/// Whether usage events are being kept (the Settings switch).
+pub fn sharing() -> bool {
+    SHARING.load(Ordering::Relaxed)
+}
+
+/// A usage event, dropped when sharing is off. `props` must hold no free text from a terminal (the redacted typed prompt in `$ai_input` apart).
 pub fn event(name: &str, props: Value) {
     if SHARING.load(Ordering::Relaxed)
         && let Some(a) = GLOBAL.get()
     {
         a.record(false, name, props);
+    }
+}
+
+/// `event` for something that happened at `at` (Unix milliseconds), such as a turn read late.
+pub fn event_at(name: &str, props: Value, at: u64) {
+    if SHARING.load(Ordering::Relaxed)
+        && let Some(a) = GLOBAL.get()
+    {
+        a.record_at(false, name, props, Some(at));
     }
 }
 
@@ -193,8 +209,8 @@ fn replace_home(s: &str, pat: &str) -> String {
 }
 
 /// One line of `s` with the traces of this machine removed: the home folder (either separator
-/// form) becomes `~`, every path-like word becomes `[path]`, and the result is cut to 500 characters.
-fn scrub_text(s: &str, home: &str) -> String {
+/// form) becomes `~`, every path-like word becomes `[path]`, and the result is cut to `max` characters.
+fn scrub_text_max(s: &str, home: &str, max: usize) -> String {
     let mut text = s.to_string();
     if !home.is_empty() && home != "/" {
         let backslashed = home.replace('/', "\\");
@@ -209,17 +225,29 @@ fn scrub_text(s: &str, home: &str) -> String {
         .map(|w| if path_like(w) { "[path]" } else { w })
         .collect::<Vec<_>>()
         .join(" ");
-    line.chars().take(STRING_MAX).collect()
+    line.chars().take(max).collect()
 }
 
-/// `v` with every string (and object key) passed through `scrub_text`.
+fn scrub_text(s: &str, home: &str) -> String {
+    scrub_text_max(s, home, STRING_MAX)
+}
+
+/// `v` with every string (and object key) passed through `scrub_text`. The value of `$ai_input`
+/// (the redacted prompt) may be 2,000 characters; every other string stops at 500.
 fn scrub(v: Value, home: &str) -> Value {
+    scrub_max(v, home, STRING_MAX)
+}
+
+fn scrub_max(v: Value, home: &str, max: usize) -> Value {
     match v {
-        Value::String(s) => Value::String(scrub_text(&s, home)),
-        Value::Array(a) => Value::Array(a.into_iter().map(|x| scrub(x, home)).collect()),
+        Value::String(s) => Value::String(scrub_text_max(&s, home, max)),
+        Value::Array(a) => Value::Array(a.into_iter().map(|x| scrub_max(x, home, max)).collect()),
         Value::Object(o) => Value::Object(
             o.into_iter()
-                .map(|(k, x)| (scrub_text(&k, home), scrub(x, home)))
+                .map(|(k, x)| {
+                    let max = if k == "$ai_input" { AI_INPUT_MAX } else { max };
+                    (scrub_text(&k, home), scrub_max(x, home, max))
+                })
                 .collect(),
         ),
         other => other,
@@ -252,6 +280,11 @@ impl Analytics {
 
     /// Queues one scrubbed event. Nothing is written without a token.
     fn record(&self, failure: bool, name: &str, props: Value) {
+        self.record_at(failure, name, props, None);
+    }
+
+    /// `record` for something that happened at `at` (Unix ms) rather than now.
+    fn record_at(&self, failure: bool, name: &str, props: Value, at: Option<u64>) {
         if self.token.is_none() {
             return;
         }
@@ -269,7 +302,7 @@ impl Analytics {
         } else {
             name.to_string()
         };
-        let event = json!({ "event": name, "distinct_id": self.distinct_id(), "timestamp": iso8601(ms), "properties": props });
+        let event = json!({ "event": name, "distinct_id": self.distinct_id(), "timestamp": iso8601(at.unwrap_or(ms)), "properties": props });
         let _guard = FILES.lock().unwrap_or_else(|e| e.into_inner());
         let wrote = if failure {
             let file = self.reports().join(format!(
@@ -714,6 +747,15 @@ mod tests {
     }
 
     #[test]
+    fn an_event_keeps_the_time_it_happened_through_the_queue_and_the_batch() {
+        let dir = home_dir("event-at");
+        let a = make(&dir, Some("phc_test"));
+        a.record_at(false, "late", json!({}), Some(1_709_164_800_123));
+        let sent = sent_batches(&a, true);
+        assert_eq!(sent[0]["body"]["batch"][0]["timestamp"], "2024-02-29T00:00:00.123Z");
+    }
+
+    #[test]
     fn post_refuses_plain_http() {
         assert!(post("http://example.test/batch/", "{}").is_err());
     }
@@ -921,6 +963,69 @@ mod tests {
                 post(url, "{}").unwrap_err().starts_with("not https"),
                 "{url}"
             );
+        }
+    }
+
+    #[test]
+    fn only_the_ai_input_may_pass_500_characters_and_it_is_cut_on_a_character_boundary() {
+        // Two-byte characters: a byte cut at 2,000 would split one.
+        let long = "é".repeat(2500);
+        let v = scrub(
+            json!({
+                "$ai_input": [{ "role": "user", "content": long }],
+                "other": "y".repeat(900),
+                "nested": { "$ai_input_note": "z".repeat(900) },
+            }),
+            "",
+        );
+        assert_eq!(v["$ai_input"][0]["content"].as_str().unwrap().chars().count(), 2000);
+        assert_eq!(v["other"].as_str().unwrap().chars().count(), 500);
+        assert_eq!(v["nested"]["$ai_input_note"].as_str().unwrap().chars().count(), 500);
+        // The path scrub still applies inside the prompt.
+        let v = scrub(json!({ "$ai_input": [{ "content": "open C:\\Users\\me\\a.txt and /home/me/x/y" }] }), "");
+        assert_eq!(v["$ai_input"][0]["content"], "open [path] and [path]");
+    }
+
+    #[test]
+    fn a_prompt_loses_the_user_name_unc_paths_and_its_line_breaks() {
+        let home = "C:\\Users\\vijay";
+        let prompt = "fix C:\\Users\\vijay\\secret-proj\\a.rs\nand C:/Users/vijay/b.rs\r\n\tsee \\\\server\\share\\x.rs or ~/proj/c.rs\n\n";
+        let v = scrub(json!({ "$ai_input": [{ "role": "user", "content": prompt }] }), home);
+        let text = v["$ai_input"][0]["content"].as_str().unwrap();
+        assert!(!text.contains("vijay") && !text.contains("C:"), "{text}");
+        assert!(!text.contains("server") && text.contains("[path]"), "{text}");
+        assert!(!text.contains(['\n', '\r', '\t']) && !text.contains("  "), "{text:?}");
+        assert!(text.starts_with("fix ~\\") && text.ends_with("~/proj/c.rs"), "{text}");
+        assert_eq!(v["$ai_input"][0]["role"], "user");
+        // An empty or blank prompt stays empty, never a panic.
+        for blank in ["", " \n\t "] {
+            assert_eq!(scrub(json!({ "$ai_input": [{ "content": blank }] }), home)["$ai_input"][0]["content"], "");
+        }
+    }
+
+    #[test]
+    fn a_prompt_cut_at_2000_characters_inside_an_emoji_sequence_stays_valid_text() {
+        // A family emoji is five characters (three emoji joined by two zero-width joiners); the
+        // cut lands after its first joiner. A character cut never splits a surrogate pair.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let prompt = format!("{}{family}{}", "a".repeat(1998), "b".repeat(100_000));
+        let v = scrub(json!({ "$ai_input": [{ "content": prompt }] }), "");
+        let text = v["$ai_input"][0]["content"].as_str().unwrap();
+        assert_eq!(text.chars().count(), 2000);
+        assert!(prompt.starts_with(text));
+        assert!(text.ends_with("\u{1F468}\u{200D}"));
+        // 2,000 four-byte characters pass whole.
+        let wide = "\u{1F600}".repeat(2001);
+        let v = scrub(json!({ "$ai_input": [{ "content": wide }] }), "");
+        assert_eq!(v["$ai_input"][0]["content"], "\u{1F600}".repeat(2000));
+    }
+
+    #[test]
+    fn far_future_and_zero_turn_times_format_without_a_panic() {
+        assert_eq!(iso8601(0), "1970-01-01T00:00:00.000Z");
+        for ms in [i64::MAX as u64, u64::MAX] {
+            let s = iso8601(ms);
+            assert!(s.ends_with('Z') && s.contains('T'), "{s}");
         }
     }
 }
