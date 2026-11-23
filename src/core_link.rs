@@ -77,6 +77,34 @@ impl EventLines {
         json!({ "terminals": live })
     }
 
+    /// Parent references from cores may still use host names. All app
+    /// consumers need the same addresses as the terminal records themselves.
+    pub fn live_for(&self, hello: &Value, machines: &Value) -> Value {
+        let mut live = self.live();
+        for terminal in live["terminals"].as_array_mut().into_iter().flatten() {
+            let Some(parent) = terminal["parent"].as_str() else { continue };
+            let Some((prefix, id)) = parent.split_once('/') else { continue };
+            let local = [hello["core"]["id"].as_str(), hello["core"]["name"].as_str()].contains(&Some(prefix));
+            if local {
+                terminal["parent"] = id.into();
+                continue;
+            }
+            let known = machines["machines"].as_array().into_iter().flatten();
+            // Preserve normalized names before considering a core's host name.
+            let machine = known.clone().find(|m| m["name"] == prefix || m["id"] == prefix)
+                .or_else(|| {
+                    let mut hosts = known.filter(|m| m["host"] == prefix);
+                    match (hosts.next(), hosts.next()) {
+                        (Some(machine), None) => Some(machine),
+                        _ => None,
+                    }
+                });
+            let Some(name) = machine.and_then(|m| m["name"].as_str()) else { continue };
+            terminal["parent"] = format!("{name}/{id}").into();
+        }
+        live
+    }
+
     pub fn push(&mut self, bytes: &[u8]) -> Pushed {
         self.pending.extend_from_slice(bytes);
         let mut consumed = 0;
@@ -802,6 +830,63 @@ mod tests {
         assert_eq!(lines.take_seen(), (HashMap::new(), false));
         lines.push(format!("{}\n", json!({"method": "missed", "params": {"seq": 9, "terminals": []}})).as_bytes());
         assert!(lines.take_seen().1, "missed: can't tell");
+    }
+
+    #[test]
+    fn parent_addresses_match_the_viewing_cores_terminal_addresses() {
+        let lines = EventLines::new(&json!({"terminals": [
+            {"address": "beta/t2", "state": "live", "parent": "host-local/t1"},
+            {"address": "beta/t3", "state": "live", "parent": "host-alpha/t4"},
+            {"address": "beta/t6", "state": "live", "parent": "t7"},
+            {"address": "t10", "state": "live", "parent": "alpha-id/t4"},
+            {"address": "t11", "state": "live", "parent": "local-id/t1"},
+            {"address": "t12", "state": "live", "parent": "alpha/t4"},
+            {"address": "t13", "state": "live", "parent": "unknown/t1"},
+            {"address": "t14", "state": "live", "parent": null},
+            {"address": "t15", "state": "live", "parent": "shared-host/t4"},
+            {"address": "t16", "state": "live", "parent": "beta/t4"}
+        ]}));
+        let hello = json!({"core": {"id": "local-id", "name": "host-local"}});
+        let machines = json!({"machines": [
+            {"name": "alpha", "id": "alpha-id", "host": "host-alpha"},
+            {"name": "beta", "id": "beta-id", "host": "host-beta"},
+            {"name": "gamma", "id": "gamma-id", "host": "shared-host"},
+            {"name": "delta", "id": "delta-id", "host": "shared-host"},
+            {"name": "epsilon", "id": "epsilon-id", "host": "beta"}
+        ]});
+        let parents = |machines: &Value| lines.live_for(&hello, machines)["terminals"].as_array().unwrap()
+            .iter().map(|t| t["parent"].clone()).collect::<Vec<_>>();
+        assert_eq!(parents(&machines), vec![
+            json!("t1"), json!("alpha/t4"), json!("t7"), json!("alpha/t4"),
+            json!("t1"), json!("alpha/t4"), json!("unknown/t1"), Value::Null,
+            json!("shared-host/t4"), json!("beta/t4"),
+        ]);
+    }
+
+    #[test]
+    fn parent_addresses_stay_as_they_are_without_core_or_machine_facts() {
+        let lines = EventLines::new(&json!({"terminals": [
+            {"address": "t1", "state": "live", "parent": "host-a/t2"},
+            {"address": "t3", "state": "live", "parent": "t4"},
+            {"address": "t5", "state": "live", "parent": "/t6"},
+            {"address": "t7", "state": "live", "parent": "host-b/t8/x"},
+            {"address": "t9", "state": "live", "parent": 12}
+        ]}));
+        let parents = |hello: &Value, machines: &Value| lines.live_for(hello, machines)["terminals"].as_array().unwrap()
+            .iter().map(|t| t["parent"].clone()).collect::<Vec<_>>();
+        let unchanged = vec![json!("host-a/t2"), json!("t4"), json!("/t6"), json!("host-b/t8/x"), json!(12)];
+        // A core that said nothing about itself and an empty machine list.
+        assert_eq!(parents(&Value::Null, &Value::Null), unchanged);
+        assert_eq!(parents(&json!({}), &json!({"machines": []})), unchanged);
+        // A machine known by host but without a name gives no address to use.
+        assert_eq!(parents(&Value::Null, &json!({"machines": [{"id": "a-id", "host": "host-a"}]})), unchanged);
+        // Only the first `/` splits the machine from the id.
+        let named = json!({"machines": [{"name": "beta", "id": "b-id", "host": "host-b"}]});
+        assert_eq!(parents(&Value::Null, &named)[3], json!("beta/t8/x"));
+        // The local core by name: the id after it is local.
+        assert_eq!(parents(&json!({"core": {"name": "host-b"}}), &named)[3], json!("t8/x"));
+        // No terminals at all.
+        assert_eq!(EventLines::new(&json!({"terminals": []})).live_for(&Value::Null, &named), json!({"terminals": []}));
     }
 
     #[test]

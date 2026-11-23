@@ -143,7 +143,7 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut child = Command::new(shell)
-        .args(["-lc", "printf %s \"$PATH\""])
+        .args(["-lc", "printf 'h0x-path[%s]h0x-path' \"$PATH\""])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -163,7 +163,15 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
     }
     let mut out = String::new();
     std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
-    Some(out.into())
+    login_path_answer(&out)
+}
+
+/// The PATH inside the probe's frame: a chatty profile prints around it, and a shell that
+/// doesn't speak sh (nushell) answers an error, nothing, or `$PATH` literally.
+fn login_path_answer(out: &str) -> Option<std::ffi::OsString> {
+    let (_, rest) = out.split_once("h0x-path[")?;
+    let (path, _) = rest.rsplit_once("]h0x-path")?;
+    (!path.is_empty() && path != "$PATH").then(|| path.into())
 }
 
 /// Installs the core version this app pins (distribution/core-version, never
@@ -300,6 +308,33 @@ fn parse_update(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<String, U
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_login_shell_answer_is_the_path_inside_the_frame() {
+        for path in ["/opt/homebrew/bin:/usr/bin::/bin", ".:/custom/agents/bin:/usr/bin", "~/bin:/opt/$x/bin:bin", ":/usr/bin:", ":"] {
+            let framed = format!("Welcome!\nh0x-path[{path}]h0x-path\nbye\n");
+            assert_eq!(login_path_answer(&framed).as_deref(), Some(std::ffi::OsStr::new(path)), "{path:?}");
+        }
+        // What nushell answers, a shell that printed nothing, and an unexpanded PATH.
+        for garbage in ["Error: nu::parser::missing_flag_param", "", "/usr/bin:/bin", "h0x-path[]h0x-path", "h0x-path[$PATH]h0x-path"] {
+            assert_eq!(login_path_answer(garbage), None, "{garbage:?}");
+        }
+    }
+
+    #[test]
+    fn a_login_shell_answer_keeps_nix_paths_and_needs_both_ends_of_the_frame() {
+        // NixOS: store and profile paths, long and full of hashes and dashes.
+        let nix = "/run/wrappers/bin:/home/me/.nix-profile/bin:/nix/profile/bin:/etc/profiles/per-user/me/bin:/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin:/nix/store/0c5ql0q9yxkp1g9a4zf6z0wy1k3cc1bd-coreutils-9.5/bin";
+        for out in [format!("h0x-path[{nix}]h0x-path"), format!("h0x-path[{nix}]h0x-path\r\n"), format!("motd\r\nh0x-path[{nix}]h0x-path")] {
+            assert_eq!(login_path_answer(&out).as_deref(), Some(std::ffi::OsStr::new(nix)), "{out:?}");
+        }
+        // A bracket inside the PATH is the PATH's own: the frame's end is the last one.
+        assert_eq!(login_path_answer("h0x-path[/opt/a]b:/bin]h0x-path").as_deref(), Some(std::ffi::OsStr::new("/opt/a]b:/bin")));
+        // Half a frame is no answer.
+        for half in ["h0x-path[/usr/bin", "/usr/bin]h0x-path", "]h0x-path h0x-path[", "h0x-path[/usr/bin]h0x-pat"] {
+            assert_eq!(login_path_answer(half), None, "{half:?}");
+        }
+    }
 
     #[cfg(unix)]
     #[test]

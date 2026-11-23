@@ -1,5 +1,5 @@
-// Windows: a window app, no console of its own (see `attach_console`).
-#![cfg_attr(windows, windows_subsystem = "windows")]
+// Windows: a window app, but tests inherit Cargo's console for their child processes.
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod activity;
 mod agent_install;
@@ -166,6 +166,7 @@ fn main() {
         log.init();
     }
 
+    update::leave_install_folder();
     if update::apply_on_startup() || update::begin_start() {
         return;
     }
@@ -243,7 +244,7 @@ fn main() {
                 analytics::event("app_closed", serde_json::json!({ "session_seconds": analytics::session_seconds() }));
                 analytics::flush();
                 update::clean_exit();
-                update::apply();
+                let _ = update::apply();
                 async {}
             })
             .detach();

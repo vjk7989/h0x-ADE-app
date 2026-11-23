@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::task::Poll;
 use crate::links;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -74,6 +74,8 @@ pub enum TerminalEvent {
     Ended,
     /// Right-click where the program doesn't take the mouse: the pane menu.
     ContextMenu(Point<Pixels>),
+    /// Something the person asked for failed: an error toast.
+    Notice { title: String, body: String },
 }
 
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
@@ -147,6 +149,9 @@ pub struct TerminalView {
     hint_task: Option<Task<()>>,
     /// Right-clicks go to the program when it takes the mouse (Shift: the menu).
     pub right_click_to_program: bool,
+    /// Files on their way to this terminal's machine for over a second: what
+    /// the pane says meanwhile, by send.
+    sending: Vec<(u64, &'static str)>,
     grid: Rc<RefCell<Grid>>,
     focus: FocusHandle,
     was_focused: bool,
@@ -297,6 +302,7 @@ impl TerminalView {
             hint_cell: None,
             hint_task: None,
             right_click_to_program: false,
+            sending: Vec::new(),
             grid: Rc::new(RefCell::new(Grid {
                 vt: Vt::new(size_hint.0.max(2), size_hint.1.max(1)),
                 core: core.clone(),
@@ -497,7 +503,7 @@ impl TerminalView {
     fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
         let shown = shown_title(title);
         if shown != self.title {
-            self.title = shown.to_owned();
+            self.title = shown.into_owned();
             cx.emit(TerminalEvent::TitleChanged);
         }
     }
@@ -641,6 +647,17 @@ impl TerminalView {
         self.shown_in.set(FRAME.load(Ordering::Relaxed));
     }
 
+    /// A hidden pane cannot render its focus loss.
+    pub fn blur(&mut self) {
+        if self.was_focused {
+            self.was_focused = false;
+            let g = self.grid.borrow();
+            if let Some(ch) = g.channel {
+                g.core.focus(ch, false);
+            }
+        }
+    }
+
     /// Sizes a terminal that isn't on screen as its pane would be (`AppWindow::fit_hidden_tabs`).
     pub fn fit(&self, cols: u16, rows: u16, cell: Size<Pixels>, scale: f32) {
         self.grid.borrow_mut().fit(cols, rows, cell, scale);
@@ -667,6 +684,7 @@ impl TerminalView {
     /// gets each file copied there first (`h0x-core put`), and its path there.
     fn dropped(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
         if !self.address.contains('/') {
+            let paths = stage_temporary_screenshot(&paths).unwrap_or(paths);
             let text = quote_paths(paths.iter().map(|p| p.to_string_lossy().into_owned()), self.quoting);
             if text.is_empty() {
                 return;
@@ -682,34 +700,62 @@ impl TerminalView {
     fn put_there(&self, paths: Vec<std::path::PathBuf>, copies: bool, cx: &mut Context<Self>) {
         let addr = self.address.clone();
         let shell = self.quoting;
+        static SENDS: AtomicU64 = AtomicU64::new(0);
+        let send = SENDS.fetch_add(1, Ordering::Relaxed);
+        let label = match (copies, paths.len()) {
+            (true, _) => "Sending image…",
+            (false, 1) => "Sending file…",
+            _ => "Sending files…",
+        };
+        let done = Rc::new(Cell::new(false));
+        let shown = done.clone();
         cx.spawn(async move |this, cx| {
-            let there = cx
-                .background_executor()
-                .spawn(async move {
-                    paths
-                        .iter()
-                        .filter_map(|p| {
-                            let out = crate::spawn::command(crate::core_bin::path()).args(["put", "--json", &addr]).arg(p).output();
-                            if copies {
-                                let _ = std::fs::remove_file(p);
-                            }
-                            let out = out.ok()?;
-                            let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-                            v.get("path").and_then(|p| p.as_str()).map(str::to_owned)
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .await;
-            if !there.is_empty() {
-                let _ = this.update(cx, |this, _| {
-                    let text = quote_paths(there, shell);
-                    if text.is_empty() {
-                        return;
-                    }
-                    let bytes = this.grid.borrow().vt.paste_bytes(&text);
-                    this.send(&bytes);
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            if !shown.get() {
+                let _ = this.update(cx, |this, cx| {
+                    this.sending.push((send, label));
+                    cx.notify();
                 });
             }
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            let (there, refused) = cx
+                .background_executor()
+                .spawn(async move {
+                    let (mut there, mut refused) = (Vec::new(), Vec::new());
+                    for p in &paths {
+                        let out = crate::spawn::command(crate::core_bin::path()).args(["put", "--json", &addr]).arg(p).output();
+                        if copies {
+                            let _ = std::fs::remove_file(p);
+                        }
+                        match out.map_err(|e| e.to_string()).and_then(|o| put_answer(&o.stdout, &o.stderr)) {
+                            Ok(path) => there.push(path),
+                            Err(why) => {
+                                let name = if copies { "the pasted image".to_owned() } else { p.file_name().unwrap_or(p.as_os_str()).to_string_lossy().into_owned() };
+                                refused.push((name, why));
+                            }
+                        }
+                    }
+                    (there, refused)
+                })
+                .await;
+            // A closed pane is gone here: its paths go nowhere.
+            let _ = this.update(cx, |this, cx| {
+                done.set(true);
+                this.sending.retain(|(s, _)| *s != send);
+                cx.notify();
+                if !there.is_empty() {
+                    let text = quote_paths(there, shell);
+                    if !text.is_empty() {
+                        let bytes = this.grid.borrow().vt.paste_bytes(&text);
+                        this.send(&bytes);
+                    }
+                }
+                if let Some((title, body)) = refusal_notice(&refused) {
+                    cx.emit(TerminalEvent::Notice { title, body });
+                }
+            });
         })
         .detach();
     }
@@ -985,7 +1031,7 @@ impl TerminalView {
         self.scroll_anim.borrow_mut().cancel();
         if g.vt.mouse_tracking() {
             let ((x, y), size) = mouse_at(&g, ev.position);
-            let out = scroll_mouse_bytes(&mut g.vt, steps, x, y, size);
+            let out = scroll_mouse_bytes(&mut g.vt, steps, ev.modifiers, x, y, size);
             if let Some(ch) = g.channel {
                 g.core.input(ch, &out);
             }
@@ -1056,7 +1102,7 @@ impl TerminalView {
         });
         let ((x, y), size) = mouse_at(&g, pos);
         let any = !g.buttons_down.is_empty();
-        let bytes = g.vt.encode_mouse(action, b, 0, x, y, size, any);
+        let bytes = g.vt.encode_mouse(action, b, mouse_mods(mods), x, y, size, any);
         if let Some(ch) = g.channel {
             g.core.input(ch, &bytes);
         }
@@ -1369,9 +1415,11 @@ fn scrollbar_row_at(total: u64, len: u64, track: f32, min: f32, top: f32) -> usi
 }
 
 /// A title as it's shown: an agent's spinner in front of it (`\u{2733} Fix the
-/// tests`, braille dots) is no part of it. HyperOx draws its own, and a title
-/// that spins would redraw every mod that shows titles, 10 times a second.
-pub(crate) fn shown_title(title: &str) -> &str {
+/// tests`, braille dots) is no part of it, nor braille dots after a short
+/// prefix (`\u{03c0} \u{2839} task`). HyperOx draws its own, and a title that
+/// spins would redraw every mod that shows titles, 10 times a second.
+pub(crate) fn shown_title(title: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
     // Frames agents spin, not status icons (\u{2713} build stays): braille dots,
     // Claude Code's stars and its half circles.
     let spinner = |c: char| {
@@ -1379,7 +1427,20 @@ pub(crate) fn shown_title(title: &str) -> &str {
     };
     let rest = title.trim_start_matches(|c: char| spinner(c) || c.is_whitespace());
     let led = title.len() - rest.len();
-    if rest.is_empty() || !title[..led].chars().any(spinner) || !title[..led].ends_with(char::is_whitespace) { title } else { rest }
+    if !rest.is_empty() && title[..led].chars().any(spinner) && title[..led].ends_with(char::is_whitespace) {
+        return Cow::Borrowed(rest);
+    }
+    let braille = |w: &str| !w.is_empty() && w.chars().all(|c| matches!(c, '\u{2800}'..='\u{28ff}'));
+    let mut words = title.splitn(3, ' ');
+    match (words.next(), words.next()) {
+        (Some(prefix), Some(frame)) if !prefix.is_empty() && prefix.chars().count() <= 3 && !braille(prefix) && braille(frame) => {
+            match words.next().map(str::trim_start).filter(|r| !r.is_empty()) {
+                Some(rest) => Cow::Owned(format!("{prefix} {rest}")),
+                None => Cow::Borrowed(prefix),
+            }
+        }
+        _ => Cow::Borrowed(title),
+    }
 }
 
 /// How the program a pane runs reads a dropped or pasted path.
@@ -1449,6 +1510,60 @@ fn quote_paths(paths: impl IntoIterator<Item = String>, shell: Quoting) -> Strin
     paths.into_iter().filter_map(quote).map(|p| p + " ").collect()
 }
 
+/// A live macOS screenshot thumbnail, dropped before it saved.
+///
+/// macOS writes such an image into a private `NSIRD_*` directory under
+/// `TemporaryItems` and grants read access to it only to the app that received
+/// the drop, and only until the thumbnail saves.
+fn is_temporary_screenshot(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    path.ancestors().skip(1).any(|directory| {
+        directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("NSIRD_"))
+            && directory
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "TemporaryItems")
+    })
+}
+
+/// Whether these bytes are an image the pane can open.
+fn is_image_bytes(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.starts_with(&[0xff, 0xd8, 0xff])
+}
+
+/// Copies a live screenshot thumbnail somewhere a pane can read, and pastes
+/// that path instead.
+///
+/// macOS gives read access to the thumbnail's temporary file only to the app
+/// that received the drop; a pane's processes are children of the HyperOx
+/// daemon, not of this app, so they cannot open it, and the file is gone
+/// within seconds. This app can read it now, so it copies the bytes into the
+/// temp directory and the pane gets a path that stays readable.
+fn stage_temporary_screenshot(paths: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    let [path] = paths else {
+        return None;
+    };
+    if !is_temporary_screenshot(path) {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if !is_image_bytes(&bytes) {
+        return None;
+    }
+    let directory = std::env::temp_dir().join("h0x-drops");
+    std::fs::create_dir_all(&directory).ok()?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+    let name = path.file_name()?.to_str()?;
+    let staged = directory.join(format!("{stamp}-{name}"));
+    std::fs::write(&staged, &bytes).ok()?;
+    Some(vec![staged])
+}
+
 /// Files on the clipboard: their text is only the bare path, which an agent
 /// reads as words, not as an image to attach.
 fn copied_files(item: &ClipboardItem) -> Option<Vec<std::path::PathBuf>> {
@@ -1456,6 +1571,33 @@ fn copied_files(item: &ClipboardItem) -> Option<Vec<std::path::PathBuf>> {
         ClipboardEntry::ExternalPaths(p) if !p.paths().is_empty() => Some(p.paths().to_vec()),
         _ => None,
     })
+}
+
+/// `h0x-core put --json`'s answer: the path there, or why it refused (on stderr).
+fn put_answer(stdout: &[u8], stderr: &[u8]) -> Result<String, String> {
+    let json = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).unwrap_or_default();
+    if let Some(path) = json(stdout)["path"].as_str() {
+        return Ok(path.to_owned());
+    }
+    if let Some(why) = json(stderr)["error"]["message"].as_str() {
+        return Err(why.to_owned());
+    }
+    let text = String::from_utf8_lossy(stderr).trim().to_owned();
+    Err(if text.is_empty() { "h0x-core put gave no path".to_owned() } else { text })
+}
+
+/// The one error toast for files the core refused to send.
+fn refusal_notice(refused: &[(String, String)]) -> Option<(String, String)> {
+    match refused {
+        [] => None,
+        [(name, why)] => Some((format!("Couldn't send {name}"), why.clone())),
+        many => {
+            let mut why: Vec<&str> = many.iter().map(|(_, w)| w.as_str()).collect();
+            let mut seen = std::collections::HashSet::new();
+            why.retain(|w| seen.insert(*w));
+            Some((format!("Couldn't send {} files", many.len()), why.join("; ")))
+        }
+    }
 }
 
 /// The clipboard's image saved to a file of its own, for its path to be pasted.
@@ -1631,6 +1773,20 @@ fn hint_text(target: &LinkTarget, mac: bool) -> String {
     }
 }
 
+fn mouse_mods(m: Modifiers) -> GhosttyMods {
+    let mut mods = 0;
+    if m.shift {
+        mods |= GHOSTTY_MODS_SHIFT as GhosttyMods;
+    }
+    if m.alt {
+        mods |= GHOSTTY_MODS_ALT as GhosttyMods;
+    }
+    if m.control {
+        mods |= GHOSTTY_MODS_CTRL as GhosttyMods;
+    }
+    mods
+}
+
 fn link_mods(m: &Modifiers) -> bool {
     let key = if cfg!(target_os = "macos") { m.platform && !m.control } else { m.control && !m.platform };
     key && !m.alt && !m.shift
@@ -1650,7 +1806,7 @@ fn scroll_delta_steps(scrolled: &mut Point<f32>, delta: ScrollDelta, phase: Touc
     point(scroll_steps(&mut scrolled.x, phase, lines.x, cols as f32), scroll_steps(&mut scrolled.y, phase, lines.y, rows as f32))
 }
 
-fn scroll_mouse_bytes(vt: &mut Vt, steps: Point<i32>, x: f32, y: f32, size: (u32, u32, f32, f32)) -> Vec<u8> {
+fn scroll_mouse_bytes(vt: &mut Vt, steps: Point<i32>, mods: Modifiers, x: f32, y: f32, size: (u32, u32, f32, f32)) -> Vec<u8> {
     let mut out = Vec::new();
     for (steps, positive, negative) in [
         (steps.y, GHOSTTY_MOUSE_BUTTON_FOUR, GHOSTTY_MOUSE_BUTTON_FIVE),
@@ -1658,7 +1814,7 @@ fn scroll_mouse_bytes(vt: &mut Vt, steps: Point<i32>, x: f32, y: f32, size: (u32
     ] {
         let button = if steps > 0 { positive } else { negative };
         for _ in 0..steps.unsigned_abs() {
-            out.extend(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(button), 0, x, y, size, false));
+            out.extend(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(button), mouse_mods(mods), x, y, size, false));
         }
     }
     out
@@ -1924,18 +2080,124 @@ fn needs_ligatures(text: &str, font: &Font) -> bool {
         || text.as_bytes().windows(2).any(|pair| pair[0].is_ascii_punctuation() && pair[1].is_ascii_punctuation())
 }
 
-pub fn cell_size(window: &Window) -> Size<Pixels> {
+#[derive(Clone, Copy, Debug)]
+struct CellMetrics {
+    size: Size<Pixels>,
+    /// How far every glyph moves right in its cell, as Ghostty's `renderGlyph` (`glyph_x`).
+    glyph_x: Pixels,
+    baseline: Pixels,
+    underline: Pixels,
+    underline_thickness: Pixels,
+    strike: Pixels,
+    strike_thickness: Pixels,
+}
+
+fn cell_metrics(window: &Window) -> CellMetrics {
     let ts = window.text_system();
-    let f = cell_font(false, false);
-    let id = ts.resolve_font(&f);
-    let fs = px(crate::settings::font_size());
-    let w = ts.advance(id, fs, 'M').map(|s| s.width).unwrap_or(fs * 0.6);
-    let h = ts.ascent(id, fs) + ts.descent(id, fs).abs();
-    // The width stays the font's own advance: GPUI only moves a glyph onto the
-    // grid once it drifts over 1px, so a rounded width made text wobble.
-    // Boxes snap their edges instead (`snap_box`).
-    let scale = window.scale_factor();
-    size(w, px((f32::from(h) * 1.15 * scale).ceil() / scale))
+    let id = ts.resolve_font(&cell_font(false, false));
+    let (fs, scale) = (crate::settings::font_size(), window.scale_factor());
+    // Asked for on every frame of every terminal; the answer only changes with the font, size or scale.
+    thread_local!(static LAST: Cell<Option<((FontId, u32, u32), CellMetrics)>> = const { Cell::new(None) });
+    let key = (id, fs.to_bits(), scale.to_bits());
+    if let Some((_, metrics)) = LAST.get().filter(|(last, _)| *last == key) {
+        return metrics;
+    }
+    let metrics = font_cell_metrics(ts, id, fs, scale);
+    LAST.set(Some((key, metrics)));
+    metrics
+}
+
+fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32) -> CellMetrics {
+    // FreeType uses integer y_ppem for metrics; CoreText uses the requested size.
+    let em = if cfg!(target_os = "macos") { fs * scale } else { (fs * scale).round().max(1.0) };
+    let metrics = ts.font_metrics(id);
+    let unit = em / metrics.units_per_em.max(1) as f32;
+    let hhea_data = ts.font_table(id, *b"hhea");
+    let os2_data = ts.font_table(id, *b"OS/2");
+    let post_data = ts.font_table(id, *b"post");
+    let hhea = hhea_data.as_deref().and_then(ttf_parser::hhea::Table::parse);
+    let os2 = os2_data.as_deref().and_then(ttf_parser::os2::Table::parse);
+    let post = post_data.as_deref().and_then(ttf_parser::post::Table::parse);
+    // Match Ghostty's hhea / USE_TYPO_METRICS / typo / Windows fallback order.
+    let (ascent, descent, gap) = if let Some(hhea) = hhea {
+        if let Some(os2) = os2 {
+            if os2.use_typographic_metrics() {
+                (os2.typographic_ascender() as f32, os2.typographic_descender() as f32, os2.typographic_line_gap() as f32)
+            } else if hhea.ascender != 0 || hhea.descender != 0 {
+                (hhea.ascender as f32, hhea.descender as f32, hhea.line_gap as f32)
+            } else if os2.typographic_ascender() != 0 || os2.typographic_descender() != 0 {
+                (os2.typographic_ascender() as f32, os2.typographic_descender() as f32, os2.typographic_line_gap() as f32)
+            } else {
+                (os2.windows_ascender() as f32, -(os2.windows_descender() as f32), 0.0)
+            }
+        } else {
+            (hhea.ascender as f32, hhea.descender as f32, hhea.line_gap as f32)
+        }
+    } else {
+        (metrics.ascent, metrics.descent, metrics.line_gap)
+    };
+    let face_height = (ascent - descent + gap) * unit;
+    let height = face_height.round().max(1.0);
+    let baseline_bottom = (gap * unit / 2.0 - descent * unit - (height - face_height) / 2.0).round();
+    let baseline = height - baseline_bottom;
+    let measured_height = |ch| ts.typographic_bounds(id, px(metrics.units_per_em as f32), ch).ok()
+        .map(|b| f32::from(b.size.height)).filter(|h| *h > 0.0);
+    let ex = os2.and_then(|o| o.x_height()).filter(|h| *h > 0).map(|h| h as f32)
+        .or_else(|| measured_height('x')).unwrap_or_else(|| {
+            let cap = os2.and_then(|o| o.capital_height()).filter(|h| *h > 0).map(|h| h as f32)
+                .or_else(|| measured_height('H')).unwrap_or(ascent * 0.75);
+            cap * 0.75
+        });
+    let ul = post.map(|p| p.underline_metrics);
+    let st = os2.map(|o| o.strikeout_metrics());
+    let ul_thick = ul.filter(|m| m.thickness > 0).map_or(ex * unit * 0.15, |m| m.thickness as f32 * unit);
+    let st_thick = st.filter(|m| m.thickness > 0).map_or(ul_thick, |m| m.thickness as f32 * unit);
+    let ul_pos = ul.filter(|m| m.thickness != 0 || m.position != 0).map_or(-ul_thick, |m| m.position as f32 * unit);
+    let st_pos = st.filter(|m| m.thickness != 0 || m.position != 0).map_or((ex * unit + st_thick) * 0.5, |m| m.position as f32 * unit);
+    let face_width = (' '..='~').filter_map(|c| ts.advance(id, px(fs * scale), c).ok())
+        .map(|s| f32::from(s.width)).reduce(f32::max).unwrap_or(fs * scale * 0.6);
+    let width = face_width.round().max(1.0);
+    CellMetrics {
+        size: size(px(width / scale), px(height / scale)),
+        glyph_x: px(glyph_x(width, face_width) / scale),
+        baseline: px(baseline / scale),
+        underline: px((baseline - ul_pos).round() / scale),
+        underline_thickness: px(ul_thick.ceil().max(1.0) / scale),
+        strike: px((baseline - st_pos).round() / scale),
+        strike_thickness: px(st_thick.ceil().max(1.0) / scale),
+    }
+}
+
+pub fn cell_size(window: &Window) -> Size<Pixels> {
+    cell_metrics(window).size
+}
+
+/// Ghostty's re-centring of glyphs in their cells (`renderGlyph`), in device
+/// pixels: half the cell's difference from the face's unrounded advance.
+/// CoreText (`font/face/coretext.zig`) keeps, when the cell is the narrower,
+/// only the part under a whole pixel, so glyphs keep their subpixel phase
+/// without sliding a pixel left; FreeType (`font/face/freetype.zig`) moves
+/// only into a wider cell, by whole pixels, to keep hinting.
+fn glyph_x(cell_width: f32, face_width: f32) -> f32 {
+    let dx = (cell_width - face_width) / 2.0;
+    if cfg!(target_os = "macos") {
+        if dx < 0.0 { dx - dx.trunc() } else { dx }
+    } else if dx > 0.0 {
+        dx.round()
+    } else {
+        0.0
+    }
+}
+
+/// Where a cell's shaped text paints from: its baseline on the cell's, moved across by `glyph_x`.
+fn text_origin(line: &ShapedLine, origin: Point<Pixels>, metrics: CellMetrics) -> Point<Pixels> {
+    let gpui_baseline = (metrics.size.height - line.ascent - line.descent) / 2.0 + line.ascent;
+    origin + point(metrics.glyph_x, metrics.baseline - gpui_baseline)
+}
+
+fn paint_cell_text(line: &ShapedLine, origin: Point<Pixels>, metrics: CellMetrics, window: &mut Window, cx: &mut App) {
+    let origin = text_origin(line, origin, metrics);
+    let _ = line.paint(origin, metrics.size.height, TextAlign::Left, None, window, cx);
 }
 
 // Force-width shaping moves glyph origins, but does not resize fallback glyphs.
@@ -1960,10 +2222,13 @@ enum RowOp {
     Sprite { x: usize, text: String, color: Hsla },
     Icon { x: usize, offset: Point<Pixels>, font: FontId, glyph: GlyphId, size: Pixels, color: Hsla },
     Text { x: usize, line: ShapedLine },
+    /// An underline in its style and color, a strikethrough in the text's color.
+    Decoration { from: usize, to: usize, underline: Option<(vt::Underline, Hsla)>, strike: Option<Hsla> },
 }
 
 /// A row's drawing: its backgrounds, merged into runs of one color, then its
-/// text in runs of one style (wide characters, sprites and icons on their own).
+/// text in runs of one style (wide characters, sprites and icons on their own),
+/// then its underlines and strikethroughs.
 fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: &mut Window) -> Vec<RowOp> {
     crate::bench::count(&crate::bench::ROWS);
     let ligatures = crate::settings::get().font_ligatures;
@@ -1987,13 +2252,10 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
         // Consume the first cell before dispatch: every path must make progress,
         // even when a private-use character has no bundled icon glyph.
         x += 1;
-        if c.text.is_empty() && !c.underline && !c.strike {
+        if c.text.is_empty() && c.underline.is_none() && !c.strike {
             continue;
         }
-        let mut color = hsla(c.fg);
-        if c.faint {
-            color.a = 0.6;
-        }
+        let color = cell_color(c);
         if crate::sprites::is_sprite(&c.text) {
             ops.push(RowOp::Sprite { x: start, text: c.text.clone(), color });
             continue;
@@ -2020,6 +2282,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
         }
         let fitted_size = fallback_size(c, &text_font, cell.width, window.text_system());
         let mut text = if c.text.is_empty() { " ".to_owned() } else { c.text.clone() };
+        let mut positions = vec![(0, px(0.0))];
         // Shape the cursor cell separately, so its plain glyph doesn't cover a ligature.
         if !c.wide && fitted_size.is_none() && cursor != Some(start) {
             while x < row.len() {
@@ -2033,14 +2296,15 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
                     && d.underline == c.underline
                     && d.strike == c.strike;
                 // Bundled fallback icons are fitted separately from the text run.
-                if !same || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
+                if !same || cursor == Some(x) || (d.text.is_empty() && d.underline.is_none() && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
                     break;
                 }
+                positions.push((text.len(), cell.width * (x - start) as f32));
                 text.push_str(if d.text.is_empty() { " " } else { &d.text });
                 x += 1;
             }
         }
-        if text.trim().is_empty() && !c.underline && !c.strike {
+        if text.trim_matches(' ').is_empty() && c.underline.is_none() && !c.strike {
             continue;
         }
         if ligatures && needs_ligatures(&text, &text_font) {
@@ -2051,14 +2315,42 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             font: text_font,
             color,
             background_color: None,
-            underline: c.underline.then(|| UnderlineStyle { thickness: px(1.0), color: Some(color), wavy: false }),
-            strikethrough: c.strike.then(|| StrikethroughStyle { thickness: px(1.0), color: Some(color) }),
+            underline: None,
+            strikethrough: None,
         };
-        let force = (!c.wide).then_some(cell.width);
-        let line = window.text_system().shape_line(text.into(), fitted_size.unwrap_or_else(|| px(crate::settings::font_size())), &[run], force);
+        let width = cell.width * if c.wide { 2.0 } else { (x - start) as f32 };
+        let line = window.text_system().shape_line(text.into(), fitted_size.unwrap_or_else(|| px(crate::settings::font_size())), &[run], None)
+            .with_cell_positions(&positions, width);
         ops.push(RowOp::Text { x: start, line });
     }
+    row_decorations(row, &mut ops);
     ops
+}
+
+/// A cell's text color, dimmed when faint.
+fn cell_color(c: &vt::Cell) -> Hsla {
+    hsla(c.fg).opacity(if c.faint { 0.6 } else { 1.0 })
+}
+
+/// A row's underlines and strikethroughs, from its cells alone, so sprites,
+/// icons and blanks get them too. Neighbours that look the same share one.
+fn row_decorations(row: &[vt::Cell], ops: &mut Vec<RowOp>) {
+    let mut x = 0;
+    while x < row.len() {
+        let c = &row[x];
+        let start = x;
+        x += if c.wide { 2 } else { 1 };
+        if c.underline.is_none() && !c.strike {
+            continue;
+        }
+        let color = cell_color(c);
+        let underline = c.underline.map(|s| (s, c.underline_color.map_or(color, |u| hsla(u).opacity(color.a))));
+        let strike = c.strike.then_some(color);
+        match ops.last_mut() {
+            Some(RowOp::Decoration { to, underline: u, strike: s, .. }) if *to == start && *u == underline && *s == strike => *to = x,
+            _ => ops.push(RowOp::Decoration { from: start, to: x, underline, strike }),
+        }
+    }
 }
 
 /// The find field's editor colors, following the theme at open time.
@@ -2078,6 +2370,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
     let cell = g.cell;
+    let metrics = cell_metrics(window);
     let (pad_x, pad_y) = pad();
     // Rows rarely fill the height exactly: split what's left above and below.
     let spare = (f32::from(bounds.size.height) - 2.0 * pad_y - f32::from(cell.height) * g.vt.rows as f32).max(0.0);
@@ -2197,7 +2490,53 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                     let _ = window.paint_glyph(at(*x, y) + *offset, *font, *glyph, *size, *color);
                 }
                 RowOp::Text { x, line } => {
-                    let _ = line.paint(at(*x, y), cell.height, TextAlign::Left, None, window, cx);
+                    paint_cell_text(line, at(*x, y), metrics, window, cx);
+                }
+                RowOp::Decoration { from, to, underline, strike } => {
+                    let width = cell.width * (to - from) as f32;
+                    let line = |offset: Pixels, thickness: Pixels| snap_box(Bounds::new(at(*from, y) + point(px(0.0), offset), size(width, thickness)));
+                    let (top, thick) = (metrics.underline, metrics.underline_thickness);
+                    match *underline {
+                        None => {}
+                        Some((vt::Underline::Single, color)) => window.paint_quad(fill(line(top, thick), color)),
+                        Some((vt::Underline::Double, color)) => {
+                            // A line above and a line below where the single one is, as Ghostty draws it.
+                            let top = top.min(cell.height - thick * 2.0);
+                            window.paint_quad(fill(line(top - thick, thick), color));
+                            window.paint_quad(fill(line(top + thick, thick), color));
+                        }
+                        Some((vt::Underline::Curly, color)) => {
+                            // GPUI's wave is three thicknesses tall, around its middle.
+                            let offset = (top - thick).min(cell.height - thick * 3.0);
+                            let style = UnderlineStyle { thickness: thick, color: Some(color), wavy: true };
+                            window.paint_underline(at(*from, y) + point(px(0.0), offset), width, &style);
+                        }
+                        Some((vt::Underline::Dotted, color)) => {
+                            // Dots wider than the line and about a dot apart, at least one a cell, as Ghostty draws them.
+                            let (width, radius) = (f32::from(cell.width) * scale, std::f32::consts::FRAC_1_SQRT_2 * f32::from(thick) * scale);
+                            let count = (width / (4.0 * radius)).ceil().min((width / (3.0 * radius)).floor()).min((width / (2.0 * radius + 1.0)).floor()).max(1.0);
+                            let (step, dot) = (cell.width / count, px(2.0 * radius / scale));
+                            let offset = (top + (thick - dot) / 2.0).min(cell.height - dot);
+                            for i in 0..(to - from) * count as usize {
+                                let b = Bounds::new(at(*from, y) + point(step * (i as f32 + 0.5) - dot / 2.0, offset), size(dot, dot));
+                                window.paint_quad(fill(b, color).corner_radii(dot / 2.0));
+                            }
+                        }
+                        Some((vt::Underline::Dashed, color)) => {
+                            // In every cell a dash, a gap, and the start of the next dash, as Ghostty draws it.
+                            let width = f32::from(cell.width) * scale;
+                            let dash = (width / 3.0).floor() + 1.0;
+                            for x in *from..*to {
+                                for (start, len) in [(0.0, dash.min(width)), (2.0 * dash, (width - 2.0 * dash).max(0.0))] {
+                                    let b = Bounds::new(at(x, y) + point(px(start / scale), top), size(px(len / scale), thick));
+                                    window.paint_quad(fill(snap_box(b), color));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(color) = *strike {
+                        window.paint_quad(fill(line(metrics.strike, metrics.strike_thickness), color));
+                    }
                 }
             }
         }
@@ -2211,7 +2550,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         let Some(row) = frame.rows.get(y as usize) else { continue };
         let color = row.get(x0 as usize).map_or(hsla(vt::theme().fg), |c| hsla(c.fg));
         let (x0, x1) = (x0 as usize, (x1 as usize + 1).min(row.len()));
-        let line = Bounds::new(at(x0, y as usize) + point(px(0.0), cell.height - px(2.0)), size(cell.width * (x1 - x0) as f32, px(1.0)));
+        let line = Bounds::new(at(x0, y as usize) + point(px(0.0), metrics.underline), size(cell.width * (x1 - x0) as f32, metrics.underline_thickness));
         window.paint_quad(fill(snap_box(line), color));
     }
 
@@ -2236,7 +2575,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                         strikethrough: None,
                     };
                     let line = window.text_system().shape_line(c.text.clone().into(), px(crate::settings::font_size()), &[run], None);
-                    let _ = line.paint(p, cell.height, TextAlign::Left, None, window, cx);
+                    paint_cell_text(&line, p, metrics, window, cx);
                 }
             }
             (true, CursorShape::Bar) => window.paint_quad(fill(snap_box(Bounds::new(p, size(px(2.0), cell.height))), color)),
@@ -2258,12 +2597,14 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             font: cell_font(false, false),
             color: fg,
             background_color: None,
-            underline: Some(UnderlineStyle { thickness: px(1.0), color: Some(fg), wavy: false }),
+            underline: None,
             strikethrough: None,
         };
         let line = window.text_system().shape_line(text.into(), px(crate::settings::font_size()), &[run], None);
         window.paint_quad(fill(snap_box(Bounds::new(p, size(line.width, cell.height))), hsla(frame.bg)));
-        let _ = line.paint(p, cell.height, TextAlign::Left, None, window, cx);
+        paint_cell_text(&line, p, metrics, window, cx);
+        let underline = Bounds::new(p + point(px(0.0), metrics.underline), size(line.width, metrics.underline_thickness));
+        window.paint_quad(fill(snap_box(underline), fg));
     }
     {
         let mut g = grid.borrow_mut();
@@ -2473,6 +2814,11 @@ impl Render for TerminalView {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                 this.focus.focus(window, cx);
+                let g = this.grid.borrow();
+                if let Some(ch) = g.channel {
+                    g.core.resize(ch, g.vt.cols, g.vt.rows);
+                }
+                drop(g);
                 if link_mods(&ev.modifiers)
                     && let Some((target, _)) = this.link_at(ev.position)
                 {
@@ -2538,9 +2884,16 @@ impl Render for TerminalView {
                     cx.emit(TerminalEvent::ContextMenu(ev.position));
                 }
             }))
-            .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+            .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, _, _cx| {
                 if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
-                    this.paste(cx);
+                    // macOS has no PRIMARY selection, so an unclaimed middle-click does nothing.
+                    #[cfg(target_os = "linux")]
+                    if let Some(text) = _cx.read_from_primary().and_then(|item| item.text()).filter(|text| !text.is_empty()) {
+                        let bytes = this.grid.borrow().vt.paste_bytes(&text);
+                        this.send(&bytes);
+                    }
+                    #[cfg(target_os = "windows")]
+                    this.paste(_cx);
                 }
             }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
@@ -2761,6 +3114,21 @@ impl Render for TerminalView {
                         .text_color(hsla(vt::theme().fg))
                         .text_xs()
                         .child(format!("[{why}]")),
+                )
+            })
+            .when_some(self.sending.last(), |d, (_, label)| {
+                d.child(
+                    div()
+                        .absolute()
+                        .bottom_2()
+                        .left_3()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(crate::settings::color("raised"))
+                        .text_color(hsla(vt::theme().fg))
+                        .text_xs()
+                        .child(*label),
                 )
             })
     }
@@ -3701,7 +4069,7 @@ mod tests {
                     let font_id = text_system.resolve_font(&font);
                     let width = text_system.advance(font_id, font_size, 'M').unwrap().width;
                     let run = TextRun { len: text.len(), font, ..Default::default() };
-                    let line = text_system.shape_line(text.into(), font_size, &[run], Some(width));
+                    let line = text_system.shape_line(text.into(), font_size, std::slice::from_ref(&run), Some(width));
 
                     assert!(f32::from(line.width() - width * text.len() as f32).abs() < 0.1, "{text}: width drift");
                     let glyphs: Vec<_> = line.runs.iter().flat_map(|run| &run.glyphs).collect();
@@ -3709,11 +4077,169 @@ mod tests {
                         assert!(f32::from(glyph.position.x - width * glyph.index as f32).abs() < 0.1, "{text}: glyph drift");
                     }
                     variants.push(glyphs.iter().map(|glyph| glyph.id).collect::<Vec<_>>());
+                    let cell = px(f32::from(width).round());
+                    let positions: Vec<_> = (0..text.len()).map(|i| (i, cell * i as f32)).collect();
+                    let aligned = text_system.shape_line(text.into(), font_size, &[run], None).with_cell_positions(&positions, cell * text.len() as f32);
+                    for glyph in aligned.runs.iter().flat_map(|run| &run.glyphs) {
+                        assert!((f32::from(glyph.position.x - cell * glyph.index as f32)).abs() < 0.1, "{text}: rounded grid drift");
+                    }
                 }
                 assert_ne!(variants[0], variants[1], "{text}: ligatures must change the glyphs");
             }
         }
         crate::settings::set((*original).clone());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ghostty_cells_and_clusters_at_fractional_scales() {
+        use super::*;
+        use std::borrow::Cow;
+        let system = Arc::new(TextSystem::new(Arc::new(gpui_wgpu::CosmicTextSystem::new_without_system_fonts(crate::settings::DEFAULT_FONT))));
+        system.add_fonts(vec![Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf"))]).unwrap();
+        let ts = WindowTextSystem::new(system);
+        let font = font(crate::settings::DEFAULT_FONT);
+        let id = ts.resolve_font(&font);
+        // Ghostty's font tables at 14/16px; zoom and display scaling use physical cells.
+        for (fs, scale, width, height, baseline) in [
+            (14., 1., 8., 18., 14.), (16., 1., 10., 21., 16.),
+            (14., 1.25, 11., 24., 19.), (14., 1.5, 13., 28., 22.),
+            (14., 2., 17., 37., 29.),
+            (16., 0.9, 9., 18., 14.), (16., 1.1, 11., 24., 19.),
+            (13.5, 1., 8., 18., 14.),
+        ] {
+            let metrics = font_cell_metrics(&ts, id, fs, scale);
+            assert_eq!(metrics.size.map(|v| v * scale), size(px(width), px(height)));
+            assert_eq!(metrics.baseline * scale, px(baseline));
+            let text = "H".repeat(60);
+            let run = TextRun { len: text.len(), font: font.clone(), ..Default::default() };
+            let positions: Vec<_> = (0..60).map(|i| (i, metrics.size.width * i as f32)).collect();
+            let line = ts.shape_line(text.into(), px(fs), &[run], None).with_cell_positions(&positions, metrics.size.width * 60.);
+            for glyph in line.runs.iter().flat_map(|r| &r.glyphs) {
+                assert_eq!(glyph.position.x, metrics.size.width * glyph.index as f32);
+            }
+        }
+        // Two code points in one terminal cell retain their shaped relative offset.
+        let text = "x\u{301}b";
+        let run = TextRun { len: text.len(), font, ..Default::default() };
+        let line = ts.shape_line(text.into(), px(14.), &[run], None);
+        let original: Vec<_> = line.runs.iter().flat_map(|r| &r.glyphs).map(|g| (g.index, g.position.x)).collect();
+        assert!(original.iter().filter(|(index, _)| *index < 3).count() >= 2, "fixture must shape a separate combining mark");
+        let aligned = line.with_cell_positions(&[(0, px(0.)), (3, px(8.))], px(16.));
+        let glyphs: Vec<_> = aligned.runs.iter().flat_map(|r| &r.glyphs).collect();
+        for ((index, x), glyph) in original.iter().zip(&glyphs) {
+            if *index < 3 { assert_eq!(glyph.position.x - glyphs[0].position.x, *x - original[0].1); }
+            else { assert_eq!(glyph.position.x, px(8.)); }
+        }
+    }
+
+    /// Ghostty's `renderGlyph` move, in device pixels: half the cell's difference
+    /// from the face; CoreText keeps only the part under a whole pixel when the cell
+    /// is narrower, FreeType moves only into a wider cell, by whole pixels.
+    #[test]
+    fn glyph_x_recentres_glyphs_as_ghostty() {
+        // (cell, face, CoreText, FreeType), device px
+        for (cell, face, core_text, free_type) in [
+            (7.0, 7.2, -0.1, 0.0),   // JetBrains Mono 12 pt at 1x
+            (14.0, 14.4, -0.2, 0.0), // and at 2x
+            (8.0, 8.0, 0.0, 0.0),
+            (7.0, 9.6, -0.3, 0.0),   // -1.3: the whole pixel is dropped
+            (8.0, 7.6, 0.2, 0.0),    // a wider cell: all the way, or the nearest whole pixel
+            (9.0, 7.2, 0.9, 1.0),
+        ] {
+            let want = if cfg!(target_os = "macos") { core_text } else { free_type };
+            let got = super::glyph_x(cell, face);
+            assert!((got - want).abs() < 1e-5, "cell {cell}, face {face}: {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn glyph_x_at_half_and_whole_pixel_boundaries() {
+        // (cell, face, CoreText, FreeType), device px
+        for (cell, face, core_text, free_type) in [
+            (9.0, 8.0, 0.5, 1.0),    // half a pixel wider: FreeType rounds away from zero
+            (8.0, 9.0, -0.5, 0.0),   // half a pixel narrower
+            (1.0, 3.0, 0.0, 0.0),    // exactly one whole pixel narrower: nothing is left
+            (0.0, 0.0, 0.0, 0.0),
+            (100.0, 0.0, 50.0, 50.0), // a face that measured nothing
+        ] {
+            let want = if cfg!(target_os = "macos") { core_text } else { free_type };
+            let got = super::glyph_x(cell, face);
+            assert!(got.is_finite() && (got - want).abs() < 1e-5, "cell {cell}, face {face}: {got}, want {want}");
+        }
+    }
+
+    /// Every bundled face, from tiny to huge and at fractional scales: whole device-pixel
+    /// cells, never zero or NaN, with the baseline and lines inside the cell.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cell_metrics_hold_for_every_bundled_font_and_size() {
+        use super::*;
+        use std::borrow::Cow;
+        let system = Arc::new(TextSystem::new(Arc::new(gpui_wgpu::CosmicTextSystem::new_without_system_fonts(crate::settings::DEFAULT_FONT))));
+        system.add_fonts(vec![
+            Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/GeistMono-Variable.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/Geist.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../assets/fonts/SymbolsNerdFont-Regular.ttf").as_slice()),
+        ]).unwrap();
+        let ts = WindowTextSystem::new(system);
+        for family in [crate::settings::DEFAULT_FONT, "Geist Mono", "Geist", "Symbols Nerd Font"] {
+            let id = ts.resolve_font(&font(family));
+            let mut last_height = 0.0;
+            for fs in [1.0, 6.0, 9.5, 14.0, 72.0] {
+                for scale in [0.5, 1.0, 1.25, 2.0, 3.0] {
+                    let m = font_cell_metrics(&ts, id, fs, scale);
+                    let (w, h) = (f32::from(m.size.width) * scale, f32::from(m.size.height) * scale);
+                    let what = format!("{family} {fs}px at {scale}x: {m:?}");
+                    for v in [w, h, f32::from(m.glyph_x), f32::from(m.baseline), f32::from(m.underline), f32::from(m.strike)] {
+                        assert!(v.is_finite(), "{what}");
+                    }
+                    assert!(w >= 1.0 && h >= 1.0, "{what}");
+                    assert!((w - w.round()).abs() < 1e-3 && (h - h.round()).abs() < 1e-3, "whole device pixels: {what}");
+                    assert!(m.underline_thickness * scale >= px(1.0) - px(1e-3) && m.strike_thickness * scale >= px(1.0) - px(1e-3), "{what}");
+                    assert!(m.baseline >= px(0.0) && m.baseline <= m.size.height, "{what}");
+                    if scale == 1.0 {
+                        assert!(h >= last_height, "a bigger font never gets a shorter cell: {what}");
+                        last_height = h;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Text painted on a cell starts `glyph_x` across from it, every glyph of the line
+    /// with it (their cell positions come from `with_cell_positions`). gpui places a
+    /// glyph on the nearest quarter device pixel, ties toward zero (`Window::paint_glyph`),
+    /// so JetBrains Mono 12 pt's -0.1 px CoreText move disappears at 1x and is -0.25
+    /// device px at 2x, as in Ghostty.
+    #[test]
+    fn cell_text_paints_glyph_x_across_from_its_cell() {
+        use super::*;
+        let quarter = |v: f32| (v.abs() * 4.0 - 0.5).ceil().copysign(v) / 4.0;
+        let line = ShapedLine::default();
+        for (scale, device) in [(1.0, 0.0), (2.0, -0.25)] {
+            let metrics = CellMetrics {
+                size: size(px(7.0), px(17.0)),
+                glyph_x: px(glyph_x(7.0 * scale, 7.2 * scale) / scale),
+                baseline: px(13.0),
+                underline: px(15.0),
+                underline_thickness: px(1.0),
+                strike: px(9.0),
+                strike_thickness: px(1.0),
+            };
+            for column in [0.0, 1.0, 5.0] {
+                let cell = point(px(7.0 * column), px(34.0));
+                let at = text_origin(&line, cell, metrics);
+                assert!(f32::from(at.x - cell.x - metrics.glyph_x).abs() < 1e-4, "column {column} at {scale}x: {:?}", at.x);
+                if cfg!(target_os = "macos") {
+                    let placed = quarter(f32::from(at.x) * scale) - quarter(f32::from(cell.x) * scale);
+                    assert_eq!(placed, device, "column {column} at {scale}x");
+                } else {
+                    assert_eq!(at.x, cell.x, "FreeType keeps glyphs on a cell narrower than the face");
+                }
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -3810,6 +4336,67 @@ mod tests {
         assert!(needs_ligatures("界=>", &font));
         assert!(needs_ligatures("fi ->", &gpui::font("Fira Code")));
         assert!(needs_ligatures("fi", &gpui::font("Fira Code")));
+    }
+
+    #[gpui::test]
+    fn unicode_spaces_are_shaped_but_blank_cells_are_skipped(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let window = cx.add_window(|_, _| Empty);
+        window.update(cx, |_, window, _| {
+            for (text, wide) in [("\u{3000}", true), ("\u{a0}", false), ("\u{2003}", false)] {
+                let row = [vt::Cell { text: text.into(), wide, ..Default::default() }, vt::Cell::default()];
+                let ops = row_ops(&row, size(px(8.), px(16.)), None, window);
+                let runs: Vec<_> = ops.iter().filter_map(|op| match op {
+                    RowOp::Text { x, line } => Some((*x, line.text.as_ref())),
+                    _ => None,
+                }).collect();
+                assert_eq!(runs, vec![(0, text)]);
+            }
+            for text in ["", " ", "   "] {
+                for (underline, strike) in [(false, false), (true, false), (false, true)] {
+                    let row = [vt::Cell { text: text.into(), underline: underline.then_some(vt::Underline::Single), strike, ..Default::default() }];
+                    let ops = row_ops(&row, size(px(8.), px(16.)), None, window);
+                    assert_eq!(ops.iter().filter(|op| matches!(op, RowOp::Text { .. })).count(), usize::from(underline || strike));
+                }
+            }
+        }).unwrap();
+    }
+
+    #[gpui::test]
+    fn underlines_and_strikes_follow_the_cells_in_style_and_color(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        use vt::{Rgb, Underline};
+        let window = cx.add_window(|_, _| Empty);
+        window.update(cx, |_, window, _| {
+            let (fg, red, blue) = (Rgb(200, 200, 200), Rgb(255, 0, 0), Rgb(0, 0, 255));
+            let cell = |text: &str, underline, underline_color| vt::Cell { text: text.into(), fg, underline, underline_color, ..Default::default() };
+            let decorations = |row: &[vt::Cell], window: &mut Window| -> Vec<_> {
+                row_ops(row, size(px(8.), px(16.)), None, window).iter().filter_map(|op| match op {
+                    RowOp::Decoration { from, to, underline, strike } => Some((*from, *to, *underline, *strike)),
+                    _ => None,
+                }).collect()
+            };
+            // A tab of bufferline.nvim: a blank, a bar (a sprite), text, a wide character and its tail, a powerline icon.
+            let mut row: Vec<_> = ["", "\u{258e}", "a", "\u{754c}", "", "\u{e0b0}"].iter().map(|t| cell(t, Some(Underline::Single), Some(red))).collect();
+            row[3].wide = true;
+            assert_eq!(decorations(&row, window), vec![(0, 6, Some((Underline::Single, hsla(red))), None)]);
+            // A run ends where the style or the color changes; plain cells have none.
+            let row = [cell("a", Some(Underline::Curly), Some(red)), cell("b", Some(Underline::Curly), None), cell("c", Some(Underline::Dashed), None), cell("d", None, None), cell("e", Some(Underline::Dashed), None)];
+            assert_eq!(decorations(&row, window), vec![
+                (0, 1, Some((Underline::Curly, hsla(red))), None),
+                (1, 2, Some((Underline::Curly, hsla(fg))), None),
+                (2, 3, Some((Underline::Dashed, hsla(fg))), None),
+                (4, 5, Some((Underline::Dashed, hsla(fg))), None),
+            ]);
+            // Faint dims the underline with the text; a strikethrough is in the text's color.
+            let struck = |c: vt::Cell| vt::Cell { strike: true, ..c };
+            let faint = vt::Cell { faint: true, ..struck(cell("a", Some(Underline::Dotted), Some(red))) };
+            assert_eq!(decorations(&[faint], window), vec![(0, 1, Some((Underline::Dotted, hsla(red).opacity(0.6))), Some(hsla(fg).opacity(0.6)))]);
+            // Another text color joins an underline that has its own color, but not a strikethrough.
+            let row = [cell("a", Some(Underline::Single), Some(red)), vt::Cell { fg: blue, ..cell("b", Some(Underline::Single), Some(red)) }];
+            assert_eq!(decorations(&row, window), vec![(0, 2, Some((Underline::Single, hsla(red))), None)]);
+            assert_eq!(decorations(&row.map(struck), window).len(), 2);
+        }).unwrap();
     }
 
     #[gpui::test]
@@ -4012,7 +4599,7 @@ mod tests {
                 for (underline, strike) in [(false, false), (true, false), (false, true), (true, true)] {
                     for text in [format!("{missing}a\u{f10d}"), format!("\u{f10d}{missing}a"), format!("a\u{f10d}{missing}")] {
                         let row: Vec<_> = text.chars().map(|c| crate::vt::Cell {
-                            text: c.to_string(), underline, strike, ..Default::default()
+                            text: c.to_string(), underline: underline.then_some(crate::vt::Underline::Single), strike, ..Default::default()
                         }).collect();
                         let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), None, window);
                         let rendered: String = ops.iter().filter_map(|op| match op {
@@ -4061,9 +4648,9 @@ mod tests {
             for code in (0xe000..=0xf8ff).chain(0xf0000..=0xf0fff) {
                 let text = char::from_u32(code).unwrap().to_string();
                 for decorated in [false, true] {
-                    let row = [crate::vt::Cell { text: text.clone(), underline: decorated, strike: decorated, ..Default::default() }];
+                    let row = [crate::vt::Cell { text: text.clone(), underline: decorated.then_some(crate::vt::Underline::Single), strike: decorated, ..Default::default() }];
                     let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), None, window);
-                    assert_eq!(ops.len(), 1, "U+{code:X}");
+                    assert_eq!(ops.iter().filter(|op| !matches!(op, super::RowOp::Decoration { .. })).count(), 1, "U+{code:X}");
                     match &ops[0] {
                         super::RowOp::Text { x, line } => { assert_eq!(*x, 0); assert_eq!(line.text.as_ref(), text); }
                         super::RowOp::Icon { x, .. } => assert_eq!(*x, 0),
@@ -4177,9 +4764,170 @@ mod tests {
         assert_eq!(shown_title("\u{2717} build"), "\u{2717} build");
     }
 
+    #[test]
+    fn a_spinner_after_a_short_prefix_is_not_part_of_it() {
+        use super::shown_title;
+        assert_eq!(shown_title("\u{03c0} \u{2839} fix the tests"), "\u{03c0} fix the tests", "omp's");
+        assert_eq!(shown_title("\u{03c0} \u{2827} fix the tests"), "\u{03c0} fix the tests", "every frame alike");
+        assert_eq!(shown_title("\u{03c0} \u{2839}"), "\u{03c0}", "nothing after it");
+        assert_eq!(shown_title("\u{2839} fix the tests"), "fix the tests", "codex's, in front");
+        assert_eq!(shown_title("\u{2733} Fix the tests"), "Fix the tests", "Claude Code's");
+        assert_eq!(shown_title("repo \u{00b7} branch"), "repo \u{00b7} branch", "a middle dot between words stays");
+        assert_eq!(shown_title("\u{03c0} \u{00b7} task"), "\u{03c0} \u{00b7} task", "only braille after a prefix");
+        assert_eq!(shown_title("hyper \u{2839} task"), "hyper \u{2839} task", "a word is no prefix");
+        assert_eq!(shown_title("\u{2839}"), "\u{2839}", "only a spinner: kept");
+        assert_eq!(shown_title("\u{2839} \u{2838}"), "\u{2839} \u{2838}");
+    }
+
+    #[test]
+    fn a_short_prefix_is_at_most_three_characters_and_one_space_apart() {
+        use super::shown_title;
+        use std::borrow::Cow;
+        assert_eq!(shown_title(""), "");
+        assert_eq!(shown_title("abc \u{2839} task"), "abc task", "three characters");
+        assert_eq!(shown_title("abcd \u{2839} task"), "abcd \u{2839} task", "four is a word");
+        assert_eq!(shown_title("\u{65e5}\u{672c}\u{8a9e} \u{2839} task"), "\u{65e5}\u{672c}\u{8a9e} task", "characters, not bytes");
+        assert_eq!(shown_title("\u{03c0} \u{2839}\u{2838} task"), "\u{03c0} task", "a frame of several dots");
+        assert_eq!(shown_title("\u{03c0} \u{2839}x task"), "\u{03c0} \u{2839}x task", "dots and letters are no frame");
+        assert_eq!(shown_title("\u{03c0}  \u{2839} task"), "\u{03c0}  \u{2839} task", "two spaces");
+        assert_eq!(shown_title("\u{03c0} \u{2839}   "), "\u{03c0}", "only spaces after it");
+        assert_eq!(shown_title("\u{03c0} \u{2839}   task"), "\u{03c0} task");
+        // An unchanged title is not copied.
+        assert!(matches!(shown_title("plain title"), Cow::Borrowed("plain title")));
+        assert!(matches!(shown_title("\u{2839} task"), Cow::Borrowed("task")));
+    }
+
+    #[test]
+    fn put_answers_without_a_path_always_say_why() {
+        use super::{put_answer, refusal_notice};
+        let none = Err("h0x-core put gave no path".to_owned());
+        assert_eq!(put_answer(b"", b""), none);
+        assert_eq!(put_answer(b"not json", b"  \r\n"), none);
+        assert_eq!(put_answer(br#"{"path":42}"#, b""), none);
+        // An error without a message is shown as it came.
+        assert_eq!(put_answer(b"", br#"{"error":{"kind":"x"}}"#), Err(r#"{"error":{"kind":"x"}}"#.to_owned()));
+        assert_eq!(put_answer(b"", b"no such machine\r\n"), Err("no such machine".to_owned()));
+        // A path wins over noise on stderr; a Windows path comes back as it is.
+        assert_eq!(put_answer(br#"{"path":"C:\\Users\\me\\h0x-drops\\a b.png"}"#, b"warning\n"), Ok(r"C:\Users\me\h0x-drops\a b.png".to_owned()));
+        // Several refusals: each reason once, in order.
+        let three = [("a".to_owned(), "x".to_owned()), ("b".to_owned(), "y".to_owned()), ("c".to_owned(), "y".to_owned())];
+        assert_eq!(refusal_notice(&three), Some(("Couldn't send 3 files".to_owned(), "x; y".to_owned())));
+    }
+
+    #[test]
+    fn only_a_whole_png_or_jpeg_header_is_an_image() {
+        use super::is_image_bytes;
+        assert!(is_image_bytes(b"\x89PNG\r\n\x1a\n"));
+        assert!(is_image_bytes(&[0xff, 0xd8, 0xff, 0xe0]));
+        for bytes in [&b""[..], &b"\x89PNG\r\n\x1a"[..], &b"\xff\xd8"[..], &b"GIF89a"[..], &b"\x89png\r\n\x1a\n"[..]] {
+            assert!(!is_image_bytes(bytes), "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn temporary_screenshots_are_found_by_their_folders_on_every_system() {
+        use super::{is_temporary_screenshot, stage_temporary_screenshot};
+        use std::path::Path;
+        let temp = std::env::temp_dir();
+        assert!(is_temporary_screenshot(&temp.join("TemporaryItems").join("NSIRD_").join("a.png")));
+        assert!(is_temporary_screenshot(&temp.join("TemporaryItems").join("NSIRD_x").join("deep").join("a.png")));
+        // The file itself is not its folder, and the names are case-sensitive.
+        assert!(!is_temporary_screenshot(&temp.join("TemporaryItems").join("NSIRD_x")));
+        assert!(!is_temporary_screenshot(&temp.join("temporaryitems").join("NSIRD_x").join("a.png")));
+        assert!(!is_temporary_screenshot(&temp.join("TemporaryItems").join("nsird_x").join("a.png")));
+        assert!(!is_temporary_screenshot(Path::new("")));
+        // A drive path is absolute only on Windows.
+        assert_eq!(is_temporary_screenshot(Path::new(r"C:\T\TemporaryItems\NSIRD_x\a.png")), cfg!(windows));
+        // Nothing dropped, and a thumbnail that is already gone.
+        assert!(stage_temporary_screenshot(&[]).is_none());
+        let gone = temp.join(format!("h0x-drop-gone-{}", std::process::id())).join("TemporaryItems/NSIRD_x/a.png");
+        assert!(stage_temporary_screenshot(&[gone]).is_none());
+    }
+
+    #[test]
+    fn a_jpeg_thumbnail_is_copied_into_the_drops_folder() {
+        use super::stage_temporary_screenshot;
+        let root = std::env::temp_dir().join(format!("h0x-drop-jpeg-{}", std::process::id()));
+        let shot = root.join("TemporaryItems").join("NSIRD_screencaptureui_x").join("shot one.jpg");
+        std::fs::create_dir_all(shot.parent().unwrap()).unwrap();
+        let bytes: [u8; 7] = [0xff, 0xd8, 0xff, 0xe0, 0, 1, 2];
+        std::fs::write(&shot, bytes).unwrap();
+        let staged = stage_temporary_screenshot(std::slice::from_ref(&shot)).expect("staged");
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].parent(), Some(std::env::temp_dir().join("h0x-drops").as_path()));
+        assert!(staged[0].file_name().unwrap().to_string_lossy().ends_with("-shot one.jpg"), "{:?}", staged[0]);
+        assert_eq!(std::fs::read(&staged[0]).unwrap(), bytes);
+        std::fs::remove_file(&staged[0]).unwrap();
+        // An empty file in the same place is no image: nothing is staged.
+        std::fs::create_dir_all(shot.parent().unwrap()).unwrap();
+        std::fs::write(&shot, b"").unwrap();
+        assert!(stage_temporary_screenshot(std::slice::from_ref(&shot)).is_none());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn only_shift_alt_and_control_reach_the_program() {
+        use super::mouse_mods;
+        use gpui::Modifiers;
+        assert_eq!(mouse_mods(Modifiers::default()), 0);
+        assert_eq!(mouse_mods(Modifiers { platform: true, function: true, ..Modifiers::default() }), 0);
+        let shift = mouse_mods(Modifiers { shift: true, ..Modifiers::default() });
+        assert_ne!(shift, 0);
+        assert_eq!(mouse_mods(Modifiers { shift: true, platform: true, function: true, ..Modifiers::default() }), shift);
+        let all = mouse_mods(Modifiers { shift: true, alt: true, control: true, ..Modifiers::default() });
+        let each = [
+            Modifiers { shift: true, ..Modifiers::default() },
+            Modifiers { alt: true, ..Modifiers::default() },
+            Modifiers { control: true, ..Modifiers::default() },
+        ].map(mouse_mods);
+        assert_eq!(each.iter().fold(0, |a, b| a | b), all);
+        assert_eq!(each[0] & each[1] | each[1] & each[2] | each[0] & each[2], 0, "one bit each");
+    }
+
     use super::{Quoting, key_bytes};
     use crate::vt::Vt;
     use gpui::{KeyDownEvent, Keystroke, Modifiers};
+
+    #[test]
+    fn mouse_modifiers_reach_clicks_drags_and_wheels_in_each_encoding() {
+        use ghostty_sys::*;
+        let size = (80, 24, 10.0, 20.0);
+        for mode in [0, 1005, 1006, 1015, 1016] {
+            for (mods, bits) in [
+                (Modifiers::default(), 0),
+                (Modifiers { shift: true, ..Modifiers::default() }, 4),
+                (Modifiers { alt: true, ..Modifiers::default() }, 8),
+                (Modifiers { control: true, ..Modifiers::default() }, 16),
+                (Modifiers { shift: true, alt: true, control: true, ..Modifiers::default() }, 28),
+            ] {
+                let mut vt = Vt::new(80, 24);
+                vt.write(b"\x1b[?1002h");
+                if mode != 0 {
+                    vt.write(format!("\x1b[?{mode}h").as_bytes());
+                }
+                let expected = |button: u8, release, x: u8| match mode {
+                    1006 => format!("\x1b[<{};{};2{}", button + bits, x / 10 + 1, if release { 'm' } else { 'M' }).into_bytes(),
+                    1016 => format!("\x1b[<{};{x};25{}", button + bits, if release { 'm' } else { 'M' }).into_bytes(),
+                    1015 => format!("\x1b[{};{};2M", if release { 3 } else { button } + bits + 32, x / 10 + 1).into_bytes(),
+                    _ => vec![0x1b, b'[', b'M', if release { 3 } else { button } + bits + 32, x / 10 + 33, 34],
+                };
+                for (action, button, release, x) in [
+                    (GHOSTTY_MOUSE_ACTION_PRESS, 0, false, 15),
+                    (GHOSTTY_MOUSE_ACTION_MOTION, 32, false, 25),
+                    (GHOSTTY_MOUSE_ACTION_RELEASE, 0, true, 25),
+                ] {
+                    assert_eq!(
+                        vt.encode_mouse(action, Some(GHOSTTY_MOUSE_BUTTON_LEFT), super::mouse_mods(mods), x as f32, 25.0, size, true),
+                        expected(button, release, x),
+                        "mode {mode}, modifiers {bits}, action {action}",
+                    );
+                }
+                let wheels = super::scroll_mouse_bytes(&mut vt, gpui::point(1, 1), mods, 15.0, 25.0, size);
+                assert_eq!(wheels, [expected(64, false, 15), expected(66, false, 15)].concat(), "mode {mode}, modifiers {bits}");
+            }
+        }
+    }
 
     #[test]
     fn touchpad_moves_add_up_to_whole_lines() {
@@ -4208,12 +4956,12 @@ mod tests {
             (point(-10.0, 20.0), b"\x1b[<64;2;2M\x1b[<67;2;2M".as_slice()),
         ] {
             let steps = super::scroll_delta_steps(&mut scrolled, ScrollDelta::Pixels(point(px(delta.x), px(delta.y))), TouchPhase::Moved, cell, 80, 24);
-            assert_eq!(super::scroll_mouse_bytes(&mut vt, steps, 15.0, 25.0, (80, 24, 10.0, 20.0)), expected);
+            assert_eq!(super::scroll_mouse_bytes(&mut vt, steps, Modifiers::default(), 15.0, 25.0, (80, 24, 10.0, 20.0)), expected);
         }
         let steps = super::scroll_delta_steps(&mut scrolled, ScrollDelta::Lines(point(1.0, -1.0)), TouchPhase::Moved, cell, 80, 24);
         let count = if cfg!(target_os = "macos") { 3 } else { 1 };
         assert_eq!(steps, point(1, -count));
-        assert_eq!(super::scroll_mouse_bytes(&mut vt, steps, 15.0, 25.0, (80, 24, 10.0, 20.0)), [b"\x1b[<65;2;2M".repeat(count as usize), b"\x1b[<66;2;2M".to_vec()].concat());
+        assert_eq!(super::scroll_mouse_bytes(&mut vt, steps, Modifiers::default(), 15.0, 25.0, (80, 24, 10.0, 20.0)), [b"\x1b[<65;2;2M".repeat(count as usize), b"\x1b[<66;2;2M".to_vec()].concat());
     }
 
     #[test]
@@ -4884,6 +5632,60 @@ mod tests {
             assert!(!target.exists());
         }
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_file_the_core_refuses_is_named_with_its_reason() {
+        use super::{put_answer, refusal_notice};
+        assert_eq!(put_answer(br#"{"path":"/tmp/a b.png"}"#, b""), Ok("/tmp/a b.png".to_owned()));
+        let big = br#"{"error":{"hint":"see `h0x-core schema`","kind":"invalid_params","message":"too big to send to studio (16 MB at most)"}}"#;
+        let why = put_answer(b"", big).unwrap_err();
+        assert_eq!(why, "too big to send to studio (16 MB at most)");
+        assert_eq!(put_answer(b"", b"no such machine\n"), Err("no such machine".to_owned()));
+        assert_eq!(refusal_notice(&[]), None);
+        assert_eq!(refusal_notice(&[("clip.mp4".into(), why.clone())]), Some(("Couldn't send clip.mp4".into(), why.clone())));
+        let two = refusal_notice(&[("a.mp4".into(), why.clone()), ("b.mov".into(), why.clone())]).unwrap();
+        assert_eq!(two.0, "Couldn't send 2 files");
+        assert_eq!(two.1, why);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_screenshot_thumbnail_is_staged_where_a_pane_can_read_it() {
+        use super::{is_temporary_screenshot, stage_temporary_screenshot};
+        let root = std::env::temp_dir().join(format!("h0x-drop-test-{}", std::process::id()));
+        let thumbnail = root.join("T/TemporaryItems/NSIRD_screencaptureui_vKTdfp/Screenshot 2026-10-16 at 2.09.54 PM.png");
+        std::fs::create_dir_all(thumbnail.parent().unwrap()).unwrap();
+        std::fs::write(&thumbnail, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        assert!(is_temporary_screenshot(&thumbnail));
+        let staged = stage_temporary_screenshot(std::slice::from_ref(&thumbnail)).expect("staged");
+        assert_eq!(staged.len(), 1);
+        assert!(staged[0].starts_with(std::env::temp_dir().join("h0x-drops")));
+        assert_ne!(staged[0], thumbnail);
+        assert_eq!(std::fs::read(&staged[0]).unwrap(), b"\x89PNG\r\n\x1a\nrest");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_file(&staged[0]).ok();
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn other_drops_are_left_alone() {
+        use super::{is_temporary_screenshot, stage_temporary_screenshot};
+        // A saved screenshot is readable by the pane's processes.
+        assert!(!is_temporary_screenshot(&std::path::PathBuf::from("/Users/me/Desktop/Screenshot.png")));
+        // A look-alike directory, the wrong parent, and a relative path.
+        assert!(!is_temporary_screenshot(&std::path::PathBuf::from("/T/TemporaryItems/NSIRDx/a.png")));
+        assert!(!is_temporary_screenshot(&std::path::PathBuf::from("/T/Items/NSIRD_screencaptureui_x/a.png")));
+        assert!(!is_temporary_screenshot(&std::path::PathBuf::from("TemporaryItems/NSIRD_x/a.png")));
+        // One file at a time: a multi-file drop keeps its paths.
+        let many = vec![std::path::PathBuf::from("/a.png"), std::path::PathBuf::from("/b.png")];
+        assert!(stage_temporary_screenshot(&many).is_none());
+        // A file that is not an image is not staged either.
+        let notes = std::env::temp_dir().join("T/TemporaryItems/NSIRD_x/notes.txt");
+        std::fs::create_dir_all(notes.parent().unwrap()).unwrap();
+        std::fs::write(&notes, b"hello").unwrap();
+        assert!(stage_temporary_screenshot(std::slice::from_ref(&notes)).is_none());
+        std::fs::remove_dir_all(notes.parent().unwrap().parent().unwrap()).ok();
     }
 
     #[test]
