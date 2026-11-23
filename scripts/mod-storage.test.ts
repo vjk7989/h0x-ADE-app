@@ -7,13 +7,13 @@ async function harness(mod: string, values: Record<string, string>) {
   const name = { agents: "Agents", spaces: "Spaces", tabs: "Tabs" }[mod]!;
   const data = new Map(Object.entries(values));
   const globals = {
-    View: class {}, props: () => ({}), spaces: () => [], ScrollHandle: { new: () => ({}) },
+    View: class {}, props: () => ({}), nextCommand: () => new Promise(() => {}), spaces: () => [], ScrollHandle: { new: () => ({}) },
     localStorage: { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => data.set(key, value), removeItem: (key: string) => data.delete(key) },
   };
   const Mod = new Function(...Object.keys(globals), `${source}; return ${name};`)(...Object.values(globals));
   const view = new Mod();
   view.refreshMachines = () => {};
-  view.init({}, { timer: { every() {} } });
+  view.init({}, { timer: { every() {} }, spawn() {}, notify() {} });
   return { view, data };
 }
 
@@ -39,7 +39,8 @@ for (const raw of ["{{{not json", "null", "42", '"old shape"', "{}"]) {
   });
   test(`spaces recover invalid folded machines: ${raw}`, async () => {
     const { view } = await harness("spaces", { "machines.folded": raw });
-    expect([...view.folded]).toEqual(raw === '"old shape"' ? [...new Set("old shape")] : []);
+    // HyperOx rejects a non-array saved value (upstream split the string into characters).
+    expect([...view.folded]).toEqual([]);
   });
 }
 

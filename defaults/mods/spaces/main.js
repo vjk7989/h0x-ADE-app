@@ -239,10 +239,10 @@ export default class Spaces extends View {
       while (this.pending.size) {
         const keys = [...this.pending];
         this.pending.clear();
-        let next = 0;
-        await Promise.all(Array.from({ length: Math.min(AT_ONCE, keys.length) }, async () => {
-          while (next < keys.length) await this.check(keys[next++], cx);
-        }));
+        const cursor = { next: 0 };
+        const runs = [];
+        for (let i = 0; i < Math.min(AT_ONCE, keys.length); i++) runs.push(this.checkEach(keys, cursor, cx));
+        await Promise.all(runs);
       }
       const used = new Set(Object.values(this.git).filter(Boolean).map((g) => JSON.parse(g.repo)).filter(([on]) => !on).map(([, repo]) => repo));
       for (const repo of this.watching) if (!used.has(repo)) this.watching.delete(repo);
@@ -250,6 +250,11 @@ export default class Spaces extends View {
       this.look = null; // its answers can make more due
       cx.notify();
     });
+  }
+
+  // One of the AT_ONCE workers: takes the next unchecked place until none is left.
+  async checkEach(keys, cursor, cx) {
+    while (cursor.next < keys.length) await this.check(keys[cursor.next++], cx);
   }
 
   // One place's git: branch, ahead/behind, its repo.

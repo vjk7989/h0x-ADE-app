@@ -637,20 +637,30 @@ fn reload_reports_the_tasks_it_strands(cx: &mut TestAppContext) {
     for (pending, summary) in [(true, Some("2 cx.sleep(ms)")), (false, None)] {
         let fixture = Fixture::new(&r#"
 import { View, div } from "gpui-kit";
+import { nextCommand } from "h0x";
 export default class extends View {
   init(_, cx) {
+    // Started by a command, after init: the sleeps belong to the running application.
     if (PENDING) {
-      cx.spawn(async (cx) => { await cx.sleep(600000); });
-      cx.spawn(async (cx) => { await cx.sleep(600000); });
+      cx.spawn(async (cx) => {
+        await nextCommand();
+        await Promise.all([cx.sleep(600000), cx.sleep(600000)]);
+      });
     }
   }
   render() { return div(); }
 }"#.replace("PENDING", if pending { "true" } else { "false" }));
-        gpui_shell::policy::set_default(Policy::new());
+        gpui_shell::policy::set_default(Policy::new().with_capabilities(capabilities())
+            .with_host_module(module(Instance { name: "strand-test".into(), props: Value::Null }, 45)).unwrap());
         let runtime = ShellRuntime::new_isolated().unwrap();
         let window = cx.add_window(|_, _| Empty);
         let root = window.update(cx, |_, window, cx| runtime.try_load(&fixture.0, window, cx).unwrap()).unwrap();
         cx.run_until_parked();
+        if pending {
+            set_shown_copies([45].into());
+            assert!(send_command_to(45, "go"));
+            cx.run_until_parked();
+        }
         logs.0.lock().unwrap().clear();
 
         std::fs::write(fixture.0.join("main.js"), r#"
@@ -664,6 +674,7 @@ export default class extends View { render() { return div(); } }
             Some(summary) => assert!(log.contains("stranded") && log.contains(summary), "the reload must name what it stranded: {log:?}"),
             None => assert!(!log.contains("stranded"), "nothing was pending: {log:?}"),
         }
+        set_shown_copies(Default::default());
         window.update(cx, |_, window, _| window.remove_window()).unwrap();
         cx.run_until_parked();
     }
