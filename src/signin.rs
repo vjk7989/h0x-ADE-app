@@ -18,8 +18,6 @@ use std::time::Duration;
 const MARK: &[u8] = include_bytes!("../defaults/mods/workspace-chrome/hyperox-mark.svg");
 // Lucide, stroke 1.5 (cook/SPEC.md section 9).
 // Duotone icons (cook/SPEC-v2.md section 5): a soft fill layer and a line layer, painted in two tints.
-const TOKENS_FILL: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000"><rect x="3" y="4" width="18" height="4.5" rx="2.25"/></svg>"##;
-const TOKENS_LINE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4.5" rx="2.25"/><rect x="5.5" y="10.25" width="13" height="4.5" rx="2.25"/><rect x="8.5" y="16.5" width="7" height="4.5" rx="2.25"/></svg>"##;
 const OBSERVE_FILL: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000"><rect x="3" y="4.5" width="18" height="15" rx="3.5"/></svg>"##;
 const OBSERVE_LINE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="3.5"/><path d="M6.5 14h2.5l1.75-4 2.5 7 1.75-3H17.5"/><circle cx="17.5" cy="14" r="1.25" fill="#000" stroke="none"/></svg>"##;
 const PII_FILL: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000"><path d="M12 3 5 5.8v5.4c0 4.6 2.9 8.1 7 9.8 4.1-1.7 7-5.2 7-9.8V5.8z"/></svg>"##;
@@ -39,12 +37,12 @@ const SIGN_IN: &str = "Sign in with your browser";
 const TRY_AGAIN: &str = "Try again";
 const PERKS_LEAD: &str = "Signing in turns on";
 /// The line layer of each perk's icon and its name; `PERK_FILLS` holds the fill layers, `PERK_IDS` the tile ids.
-const PERKS: [(&[u8], &str); 3] = [(TOKENS_LINE, "Token saving"), (OBSERVE_LINE, "Observability engine"), (PII_LINE, "Blockchain security for PII masking")];
-const PERK_FILLS: [&[u8]; 3] = [TOKENS_FILL, OBSERVE_FILL, PII_FILL];
-const PERK_IDS: [&str; 3] = ["feat-tokens", "feat-observe", "feat-pii"];
+const PERKS: [(&[u8], &str); 2] = [(OBSERVE_LINE, "Observability engine"), (PII_LINE, "Blockchain security for PII masking")];
+const PERK_FILLS: [&[u8]; 2] = [OBSERVE_FILL, PII_FILL];
+const PERK_IDS: [&str; 2] = ["feat-observe", "feat-pii"];
 /// One line under each perk (the owner has seen them), in the same order.
-const BENEFITS: [&str; 3] =
-    ["Leaner prompts, so agent sessions use fewer tokens.", "See what each agent ran, changed and spent.", "Personal data is masked before it leaves this computer."];
+const BENEFITS: [&str; 2] =
+    ["See what each agent ran, changed and spent.", "Personal data is masked before it leaves this computer."];
 const CONTINUE: &str = "Continue";
 const SKIP: &str = "Skip sign-in";
 const SKIP_NOTE: [&str; 2] = ["Skipping turns these off.", "Sign in later in Settings \u{2192} Profile."];
@@ -507,25 +505,27 @@ fn layout(width: f32, height: f32) -> Layout {
     }
 }
 
-/// The regular grid, in px at scale 1: three columns, the hero 312 high, the lead line, the feature row.
+/// The regular grid, in px at scale 1: three columns, the hero 312 high, the lead line, the feature row (two tiles).
 const COL: f32 = 256.0;
 const GAP: f32 = 12.0;
 const HERO_H: f32 = 312.0;
 const LEAD_H: f32 = 16.0;
 const FEATURE_H: f32 = 148.0;
+/// The two feature tiles share the grid width.
+const FEATURE_W: f32 = (3.0 * COL + 2.0 * GAP - GAP) / 2.0;
 const GRID_W: f32 = 3.0 * COL + 2.0 * GAP;
 const GRID_H: f32 = HERO_H + GAP + LEAD_H + GAP + FEATURE_H;
 
-/// The five tiles of the regular grid in window coordinates as (left, top, right, bottom): hero, mark,
-/// then the three features. The grid is centred.
-fn tile_rects(width: f32, height: f32, scale: f32) -> [(f32, f32, f32, f32); 5] {
+/// The four tiles of the regular grid in window coordinates as (left, top, right, bottom): hero, mark,
+/// then the two features. The grid is centred.
+fn tile_rects(width: f32, height: f32, scale: f32) -> [(f32, f32, f32, f32); 4] {
     let (x0, y0) = ((width - GRID_W * scale) / 2.0, height / 2.0 - GRID_H * scale / 2.0);
     let rect = |col: f32, row_top: f32, cols: f32, h: f32| {
         let (left, top) = (x0 + col * (COL + GAP) * scale, y0 + row_top * scale);
         (left, top, left + (cols * COL + (cols - 1.0) * GAP) * scale, top + h * scale)
     };
     let features = HERO_H + GAP + LEAD_H + GAP;
-    [rect(0.0, 0.0, 2.0, HERO_H), rect(2.0, 0.0, 1.0, HERO_H), rect(0.0, features, 1.0, FEATURE_H), rect(1.0, features, 1.0, FEATURE_H), rect(2.0, features, 1.0, FEATURE_H)]
+    [rect(0.0, 0.0, 2.0, HERO_H), rect(2.0, 0.0, 1.0, HERO_H), rect(0.0, features, 1.5, FEATURE_H), rect(1.5, features, 1.5, FEATURE_H)]
 }
 
 /// The compact grid's width: 712, or the window less 16 on each side.
@@ -906,8 +906,8 @@ fn consent_row(agreed: bool, focus: &FocusHandle, s: f32, light: bool, toggle: i
 
 /// The main action: a solid button with a lit top edge and a soft lift, and the focus ring while it has focus
 /// (not `focus_visible`: the ring must not hide after a mouse move).
-/// `off`: it cannot be used yet (faded, no hover).
-fn primary_button(id: &'static str, label: &'static str, s: f32, off: bool) -> Stateful<Div> {
+/// `off`: it cannot be used yet (faded, no hover). `external`: it opens the browser, so it shows the link glyph.
+fn primary_button(id: &'static str, label: &'static str, s: f32, off: bool, external: bool) -> Stateful<Div> {
     let lift = BoxShadow::new(px(0.0), z(8.0, s), c("solid").opacity(0.7)).blur_radius(z(20.0, s)).spread_radius(z(-10.0, s));
     let mut focused = ring();
     focused.push(lift.clone());
@@ -939,7 +939,12 @@ fn primary_button(id: &'static str, label: &'static str, s: f32, off: bool) -> S
     button
         .child(div().absolute().top(px(0.0)).left(z(12.0, s)).right(z(12.0, s)).h(px(1.0)).bg(white().opacity(0.25)))
         .child(label)
-        .child(svg().data(OPEN_ICON).size(z(15.0, s)).flex_none().text_color(c("solid_foreground")))
+        .when(external, |d| d.child(svg().data(OPEN_ICON).size(z(15.0, s)).flex_none().text_color(c("solid_foreground"))))
+}
+
+/// Every primary label opens the browser except Continue, which only records the agreement.
+fn opens_browser(label: &str) -> bool {
+    label != CONTINUE
 }
 
 /// Cancel and Skip: a quiet glass button. `off`: it cannot be used yet (faded, no hover).
@@ -1113,7 +1118,7 @@ impl Render for SignIn {
                     .when(self.ask && view.secondary.is_none(), |d| d.child(consent_row(self.agreed, &self.consent_focus, s, light, cx.listener(|this, _, _, cx| this.toggle_consent(cx)))))
                     .when_some(view.primary, |d, label| {
                         let id = if idle { "signin" } else { "retry" };
-                        d.child(primary_button(id, label, s, off).track_focus(&self.primary_focus).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
+                        d.child(primary_button(id, label, s, off, opens_browser(label)).track_focus(&self.primary_focus).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
                     })
                     .when_some(view.secondary, |d, label| d.child(quiet_button("cancel", label, s, light, false).on_click(cx.listener(|this, _, w, cx| this.cancel(w, cx)))))
                     .when_some(view.note, |d, note| {
@@ -1198,10 +1203,10 @@ impl Render for SignIn {
                 )
         };
 
-        // "Signing in turns on" and the three features.
-        let features = (0..3).map(|i| {
+        // "Signing in turns on" and the two features.
+        let features = (0..2).map(|i| {
             let tile = feature(i, s, compact, tint, light);
-            if compact { tile.flex_1().min_w(px(0.0)).h(px(122.0)) } else { tile.flex_none().w(z(COL, s)).h(z(FEATURE_H, s)) }
+            if compact { tile.flex_1().min_w(px(0.0)).h(px(122.0)) } else { tile.flex_none().w(z(FEATURE_W, s)).h(z(FEATURE_H, s)) }
         });
         let gap = if compact { 10.0 } else { GAP };
         let perks = div()
@@ -1371,21 +1376,22 @@ mod tests {
 
     #[test]
     fn the_tiles_sit_in_a_grid_centred_in_the_window() {
-        use super::{COL, FEATURE_H, GAP, GRID_H, GRID_W, HERO_H, LEAD_H, tile_rects};
-        let [hero, mark, a, b, c] = tile_rects(1280.0, 800.0, 1.0);
+        use super::{COL, FEATURE_H, FEATURE_W, GAP, GRID_H, GRID_W, HERO_H, LEAD_H, tile_rects};
+        let [hero, mark, a, b] = tile_rects(1280.0, 800.0, 1.0);
         // The 1280 x 800 window: the hero is two columns and a gap, the mark tile the third column, the features sit below.
         let (x0, y0, step) = ((1280.0 - GRID_W) / 2.0, (800.0 - GRID_H) / 2.0, COL + GAP);
         let hero_w = 2.0 * COL + GAP;
         assert_eq!(hero, (x0, y0, x0 + hero_w, y0 + HERO_H));
         assert_eq!(mark, (x0 + 2.0 * step, y0, x0 + 2.0 * step + COL, y0 + HERO_H));
         let row = y0 + HERO_H + GAP + LEAD_H + GAP;
-        assert_eq!((a, b, c), ((x0, row, x0 + COL, row + FEATURE_H), (x0 + step, row, x0 + step + COL, row + FEATURE_H), (x0 + 2.0 * step, row, x0 + 2.0 * step + COL, row + FEATURE_H)));
+        assert_eq!((a, b), ((x0, row, x0 + FEATURE_W, row + FEATURE_H), (x0 + FEATURE_W + GAP, row, x0 + GRID_W, row + FEATURE_H)));
+        assert_eq!(FEATURE_W * 2.0 + GAP, GRID_W, "two tiles span the grid");
         assert_eq!((GRID_W, GRID_H), (3.0 * COL + 2.0 * GAP, HERO_H + GAP + LEAD_H + GAP + FEATURE_H));
         // Centred as a unit at any size and scale.
         for (w, h, s) in [(1280.0, 800.0, 1.0), (1920.0, 1080.0, 1.12), (840.0, 680.0, 1.0)] {
             let rects = tile_rects(w, h, s);
             let (left, top) = (rects[0].0, rects[0].1);
-            let (right, bottom) = (rects[1].2, rects[4].3);
+            let (right, bottom) = (rects[1].2, rects[3].3);
             assert!(((left + right) / 2.0 - w / 2.0).abs() < 0.01, "{w}x{h}");
             assert!(((top + bottom) / 2.0 - h / 2.0).abs() < 0.01, "{w}x{h}");
             assert!((right - left - GRID_W * s).abs() < 0.01 && (bottom - top - GRID_H * s).abs() < 0.01);
@@ -1394,9 +1400,9 @@ mod tests {
 
     #[test]
     fn the_icons_are_duotone_pairs_a_soft_fill_and_a_line() {
-        use super::{ALERT_ICON, ARROW_ICON, CHAIN_FILL, CHAIN_LINE, GLOBE_FILL, GLOBE_LINE, OBSERVE_FILL, OBSERVE_LINE, OPEN_ICON, PERK_FILLS, PERKS, PII_FILL, PII_LINE, TOKENS_FILL, TOKENS_LINE};
+        use super::{ALERT_ICON, ARROW_ICON, CHAIN_FILL, CHAIN_LINE, GLOBE_FILL, GLOBE_LINE, OBSERVE_FILL, OBSERVE_LINE, OPEN_ICON, PERK_FILLS, PERKS, PII_FILL, PII_LINE};
         let text = |b: &[u8]| std::str::from_utf8(b).unwrap().to_owned();
-        for (fill, line) in [(TOKENS_FILL, TOKENS_LINE), (OBSERVE_FILL, OBSERVE_LINE), (PII_FILL, PII_LINE), (GLOBE_FILL, GLOBE_LINE), (CHAIN_FILL, CHAIN_LINE)] {
+        for (fill, line) in [(OBSERVE_FILL, OBSERVE_LINE), (PII_FILL, PII_LINE), (GLOBE_FILL, GLOBE_LINE), (CHAIN_FILL, CHAIN_LINE)] {
             let (fill, line) = (text(fill), text(line));
             assert!(fill.contains("viewBox=\"0 0 24 24\"") && fill.contains("fill=\"#000\"") && !fill.contains("stroke"), "{fill}");
             assert!(line.contains("viewBox=\"0 0 24 24\"") && line.contains("stroke-width=\"1.5\"") && line.contains("fill=\"none\""), "{line}");
@@ -1408,9 +1414,9 @@ mod tests {
             assert!(text(single).contains("stroke-width=\"1.5\""));
         }
         assert_eq!(PERK_FILLS.len(), PERKS.len());
-        assert_eq!(PERK_FILLS[0], TOKENS_FILL);
-        assert_eq!(PERKS[1].0, OBSERVE_LINE);
-        assert_eq!(PERKS[2].0, PII_LINE);
+        assert_eq!(PERK_FILLS[0], OBSERVE_FILL);
+        assert_eq!(PERKS[0].0, OBSERVE_LINE);
+        assert_eq!(PERKS[1].0, PII_LINE);
     }
 
     #[test]
@@ -1572,13 +1578,12 @@ mod tests {
         assert_eq!((super::PARTNER_URL, super::PARTNER_DOMAIN, super::PARTNER_NOTE), ("https://buckleson.com", "buckleson.com", "Blockchain & security partner"));
         // Only the screen's own code counts, not this list.
         let source = include_str!("signin.rs").split("#[cfg(test)]").next().unwrap();
-        for id in ["signin-root", "signin-card", "signin-perks", "\"signin\"", "\"retry\"", "\"cancel\"", "\"signin-skip\"", "signin-skip-note", "\"team\"", "\"partner\"", "signin-rain", "signin-mark", "feat-tokens", "feat-observe", "feat-pii"] {
+        for id in ["signin-root", "signin-card", "signin-perks", "\"signin\"", "\"retry\"", "\"cancel\"", "\"signin-skip\"", "signin-skip-note", "\"team\"", "\"partner\"", "signin-rain", "signin-mark", "feat-observe", "feat-pii"] {
             assert!(source.contains(id), "{id}");
         }
         assert_eq!(BENEFITS.len(), PERKS.len());
-        assert_eq!(BENEFITS[0], "Leaner prompts, so agent sessions use fewer tokens.");
-        assert_eq!(BENEFITS[1], "See what each agent ran, changed and spent.");
-        assert_eq!(BENEFITS[2], "Personal data is masked before it leaves this computer.");
+        assert_eq!(BENEFITS[0], "See what each agent ran, changed and spent.");
+        assert_eq!(BENEFITS[1], "Personal data is masked before it leaves this computer.");
     }
 
     #[test]
@@ -1611,7 +1616,7 @@ mod tests {
     fn the_perks_come_in_the_owners_words_and_order() {
         assert_eq!(PERKS_LEAD, "Signing in turns on");
         let labels: Vec<&str> = PERKS.iter().map(|(_, l)| *l).collect();
-        assert_eq!(labels, ["Token saving", "Observability engine", "Blockchain security for PII masking"]);
+        assert_eq!(labels, ["Observability engine", "Blockchain security for PII masking"], "Token saving is on by default, so it is not a sign-in perk");
     }
 
     #[test]
@@ -1675,7 +1680,7 @@ mod tests {
         use super::{GRID_H, GRID_W, layout, tile_rects};
         let (w, h) = (842.0, 684.0);
         assert_eq!(layout(w, h).mode, super::Mode::Regular);
-        let [hero, mark, a, _, c] = tile_rects(w, h, 1.0);
+        let [hero, mark, a, c] = tile_rects(w, h, 1.0);
         let left = (w - GRID_W) / 2.0;
         assert_eq!(hero, (left, (h - GRID_H) / 2.0, left + 2.0 * super::COL + super::GAP, (h - GRID_H) / 2.0 + 312.0));
         assert!((hero.0 - (w - mark.2)).abs() < 0.5, "centred: the left margin {} equals the right margin {}", hero.0, w - mark.2);
@@ -1712,14 +1717,186 @@ mod tests {
 
     #[test]
     fn the_consent_only_form_has_one_continue_button_and_nothing_else_to_choose() {
-        use super::{CONTINUE, blocked, content_only};
+        use super::{CONTINUE, SIGN_IN, TRY_AGAIN, blocked, content_only, opens_browser};
         let c = content_only();
         assert_eq!((c.primary, c.secondary, c.note, c.skip, c.status), (Some(CONTINUE), None, None, false, None));
         assert_eq!(CONTINUE, "Continue");
+        // Continue is local: no external-link glyph. The browser buttons keep theirs.
+        assert!(!opens_browser(CONTINUE));
+        for label in [SIGN_IN, TRY_AGAIN] {
+            assert!(opens_browser(label), "{label}");
+        }
         // Blocked until ticked: Enter (and a click, which `start` guards the same way) does nothing, then continues.
         assert!(blocked(true, false) && !blocked(true, true));
         assert_eq!(enter_action(State::Idle, false, blocked(true, false)), Action::None);
         assert_eq!(enter_action(State::Idle, false, blocked(true, true)), Action::Start);
+    }
+
+    #[test]
+    fn only_the_consent_only_continue_drops_the_link_glyph_in_every_state_and_layout() {
+        use super::{CONTINUE, content_only, opens_browser};
+        // Every primary label the screen can show: each failure offers Try again, which opens the browser; waiting has none.
+        for state in [State::Idle, State::Waiting, State::Failed(CANCELLED), State::Failed(OTHER), State::Failed(REJECTED), State::Failed(TIMEOUT), State::Failed(UNREACHABLE)] {
+            if let Some(label) = content(state).primary {
+                assert!(opens_browser(label), "{label}");
+            }
+        }
+        assert_eq!(content_only().primary.map(opens_browser), Some(false));
+        assert!(opens_browser(SIGN_IN) && opens_browser(TRY_AGAIN) && !opens_browser(CONTINUE));
+        // One code path for both layouts: the glyph only under `external`, and the only primary button decides it from the label.
+        let source = include_str!("signin.rs").split("#[cfg(test)]").next().unwrap();
+        assert_eq!(source.matches("data(OPEN_ICON)").count(), 1, "one link glyph");
+        assert!(source.contains(".when(external, |d| d.child(svg().data(OPEN_ICON)"), "the glyph is drawn only for a browser button");
+        let calls: Vec<&str> = source.match_indices("primary_button(").map(|(i, _)| &source[i..i + source[i..].find('\n').unwrap()]).collect();
+        assert_eq!(calls.len(), 2, "the definition and one call: {calls:?}");
+        assert!(calls[1].contains("primary_button(id, label, s, off, opens_browser(label))") && !calls[1].contains("compact"), "{calls:?}");
+    }
+
+    #[test]
+    fn the_two_feature_tiles_fill_the_row_without_overlap_at_every_regular_size() {
+        use super::{FEATURE_H, FEATURE_W, GAP, GRID_W, HERO_H, LEAD_H, Mode, layout, tile_rects};
+        assert_eq!(FEATURE_W, 390.0);
+        // The smallest regular windows (840 x 680), the default (842 x 684), both sides of the 1.12 scale step, a large screen.
+        for (w, h) in [(840.0, 680.0), (842.0, 684.0), (1599.0, 949.0), (1600.0, 950.0), (2560.0, 1440.0)] {
+            let lay = layout(w, h);
+            assert_eq!(lay.mode, Mode::Regular, "{w}x{h}");
+            let s = lay.scale;
+            let [hero, mark, a, b] = tile_rects(w, h, s);
+            let close = |x: f32, y: f32| (x - y).abs() < 0.01;
+            // The rendered width (z(FEATURE_W, s)) is the rect's width, and both tiles are the same size.
+            assert!(close(a.2 - a.0, FEATURE_W * s) && close(b.2 - b.0, FEATURE_W * s), "{w}x{h}: {a:?} {b:?}");
+            assert!(close(a.3 - a.1, FEATURE_H * s) && close(b.3 - b.1, FEATURE_H * s) && a.1 == b.1, "{w}x{h}: one row");
+            // Edge to edge under the hero and the mark tile, one gap between them.
+            assert!(close(a.0, hero.0) && close(b.2, mark.2) && close(b.2 - a.0, GRID_W * s), "{w}x{h}: the row is filled");
+            assert!(close(b.0 - a.2, GAP * s), "{w}x{h}: no overlap, one gap: {a:?} {b:?}");
+            // Below the hero, the mark and the lead line; inside the window and above the 36 px footer.
+            assert!(close(a.1, hero.3 + (GAP + LEAD_H + GAP) * s) && close(hero.3, hero.1 + HERO_H * s) && a.1 > mark.3, "{w}x{h}");
+            assert!(a.0 >= 0.0 && hero.1 >= 0.0 && b.2 <= w && b.3 + 36.0 <= h, "{w}x{h}: inside the window: {hero:?} {b:?}");
+        }
+    }
+
+    #[test]
+    fn the_compact_feature_row_splits_its_width_in_two_down_to_the_620_minimum() {
+        use super::{Mode, compact_width, layout};
+        // The narrowest and shortest windows the screen opens at, and just inside the compact layout.
+        let (min_w, min_h) = (window_width(Some(0.0)), window_height(Some(0.0)));
+        assert_eq!((min_w, min_h), (620.0, 460.0));
+        for (w, h) in [(min_w, min_h), (min_w, 684.0), (839.0, 684.0), (842.0, 679.0), (842.0, min_h)] {
+            assert_eq!(layout(w, h).mode, Mode::Compact, "{w}x{h}");
+            let row = compact_width(w);
+            // Two flex_1 tiles and one 10 px gap: each gets half of the rest, and neither is squeezed to nothing.
+            let tile = (row - 10.0) / 2.0;
+            assert!(tile * 2.0 + 10.0 == row && tile >= 289.0, "{w}x{h}: {tile}");
+            assert!(row <= w - 32.0 && (w - row) / 2.0 >= 16.0, "{w}x{h}: 16 px or more each side: {row}");
+        }
+    }
+
+    // The full form (not the consent-only one) with two feature tiles, at the regular size, just inside compact and at the
+    // smallest window: Tab and Shift-Tab reach the box, the main button and Skip, in that order from the box, whether
+    // ticked or not and after a failure. Then the consent-only form at the smallest window: Tab reaches the box and Continue.
+    #[gpui::test]
+    fn tab_reaches_every_control_of_the_sign_in_screen_at_every_window_size(cx: &mut gpui::TestAppContext) {
+        use super::{Mode, SignIn, layout};
+        use gpui::{FocusHandle, InputEvent as _, KeyUpEvent, Keystroke, VisualTestContext, px, size};
+        use std::{cell::RefCell, rc::Rc};
+        fn press(cx: &mut VisualTestContext, key: &str) {
+            cx.simulate_keystrokes(key);
+            let keystroke = Keystroke::parse(key).unwrap();
+            cx.update(|window, cx| {
+                window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        // The Tab presses until `target` has focus, or None; `seen` gets every other handle met on the way.
+        fn presses_to(cx: &mut VisualTestContext, key: &str, target: &FocusHandle, others: &[&FocusHandle], seen: &mut Vec<usize>) -> Option<usize> {
+            for n in 0..24 {
+                if cx.update(|window, _| target.is_focused(window)) {
+                    return Some(n);
+                }
+                for (i, other) in others.iter().enumerate() {
+                    if cx.update(|window, _| other.is_focused(window)) && !seen.contains(&i) {
+                        seen.push(i);
+                    }
+                }
+                press(cx, key);
+            }
+            None
+        }
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let primary_focus = cx.focus_handle().tab_stop(true);
+            window.focus(&primary_focus, cx);
+            SignIn {
+                state: State::Idle,
+                attempt: 0,
+                core: None,
+                requests: None,
+                focus: cx.focus_handle(),
+                primary_focus,
+                skip_focus: cx.focus_handle().tab_stop(true),
+                consent_focus: cx.focus_handle().tab_stop(true),
+                ask: true,
+                agreed: false,
+                only: false,
+                held: Vec::new(),
+                frame: 0,
+                rain: Rc::new(RefCell::new(super::RainPaint::default())),
+            }
+        });
+        let (primary, skip, consent) = cx.update(|_, app| {
+            let v = view.read(app);
+            (v.primary_focus.clone(), v.skip_focus.clone(), v.consent_focus.clone())
+        });
+        for (w, h, mode) in [(842.0, 684.0, Mode::Regular), (839.0, 684.0, Mode::Compact), (620.0, 460.0, Mode::Compact)] {
+            cx.simulate_resize(size(px(w), px(h)));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(cx.update(|window, _| window.viewport_size()), size(px(w), px(h)));
+            assert_eq!(layout(w, h).mode, mode, "{w}x{h}");
+            for (state, agreed) in [(State::Idle, false), (State::Idle, true), (State::Failed(CANCELLED), true)] {
+                cx.update(|_, app| {
+                    view.update(app, |v, _| {
+                        v.state = state;
+                        v.agreed = agreed;
+                    })
+                });
+                let what = format!("{w}x{h} {:?} agreed {agreed}", content(state).primary);
+                cx.update(|window, app| window.focus(&consent, app));
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                // Forward from the box: the main button, then Skip, then round to the box again.
+                let mut seen = Vec::new();
+                assert!(presses_to(cx, "tab", &primary, &[&skip], &mut seen).is_some(), "{what}: Tab reaches the main button");
+                assert!(seen.is_empty(), "{what}: the main button comes before Skip");
+                assert!(presses_to(cx, "tab", &skip, &[&consent], &mut seen).is_some(), "{what}: Tab reaches Skip");
+                assert!(seen.is_empty(), "{what}: Skip comes before the box again");
+                assert!(presses_to(cx, "tab", &consent, &[], &mut seen).is_some(), "{what}: Tab comes round to the box");
+                // Backward from the box: Skip first (round the end), then the main button.
+                assert!(presses_to(cx, "shift-tab", &skip, &[&primary], &mut seen).is_some(), "{what}: Shift-Tab reaches Skip");
+                assert!(seen.is_empty(), "{what}: Shift-Tab meets Skip before the main button");
+                assert!(presses_to(cx, "shift-tab", &primary, &[], &mut seen).is_some(), "{what}: Shift-Tab reaches the main button");
+                // Tab never ticks the box nor starts a sign-in.
+                let (now_agreed, idle_or_failed) = cx.update(|_, app| {
+                    let v = view.read(app);
+                    (v.agreed, !matches!(v.state, State::Waiting))
+                });
+                assert!(now_agreed == agreed && idle_or_failed, "{what}");
+            }
+        }
+        // The consent-only form at the smallest window: no Skip, and Tab still reaches the box and Continue.
+        cx.update(|_, app| {
+            view.update(app, |v, _| {
+                v.only = true;
+                v.state = State::Idle;
+                v.agreed = false;
+            })
+        });
+        cx.update(|window, app| window.focus(&primary, app));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let mut seen = Vec::new();
+        assert!(presses_to(cx, "tab", &consent, &[&skip], &mut seen).is_some(), "620x460 consent-only: Tab reaches the box");
+        assert!(presses_to(cx, "tab", &primary, &[&skip], &mut seen).is_some(), "620x460 consent-only: Tab reaches Continue");
+        assert!(seen.is_empty(), "620x460 consent-only: no Skip to reach");
+        cx.update(|_, app| view.update(app, |v, _| v.state = State::Idle));
     }
 
     #[test]

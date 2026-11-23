@@ -2816,6 +2816,54 @@ fn logo_menu_waits_while_an_account_change_runs_and_the_user_mod_only_opens_the_
 }
 
 #[gpui::test]
+fn settings_profile_token_saving_row_shows_the_real_state_signed_in_or_out_and_is_not_a_sign_in_feature(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let signed_in = account_value(&[("u1", "google.com", "vijay")], Some("u1"));
+    // Default (no file, empty file, true) is on; only an explicit false is off.
+    for (label, account, heading) in [("signed in", signed_in, "Included with your account"), ("signed out", account_value(&[], None), "Turned on when you sign in")] {
+        for (file, on) in [(None, true), (Some("{}"), true), (Some(r#"{"token_saver": true}"#), true), (Some(r#"{"token_saver": false}"#), false)] {
+            let (trees, _) = describe_pressing(cx, &staged, "frame/settings", profile_values(account.clone()), file, "", 0);
+            let tree = &trees[0];
+            let at = tree.find("st-prof-tokens").unwrap_or_else(|| panic!("{label} {file:?}: {tree}"));
+            let row = &tree[at..tree.find("st-prof-observe").unwrap_or(tree.len())];
+            let (shown, hidden) = if on { ("text \"on\"", "text \"off\"") } else { ("text \"off\"", "text \"on\"") };
+            assert!(row.contains("Token saving") && row.contains(shown) && !row.contains(hidden), "{label} {file:?}: {row}");
+            assert!(at < tree.find(heading).unwrap(), "{label} {file:?}: Token saving sits above the sign-in list: {tree}");
+        }
+    }
+}
+
+#[gpui::test]
+fn settings_profile_token_saving_agrees_with_0x_modes_and_the_app_for_values_that_are_not_a_boolean(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let signed_in = account_value(&[("u1", "google.com", "vijay")], Some("u1"));
+    // Only false is off. A wrong type is the default, on: in Profile, on the 0x Modes switch, and where the app reads it (bool_or_true).
+    let wrong: Vec<String> = [r#"null"#, "0", "1", r#""false""#, r#""off""#, r#""""#, "[]", "{}", "[false]"].iter().map(|v| format!(r#"{{"token_saver": {v}}}"#)).collect();
+    for file in &wrong {
+        let person: crate::settings::Person = serde_json::from_str(file).unwrap_or_else(|e| panic!("{file}: {e}"));
+        assert!(person.token_saver, "{file}: the app reads it as on");
+    }
+    // A file the page can't read (empty, not JSON, not an object) is the default person too.
+    let unreadable = ["", "{not json", "null", "[]", "true", "\u{feff}"];
+    for file in wrong.iter().map(String::as_str).chain(unreadable) {
+        let (modes, _) = describe_pressing(cx, &staged, "frame/settings", modes_values(), Some(file), TOKEN_SAVER_PRESS, 0);
+        assert!(modes[0].contains("st-token-saver-on") && !modes[0].contains("st-token-saver-off"), "{file:?}: 0x Modes: {}", modes[0]);
+        for (label, account) in [("signed in", signed_in.clone()), ("signed out", account_value(&[], None))] {
+            let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", profile_values(account), Some(file), "", 0);
+            let tree = &trees[0];
+            // One Token saving row, on, and it is never listed with the sign-in features.
+            assert_eq!((tree.matches("st-prof-tokens").count(), tree.matches("Token saving").count()), (1, 1), "{label} {file:?}: {tree}");
+            let at = tree.find("st-prof-tokens").unwrap();
+            let row = &tree[at..tree.find("st-prof-observe").unwrap_or_else(|| panic!("{label} {file:?}: {tree}"))];
+            assert!(row.contains("text \"on\"") && !row.contains("text \"off\""), "{label} {file:?}: {row}");
+            assert!(calls.borrow().writes.is_empty(), "{label} {file:?}: showing the row writes nothing: {:?}", calls.borrow().writes);
+        }
+    }
+}
+
+#[gpui::test]
 fn settings_profile_with_saved_accounts_but_none_current_lists_them_all_with_no_check(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
