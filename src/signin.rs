@@ -1733,6 +1733,173 @@ mod tests {
     }
 
     #[test]
+    fn only_the_consent_only_continue_drops_the_link_glyph_in_every_state_and_layout() {
+        use super::{CONTINUE, content_only, opens_browser};
+        // Every primary label the screen can show: each failure offers Try again, which opens the browser; waiting has none.
+        for state in [State::Idle, State::Waiting, State::Failed(CANCELLED), State::Failed(OTHER), State::Failed(REJECTED), State::Failed(TIMEOUT), State::Failed(UNREACHABLE)] {
+            if let Some(label) = content(state).primary {
+                assert!(opens_browser(label), "{label}");
+            }
+        }
+        assert_eq!(content_only().primary.map(opens_browser), Some(false));
+        assert!(opens_browser(SIGN_IN) && opens_browser(TRY_AGAIN) && !opens_browser(CONTINUE));
+        // One code path for both layouts: the glyph only under `external`, and the only primary button decides it from the label.
+        let source = include_str!("signin.rs").split("#[cfg(test)]").next().unwrap();
+        assert_eq!(source.matches("data(OPEN_ICON)").count(), 1, "one link glyph");
+        assert!(source.contains(".when(external, |d| d.child(svg().data(OPEN_ICON)"), "the glyph is drawn only for a browser button");
+        let calls: Vec<&str> = source.match_indices("primary_button(").map(|(i, _)| &source[i..i + source[i..].find('\n').unwrap()]).collect();
+        assert_eq!(calls.len(), 2, "the definition and one call: {calls:?}");
+        assert!(calls[1].contains("primary_button(id, label, s, off, opens_browser(label))") && !calls[1].contains("compact"), "{calls:?}");
+    }
+
+    #[test]
+    fn the_two_feature_tiles_fill_the_row_without_overlap_at_every_regular_size() {
+        use super::{FEATURE_H, FEATURE_W, GAP, GRID_W, HERO_H, LEAD_H, Mode, layout, tile_rects};
+        assert_eq!(FEATURE_W, 390.0);
+        // The smallest regular windows (840 x 680), the default (842 x 684), both sides of the 1.12 scale step, a large screen.
+        for (w, h) in [(840.0, 680.0), (842.0, 684.0), (1599.0, 949.0), (1600.0, 950.0), (2560.0, 1440.0)] {
+            let lay = layout(w, h);
+            assert_eq!(lay.mode, Mode::Regular, "{w}x{h}");
+            let s = lay.scale;
+            let [hero, mark, a, b] = tile_rects(w, h, s);
+            let close = |x: f32, y: f32| (x - y).abs() < 0.01;
+            // The rendered width (z(FEATURE_W, s)) is the rect's width, and both tiles are the same size.
+            assert!(close(a.2 - a.0, FEATURE_W * s) && close(b.2 - b.0, FEATURE_W * s), "{w}x{h}: {a:?} {b:?}");
+            assert!(close(a.3 - a.1, FEATURE_H * s) && close(b.3 - b.1, FEATURE_H * s) && a.1 == b.1, "{w}x{h}: one row");
+            // Edge to edge under the hero and the mark tile, one gap between them.
+            assert!(close(a.0, hero.0) && close(b.2, mark.2) && close(b.2 - a.0, GRID_W * s), "{w}x{h}: the row is filled");
+            assert!(close(b.0 - a.2, GAP * s), "{w}x{h}: no overlap, one gap: {a:?} {b:?}");
+            // Below the hero, the mark and the lead line; inside the window and above the 36 px footer.
+            assert!(close(a.1, hero.3 + (GAP + LEAD_H + GAP) * s) && close(hero.3, hero.1 + HERO_H * s) && a.1 > mark.3, "{w}x{h}");
+            assert!(a.0 >= 0.0 && hero.1 >= 0.0 && b.2 <= w && b.3 + 36.0 <= h, "{w}x{h}: inside the window: {hero:?} {b:?}");
+        }
+    }
+
+    #[test]
+    fn the_compact_feature_row_splits_its_width_in_two_down_to_the_620_minimum() {
+        use super::{Mode, compact_width, layout};
+        // The narrowest and shortest windows the screen opens at, and just inside the compact layout.
+        let (min_w, min_h) = (window_width(Some(0.0)), window_height(Some(0.0)));
+        assert_eq!((min_w, min_h), (620.0, 460.0));
+        for (w, h) in [(min_w, min_h), (min_w, 684.0), (839.0, 684.0), (842.0, 679.0), (842.0, min_h)] {
+            assert_eq!(layout(w, h).mode, Mode::Compact, "{w}x{h}");
+            let row = compact_width(w);
+            // Two flex_1 tiles and one 10 px gap: each gets half of the rest, and neither is squeezed to nothing.
+            let tile = (row - 10.0) / 2.0;
+            assert!(tile * 2.0 + 10.0 == row && tile >= 289.0, "{w}x{h}: {tile}");
+            assert!(row <= w - 32.0 && (w - row) / 2.0 >= 16.0, "{w}x{h}: 16 px or more each side: {row}");
+        }
+    }
+
+    // The full form (not the consent-only one) with two feature tiles, at the regular size, just inside compact and at the
+    // smallest window: Tab and Shift-Tab reach the box, the main button and Skip, in that order from the box, whether
+    // ticked or not and after a failure. Then the consent-only form at the smallest window: Tab reaches the box and Continue.
+    #[gpui::test]
+    fn tab_reaches_every_control_of_the_sign_in_screen_at_every_window_size(cx: &mut gpui::TestAppContext) {
+        use super::{Mode, SignIn, layout};
+        use gpui::{FocusHandle, InputEvent as _, KeyUpEvent, Keystroke, VisualTestContext, px, size};
+        use std::{cell::RefCell, rc::Rc};
+        fn press(cx: &mut VisualTestContext, key: &str) {
+            cx.simulate_keystrokes(key);
+            let keystroke = Keystroke::parse(key).unwrap();
+            cx.update(|window, cx| {
+                window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        // The Tab presses until `target` has focus, or None; `seen` gets every other handle met on the way.
+        fn presses_to(cx: &mut VisualTestContext, key: &str, target: &FocusHandle, others: &[&FocusHandle], seen: &mut Vec<usize>) -> Option<usize> {
+            for n in 0..24 {
+                if cx.update(|window, _| target.is_focused(window)) {
+                    return Some(n);
+                }
+                for (i, other) in others.iter().enumerate() {
+                    if cx.update(|window, _| other.is_focused(window)) && !seen.contains(&i) {
+                        seen.push(i);
+                    }
+                }
+                press(cx, key);
+            }
+            None
+        }
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let primary_focus = cx.focus_handle().tab_stop(true);
+            window.focus(&primary_focus, cx);
+            SignIn {
+                state: State::Idle,
+                attempt: 0,
+                core: None,
+                requests: None,
+                focus: cx.focus_handle(),
+                primary_focus,
+                skip_focus: cx.focus_handle().tab_stop(true),
+                consent_focus: cx.focus_handle().tab_stop(true),
+                ask: true,
+                agreed: false,
+                only: false,
+                held: Vec::new(),
+                frame: 0,
+                rain: Rc::new(RefCell::new(super::RainPaint::default())),
+            }
+        });
+        let (primary, skip, consent) = cx.update(|_, app| {
+            let v = view.read(app);
+            (v.primary_focus.clone(), v.skip_focus.clone(), v.consent_focus.clone())
+        });
+        for (w, h, mode) in [(842.0, 684.0, Mode::Regular), (839.0, 684.0, Mode::Compact), (620.0, 460.0, Mode::Compact)] {
+            cx.simulate_resize(size(px(w), px(h)));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(cx.update(|window, _| window.viewport_size()), size(px(w), px(h)));
+            assert_eq!(layout(w, h).mode, mode, "{w}x{h}");
+            for (state, agreed) in [(State::Idle, false), (State::Idle, true), (State::Failed(CANCELLED), true)] {
+                cx.update(|_, app| {
+                    view.update(app, |v, _| {
+                        v.state = state;
+                        v.agreed = agreed;
+                    })
+                });
+                let what = format!("{w}x{h} {:?} agreed {agreed}", content(state).primary);
+                cx.update(|window, app| window.focus(&consent, app));
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                // Forward from the box: the main button, then Skip, then round to the box again.
+                let mut seen = Vec::new();
+                assert!(presses_to(cx, "tab", &primary, &[&skip], &mut seen).is_some(), "{what}: Tab reaches the main button");
+                assert!(seen.is_empty(), "{what}: the main button comes before Skip");
+                assert!(presses_to(cx, "tab", &skip, &[&consent], &mut seen).is_some(), "{what}: Tab reaches Skip");
+                assert!(seen.is_empty(), "{what}: Skip comes before the box again");
+                assert!(presses_to(cx, "tab", &consent, &[], &mut seen).is_some(), "{what}: Tab comes round to the box");
+                // Backward from the box: Skip first (round the end), then the main button.
+                assert!(presses_to(cx, "shift-tab", &skip, &[&primary], &mut seen).is_some(), "{what}: Shift-Tab reaches Skip");
+                assert!(seen.is_empty(), "{what}: Shift-Tab meets Skip before the main button");
+                assert!(presses_to(cx, "shift-tab", &primary, &[], &mut seen).is_some(), "{what}: Shift-Tab reaches the main button");
+                // Tab never ticks the box nor starts a sign-in.
+                let (now_agreed, idle_or_failed) = cx.update(|_, app| {
+                    let v = view.read(app);
+                    (v.agreed, !matches!(v.state, State::Waiting))
+                });
+                assert!(now_agreed == agreed && idle_or_failed, "{what}");
+            }
+        }
+        // The consent-only form at the smallest window: no Skip, and Tab still reaches the box and Continue.
+        cx.update(|_, app| {
+            view.update(app, |v, _| {
+                v.only = true;
+                v.state = State::Idle;
+                v.agreed = false;
+            })
+        });
+        cx.update(|window, app| window.focus(&primary, app));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let mut seen = Vec::new();
+        assert!(presses_to(cx, "tab", &consent, &[&skip], &mut seen).is_some(), "620x460 consent-only: Tab reaches the box");
+        assert!(presses_to(cx, "tab", &primary, &[&skip], &mut seen).is_some(), "620x460 consent-only: Tab reaches Continue");
+        assert!(seen.is_empty(), "620x460 consent-only: no Skip to reach");
+        cx.update(|_, app| view.update(app, |v, _| v.state = State::Idle));
+    }
+
+    #[test]
     fn the_bypass_skips_the_screen_without_asking_the_account() {
         assert!(!decide(true, || panic!("must not be asked"), || panic!("must not be asked")));
     }
