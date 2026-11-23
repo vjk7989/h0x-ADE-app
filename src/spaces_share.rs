@@ -92,7 +92,7 @@ mod tests {
     use crate::model::Space;
 
     fn space(name: &str, folder: &str, machine: Option<&str>) -> Space {
-        Space { id: name.into(), name: name.into(), folder: folder.into(), machine: machine.map(str::to_owned), tabs: vec![], active: None }
+        Space { id: name.into(), name: name.into(), folder: folder.into(), machine: machine.map(str::to_owned), tabs: vec![], active: None, rest: Default::default() }
     }
 
     #[test]
