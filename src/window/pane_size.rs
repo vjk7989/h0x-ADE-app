@@ -239,15 +239,21 @@ mod tests {
         b
     }
 
+    /// A root container made of small pieces: one deep `json!` literal exceeds the macro recursion limit.
+    fn root(kind: &str, extra: Value, children: Vec<Value>) -> Node {
+        let mut r = json!({ "id": "root", "type": kind });
+        r.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap_or_default());
+        r["children"] = Value::Array(children);
+        node(r)
+    }
+
     fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(x), px(y)), size(px(w), px(h)))
     }
 
     #[test]
     fn split_blocks_sit_where_they_are_drawn_after_gaps_and_hidden_siblings() {
-        let root = node(json!({ "id": "root", "type": "row", "gap": 10, "children": [
-            block("a", json!({})), block("c", json!({ "hidden": true })), block("b", json!({}))
-        ] }));
+        let root = root("row", json!({ "gap": 10 }), vec![block("a", json!({})), block("c", json!({ "hidden": true })), block("b", json!({}))]);
         let at = |id: &str| block_bounds(&root, rect(100., 50., 210., 100.), id, None, &HashSet::new(), 1.0);
         assert_eq!(at("a"), Some(rect(100., 50., 100., 100.)));
         // The hidden sibling takes no room and adds no gap.
@@ -259,9 +265,7 @@ mod tests {
 
     #[test]
     fn padding_gaps_and_zoom_move_column_blocks_down() {
-        let root = node(json!({ "id": "root", "type": "column", "gap": 10, "padding": [5, 8], "children": [
-            block("a", json!({})), block("b", json!({}))
-        ] }));
+        let root = root("column", json!({ "gap": 10, "padding": [5, 8] }), vec![block("a", json!({})), block("b", json!({}))]);
         let at = |id: &str, zoom: f32| block_bounds(&root, rect(0., 0., 200., 230.), id, None, &HashSet::new(), zoom);
         assert_eq!(at("a", 1.0), Some(rect(8., 5., 184., 105.)));
         assert_eq!(at("b", 1.0), Some(rect(8., 120., 184., 105.)));
@@ -271,9 +275,7 @@ mod tests {
 
     #[test]
     fn a_fixed_width_block_pushes_its_neighbour_over() {
-        let root = node(json!({ "id": "root", "type": "row", "children": [
-            block("a", json!({ "size": { "px": 30 } })), block("b", json!({}))
-        ] }));
+        let root = root("row", json!({}), vec![block("a", json!({ "size": { "px": 30 } })), block("b", json!({}))]);
         let at = |id: &str| block_bounds(&root, rect(0., 0., 100., 40.), id, None, &HashSet::new(), 1.0);
         assert_eq!(at("a"), Some(rect(0., 0., 30., 40.)));
         assert_eq!(at("b"), Some(rect(30., 0., 70., 40.)));
@@ -281,9 +283,7 @@ mod tests {
 
     #[test]
     fn a_pane_size_takes_off_borders_padding_and_the_frame() {
-        let root = node(json!({ "id": "root", "type": "row", "border": { "width": 2 }, "children": [
-            block("a", json!({ "border": { "width": 1 }, "padding": 3 })), block("b", json!({}))
-        ] }));
+        let root = root("row", json!({ "border": { "width": 2 } }), vec![block("a", json!({ "border": { "width": 1 }, "padding": 3 })), block("b", json!({}))]);
         let none = HashSet::new();
         assert_eq!(block_bounds(&root, rect(0., 0., 104., 50.), "a", None, &none, 1.0), Some(rect(3., 3., 48., 44.)));
         assert_eq!(block_bounds(&root, rect(0., 0., 104., 50.), "b", None, &none, 1.0), Some(rect(52., 2., 50., 46.)));
@@ -295,9 +295,7 @@ mod tests {
 
     #[test]
     fn a_too_small_area_gives_empty_blocks_never_negative_ones() {
-        let root = node(json!({ "id": "root", "type": "row", "gap": 10, "padding": 10, "children": [
-            block("a", json!({ "padding": 4 })), block("b", json!({}))
-        ] }));
+        let root = root("row", json!({ "gap": 10, "padding": 10 }), vec![block("a", json!({ "padding": 4 })), block("b", json!({}))]);
         let none = HashSet::new();
         for area in [rect(0., 0., 10., 10.), rect(0., 0., 0., 0.)] {
             for id in ["a", "b"] {
