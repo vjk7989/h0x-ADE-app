@@ -3146,8 +3146,8 @@ mod tests {
             let f = vt.frame();
             let first: String = f.rows[0].iter().map(|c| c.text.as_str()).collect();
             assert!(first.starts_with("after 299 plain"), "{case}: {first:?}");
-            assert!(f.rows[0][0].bold && f.rows[0][0].underline, "{case}: the cursor's style survives the clear");
-            assert!(!f.rows[0][10].bold && !f.rows[0][10].underline, "{case}: and ends where it was reset");
+            assert!(f.rows[0][0].bold && f.rows[0][0].underline.is_some(), "{case}: the cursor's style survives the clear");
+            assert!(!f.rows[0][10].bold && f.rows[0][10].underline.is_none(), "{case}: and ends where it was reset");
             assert_eq!(vt.link_at(0, 0, found).map(|hit| hit.target).as_deref(), Some("https://example.com/299"), "{case}");
             assert_eq!(vt.link_at(10, 0, found), None, "{case}: the link was closed");
             let sb = vt.scrollbar();
