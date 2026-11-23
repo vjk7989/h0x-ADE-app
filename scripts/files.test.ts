@@ -127,3 +127,58 @@ test("Files follows directory links one level at a time", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// The open file's editor follows the font in settings at every render (UPSTREAM-SYNC-2 A7).
+function editorPanel(font: Record<string, unknown>) {
+  const editors: any[] = [];
+  const make = () => {
+    const node: any = { calls: {} as Record<string, unknown[]>, children: [] as any[] };
+    const el: any = new Proxy(node, { get: (_, method) => {
+      if (method === "node") return node;
+      return (...args: any[]) => {
+        if (method === "child") node.children.push(args[0]?.node ?? args[0]);
+        else if (method === "children") node.children.push(...args[0].map((c: any) => c?.node ?? c));
+        else if (method === "when") { if (args[0]) args[1](el); }
+        else node.calls[String(method)] = args;
+        return el;
+      };
+    } });
+    return el;
+  };
+  let reads = 0;
+  const globals: Record<string, unknown> = {
+    View: class {}, div: make, svg: make, v_flex: make, h_flex: make,
+    Editor: { new: (state: unknown) => { const el = make(); editors.push({ state, node: el.node }); return el; } },
+    EditorState: { new: make }, InputState: { new: make }, Input: { new: make },
+    spaces: () => [{ id: "s1", active: true, folder: "/repo", machine: null }], panes: () => [], focused: () => null,
+    agents: () => [], core: async () => ({}), exec: async () => ({}), readTextFile: async () => "", writeTextFile: async () => {},
+    watchFolder: () => new Promise(() => {}), theme: () => new Proxy({}, { get: () => "#000000" }),
+    settings: () => { reads++; return font; }, window: () => ({ platform: "linux" }), windowVisible: () => true, layout: () => null,
+    nextCommand: () => new Promise(() => {}), openFile: async () => "text", shared: () => null, setShared: () => {},
+  };
+  const Files = new Function(...Object.keys(globals), `${source.replace(/^import .*;\n/gm, "").replace("export default class Files", "class Files")}; return Files;`)(...Object.values(globals));
+  const view = new Files();
+  const code = { value: () => "text" };
+  Object.assign(view, { file: "/repo/src/a.ts", code, doc: {}, context: { key: JSON.stringify({ cwd: "/repo", on: null, space: "s1" }) } });
+  const render = () => { editors.length = 0; view.render({ notify() {} }); return editors[0]; };
+  return { view, render, font, code, reads: () => reads };
+}
+
+test("the file editor takes its font family and size from settings, and follows a change", () => {
+  const p = editorPanel({ font_family: "Fira Code", font_size: 15 });
+  const first = p.render();
+  expect(first.state).toBe(p.code);
+  expect(first.node.calls.font_family).toEqual(["Fira Code"]);
+  expect(first.node.calls.text_size).toEqual([15]);
+  Object.assign(p.font, { font_family: "Iosevka", font_size: 9 });
+  const next = p.render();
+  expect(next.node.calls.font_family).toEqual(["Iosevka"]);
+  expect(next.node.calls.text_size).toEqual([9]);
+});
+
+test("without an open editor the panel doesn't read the font", () => {
+  const p = editorPanel({ font_family: "Fira Code", font_size: 15 });
+  Object.assign(p.view, { code: null, opened: null, fileError: "Can't read it" });
+  expect(p.render()).toBeUndefined();
+  expect(p.reads()).toBe(0);
+});

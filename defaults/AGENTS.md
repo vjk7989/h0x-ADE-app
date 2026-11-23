@@ -171,6 +171,9 @@ the highlighted line shows where it will land.
   records the starter as `parent` (see `terminals()`). They belong to their
   parent's tab without a pane; the `agents` mod shows them,
   `terminal.peek` opens one, `terminal.keep` gives one a pane.
+  When the shown space is on another machine, the peek's Keep button uses the
+  nearest ancestor's space on the terminal's machine, or the first space there
+  if no ancestor has a pane there. Keep is hidden if that machine has no space.
   Ctrl-click (Cmd-click on macOS) a live terminal address in terminal text to
   peek at it. Bare addresses refer to the machine of the terminal showing them;
   use `machine/address` for another machine. Names and non-live addresses aren't links.
@@ -363,8 +366,9 @@ layout's look and a block can differ:
   are upgraded to readable terminal colors; edited theme files are kept.
   A theme named like a layout (`themes/win98.json`) is
   that layout's own: Settings offers it only there.
-- `font` / `font_size`: the terminals' (px at zoom 1); `ui_font`: the mods'
-  (their text sizes are their own, in px, and follow zoom). Optional: without
+- `font` / `font_size`: the terminals', the Files preview's and the Changes
+  diff's (px at zoom 1); `ui_font`: the mods' (their text sizes are their own,
+  in px, and follow zoom). Optional: without
   them a layout uses settings.json's, else HyperOx's (JetBrains Mono 14, Geist).
   HyperOx (main) leaves these unset; Terminals sets text size 15, and HyperOx 98
   brings its own fonts.
@@ -404,7 +408,8 @@ The tab block says how each pane of the shown tab is wrapped:
   buttons run pane commands with that pane (`pane.split`, `pane.zoom`,
   `pane.close`). `position`: `top` or `bottom`; `reveal: "hover"` shows it
   only while the pointer is on the pane, drawn over the terminal so the
-  terminal never resizes. The shipped `pane` mod is an example header.
+  terminal never resizes. The shipped `pane` mod keeps its divider on the
+  terminal-facing edge and reads the frame position from `layout()`.
 - `lone: true` frames a tab's only pane too (default: only when split).
 - Each layout has its own, so one can stay bare while another makes
   every pane a card.
@@ -662,7 +667,9 @@ The main ones:
   Add machine lists all named ssh-config hosts in a scrollable list. Machines
   that need a password, a new host key or h0x-core installed show what to run
   in your own terminal; the picker updates once it is added. Other machines are
-  added quietly. If a remote machine was rebuilt
+  added quietly. Login guidance includes Copy. A machine that needs a login shows
+  `h0x-core machine login <name>` with Copy in Settings > Machines, its sidebar group,
+  the welcome screen and the failed New space toast. If a remote machine was rebuilt
   or replaced and a different core answers there, its sidebar offers Connect:
   explicitly forget the old identity and pair again with the same name and target.
   Other unreachable machines don't offer this.
@@ -980,6 +987,11 @@ Chained builders with GPUI's snake_case names: `div()`, `h_flex()`,
 `.rounded(n)`; `.id("unique")` then `.on_click(...)`, `.on_mouse_down("right", ...)`,
 `.hover((s) => s.bg(c))`, `.on_scroll_wheel(...)`; keyboard: `this.h = cx.focus_handle()`
 in init, `.track_focus(this.h).on_key_down((e, cx) => …)`, `this.h.focus()`.
+`ScrollHandle` from `gpui-base` scrolls a plain `overflow_*_scroll()` or
+`overflow_*_scrollbar()` area from code. Create `this.scroll = ScrollHandle.new()`
+in `init`, attach `.track_scroll(this.scroll)`, then call
+`this.scroll.scroll_to_item(index)` to reveal a zero-based direct child with
+only the movement needed. Requests run once after layout; visible children stay put.
 `.on_drop((event, cx) => …)` on a plain layout element receives external files as
 `event.paths` (absolute paths). The feedback form accepts dropped images with
 the same limits, previews and removal as picked images.

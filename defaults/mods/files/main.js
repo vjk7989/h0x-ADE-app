@@ -360,7 +360,6 @@ export default class Files extends View {
         this.drafts.delete(full);
         this.code = EditorState.new({ language: LANG[ext] ?? ext, readonly: Boolean(on) || large,
           value: large ? disk.slice(0, 400000) + "\n… (file truncated)" : draft ? draft.draft : disk,
-          font_family: settings().font_family, font_size: 12,
           syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
         this.reveal();
         if (on || large) { this.doc = { full, hint: on ? "read-only: remote machine" : "read-only: too large" }; return; }
@@ -496,6 +495,7 @@ ${doc.path}`, now = Date.now(), edit = this.edits.get(id);
   render(cx) {
     if (key() !== this.context?.key) this.refresh(cx);
     const t = theme(), doc = this.doc;
+    const font = this.code ? settings() : null;
     const button = (id, label, click) => div().id(id).px(8).py(2).rounded(5).cursor_pointer().border_1().border_color(t.border).hover(s => s.bg(t.hover)).on_click(click).child(label);
     const tool = (id, icon, click) => h_flex().id(id).w(22).h(22).flex_none().items_center().justify_center().rounded(5).cursor_pointer().hover(s => s.bg(t.hover)).on_click(click)
       .child(svg(`mods/files/${icon}.svg`).size(14).flex_none().text_color(t.muted));
@@ -531,7 +531,7 @@ ${doc.path}`, now = Date.now(), edit = this.edits.get(id);
             if (e.key !== "s" || !(e.modifiers.control || e.modifiers.platform) || e.modifiers.shift || e.modifiers.alt) return;
             this.save(cx); cx.stop_propagation(); cx.notify();
           })
-          .child(Editor.new(this.code).flex_1().min_h(0))
+          .child(Editor.new(this.code).font_family(font.font_family).text_size(font.font_size).flex_1().min_h(0))
         : this.opened ? this.openedCard(t, button)
         : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
   }

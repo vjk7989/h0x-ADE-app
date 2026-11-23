@@ -10,6 +10,77 @@ use std::{
     time::Instant,
 };
 
+
+#[gpui::test]
+fn mod_text_selection_stays_in_its_shell_root(cx: &mut TestAppContext) {
+    use gpui::*;
+    use gpui_base::{SelectableText, TextSelection, TextView, TextViewState};
+    use gpui_shell::ShellRoot;
+
+    struct Column {
+        texts: Vec<Entity<TextViewState>>,
+        label: &'static str,
+    }
+    impl Render for Column {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().flex().flex_col().size_full().gap(px(20.))
+                .children(self.texts.iter().map(|text| TextView::new(text).scrollable(false).selectable(true)))
+                .child(SelectableText::new("plain", format!("{} plain text", self.label)).document_order(u64::MAX))
+        }
+    }
+    struct Columns {
+        roots: Vec<Entity<ShellRoot>>,
+    }
+    impl Render for Columns {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().flex().size_full().children(self.roots.iter().map(|root| {
+                div().w(px(240.)).h_full().child(root.clone())
+            }))
+        }
+    }
+    cx.update(gpui_shell::init);
+    let mut texts = Vec::new();
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let roots = ["LEFT", "CENTER", "RIGHT"].into_iter().map(|label| {
+            let blocks = ["first", "middle", "second"].into_iter().map(|block| {
+                cx.new(|cx| TextViewState::markdown(&format!("{label} {block} block"), cx))
+            }).collect::<Vec<_>>();
+            texts.push(blocks.clone());
+            let content = cx.new(|_| Column { texts: blocks, label }).into();
+            cx.new(|cx| ShellRoot::new(content, window, cx))
+        }).collect();
+        Columns { roots }
+    });
+    cx.run_until_parked();
+    let bounds = |column: usize, block: usize, cx: &mut VisualTestContext| {
+        texts[column][block].read_with(cx, |text, _| text.bounds())
+    };
+    let start = bounds(1, 0, cx).origin + point(px(1.), px(10.));
+    let inside = bounds(1, 2, cx);
+    let neighbor = bounds(2, 2, cx);
+    for end in [
+        point(inside.right() - px(1.), inside.top() + px(10.)),
+        point(neighbor.right() - px(1.), neighbor.top() + px(10.)),
+        point(px(900.), px(400.)),
+        point(px(-20.), px(400.)),
+    ] {
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let copied = cx.update(|window, cx| TextSelection::selected_text(window, cx));
+        assert!(copied.contains("CENTER first block"), "{copied:?}");
+        assert!(copied.contains("CENTER middle block"), "end {end:?}: {copied:?}");
+        assert!(copied.contains("CENTER second block"), "end {end:?}: {copied:?}");
+        assert!(!copied.contains("LEFT") && !copied.contains("RIGHT"), "{copied:?}");
+        if end.y == px(400.) {
+            assert!(copied.contains("CENTER plain text"), "{copied:?}");
+        }
+        cx.simulate_mouse_move(neighbor.center(), None, Modifiers::default());
+        assert_eq!(cx.update(|window, cx| TextSelection::selected_text(window, cx)), copied);
+    }
+}
+
 struct Staged(PathBuf);
 impl Staged {
     fn new() -> Self {
@@ -1404,6 +1475,9 @@ fn describe_with_values(
         Ok(second)
     })?;
     window.update(cx, |_, window, _| window.remove_window())?;
+    // localStorage writes land on the executor: let them finish while the
+    // staged folder is still there, or they recreate it after its drop.
+    cx.run_until_parked();
     assert!(calls.borrow().unexpected.is_empty(), "{entry}: {:?}", calls.borrow().unexpected);
     result
 }
@@ -1431,6 +1505,19 @@ fn shipped_initial_descriptions(cx: &mut TestAppContext) {
         entries.len(),
         start.elapsed()
     );
+}
+
+/// A mod's localStorage write lands on the executor; one that lands after the
+/// staged folder's drop recreates it, and the folder outlives the test.
+#[gpui::test]
+fn a_described_mod_leaves_no_folder_behind(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let path = staged.0.clone();
+    describe(cx, &staged, "mods/agents", true, props(), updates("current", "current"), None).unwrap();
+    drop(staged);
+    cx.run_until_parked();
+    assert!(!path.exists(), "left behind: {:?}", std::fs::read_dir(&path).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>()));
 }
 
 #[gpui::test]
@@ -1596,6 +1683,35 @@ fn confirm_dialog_with_its_own_buttons_or_none_keeps_the_rounded_corners(cx: &mu
 }
 
 #[gpui::test]
+fn pane_header_divider_faces_the_terminal(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (position, reveal) in [("bottom", "always"), ("top", "always"), ("", "always"), ("bottom", "hover"), ("top", "hover")] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("layout".into(), json!({
+            "id": "root", "type": "column", "children": [
+                {"id": "hidden", "type": "block", "hidden": true,
+                 "content": {"tab": "active", "pane": {"header": {"position": "bottom"}}}},
+                {"id": "stack", "type": "stack", "active": "shown", "children": [
+                    {"id": "inactive", "type": "block",
+                     "content": {"tab": "active", "pane": {"header": {"position": "bottom"}}}},
+                    {"id": "shown", "type": "block",
+                     "content": {"tab": "active", "pane": {"header": {"position": position, "reveal": reveal}}}}
+                ]}
+            ]
+        }));
+        if position.is_empty() {
+            values.get_mut("layout").unwrap()["children"][1]["children"][1]["content"]["pane"]["header"].as_object_mut().unwrap().remove("position");
+        }
+        let tree = describe_with_values(cx, &staged, "mods/pane", values, None).unwrap();
+        let head = tree.lines().find(|l| l.contains("pane-head-")).unwrap();
+        let (edge, outside) = if position == "bottom" { ("t", "b") } else { ("b", "t") };
+        assert!(head.contains(&format!(".border_{edge}[Number(1.0)]")), "{position}: {head}");
+        assert!(!head.contains(&format!(".border_{outside}[")), "{position}: {head}");
+    }
+}
+
+#[gpui::test]
 fn layout_previews_stay_inside_their_cards(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
@@ -1634,6 +1750,37 @@ fn check_materializes_retained_elements_in_a_rendered_view(cx: &mut TestAppConte
         assert!(!description.is_empty(), "{body}");
         gpui::AnyWindowHandle::from(window).update(cx, |_, window, _| window.remove_window()).unwrap();
     }
+}
+
+#[gpui::test]
+fn long_space_names_use_the_sidebar_width(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let name = "quarterly infrastructure cost review";
+    let mut values = fixture(true, props(), updates("current", "current"));
+    let spaces = values.get_mut("spaces").unwrap().as_array_mut().unwrap();
+    spaces[0]["name"] = json!(name);
+    // A worktree of the first space's repo, drawn nested under it.
+    spaces.insert(1, json!({"id":"s3","index":2,"name":"portal rewrite","folder":"/fixture/portal","machine":null,"branch":null,"active":false,"status":"idle","tabs":[]}));
+    // The remote space is on main in a repo named after it: its tail has nothing to show.
+    let git = "this.git[JSON.stringify([null, '/fixture/project'])] = { name: 'h0x', branch: 'feature/rate-limiting', ahead: 0, behind: 0, repo: JSON.stringify([null, '/fixture/project/.git']), linked: false };
+        this.git[JSON.stringify([null, '/fixture/portal'])] = { name: 'h0x', branch: 'portal-rewrite', ahead: 0, behind: 0, repo: JSON.stringify([null, '/fixture/project/.git']), linked: true };
+        this.git[JSON.stringify(['remote', '/remote/project'])] = { name: 'remote', branch: 'main', ahead: 0, behind: 0, repo: JSON.stringify(['remote', '/remote/project/.git']), linked: false };";
+    let tree = describe_with_values(cx, &staged, "mods/spaces", values, Some(git)).unwrap();
+    let lines: Vec<&str> = tree.lines().collect();
+    let text = lines.iter().position(|l| l.contains(&format!("text {name:?}"))).unwrap();
+    let label = lines[text - 1];
+    assert!(!label.contains(".max_w"), "a wider sidebar must show more of the name: {label}");
+    assert!(!label.contains(".flex_shrink[Number(0.0)]"), "the name must give way when the row is full: {label}");
+    assert!(label.contains(".min_w[Number(48.0)]"), "the name shrinks, but a short one stays readable: {label}");
+    let tail = lines[text + 1..].iter().find(|l| l.contains(".justify_end")).unwrap();
+    assert!(tail.contains(".flex_auto") && !tail.contains(".flex_1"), "the git tail must start from its text's width, so both sides give way in proportion: {tail}");
+    assert!(tail.contains(".min_w[Number(48.0)]"), "the git tail shrinks, but a short one stays readable: {tail}");
+    let remote = lines.iter().position(|l| l.contains("text \"Remote\"")).unwrap();
+    let empty = lines[remote + 1..].iter().find(|l| l.contains(".justify_end")).unwrap();
+    assert!(empty.contains(".min_w[Number(0.0)]"), "an empty git tail must not take room from the name: {empty}");
+    let icon = lines.iter().find(|l| l.contains("branch.svg")).expect("the worktree space is nested");
+    assert!(icon.contains(".flex_none"), "a worktree's icon keeps its size while the name gives way: {icon}");
 }
 
 #[gpui::test]
@@ -13035,5 +13182,66 @@ fn settings_profile_tokens_card_uses_only_theme_colours_in_dark_and_light(cx: &m
         assert!(has("st-prof-tokens-today", &format!(".text_color[Str(\"{foreground}\")]")) && has("st-prof-tokens-today", &format!(".bg[Str(\"{raised}\")]")), "{label}: {tree}");
         assert!(has("st-prof-tokens-week", &format!(".text_color[Str(\"{muted}\")]")) && has("st-prof-tokens-used", &format!(".text_color[Str(\"{foreground}\")]")), "{label}: {tree}");
         assert!(card.iter().any(|l| l.contains(&format!(".text_color[Str(\"{dim}\")]"))), "{label}: labels are dim: {tree}");
+    }
+}
+
+#[gpui::test]
+fn status_bar_counts_agents_in_the_singular_and_the_plural(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let agent = |n: u32| json!({"address":format!("t{n}"),"pane":format!("p{n}"),"space":"s1","space_name":"Local","tab":"tab1","tab_index":1,"tab_name":"Build","status":"blocked","app":"pi","program":null,"title":"Build","seq":n,"focused":n==1});
+
+    let mut one = fixture(true, props(), updates("current", "current"));
+    one.insert("agents".into(), json!([agent(1)]));
+    let tree = describe_with_values(cx, &staged, "mods/workspace-status", one, None).unwrap();
+    assert!(tree.contains("1 agent") && !tree.contains("1 agents"), "one agent is singular: {tree}");
+    assert!(tree.contains("1 needs you"), "one blocked agent needs you: {tree}");
+
+    let mut two = fixture(true, props(), updates("current", "current"));
+    two.insert("agents".into(), json!([agent(1), agent(2)]));
+    let tree = describe_with_values(cx, &staged, "mods/workspace-status", two, None).unwrap();
+    assert!(tree.contains("2 agents"), "two agents are plural: {tree}");
+    assert!(tree.contains("2 need you") && !tree.contains("2 needs you"), "two blocked agents need you: {tree}");
+}
+
+#[gpui::test]
+fn status_bar_counts_no_agents_and_a_mixed_list(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let agent = |n: u32, status: &str| json!({"address":format!("t{n}"),"pane":format!("p{n}"),"space":"s1","space_name":"Local","tab":"tab1","tab_index":1,"tab_name":"Build","status":status,"app":"pi","program":null,"title":"Build","seq":n,"focused":n==1});
+
+    let mut none = fixture(true, props(), updates("current", "current"));
+    none.insert("agents".into(), json!([]));
+    let tree = describe_with_values(cx, &staged, "mods/workspace-status", none, None).unwrap();
+    assert!(tree.contains("0 agents"), "zero agents are plural: {tree}");
+    assert!(!tree.contains("need you") && !tree.contains("needs you"), "nobody needs you: {tree}");
+
+    let mut mixed = fixture(true, props(), updates("current", "current"));
+    mixed.insert("agents".into(), json!([agent(1, "blocked"), agent(2, "working")]));
+    let tree = describe_with_values(cx, &staged, "mods/workspace-status", mixed, None).unwrap();
+    assert!(tree.contains("2 agents"), "two agents are plural: {tree}");
+    assert!(tree.contains("1 needs you") && !tree.contains("1 need you"), "one of them needs you: {tree}");
+}
+
+#[gpui::test]
+fn pane_header_divider_defaults_to_below_without_a_visible_frame(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let all_hidden = json!({
+        "id": "root", "type": "column", "children": [
+            {"id": "stack", "type": "stack", "active": "gone", "children": [
+                {"id": "a", "type": "block", "hidden": true,
+                 "content": {"tab": "active", "pane": {"header": {"position": "bottom"}}}}
+            ]}
+        ]
+    });
+    let no_pane = json!({"id": "root", "type": "column", "children": [{"id": "a", "type": "block", "content": {"mod": "agents"}}]});
+    for (label, layout) in [("no layout", json!(null)), ("every frame hidden", all_hidden), ("no pane frame", no_pane)] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("layout".into(), layout);
+        let tree = describe_with_values(cx, &staged, "mods/pane", values, None).unwrap();
+        let head = tree.lines().find(|l| l.contains("pane-head-")).unwrap();
+        assert!(head.contains(".border_b[Number(1.0)]"), "{label}: {head}");
+        assert!(!head.contains(".border_t["), "{label}: {head}");
     }
 }

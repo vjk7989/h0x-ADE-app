@@ -59,6 +59,29 @@ test("an unnamed tab's row reads its terminal's title, not the tab number", () =
   expect(title({ name: "3", named: false }, { ...claude, title: "claude" })).toBe("3");
 });
 
+test("an empty OSC title published as the terminal address keeps the tab name", () => {
+  const title = new Function("View", `${source}; return title;`)(class {});
+  for (const address of ["t2", "remote/t2"]) {
+    for (const identity of [{ terminal: address }, { address }]) {
+      const lead = { ...identity, program: { name: "Claude Code", key: "claude" }, title: address };
+      expect(title({ name: "2", named: false }, lead)).toBe("2");
+      expect(title({ name: "Claude Code", named: true }, lead)).toBe("Claude Code");
+      expect(title({ name: "fix login", named: true }, lead)).toBe("fix login");
+      expect(title({ name: "2", named: false }, { ...lead, title: "renamed-task" })).toBe("renamed-task");
+    }
+  }
+});
+
+test("a title that is a folder never replaces the tab's name", () => {
+  const title = new Function("View", "localStorage", "props", "run", `${source}; return title;`)(class {}, {}, () => ({}), () => {});
+  const claude = { program: { name: "claude", key: "claude" }, title: "Herdr session names" };
+  expect(title({ name: "3", named: false }, { ...claude, title: "~/src/api" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, title: "/tmp" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, title: "\u2733 ~/src/api" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, title: "C:\\src\\api" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, title: "\u2733 Herdr session names" })).toBe("Herdr session names");
+});
+
 test("tab labels prefer the first agent, then focused terminal, then first terminal", () => {
   const leadPanes = new Function("View", `${source}; return leadPanes;`)(class {});
   const pane = (tab: string, terminal: string, agent = false, focused = false) => ({ tab, terminal, program: { agent }, focused });
@@ -83,6 +106,7 @@ function element() {
     return (...args: any[]) => {
       if (method === "id") node.id = args[0];
       if (method === "on_click") (node as any).click = args[0];
+      if (method === "bg") (node as any).bg = args[0];
       if (method === "child") node.children.push(args[0]?.node ?? args[0]);
       if (method === "children") node.children.push(...args[0].map((child: any) => child?.node ?? child));
       if (method === "when" && args[0]) args[1](el);
@@ -158,15 +182,16 @@ for (const sort of ["priority", "grouped"]) for (const named of [false, true]) t
 });
 
 // A kept sub-agent: started by t1 (`h0x-core run`), then given a pane (`terminal.keep`).
-function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent: "t1" }], paneless = [] as { address: string; parent: string }[], pinned = [] as string[] } = {}) {
+function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent: "t1" }], paneless = [] as { address: string; parent: string }[], pinned = [] as string[], statuses = {} as Record<string, string>, others = [] as string[] } = {}) {
   const program = { name: "Claude", key: "claude", agent: true };
-  const row = (address: string, seq: number) => ({ address, pane: `p-${address}`, tab: "tab1", space: "s1", space_name: "Project", program, title: address, status: "working", seq, pinned: pinned.includes(address) });
-  const list = [row("t1", 1), ...kept.map((k, i) => row(k.address, i + 2))];
-  const live = (address: string, parent: string | null) => ({ address, parent, state: "live", status: "working", program, labels: {} });
+  const status = (address: string) => statuses[address] ?? "working";
+  const row = (address: string, seq: number) => ({ address, pane: `p-${address}`, tab: "tab1", space: "s1", space_name: "Project", program, title: `Task ${address}`, status: status(address), seq, pinned: pinned.includes(address) });
+  const list = [row("t1", 1), ...kept.map((k, i) => row(k.address, i + 2)), ...others.map((a, i) => row(a, i + 10))];
+  const live = (address: string, parent: string | null) => ({ address, parent, state: "live", status: status(address), program, labels: {} });
   const orders: string[][] = [];
   const { agents, writes } = harness([], {
     agents: () => list,
-    terminals: () => [live("t1", null), ...paneless.map(k => live(k.address, k.parent)), ...kept.map(k => live(k.address, k.parent))],
+    terminals: () => [live("t1", null), ...others.map(a => live(a, null)), ...paneless.map(k => live(k.address, k.parent)), ...kept.map(k => live(k.address, k.parent))],
     panes: () => list.map(a => ({ tab: a.tab, terminal: a.address, program, title: a.title })), focused: () => null,
     spaces: () => [{ tabs: [{ id: "tab1", name: "Project", named: true }] }],
     layout: () => ({ id: "sidebar", size: { px: width } }), shared: () => sort,
@@ -209,7 +234,276 @@ for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent keep
   expect(keptRender(sort, { width: 44 }).ids).toContain("ag-t3"); // the rail draws no trees
   const pinned = keptRender(sort, { pinned: ["t3"] });
   expect(pinned.ids).toContain("ag-t3");
-  expect(pinned.texts.get("ag-t1")).toContain("t1");
-  expect(pinned.texts.get("ag-t3")).toContain("t3");
+  expect(pinned.texts.get("ag-t1")).toContain("Task t1");
+  expect(pinned.texts.get("ag-t3")).toContain("Task t3");
   expect(keptRender(sort, { kept: [{ address: "t3", parent: "t9" }] }).ids).toContain("ag-t3"); // its parent ended
+});
+
+test("a kept sub-agent's done doesn't pull its working parent above other working agents", () => {
+  const { order, texts } = keptRender("priority", { statuses: { t3: "done" }, others: ["t5"] });
+  expect(order).toEqual(["t5", "t1"]);
+  expect(texts.get("sub-t3")).toBeDefined();
+});
+
+test("a kept sub-agent keeps its own done status; a pane-less one stays idle", () => {
+  const kidStatus = new Function("View", `${source}; return kidStatus;`)(class {});
+  const listed = new Map([["t3", "done"]]);
+  expect(kidStatus({ address: "t3", status: "done" }, listed)).toBe("done");
+  expect(kidStatus({ address: "t4", status: "done" }, listed)).toBe("idle");
+  expect(kidStatus({ address: "t4", status: "error" }, listed)).toBe("blocked");
+  expect(kidStatus({ address: "t4", status: "working" }, listed)).toBe("working");
+});
+
+for (const width of [268, 44]) test(`the focused agent's row is marked as selected ${width < 160 ? "in the rail" : "in the wide list"}`, () => {
+  const program = { name: "Claude", key: "claude", agent: true };
+  const list = ["t1", "t2"].map((address, i) => ({
+    address, pane: `p-${address}`, tab: address, space: "s1", space_name: "Project",
+    program, title: address, status: "idle", seq: i, focused: address === "t2",
+  }));
+  const { agents } = harness([], {
+    agents: () => list, terminals: () => list.map(a => ({ ...a, state: "live", labels: {} })),
+    panes: () => list.map(a => ({ ...a, terminal: a.address })), focused: () => ({ agent: "t2" }),
+    spaces: () => [{ tabs: list.map(a => ({ id: a.tab, name: a.address, named: true })) }],
+    layout: () => ({ id: "sidebar", size: { px: width } }), shared: () => "grouped",
+    theme: () => ({ selected: "selected", hover: "hover" }), setAgentOrder() {},
+    div: element, v_flex: element, h_flex: element, svg: element, image: element,
+  });
+  const fills = new Map<string, unknown>();
+  const walk = (node: any) => {
+    if (node?.id?.startsWith("ag-t")) fills.set(node.id, node.bg);
+    (node?.children ?? []).forEach(walk);
+  };
+  walk(agents.render({}).node);
+  expect([...fills]).toEqual([["ag-t1", undefined], ["ag-t2", "selected"]]);
+});
+
+test("a title that opens with a bracket keeps it; each agent's own prefix still goes", () => {
+  const title = new Function("View", "localStorage", "props", "run", `${source}; return title;`)(class {}, {}, () => ({}), () => {});
+  const clean = new Function("View", "localStorage", "props", "run", `${source}; return clean;`)(class {}, {}, () => ({}), () => {});
+  const claude = { program: { name: "claude", key: "claude" }, title: "" };
+  // The reported bug: a Claude Code session renamed "[herdr] config" showed as "herdr] config".
+  expect(title({ name: "3", named: false }, { ...claude, title: "[herdr] config" })).toBe("[herdr] config");
+  // Titles as each agent writes them (from its source).
+  const titles: [string, string][] = [
+    ["[herdr] config", "[herdr] config"], // Claude Code: the session name
+    ["⠋ [herdr] config | herdr-app", "[herdr] config | herdr-app"], // Codex working
+    ["[ ! ] Action Required | [herdr] config | herdr-app", "Action Required | [herdr] config | herdr-app"], // Codex needs you
+    ["[ . ] Action Required | [herdr] config | herdr-app", "Action Required | [herdr] config | herdr-app"], // ... its other blink phase
+    ["● [ ! ] Action Required | herdr-app", "Action Required | herdr-app"], // ... with the microphone on
+    ["✦  [herdr] config (herdr-app)", "[herdr] config (herdr-app)"], // Gemini working
+    ["◇  Ready (herdr-app)", "Ready (herdr-app)"], // Gemini idle
+    ["OC | [herdr] config", "OC | [herdr] config"], // OpenCode
+    ["π - [herdr] config - herdr-app", "π - [herdr] config - herdr-app"], // Pi
+    ["⠋ - Thinking - [herdr] config - grok", "Thinking - [herdr] config - grok"], // Grok: the spinner's " - " goes too
+  ];
+  for (const [raw, shown] of titles) expect(clean(raw)).toBe(shown);
+});
+
+test("a title's leading emoji stays, a status glyph before it goes", () => {
+  const title = new Function("View", "localStorage", "props", "run", `${source}; return title;`)(class {}, {}, () => ({}), () => {});
+  const row = (t: string) => title({ name: "3", named: false }, { program: { name: "claude", key: "claude" }, title: t });
+  for (const e of ["🔴", "🟦", "✅", "❌", "⭐", "🚀", "🧠", "⚪", "🇰🇷", "👍🏽", "👨\u200d💻", "❤️", "⚙️", "#️⃣", "✋🏽"]) expect(row(`${e} login`)).toBe(`${e} login`);
+  expect(row("\u2733 🟢 login")).toBe("🟢 login");
+  expect(row("[ ! ] 🔴 login")).toBe("🔴 login");
+  expect(row("\u25cf [ ! ] 🔴 login")).toBe("🔴 login");
+  expect(row("\u2733 login")).toBe("login");
+  expect(row("\u280b - Thinking")).toBe("Thinking");
+  expect(row("✋  Action Required (proj)")).toBe("Action Required (proj)");
+  expect(row("⏳  ❤️ deploy")).toBe("❤️ deploy");
+  // A folder is still a folder behind its emoji.
+  expect(row("🔴 ~/proj")).toBe("3");
+  // An emoji is a name a person chose: alone, or beside the program's name, it is the row's name.
+  expect(row("🔴")).toBe("🔴");
+  expect(row("🔴 claude")).toBe("🔴 claude");
+});
+
+// Edge cases for titles, the rail and saved state (UPSTREAM-SYNC-2 A1).
+test("an empty, blank or glyph-only title keeps the tab's own name", () => {
+  const title = new Function("View", `${source}; return title;`)(class {});
+  const claude = { program: { name: "claude", key: "claude" } };
+  for (const raw of [undefined, null, "", "   ", "\u2726  ", "\u280b - ", "\u00b7\u00b7\u00b7"]) {
+    expect(title({ name: "3", named: false }, { ...claude, title: raw })).toBe("3");
+    expect(title({ name: "fix login", named: true }, { ...claude, title: raw })).toBe("fix login");
+  }
+  expect(title({ name: "3", named: false }, undefined)).toBe("3");
+  expect(title({ name: "3", named: false }, null)).toBe("3");
+});
+
+test("a very long title is kept whole, its status glyph still goes", () => {
+  const title = new Function("View", `${source}; return title;`)(class {});
+  const claude = { program: { name: "claude", key: "claude" } };
+  const long = "Refactor the session restore path for remote machines ".repeat(40).trim();
+  expect(title({ name: "3", named: false }, { ...claude, title: long })).toBe(long);
+  expect(title({ name: "3", named: false }, { ...claude, title: `\u2726  ${long}` })).toBe(long);
+  // A long run of glyphs before the title is stripped in one pass.
+  expect(title({ name: "3", named: false }, { ...claude, title: "\u00b7".repeat(20000) + " done" })).toBe("done");
+});
+
+test("unicode titles keep their letters and marks", () => {
+  const title = new Function("View", `${source}; return title;`)(class {});
+  const row = (raw: string) => title({ name: "3", named: false }, { program: { name: "claude", key: "claude" }, title: raw });
+  expect(row("\u2726 \u4fee\u590d\u767b\u5f55\u6d41\u7a0b")).toBe("\u4fee\u590d\u767b\u5f55\u6d41\u7a0b"); // CJK
+  expect(row("\u280b \u0625\u0635\u0644\u0627\u062d \u0627\u0644\u062f\u062e\u0648\u0644")).toBe("\u0625\u0635\u0644\u0627\u062d \u0627\u0644\u062f\u062e\u0648\u0644"); // Arabic
+  expect(row("\u00dcn\u00efc\u00f6d\u00e9 r\u00e9sum\u00e9")).toBe("\u00dcn\u00efc\u00f6d\u00e9 r\u00e9sum\u00e9");
+  expect(row("e\u0301clair")).toBe("e\u0301clair"); // a combining mark after its letter stays
+  expect(row("\u0939\u093f\u0928\u094d\u0926\u0940 task")).toBe("\u0939\u093f\u0928\u094d\u0926\u0940 task"); // Devanagari vowel signs
+  expect(row("\u2726 \u00e9\u00e9 ~ not a path")).toBe("\u00e9\u00e9 ~ not a path");
+});
+
+test("a title that is the terminal's own address or a Windows folder keeps the tab name", () => {
+  const title = new Function("View", `${source}; return title;`)(class {});
+  const claude = { program: { name: "claude", key: "claude" } };
+  expect(title({ name: "3", named: false }, { ...claude, address: "box/t2", title: "box/t2" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, terminal: "t2", address: "x", title: "t2" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, title: "C:\\Users\\me\\proj" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, title: "\u2726 C:\\work" })).toBe("3");
+});
+
+function sameNameRender(sort: string, width: number, count: number, sameTab = false) {
+  const program = { name: "Claude", key: "claude", agent: true };
+  const list = Array.from({ length: count }, (_, i) => ({
+    address: `t${i + 1}`, pane: `p${i + 1}`, tab: sameTab ? "tab" : `tab${i + 1}`, space: "s1", space_name: "Project",
+    program, title: "Same task", status: "idle", seq: i,
+  }));
+  const { agents } = harness([], {
+    agents: () => list, terminals: () => list.map(a => ({ ...a, state: "live", labels: {} })),
+    panes: () => list.map(a => ({ ...a, terminal: a.address })), focused: () => null,
+    spaces: () => [{ tabs: [...new Set(list.map(a => a.tab))].map(id => ({ id, name: "Claude", named: false })) }],
+    layout: () => ({ id: "sidebar", size: { px: width } }), shared: () => sort,
+    theme: () => ({}), setAgentOrder() {},
+    div: element, v_flex: element, h_flex: element, svg: element, image: element,
+  });
+  const ids: string[] = [];
+  const texts = new Map<string, string>();
+  const walk = (node: any) => {
+    if (node?.id) { ids.push(node.id); texts.set(node.id, textOf(node)); }
+    (node?.children ?? []).forEach(walk);
+  };
+  walk(agents.render({}).node);
+  return { ids, texts };
+}
+
+for (const sort of ["priority", "grouped"]) for (const width of [268, 44]) {
+  for (const sameTab of [false, true]) test(`${sort} at ${width}px: two agents with the same name each show once${sameTab ? " in one tab" : ""}`, () => {
+    const { ids, texts } = sameNameRender(sort, width, 2, sameTab);
+    expect(ids.filter(id => id === "ag-t1")).toHaveLength(1);
+    expect(ids.filter(id => id === "ag-t2")).toHaveLength(1);
+    if (width > 160) {
+      expect(texts.get("ag-t1")).toContain("Same task");
+      expect(texts.get("ag-t2")).toContain("Same task");
+    }
+  });
+
+  test(`${sort} at ${width}px: no agents draws no agent rows`, () => {
+    const { ids } = sameNameRender(sort, width, 0);
+    expect(ids.filter(id => /^ag-t[0-9]+$/.test(id))).toEqual([]);
+  });
+
+  test(`${sort} at ${width}px: one agent draws one row`, () => {
+    const { ids } = sameNameRender(sort, width, 1);
+    expect(ids.filter(id => /^ag-t[0-9]+$/.test(id))).toEqual(["ag-t1"]);
+  });
+}
+
+function rawStorage(entries: Record<string, string>) {
+  const data = new Map(Object.entries(entries));
+  const storage = { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => data.set(k, v), removeItem: (k: string) => data.delete(k) };
+  const Agents = new Function("View", "localStorage", "props", "run", "busyVerb", `${source}; return Agents;`)(
+    class {}, storage, () => ({}), () => {}, () => "Brewing\u2026",
+  );
+  const agents = new Agents();
+  agents.init({}, { timer: { every() {} } });
+  return { agents, data };
+}
+
+test("unreadable saved state starts empty instead of throwing", () => {
+  for (const bad of ["not json", "{", "null", "5", "\"text\"", "true"]) {
+    const { agents, data } = rawStorage({ changed: bad, pins: bad });
+    expect(agents.changed).toEqual({});
+    expect(agents.pendingPins).toEqual([]);
+    expect(data.has("pins")).toBe(false);
+  }
+  const swapped = rawStorage({ changed: "[1,2]", pins: "{\"t1\":true}" });
+  expect(swapped.agents.changed).toEqual({});
+  expect(swapped.agents.pendingPins).toEqual([]);
+});
+
+test("valid saved state is kept", () => {
+  const changed = { t1: { status: "done", at: 5 } };
+  const { agents, data } = rawStorage({ changed: JSON.stringify(changed), pins: "[\"t1\"]" });
+  expect(agents.changed).toEqual(changed);
+  expect(agents.pendingPins).toEqual(["t1"]);
+  expect(data.get("pins")).toBe("[\"t1\"]");
+});
+
+// The peek bar's keep button (A7): a pane stays on its terminal's machine.
+const peekSource = (await readFile(new URL("../defaults/mods/peek/main.js", import.meta.url), "utf8"))
+  .replace(/^import .*;\n/gm, "").replace("export default class Peek", "class Peek");
+function peek(terminal: string, world: { spaces: any[]; panes?: any[]; terminals?: any[] }) {
+  const writes: unknown[][] = [];
+  const closed: unknown[] = [];
+  const globals = {
+    View: class {}, div: element, image: element, svg: element, h_flex: element,
+    agents: () => [], terminals: () => world.terminals ?? [], panes: () => world.panes ?? [], spaces: () => world.spaces,
+    run: (...args: unknown[]) => writes.push(args), theme: () => ({}), props: () => ({ terminal, overlay: "peek" }),
+    closeOverlay: (overlay: unknown) => closed.push(overlay), busyVerb: () => "Brewing\u2026", windowVisible: () => true,
+  };
+  const Peek = new Function(...Object.keys(globals), `${peekSource}; return Peek;`)(...Object.values(globals));
+  const view = new Peek();
+  const keep = () => {
+    let found: any;
+    const walk = (node: any) => { if (node?.id === "keep") found = node; (node?.children ?? []).forEach(walk); };
+    walk(view.render().node);
+    return found;
+  };
+  return { view, writes, closed, keep };
+}
+const peekSpace = (id: string, machine: string | null, active = false, tabs: string[] = []) => ({ id, machine, active, tabs: tabs.map(t => ({ id: t })) });
+
+test("peek offers no keep button when there is no space at all", () => {
+  const p = peek("t3", { spaces: [] });
+  expect(p.view.keepSpace("t3", null)).toBeUndefined();
+  expect(p.keep()).toBeUndefined();
+});
+
+test("peek keeps a local agent in the shown space without switching", () => {
+  const p = peek("t3", { spaces: [peekSpace("a", null), peekSpace("b", null, true)] });
+  expect(p.view.keepSpace("t3", null).id).toBe("b");
+  p.keep().click();
+  expect(p.writes).toEqual([["terminal.keep", { terminal: "t3" }]]);
+  expect(p.closed).toEqual(["peek"]);
+});
+
+test("peek keeps a remote agent in its nearest ancestor's space on that machine", () => {
+  const p = peek("box/t3", {
+    spaces: [peekSpace("local", null, true), peekSpace("boxA", "box"), peekSpace("boxB", "box", false, ["tb"])],
+    terminals: [{ address: "box/t3", parent: "box/t2" }, { address: "box/t2", parent: "box/t1" }, { address: "box/t1", parent: null }],
+    panes: [{ terminal: "box/t1", tab: "tb" }],
+  });
+  p.keep().click();
+  expect(p.writes).toEqual([["space.select", { id: "boxB" }], ["terminal.keep", { terminal: "box/t3" }]]);
+});
+
+test("peek never keeps a remote agent in another machine's space", () => {
+  const none = peek("box/t3", { spaces: [peekSpace("local", null, true), peekSpace("other", "other")] });
+  expect(none.view.keepSpace("box/t3", null)).toBeUndefined();
+  expect(none.keep()).toBeUndefined();
+  const one = peek("box/t3", { spaces: [peekSpace("local", null, true), peekSpace("boxA", "box")] });
+  expect(one.view.keepSpace("box/t3", "box/t9").id).toBe("boxA");
+});
+
+test("peek's ancestor walk stops on a parent loop and falls back to the first space there", () => {
+  const p = peek("box/t3", {
+    spaces: [peekSpace("local", null, true), peekSpace("boxA", "box"), peekSpace("boxB", "box")],
+    terminals: [{ address: "box/t1", parent: "box/t2" }, { address: "box/t2", parent: "box/t1" }],
+    panes: [],
+  });
+  expect(p.view.keepSpace("box/t3", "box/t1").id).toBe("boxA");
+});
+
+test("peek on an agent that has a pane goes to it, without picking a space", () => {
+  const p = peek("box/t3", { spaces: [peekSpace("local", null, true)], panes: [{ terminal: "box/t3", tab: "x" }] });
+  p.keep().click();
+  expect(p.writes).toEqual([["pane.focus", { terminal: "box/t3" }]]);
+  expect(p.closed).toEqual(["peek"]);
 });
