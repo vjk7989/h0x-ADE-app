@@ -1171,12 +1171,12 @@ fn known_agents(on: Option<String>, list: Vec<Value>) -> Value {
     )
 }
 
-/// `powershell.exe` arguments that print a file's bytes. The script travels as
+/// `powershell.exe` arguments that print a regular file's first bytes, at most one over the preview limit. The script travels as
 /// base64 (`-EncodedCommand`), so no shell reads the path; inside it the path is
 /// a single-quoted literal.
 fn windows_read_args(path: &str) -> Vec<String> {
     use base64::Engine;
-    let script = format!("$ErrorActionPreference = 'Stop'; $b = [IO.File]::ReadAllBytes({}); $o = [Console]::OpenStandardOutput(); $o.Write($b, 0, $b.Length)", crate::programs::powershell_quote(&path.replace('/', "\\")));
+    let script = format!("$ErrorActionPreference = 'Stop'; $f = Get-Item -LiteralPath {} -Force; if ($f -isnot [IO.FileInfo]) {{ exit 1 }}; $r = [IO.BinaryReader]::new($f.OpenRead()); try {{ $b = $r.ReadBytes({}); $o = [Console]::OpenStandardOutput(); $o.Write($b, 0, $b.Length) }} finally {{ $r.Dispose() }}", crate::programs::powershell_quote(&path.replace('/', "\\")), crate::mod_files::LIMIT + 1);
     let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     vec!["-NoProfile".into(), "-NonInteractive".into(), "-EncodedCommand".into(), base64::engine::general_purpose::STANDARD.encode(utf16)]
 }
@@ -1186,9 +1186,12 @@ fn is_unc(path: &str) -> bool {
     path.replace('/', "\\").starts_with("\\\\")
 }
 
-/// A text file on another machine: `cat`, or PowerShell where there is none (Windows).
+/// A text file on another machine, regular files only and at most one byte over the limit:
+/// `head` through `sh`, or PowerShell where there is none (Windows).
 fn read_remote(machine: &str, path: &str) -> Result<Option<String>, String> {
-    let (code, out, _) = match run_remote(machine, "cat", &["--".into(), path.into()], None) {
+    let script = r#"test -f "$1" || exit 1; exec head -c "$2" -- "$1""#;
+    let max = (crate::mod_files::LIMIT + 1).to_string();
+    let (code, out, _) = match run_remote(machine, "sh", &["-c".into(), script.into(), "sh".into(), path.into(), max], None) {
         Err(e) if e.contains("cannot start") => {
             if is_unc(path) {
                 return Err("A network path cannot be read through another machine".into());
@@ -3099,11 +3102,11 @@ mod tests {
             let bytes = base64::engine::general_purpose::STANDARD.decode(&args[3]).unwrap();
             String::from_utf16(&bytes.chunks(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect::<Vec<_>>()).unwrap()
         };
-        assert!(script("C:/r/a&calc&.txt").contains("ReadAllBytes('C:\\r\\a&calc&.txt')"));
+        assert!(script("C:/r/a&calc&.txt").contains("-LiteralPath 'C:\\r\\a&calc&.txt' -Force"));
         for path in ["a|b^c%PATH%\"d(e).txt", "it's.txt", "x\u{2018};iwr evil|iex;\u{2019}.txt"] {
             let s = script(path);
             let want = crate::programs::powershell_quote(path);
-            assert!(s.contains(&format!("ReadAllBytes({want})")), "{path}");
+            assert!(s.contains(&format!("-LiteralPath {want} -Force")), "{path}");
         }
         // Curly quotes are doubled like the straight one, so none ends the literal early.
         assert!(script("a\u{2019}b").contains("'a\u{2019}\u{2019}b'"));
@@ -3126,7 +3129,7 @@ mod tests {
         // Splits a script into what precedes the path, the path as PowerShell reads its
         // single-quoted literal (any of the five quotes ends it unless doubled), and the rest.
         let split = |s: &str| {
-            let at = s.find("ReadAllBytes(").unwrap() + "ReadAllBytes(".len();
+            let at = s.find("-LiteralPath ").unwrap() + "-LiteralPath ".len();
             let mut chars = s[at..].char_indices().peekable();
             assert!(chars.next().is_some_and(|(_, c)| quotes.contains(&c)), "{s}");
             let mut literal = String::new();
@@ -3181,6 +3184,63 @@ mod tests {
                 assert!(encoded < 32_000, "{path:?}: {encoded}");
             }
         }
+    }
+
+    fn windows_read_script(path: &str) -> String {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(&windows_read_args(path)[3]).unwrap();
+        String::from_utf16(&bytes.chunks(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect::<Vec<_>>()).unwrap()
+    }
+
+    #[test]
+    fn a_remote_windows_read_is_bounded_and_refuses_anything_but_a_file() {
+        let limit = crate::mod_files::LIMIT + 1;
+        for path in ["", "-", "-rf $HOME", "a b 'c' $d.txt", r"C:\", r"\\.\NUL"] {
+            let s = windows_read_script(path);
+            // At most one byte over the preview limit, never the whole file.
+            assert!(s.contains(&format!(".ReadBytes({limit})")), "{path:?}: {s}");
+            assert!(!s.contains("ReadAllBytes") && !s.contains("ReadToEnd"), "{path:?}");
+            // A folder, a registry key or any other provider item is not read.
+            assert!(s.contains("if ($f -isnot [IO.FileInfo]) { exit 1 }"), "{path:?}");
+            assert!(s.find("-isnot").unwrap() < s.find("OpenRead").unwrap(), "{path:?}");
+            // The reader is closed even when writing fails.
+            assert!(s.contains("finally { $r.Dispose() }"), "{path:?}");
+        }
+    }
+
+    /// The script run by the PowerShell on this machine: what a Windows machine
+    /// without `sh` gives back for a file, a folder, a missing path and a big file.
+    #[cfg(windows)]
+    #[test]
+    fn a_remote_windows_read_runs_in_powershell() {
+        let root = std::env::temp_dir().join(format!("h0x-ade remote read {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub folder")).unwrap();
+        let run = |path: &std::path::Path| {
+            let out = std::process::Command::new("powershell.exe").args(windows_read_args(&path.to_string_lossy())).stdin(std::process::Stdio::null()).output().unwrap();
+            (out.status.code(), out.stdout)
+        };
+        for name in ["-it's $HOME `x` a.txt", "plain.txt", "\u{2019}curly\u{2018}.txt"] {
+            let file = root.join(name);
+            std::fs::write(&file, "hi").unwrap();
+            assert_eq!(run(&file), (Some(0), b"hi".to_vec()), "{name}");
+            // Forward slashes reach the same file.
+            let forward = std::path::PathBuf::from(file.to_string_lossy().replace('\\', "/"));
+            assert_eq!(run(&forward), (Some(0), b"hi".to_vec()), "{name}");
+        }
+        let empty = root.join("empty.txt");
+        std::fs::write(&empty, "").unwrap();
+        assert_eq!(run(&empty), (Some(0), vec![]));
+        let big = root.join("big.txt");
+        std::fs::write(&big, vec![b'a'; crate::mod_files::LIMIT as usize + 100]).unwrap();
+        let (code, out) = run(&big);
+        assert_eq!((code, out.len() as u64), (Some(0), crate::mod_files::LIMIT + 1));
+        // Not a file, or not there: a non-zero exit, which `read_remote` turns into None.
+        for path in [root.join("sub folder"), root.join("missing.txt")] {
+            let (code, out) = run(&path);
+            assert!(code != Some(0) && out.is_empty(), "{path:?}: {code:?}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

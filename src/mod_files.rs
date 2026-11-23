@@ -27,7 +27,25 @@ fn decode(bytes: Vec<u8>) -> Result<String, String> {
 }
 
 pub fn read(path: &Path) -> Result<Option<String>, String> {
-    let file = match std::fs::File::open(path) {
+    let open = || {
+        if !std::fs::metadata(path)?.is_file() {
+            return Err(std::io::Error::other("Not a regular file"));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // The path can be replaced with a pipe between metadata and open.
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::other("Not a regular file"));
+        }
+        Ok(file)
+    };
+    let file = match open() {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.to_string()),
@@ -251,6 +269,83 @@ pub fn remove_app_file(path: String) -> impl std::future::Future<Output = Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_fifo_is_rejected_without_waiting_for_a_writer() {
+        use std::{ffi::CString, os::unix::{ffi::OsStrExt, fs::symlink}, time::Duration};
+        let root = std::env::temp_dir().join(format!("h0x-ade-preview-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let fifo = root.join("pipe");
+        let path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let link = root.join("preview");
+        symlink(fifo, &link).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || { let _ = tx.send(read(&link)); });
+        let result = rx.recv_timeout(Duration::from_secs(2));
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.unwrap().unwrap_err(), "Not a regular file");
+    }
+
+    /// `read` on another thread, or a timeout: a preview that waits on a pipe fails here instead of hanging.
+    fn read_quickly(path: &Path) -> Result<Option<String>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = path.to_path_buf();
+        std::thread::spawn(move || { let _ = tx.send(read(&path)); });
+        rx.recv_timeout(std::time::Duration::from_secs(2)).expect("the preview waited instead of refusing")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_a_folder_and_a_device_are_refused_at_once() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let root = std::env::temp_dir().join(format!("h0x-ade-preview-special-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let fifo = root.join("pipe");
+        let c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let link = root.join("link-to-folder");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        for path in [fifo.as_path(), root.as_path(), link.as_path(), Path::new("/dev/null"), Path::new("/dev/zero")] {
+            assert_eq!(read_quickly(path), Err("Not a regular file".into()), "{path:?}");
+        }
+        // A link to nothing is a missing file, not an error.
+        let dangling = root.join("dangling");
+        std::os::unix::fs::symlink(root.join("gone"), &dangling).unwrap();
+        assert_eq!(read_quickly(&dangling), Ok(None));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn regular_files_still_read_up_to_the_limit_and_a_folder_is_refused() {
+        let root = std::env::temp_dir().join(format!("h0x-ade preview edges {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(read_quickly(&root), Err("Not a regular file".into()));
+        assert_eq!(read_quickly(&root.join("missing.txt")), Ok(None));
+        assert_eq!(read_quickly(&root.join("missing").join("deeper.txt")), Ok(None));
+        let file = root.join("-it's $HOME a.txt");
+        std::fs::write(&file, "").unwrap();
+        assert_eq!(read_quickly(&file), Ok(Some(String::new())));
+        std::fs::write(&file, vec![b'a'; LIMIT as usize]).unwrap();
+        assert_eq!(read_quickly(&file).unwrap().unwrap().len(), LIMIT as usize);
+        std::fs::write(&file, vec![b'a'; LIMIT as usize + 1]).unwrap();
+        assert_eq!(read_quickly(&file), Err("Text file exceeds 1 MiB".into()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_devices_and_drive_roots_are_not_previewed() {
+        // A device opens like a file on Windows; it is never read as one.
+        for path in [r"\\.\NUL", "NUL", r"\\.\CON"] {
+            assert!(!matches!(read_quickly(Path::new(path)), Ok(Some(_))), "{path}");
+        }
+        let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        assert_eq!(read_quickly(Path::new(&format!("{drive}\\"))), Err("Not a regular file".into()));
+    }
 
     #[test]
     fn decode_reads_utf8_bom_and_both_utf16_orders() {

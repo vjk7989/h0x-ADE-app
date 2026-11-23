@@ -19,6 +19,9 @@ pub struct SharedSpace {
     name: String,
     folder: String,
     tabs: Vec<SharedTab>,
+    /// Fields this build doesn't read, kept so a newer build's survive this one's write.
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -29,6 +32,9 @@ struct SharedTab {
     name: String,
     #[serde(default = "empty_root")]
     root: Node,
+    /// Fields this build doesn't read, kept so a newer build's survive this one's write.
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
 }
 
 fn empty_root() -> Node {
@@ -165,9 +171,10 @@ impl Document {
                         .map(|t| {
                             let mut root = t.root.clone();
                             map_node(&mut root, &map);
-                            SharedTab { id: map(&t.id), name: t.name.clone(), root }
+                            SharedTab { id: map(&t.id), name: t.name.clone(), root, rest: t.rest.clone() }
                         })
                         .collect(),
+                    rest: s.rest.clone(),
                 })
                 .collect(),
         }
@@ -190,9 +197,10 @@ impl Document {
                 .map(|t| {
                     let mut root = t.root.clone();
                     map_node(&mut root, &map);
-                    Tab { id: map(&t.id), name: t.name.clone(), root, focused: None, before: vec![], zoomed: None, settled: None }
+                    Tab { id: map(&t.id), name: t.name.clone(), root, focused: None, before: vec![], zoomed: None, settled: None, rest: t.rest.clone() }
                 })
                 .collect(),
+            rest: s.rest.clone(),
         });
         model.spaces.splice(at..at, spaces);
         model.order_spaces();
@@ -355,6 +363,88 @@ mod tests {
         saved.apply_machine(&mut m, None);
         assert!(m.agents["t1"].seen);
     }
+    /// A newer build may add fields to a space or tab (#718's `floating`): this
+    /// build writes them back as they were, so a mixed-version machine keeps them.
+    #[test]
+    fn unknown_space_and_tab_fields_survive_a_read_and_write() {
+        let text = serde_json::json!({"spaces":[{"id":"s","name":"work","folder":"/w","color":"teal","tabs":[{"id":"t","name":"","root":
+            {"id":"t","type":"row","children":[{"id":"p","type":"block","content":{"terminal":"t1"}}]},
+            "floating":[{"pane":{"id":"q","type":"block","content":{"terminal":"t2"}},"rect":[0.2,0.2,0.6,0.6]}]}]}]});
+        let read: Document = serde_json::from_value(text.clone()).unwrap();
+        for machine in [None, Some("mac")] {
+            let mut m = Model::default();
+            read.replace(&mut m, machine);
+            let id = |s: &str| qualify(s, machine);
+            m.split(&id("p"), Axis::Row, &id("p2"), &id("t3"));
+            let written = serde_json::to_value(Document::capture(&m, machine)).unwrap();
+            assert_eq!(written["spaces"][0]["color"], "teal", "{machine:?}");
+            assert_eq!(written["spaces"][0]["tabs"][0]["floating"], text["spaces"][0]["tabs"][0]["floating"], "{machine:?}");
+        }
+        // Read and written alone: the same document.
+        let mut m = Model::default();
+        read.replace(&mut m, None);
+        assert_eq!(serde_json::to_value(Document::capture(&m, None)).unwrap(), text);
+        assert!(!serde_json::to_string(&Document::capture(&model(), None)).unwrap().contains("rest"), "nothing extra: no field");
+    }
+
+    /// Nested, empty and null unknown values come back exactly; the fields this build
+    /// knows still take the model's changes, and the unknown ones stay with their own entry.
+    #[test]
+    fn unknown_fields_of_any_shape_survive_while_known_fields_update() {
+        let unknown = serde_json::json!({
+            "nested": {"a": [1, {"b": null}], "c": {"d": {"e": "deep"}}},
+            "empty_object": {}, "empty_array": [], "empty_string": "", "null": null,
+            "zero": 0, "flag": false, "dotted.key": "x", "": "blank key"
+        });
+        let mut space = serde_json::json!({"id":"s","name":"work","folder":"C:\\Users\\me\\work dir","tabs":[
+            {"id":"t","name":"one","root":{"id":"t","type":"row","children":[{"id":"p","type":"block","content":{"terminal":"t1"}}]}},
+            {"id":"u","name":"two","root":{"id":"u","type":"row","children":[{"id":"q","type":"block","content":{"terminal":"t2"}}]},"only_u":{"k":1}}
+        ]});
+        for (k, v) in unknown.as_object().unwrap() {
+            space[k] = v.clone();
+            space["tabs"][0][k] = v.clone();
+        }
+        let text = serde_json::json!({"spaces":[space]});
+        let read: Document = serde_json::from_value(text.clone()).unwrap();
+        // Nothing lost and nothing added by a plain read and write.
+        assert_eq!(serde_json::to_value(&read).unwrap(), text);
+        for machine in [None, Some("mac")] {
+            let mut m = Model::default();
+            read.replace(&mut m, machine);
+            let id = |s: &str| qualify(s, machine);
+            m.spaces[0].name = "renamed".into();
+            m.spaces[0].folder = "/elsewhere".into();
+            m.tab_mut(&id("u")).unwrap().name = "moved".into();
+            assert!(m.move_tab(&id("u"), 1));
+            let written = serde_json::to_value(Document::capture(&m, machine)).unwrap();
+            let space = &written["spaces"][0];
+            assert_eq!((space["name"].as_str(), space["folder"].as_str()), (Some("renamed"), Some("/elsewhere")), "{machine:?}");
+            assert_eq!(space["tabs"][0]["id"], "u", "{machine:?}");
+            assert_eq!(space["tabs"][0]["name"], "moved", "{machine:?}");
+            assert_eq!(space["tabs"][0]["only_u"], serde_json::json!({"k":1}), "the field moves with its tab: {machine:?}");
+            for (k, v) in unknown.as_object().unwrap() {
+                assert_eq!(space.get(k), Some(v), "space {k:?}: {machine:?}");
+                assert_eq!(space["tabs"][1].get(k), Some(v), "tab {k:?}: {machine:?}");
+                assert_eq!(space["tabs"][0].get(k), None, "tab u never had {k:?}: {machine:?}");
+            }
+        }
+    }
+
+    /// A space or tab made by this build writes only the fields it knows.
+    #[test]
+    fn new_spaces_and_tabs_add_no_unknown_fields() {
+        let mut m = model();
+        m.add_tab("s", Tab::new("t2", "", "p2", "t3"));
+        let written = serde_json::to_value(Document::capture(&m, None)).unwrap();
+        let keys = |v: &serde_json::Value| { let mut k = v.as_object().unwrap().keys().cloned().collect::<Vec<_>>(); k.sort(); k };
+        assert_eq!(keys(&written["spaces"][0]), ["folder", "id", "name", "tabs"]);
+        for tab in written["spaces"][0]["tabs"].as_array().unwrap() {
+            assert_eq!(keys(tab), ["id", "name", "root"]);
+        }
+        let empty: Document = serde_json::from_value(serde_json::json!({"spaces":[{}]})).unwrap();
+        assert_eq!(serde_json::to_value(&empty).unwrap(), serde_json::json!({"spaces":[{"id":"","name":"","folder":"","tabs":[]}]}));
+    }
+
     #[test]
     fn shared_fields_can_be_omitted() {
         let doc: Document = serde_json::from_value(serde_json::json!({"spaces":[{"id":"s","tabs":[{"id":"t"}]}]})).unwrap();

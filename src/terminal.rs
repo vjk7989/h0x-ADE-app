@@ -19,6 +19,29 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+const OUTPUT_TIME_PER_TURN: Duration = Duration::from_millis(6);
+
+fn output_turn(
+    first: Stream,
+    rx: &async_channel::Receiver<Stream>,
+    budget: Duration,
+) -> impl Iterator<Item = Stream> + '_ {
+    let deadline = Instant::now() + budget;
+    let mut first = Some(first);
+    let mut ended = false;
+    std::iter::from_fn(move || {
+        let item = if let Some(first) = first.take() {
+            first
+        } else {
+            // Released cores send frames of at most 16 KiB; a turn can overshoot by one frame.
+            if ended || Instant::now() >= deadline { return None; }
+            rx.try_recv().ok()?
+        };
+        ended = !matches!(item, Stream::Data(_));
+        Some(item)
+    })
+}
+
 fn pad() -> (f32, f32) {
     let p = crate::settings::get().terminal_padding;
     let zoom = crate::settings::zoom();
@@ -150,6 +173,7 @@ pub struct TerminalView {
     pending_search_nav: Option<bool>,
     search_task: Option<Task<()>>,
     attach_deadline: Instant,
+    _render_hold: Option<(Instant, Task<()>)>,
     _reader: Option<Task<()>>,
 }
 
@@ -314,6 +338,7 @@ impl TerminalView {
             pending_search_nav: None,
             search_task: None,
             attach_deadline,
+            _render_hold: None,
             _reader: None,
         };
         view.connect(core, cx);
@@ -339,6 +364,7 @@ impl TerminalView {
     /// Attaches off the UI thread: a terminal on a machine still dialing can
     /// take seconds, and the window must keep drawing meanwhile.
     fn connect(&mut self, core: Arc<Core>, cx: &mut Context<Self>) {
+        self._render_hold = None;
         let fit_ready = {
             let mut g = self.grid.borrow_mut();
             let (cols, rows) = (g.vt.cols, g.vt.rows);
@@ -387,14 +413,25 @@ impl TerminalView {
             let Ok(Some(rx)) = this.update(cx, |this, cx| this.attached(attached, (cols, rows), cx)) else {
                 return;
             };
+            // Keep the first history paint together; live output gets the shorter budget.
+            let mut budget = Duration::from_millis(250);
             while let Ok(first) = rx.recv().await {
-                let mut batch = vec![first];
-                while let Ok(more) = rx.try_recv() {
-                    batch.push(more);
-                }
-                let alive = this.update(cx, |this, cx| this.ingest(batch, cx));
+                let alive = this.update(cx, |this, cx| this.ingest(output_turn(first, &rx, budget), cx));
+                budget = OUTPUT_TIME_PER_TURN;
                 if !matches!(alive, Ok(true)) {
                     break;
+                }
+                if !rx.is_empty() {
+                    // A ready receiver does not yield to input and painting.
+                    let mut yielded = false;
+                    std::future::poll_fn(|cx| {
+                        if std::mem::replace(&mut yielded, true) {
+                            Poll::Ready(())
+                        } else {
+                            cx.waker().wake_by_ref();
+                            Poll::Pending
+                        }
+                    }).await;
                 }
             }
         }));
@@ -503,7 +540,7 @@ impl TerminalView {
     }
 
     /// Feeds relayed bytes in; returns false once the stream is over.
-    fn ingest(&mut self, batch: Vec<Stream>, cx: &mut Context<Self>) -> bool {
+    fn ingest(&mut self, batch: impl IntoIterator<Item = Stream>, cx: &mut Context<Self>) -> bool {
         let mut open = true;
         let title = {
             let mut g = self.grid.borrow_mut();
@@ -550,6 +587,19 @@ impl TerminalView {
         }
         if !open {
             cx.emit(TerminalEvent::Ended);
+        }
+        // GPUI can retain this pane's drawing while other panes paint.
+        // Wake it at the sync deadline even if the program sends no more bytes.
+        let deadline = self.grid.borrow().vt.render_hold_deadline();
+        if self._render_hold.as_ref().map(|(deadline, _)| *deadline) != deadline {
+            self._render_hold = deadline.map(|deadline| (deadline, cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(deadline.saturating_duration_since(Instant::now())).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.shown_in.get() == FRAME.load(Ordering::Relaxed) {
+                        cx.notify();
+                    }
+                });
+            })));
         }
         // Output in a terminal nobody sees doesn't redraw the window; it's
         // drawn fresh when shown again. Nor does output that changed nothing
@@ -2808,6 +2858,127 @@ mod tests {
             assert_eq!(hint(&remote, cx), None, "no hint over a remote pane's file names");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn output_turns_preserve_bytes_budget_and_close_order() {
+        use crate::core_link::Stream;
+        use std::time::Duration;
+
+        let (tx, rx) = async_channel::unbounded();
+        let payload: Vec<u8> = (0..50_000).map(|n| n as u8).collect();
+        for chunk in payload.chunks(997) {
+            tx.try_send(Stream::Data(chunk.to_vec())).unwrap();
+        }
+        tx.try_send(Stream::Closed(json!({"reason": "exited"}))).unwrap();
+        drop(tx);
+        let first = rx.try_recv().unwrap();
+        let mut turn = super::output_turn(first, &rx, Duration::ZERO);
+        let Some(Stream::Data(first)) = turn.next() else { panic!("missing first frame") };
+        assert!(turn.next().is_none(), "an expired turn must leave queued data for later");
+        let mut received = first;
+        let mut ended = false;
+        while let Ok(first) = rx.try_recv() {
+            for item in super::output_turn(first, &rx, Duration::from_secs(1)) {
+                match item {
+                    Stream::Data(bytes) => {
+                        assert!(!ended, "data overtook the close event");
+                        received.extend_from_slice(&bytes);
+                    }
+                    Stream::Closed(why) => {
+                        assert_eq!(why["reason"], "exited");
+                        assert_eq!(received, payload);
+                        ended = true;
+                    }
+                    Stream::Lost => panic!("unexpected lost connection"),
+                }
+            }
+        }
+        assert!(ended);
+        assert!(rx.is_closed() && rx.is_empty());
+    }
+
+    fn kinds(items: impl IntoIterator<Item = crate::core_link::Stream>) -> Vec<String> {
+        use crate::core_link::Stream;
+        items.into_iter().map(|item| match item {
+            Stream::Data(bytes) => format!("data:{}", String::from_utf8_lossy(&bytes)),
+            Stream::Closed(why) => format!("closed:{}", why["reason"].as_str().unwrap_or_default()),
+            Stream::Lost => "lost".into(),
+        }).collect()
+    }
+
+    /// An empty stream (the first thing is the end) is one item and the turn is over, even
+    /// with more queued behind it; a turn never waits for frames that haven't come.
+    #[test]
+    fn output_turns_end_at_once_on_an_empty_or_ended_stream() {
+        use crate::core_link::Stream;
+        use std::time::Duration;
+        let budget = Duration::from_secs(60);
+        for end in [Stream::Closed(json!({"reason": "exited"})), Stream::Lost] {
+            let (tx, rx) = async_channel::unbounded();
+            tx.try_send(Stream::Data(b"after".to_vec())).unwrap();
+            let want = kinds([match &end { Stream::Lost => Stream::Lost, _ => Stream::Closed(json!({"reason": "exited"})) }]);
+            assert_eq!(kinds(super::output_turn(end, &rx, budget)), want);
+            assert_eq!(rx.len(), 1, "nothing after the end is taken");
+        }
+        // Nothing queued and the sender still there: the first frame, then the turn returns.
+        let (tx, rx) = async_channel::unbounded::<Stream>();
+        let started = std::time::Instant::now();
+        assert_eq!(kinds(super::output_turn(Stream::Data(b"only".to_vec()), &rx, budget)), ["data:only"]);
+        assert!(started.elapsed() < Duration::from_secs(5), "the turn waited for more output");
+        // An empty frame is still a frame, and the sender gone is not an end.
+        tx.try_send(Stream::Data(vec![])).unwrap();
+        drop(tx);
+        assert_eq!(kinds(super::output_turn(Stream::Data(vec![]), &rx, budget)), ["data:", "data:"]);
+        assert!(rx.is_empty());
+    }
+
+    /// Past the deadline a turn hands back after the frame it holds; the rest waits in the
+    /// queue for the next turns, in order, with nothing lost or repeated.
+    #[test]
+    fn output_turns_yield_at_the_budget_and_lose_nothing() {
+        use crate::core_link::Stream;
+        use std::time::Duration;
+        let (tx, rx) = async_channel::unbounded();
+        for n in 0..10 {
+            tx.try_send(Stream::Data(format!("{n},").into_bytes())).unwrap();
+        }
+        tx.try_send(Stream::Closed(json!({"reason": "exited"}))).unwrap();
+        let first = rx.try_recv().unwrap();
+        let mut turn = super::output_turn(first, &rx, Duration::from_millis(1));
+        assert_eq!(kinds(turn.next()), ["data:0,"]);
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(turn.next().is_none(), "the budget is spent");
+        drop(turn);
+        assert_eq!(rx.len(), 10, "the queued frames are still there");
+        // The real per-turn budget, under heavy output: every byte comes through, in order.
+        let mut seen = vec!["data:0,".to_owned()];
+        let mut turns = 0;
+        while let Ok(first) = rx.try_recv() {
+            turns += 1;
+            seen.extend(kinds(super::output_turn(first, &rx, super::OUTPUT_TIME_PER_TURN)));
+        }
+        let mut want: Vec<String> = (0..10).map(|n| format!("data:{n},")).collect();
+        want.push("closed:exited".into());
+        assert_eq!(seen, want);
+        assert!(turns >= 1);
+        assert_eq!(super::OUTPUT_TIME_PER_TURN, Duration::from_millis(6));
+
+        let (tx, rx) = async_channel::unbounded();
+        let payload: Vec<u8> = (0..4_000_000u32).map(|n| (n % 251) as u8).collect();
+        for chunk in payload.chunks(16 * 1024) {
+            tx.try_send(Stream::Data(chunk.to_vec())).unwrap();
+        }
+        drop(tx);
+        let mut received = Vec::with_capacity(payload.len());
+        while let Ok(first) = rx.try_recv() {
+            for item in super::output_turn(first, &rx, super::OUTPUT_TIME_PER_TURN) {
+                let Stream::Data(bytes) = item else { panic!("only data was sent") };
+                received.extend_from_slice(&bytes);
+            }
+        }
+        assert_eq!(received.len(), payload.len());
+        assert!(received == payload, "bytes reordered or changed across turns");
     }
 
     #[gpui::test]
