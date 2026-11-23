@@ -2138,7 +2138,15 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         std::fs::write(&receipt, r#"{"version":"9.9.9"}"#).unwrap();
         // A file at the backup path blocks renaming the installed folder.
         std::fs::write(&old, "blocker").unwrap();
+        // Windows may replace a file by renaming a folder over it, but not rename a folder with an open file in it.
+        #[cfg(windows)]
+        let held = {
+            std::fs::write(root.join("held"), "").unwrap();
+            std::fs::File::open(root.join("held")).unwrap()
+        };
         let error = swap(&root, "9.9.9").unwrap_err();
+        #[cfg(windows)]
+        drop(held);
         assert!(error.raw_os_error().is_some(), "{error}");
         assert!(root.is_dir());
         assert!(staged.is_dir());

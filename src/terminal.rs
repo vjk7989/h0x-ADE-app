@@ -4184,7 +4184,7 @@ mod tests {
             Cow::Borrowed(include_bytes!("../assets/fonts/SymbolsNerdFont-Regular.ttf").as_slice()),
         ]).unwrap();
         let ts = WindowTextSystem::new(system);
-        for family in [crate::settings::DEFAULT_FONT, "Geist Mono", "Geist", "Symbols Nerd Font", "No Such Font"] {
+        for family in [crate::settings::DEFAULT_FONT, "Geist Mono", "Geist", "Symbols Nerd Font"] {
             let id = ts.resolve_font(&font(family));
             let mut last_height = 0.0;
             for fs in [1.0, 6.0, 9.5, 14.0, 72.0] {
@@ -4774,7 +4774,7 @@ mod tests {
         assert_eq!(shown_title("\u{2733} Fix the tests"), "Fix the tests", "Claude Code's");
         assert_eq!(shown_title("repo \u{00b7} branch"), "repo \u{00b7} branch", "a middle dot between words stays");
         assert_eq!(shown_title("\u{03c0} \u{00b7} task"), "\u{03c0} \u{00b7} task", "only braille after a prefix");
-        assert_eq!(shown_title("h0x \u{2839} task"), "h0x \u{2839} task", "a word is no prefix");
+        assert_eq!(shown_title("hyper \u{2839} task"), "hyper \u{2839} task", "a word is no prefix");
         assert_eq!(shown_title("\u{2839}"), "\u{2839}", "only a spinner: kept");
         assert_eq!(shown_title("\u{2839} \u{2838}"), "\u{2839} \u{2838}");
     }

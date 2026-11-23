@@ -117,7 +117,7 @@ fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
         // installed check searches when the shell can't run it (`programs::installed_here`),
         // then the person's shell takes over.
         let path = std::env::var("PATH").map(|p| format!("PATH='{}' ", p.replace('\'', "'\\''"))).unwrap_or_default();
-        let mut run = vec!["/bin/sh".into(), "-c".into(), format!("{path}\"$@\"; exec \"$0\" {}", if login { "-li" } else { "-i" }), sh];
+        let mut run = vec!["/bin/sh".into(), "-c".into(), format!("{path}\"$@\"; exec \"$0\" -i"), sh];
         run.extend(cmd);
         return run;
     }
