@@ -228,6 +228,8 @@ impl AppWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The window's `use gpui::*` brings in gpui's own `test` attribute; keep the built-in one.
+    use core::prelude::v1::test;
 
     fn node(layout: Value) -> Node {
         serde_json::from_value(layout).unwrap()
