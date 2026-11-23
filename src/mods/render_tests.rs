@@ -4723,7 +4723,7 @@ fn settings_remote_web_starts_once_with_the_chosen_reach(cx: &mut TestAppContext
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
-    for (reach, tail) in [("lan", vec!["--lan"]), ("tunnel", vec!["--tunnel", "--yes"])] {
+    for (reach, tail) in [("lan", vec!["--lan"]), ("tailscale", vec!["--tailscale"]), ("tunnel", vec!["--tunnel", "--yes"]), ("bogus", vec!["--lan"])] {
         let setup = format!("this.reach = '{reach}'; this.startWeb(cx); this.startWeb(cx);");
         let (_, calls) = describe_remote(cx, &staged, &replies, &setup);
         let runs = starts(&calls);
