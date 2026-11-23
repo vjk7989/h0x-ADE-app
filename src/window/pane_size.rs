@@ -84,35 +84,50 @@ fn shares(children: &[&Node], available: f32, zoom: f32) -> Vec<f32> {
     sizes
 }
 
-fn pane_size(n: &Node, size: Size<Pixels>, target: &str, frame: Option<&PaneFrame>, focused: &HashSet<String>, zoom: f32) -> Option<Size<Pixels>> {
+fn block_bounds(n: &Node, bounds: Bounds<Pixels>, target: &str, frame: Option<&PaneFrame>, focused: &HashSet<String>, zoom: f32) -> Option<Bounds<Pixels>> {
     if n.hidden { return None; }
-    let mut size = content_size(n, size, focused.contains(&n.id), zoom);
+    let border = node_border(n, focused.contains(&n.id)).map_or(0.0, |line| line.width) * zoom;
+    let mut origin = bounds.origin + point(px(border), px(border));
+    let size = inset(bounds.size, 2.0 * border, 2.0 * border);
+    if n.content().is_some() {
+        return (n.id == target).then_some(Bounds::new(origin, size));
+    }
+    let (y, x) = padding(n);
+    origin += point(px(x * zoom), px(y * zoom));
+    let size = content_size(n, bounds.size, focused.contains(&n.id), zoom);
     match &n.kind {
-        Kind::Block { .. } if n.id == target => {
-            if let Some(frame) = frame.filter(|_| n.is_pane()) {
-                let border = frame_border(frame, focused.contains(&n.id)).map_or(0.0, |line| line.width) * zoom;
-                let header = frame.header.as_ref().filter(|h| !h.hover()).map_or(0.0, header_height) * zoom;
-                size = inset(size, 2.0 * border, 2.0 * border + header);
-            }
-            Some(size)
-        }
         Kind::Row { children } | Kind::Column { children } => {
             let row = n.axis() == Some(Axis::Row);
             let children: Vec<_> = children.iter().filter(|n| !n.hidden).collect();
-            let separators = separator_width(n, gap(n, frame)) * zoom * children.len().saturating_sub(1) as f32;
-            let available = f32::from(if row { size.width } else { size.height }) - separators;
+            let separator = separator_width(n, gap(n, frame)) * zoom;
+            let available = f32::from(if row { size.width } else { size.height }) - separator * children.len().saturating_sub(1) as f32;
             for (child, span) in children.iter().zip(shares(&children, available, zoom)) {
                 let size = if row { gpui::size(px(span), size.height) } else { gpui::size(size.width, px(span)) };
-                if let Some(size) = pane_size(child, size, target, frame, focused, zoom) { return Some(size); }
+                if let Some(bounds) = block_bounds(child, Bounds::new(origin, size), target, frame, focused, zoom) { return Some(bounds); }
+                if row { origin.x += px(span + separator); } else { origin.y += px(span + separator); }
             }
             None
         }
         Kind::Stack { header, .. } => {
             let height = header.as_ref().map_or(0.0, header_height) * zoom;
-            pane_size(n.active_child()?, inset(size, 0.0, height), target, frame, focused, zoom)
+            if header.as_ref().is_some_and(|h| !h.bottom()) { origin.y += px(height); }
+            block_bounds(n.active_child()?, Bounds::new(origin, inset(size, 0.0, height)), target, frame, focused, zoom)
         }
         _ => None,
     }
+}
+
+fn pane_size(n: &Node, size: Size<Pixels>, target: &str, frame: Option<&PaneFrame>, focused: &HashSet<String>, zoom: f32) -> Option<Size<Pixels>> {
+    let bounds = block_bounds(n, Bounds::new(Point::default(), size), target, frame, focused, zoom)?;
+    let n = n.find(target)?;
+    let (y, x) = padding(n);
+    let mut size = inset(bounds.size, 2.0 * x * zoom, 2.0 * y * zoom);
+    if let Some(frame) = frame.filter(|_| n.is_pane()) {
+        let border = frame_border(frame, focused.contains(&n.id)).map_or(0.0, |line| line.width) * zoom;
+        let header = frame.header.as_ref().filter(|h| !h.hover()).map_or(0.0, header_height) * zoom;
+        size = inset(size, 2.0 * border, 2.0 * border + header);
+    }
+    Some(size)
 }
 
 /// The tab area and the cell size.
@@ -155,6 +170,24 @@ impl AppWindow {
         Some(crate::terminal::grid_size(size, crate::terminal::cell_size(window)))
     }
 
+    /// Use the full split layout even if it has never been drawn unzoomed.
+    pub(super) fn unzoomed_neighbor(&self, tab: &Tab, from: &str, dir: &str) -> Option<String> {
+        let (context, area) = self.context_area()?;
+        let frame = match context.content() {
+            Some(Content::Context { pane: Some(frame), .. }) if frame.lone || tab.root.panes().len() > 1 => Some(frame),
+            _ => None,
+        };
+        let zoom = settings::zoom();
+        let (y, x) = padding(context);
+        let origin = self.bounds.borrow().get(&context.id)?.origin + point(px(x * zoom), px(y * zoom));
+        let bounds = Bounds::new(origin, inset(area, 2.0 * x * zoom, 2.0 * y * zoom));
+        let focused = tab.root.path_to(from)?.into_iter().collect();
+        let geometry = |id: &str| block_bounds(&tab.root, bounds, id, frame, &focused, zoom);
+        let candidates = tab.root.visible_blocks().into_iter().filter(|n| n.is_pane() && n.id != from)
+            .filter_map(|n| Some((n.id.clone(), geometry(&n.id)?)));
+        nearest(geometry(from)?, dir, candidates, &self.pane_history)
+    }
+
     /// The block tabs show in, and the area it was last drawn with.
     fn context_area(&self) -> Option<(&Node, Size<Pixels>)> {
         let context = self.chrome.visible_blocks().into_iter().find(|n| matches!(n.content(), Some(Content::Context { .. })))?;
@@ -187,6 +220,91 @@ impl AppWindow {
                 {
                     t.view.read(cx).fit(cols, rows, cell, scale);
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(layout: Value) -> Node {
+        serde_json::from_value(layout).unwrap()
+    }
+
+    fn block(id: &str, extra: Value) -> Value {
+        let mut b = json!({ "id": id, "type": "block", "content": { "terminal": format!("t-{id}") } });
+        b.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap_or_default());
+        b
+    }
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(y)), size(px(w), px(h)))
+    }
+
+    #[test]
+    fn split_blocks_sit_where_they_are_drawn_after_gaps_and_hidden_siblings() {
+        let root = node(json!({ "id": "root", "type": "row", "gap": 10, "children": [
+            block("a", json!({})), block("c", json!({ "hidden": true })), block("b", json!({}))
+        ] }));
+        let at = |id: &str| block_bounds(&root, rect(100., 50., 210., 100.), id, None, &HashSet::new(), 1.0);
+        assert_eq!(at("a"), Some(rect(100., 50., 100., 100.)));
+        // The hidden sibling takes no room and adds no gap.
+        assert_eq!(at("b"), Some(rect(210., 50., 100., 100.)));
+        assert_eq!(at("c"), None);
+        assert_eq!(at("missing"), None);
+        assert_eq!(at(""), None);
+    }
+
+    #[test]
+    fn padding_gaps_and_zoom_move_column_blocks_down() {
+        let root = node(json!({ "id": "root", "type": "column", "gap": 10, "padding": [5, 8], "children": [
+            block("a", json!({})), block("b", json!({}))
+        ] }));
+        let at = |id: &str, zoom: f32| block_bounds(&root, rect(0., 0., 200., 230.), id, None, &HashSet::new(), zoom);
+        assert_eq!(at("a", 1.0), Some(rect(8., 5., 184., 105.)));
+        assert_eq!(at("b", 1.0), Some(rect(8., 120., 184., 105.)));
+        assert_eq!(at("a", 2.0), Some(rect(16., 10., 168., 95.)));
+        assert_eq!(at("b", 2.0), Some(rect(16., 125., 168., 95.)));
+    }
+
+    #[test]
+    fn a_fixed_width_block_pushes_its_neighbour_over() {
+        let root = node(json!({ "id": "root", "type": "row", "children": [
+            block("a", json!({ "size": { "px": 30 } })), block("b", json!({}))
+        ] }));
+        let at = |id: &str| block_bounds(&root, rect(0., 0., 100., 40.), id, None, &HashSet::new(), 1.0);
+        assert_eq!(at("a"), Some(rect(0., 0., 30., 40.)));
+        assert_eq!(at("b"), Some(rect(30., 0., 70., 40.)));
+    }
+
+    #[test]
+    fn a_pane_size_takes_off_borders_padding_and_the_frame() {
+        let root = node(json!({ "id": "root", "type": "row", "border": { "width": 2 }, "children": [
+            block("a", json!({ "border": { "width": 1 }, "padding": 3 })), block("b", json!({}))
+        ] }));
+        let none = HashSet::new();
+        assert_eq!(block_bounds(&root, rect(0., 0., 104., 50.), "a", None, &none, 1.0), Some(rect(3., 3., 48., 44.)));
+        assert_eq!(block_bounds(&root, rect(0., 0., 104., 50.), "b", None, &none, 1.0), Some(rect(52., 2., 50., 46.)));
+        assert_eq!(pane_size(&root, size(px(104.), px(50.)), "a", None, &none, 1.0), Some(size(px(42.), px(38.))));
+        let frame: PaneFrame = serde_json::from_value(json!({ "border": { "width": 2 } })).unwrap();
+        assert_eq!(pane_size(&root, size(px(104.), px(50.)), "a", Some(&frame), &none, 1.0), Some(size(px(38.), px(34.))));
+        assert_eq!(pane_size(&root, size(px(104.), px(50.)), "missing", Some(&frame), &none, 1.0), None);
+    }
+
+    #[test]
+    fn a_too_small_area_gives_empty_blocks_never_negative_ones() {
+        let root = node(json!({ "id": "root", "type": "row", "gap": 10, "padding": 10, "children": [
+            block("a", json!({ "padding": 4 })), block("b", json!({}))
+        ] }));
+        let none = HashSet::new();
+        for area in [rect(0., 0., 10., 10.), rect(0., 0., 0., 0.)] {
+            for id in ["a", "b"] {
+                let b = block_bounds(&root, area, id, None, &none, 1.0).unwrap();
+                assert!(b.size.width >= px(0.) && b.size.height >= px(0.), "{id}: {b:?}");
+                let s = pane_size(&root, area.size, id, None, &none, 1.0).unwrap();
+                assert_eq!(s, size(px(0.), px(0.)), "{id}");
             }
         }
     }

@@ -1186,19 +1186,53 @@ fn is_unc(path: &str) -> bool {
     path.replace('/', "\\").starts_with("\\\\")
 }
 
+/// A path PowerShell would not read as a plain file: a network or device path (`\server`,
+/// `\.\pipe\x`, `\??\x`), also behind a `FileSystem::` provider prefix. Reading one makes the
+/// remote machine open an SMB connection or a pipe, so it is never opened on Windows.
+fn windows_special_path(path: &str) -> bool {
+    let path = path.replace('/', "\\");
+    let mut native = path.as_str();
+    while let Some((_, tail)) = native.split_once("::").filter(|(provider, _)| {
+        provider.eq_ignore_ascii_case("FileSystem") || provider.eq_ignore_ascii_case(r"Microsoft.PowerShell.Core\FileSystem")
+    }) {
+        native = tail;
+    }
+    is_unc(native) || native.starts_with(r"\??\")
+}
+
 /// A text file on another machine, regular files only and at most one byte over the limit:
-/// `head` through `sh`, or PowerShell where there is none (Windows).
+/// `head` through `sh`, or PowerShell where there is none or it cannot read the path (Windows).
 fn read_remote(machine: &str, path: &str) -> Result<Option<String>, String> {
-    let script = r#"test -f "$1" || exit 1; exec head -c "$2" -- "$1""#;
-    let max = (crate::mod_files::LIMIT + 1).to_string();
-    let (code, out, _) = match run_remote(machine, "sh", &["-c".into(), script.into(), "sh".into(), path.into(), max], None) {
-        Err(e) if e.contains("cannot start") => {
-            if is_unc(path) {
-                return Err("A network path cannot be read through another machine".into());
-            }
-            run_remote(machine, "powershell.exe", &windows_read_args(path), None)?
+    read_remote_with(path, |command, args| run_remote(machine, command, args, None))
+}
+
+fn read_remote_with(path: &str, mut run: impl FnMut(&str, &[String]) -> Result<(i32, Vec<u8>, Vec<u8>), String>) -> Result<Option<String>, String> {
+    let refused = "A network path cannot be read through another machine";
+    // Git's sh on Windows can open such a path itself, before any script checks it.
+    if windows_special_path(path) {
+        match run("sh", &["-c".into(), r#"[ "${OS-}" != Windows_NT ]"#.into()]) {
+            Ok((0, _, _)) => {}
+            Ok(_) => return Err(refused.into()),
+            Err(e) if e.contains("cannot start") => return Err(refused.into()),
+            Err(e) => return Err(e),
         }
-        r => r?,
+    }
+    // On Windows (`OS` is Windows_NT) a miss may only mean sh cannot read a Windows path: 127 asks for PowerShell.
+    let script = r#"test -f "$1" || { [ "${OS-}" = Windows_NT ] && exit 127; exit 1; }; exec head -c "$2" -- "$1""#;
+    let max = (crate::mod_files::LIMIT + 1).to_string();
+    let read = run("sh", &["-c".into(), script.into(), "sh".into(), path.into(), max]);
+    let use_powershell = match &read {
+        Ok((126 | 127, _, _)) => true,
+        Err(e) => e.contains("cannot start"),
+        _ => false,
+    };
+    let (code, out, _) = if use_powershell {
+        if windows_special_path(path) {
+            return Err(refused.into());
+        }
+        run("powershell.exe", &windows_read_args(path))?
+    } else {
+        read?
     };
     if code != 0 {
         return Ok(None);
@@ -1741,6 +1775,169 @@ mod tests {
             assert!(!text.trim().is_empty(), "{file} is empty");
             assert!(!text.to_ascii_lowercase().contains("herdr"), "{file} mentions herdr");
         }
+    }
+
+    #[test]
+    fn an_input_selection_uses_the_theme_selection_colour() {
+        let mut tokens = gpui_base::SemanticThemeTokens::default();
+        tokens.colors.accent = gpui::hsla(0.1, 0.5, 0.5, 1.0);
+        tokens.colors.selection = gpui::hsla(0.6, 0.5, 0.5, 0.3);
+
+        let style = gpui_base::input::InputEditorStyle::default().resolved(&tokens);
+
+        assert_eq!(style.selection, tokens.colors.selection);
+    }
+
+    #[test]
+    fn remote_preview_falls_back_to_powershell_when_sh_cannot_read_a_windows_path() {
+        let path = r"C:\test/a.txt";
+        for shell in [Ok((126, vec![], vec![])), Ok((127, vec![], vec![])), Err("cannot start sh: program not found".into())] {
+            let mut commands = [("sh", shell), ("powershell.exe", Ok((0, b"preview".to_vec(), vec![])))].into_iter();
+            let text = read_remote_with(path, |command, _| {
+                let (expected, result) = commands.next().expect("unexpected remote command");
+                assert_eq!(command, expected);
+                result
+            });
+            assert_eq!(text, Ok(Some("preview".into())));
+            assert!(commands.next().is_none());
+        }
+        // A miss on a machine that is not Windows is just a miss.
+        assert_eq!(read_remote_with("/test/a.txt", |_, _| Ok((1, vec![], vec![]))), Ok(None));
+    }
+
+    #[test]
+    fn remote_preview_never_opens_network_or_device_paths_on_windows() {
+        for path in [r"\\.\pipe\x", "//localhost/pipe/x", r"\\server\share\f", r"\??\pipe\x", r"FileSystem::\\.\pipe\x", r"Microsoft.PowerShell.Core\FileSystem::FileSystem::\\.\pipe\x"] {
+            assert!(windows_special_path(path), "{path}");
+            for probe in [Ok((1, vec![], vec![])), Err("cannot start sh: program not found".into())] {
+                let mut reply = Some(probe);
+                let actual = read_remote_with(path, |command, args| {
+                    assert_eq!((command, args.len()), ("sh", 2), "{path}: only the probe runs");
+                    reply.take().expect("unexpected retry")
+                });
+                assert!(actual.is_err(), "{path}");
+            }
+        }
+        assert!(!windows_special_path(r"C:\pipe\file") && !windows_special_path("/home/me/f"));
+    }
+
+    #[test]
+    fn windows_special_paths_cover_every_spelling_and_leave_plain_paths() {
+        for path in [
+            r"\\?\C:\Users\me\a.txt",
+            r"\\?\UNC\server\share\a.txt",
+            "//?/C:/a.txt",
+            r"\\.\COM1",
+            r"\\.\PhysicalDrive0",
+            r"\\server",
+            r"\\",
+            r"\??\C:\a.txt",
+            "/??/pipe/x",
+            r"filesystem::\\server\share",
+            r"FILESYSTEM::\??\pipe\x",
+            r"microsoft.powershell.core\filesystem::\\server\share",
+            r"Microsoft.PowerShell.Core/FileSystem::\\.\pipe\x",
+        ] {
+            assert!(windows_special_path(path), "{path}");
+        }
+        for path in [
+            "",
+            r"C:\",
+            "C:",
+            r"C:\Users\me\a.txt",
+            "C:/Users/me/a.txt",
+            r"\Users\me\a.txt",
+            "relative/a.txt",
+            "::",
+            "FileSystem::",
+            r"FileSystem::C:\a.txt",
+            r"C:\a::b\c.txt",
+            "/home/me/a b.txt",
+        ] {
+            assert!(!windows_special_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_special_path_is_read_by_sh_only_on_a_machine_that_is_not_windows() {
+        let path = "//server/share/notes.txt";
+        // Not Windows: a `//` path is an ordinary POSIX path, read by sh, the path an argument and not source.
+        let mut calls = Vec::new();
+        let text = read_remote_with(path, |command, args| {
+            calls.push((command.to_owned(), args.to_vec()));
+            Ok(if calls.len() == 1 { (0, vec![], vec![]) } else { (0, b"notes".to_vec(), vec![]) })
+        });
+        assert_eq!(text, Ok(Some("notes".into())));
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].0, "sh");
+        assert_eq!(calls[1].1[3], path);
+        assert_eq!(calls[1].1[4], (crate::mod_files::LIMIT + 1).to_string());
+        // But if that sh still asks for PowerShell, the path stays refused.
+        for code in [126, 127] {
+            let mut replies = [Ok((0, vec![], vec![])), Ok((code, vec![], vec![]))].into_iter();
+            let actual = read_remote_with(path, |command, _| {
+                assert_eq!(command, "sh", "PowerShell never opens a network path");
+                replies.next().expect("unexpected retry")
+            });
+            assert!(actual.is_err(), "exit {code}");
+        }
+        // A probe that failed for another reason (the machine is gone) says so.
+        let lost = read_remote_with(path, |_, _| Err("connection lost".into()));
+        assert_eq!(lost, Err("connection lost".into()));
+    }
+
+    #[test]
+    fn remote_preview_errors_and_limits_are_not_hidden_by_the_powershell_fallback() {
+        let path = r"C:\Users\me\notes.txt";
+        // sh failing for another reason is the answer: no PowerShell.
+        let mut calls = 0;
+        let lost = read_remote_with(path, |command, _| {
+            calls += 1;
+            assert_eq!(command, "sh");
+            Err("connection lost".into())
+        });
+        assert_eq!((lost, calls), (Err("connection lost".into()), 1));
+        // Other exit codes are a miss, not a reason to try PowerShell.
+        for code in [1, 2, 125, 128] {
+            let mut calls = 0;
+            let miss = read_remote_with(path, |_, _| {
+                calls += 1;
+                Ok((code, b"partial".to_vec(), vec![]))
+            });
+            assert_eq!((miss, calls), (Ok(None), 1), "exit {code}");
+        }
+        // PowerShell gets the Windows path; its own failure and its miss come through.
+        let mut replies = [Ok((127, vec![], vec![])), Err("cannot start powershell.exe".to_owned())].into_iter();
+        let failed = read_remote_with(path, |command, args| {
+            if command == "powershell.exe" {
+                assert_eq!(args, windows_read_args(path).as_slice());
+            }
+            replies.next().unwrap()
+        });
+        assert_eq!(failed, Err("cannot start powershell.exe".into()));
+        let mut replies = [Ok((127, vec![], vec![])), Ok((1, vec![], vec![]))].into_iter();
+        assert_eq!(read_remote_with(path, |_, _| replies.next().unwrap()), Ok(None));
+        // An empty file is text; the limit is a byte, and one over it is refused.
+        let limit = crate::mod_files::LIMIT as usize;
+        for (len, fits) in [(0, true), (limit, true), (limit + 1, false)] {
+            let read = read_remote_with("/home/me/f", |_, _| Ok((0, vec![b'a'; len], vec![])));
+            match read {
+                Ok(Some(text)) => assert!(fits && text.len() == len, "{len}"),
+                other => assert!(!fits && other.is_err(), "{len}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_input_keeps_a_selection_colour_it_was_given() {
+        let mut tokens = gpui_base::SemanticThemeTokens::default();
+        tokens.colors.selection = gpui::hsla(0.6, 0.5, 0.5, 0.3);
+        let own = gpui::hsla(0.3, 0.5, 0.5, 0.5);
+        let style = gpui_base::input::InputEditorStyle { selection: own, ..Default::default() }.resolved(&tokens);
+        assert_eq!(style.selection, own);
+        // Transparent is unset: the theme's selection fills in, even a transparent one.
+        let unset = gpui_base::input::InputEditorStyle { selection: gpui::hsla(0.3, 0.5, 0.5, 0.0), ..Default::default() }.resolved(&tokens);
+        assert_eq!(unset.selection, tokens.colors.selection);
     }
 
     #[test]

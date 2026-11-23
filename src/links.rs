@@ -6,9 +6,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-/// Ghostty's default link pattern (`src/config/url.zig`), unchanged.
+/// Ghostty's default link pattern (`src/config/url.zig`), plus the editor
+/// remote schemes (`cursor://vscode-remote/...`, `vscode://vscode-remote/...`).
 static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    let schemes = r"https?://|mailto:|ftp://|file:|ssh:|git://|ssh://|tel:|magnet:|ipfs://|ipns://|gemini://|gopher://|news:";
+    let schemes = r"https?://|mailto:|ftp://|file:|ssh:|git://|ssh://|tel:|magnet:|ipfs://|ipns://|gemini://|gopher://|news:|cursor://|vscode://";
     let ipv6 = r"(?:\[[:0-9a-fA-F]+(?:[:0-9a-fA-F]*)+\](?::[0-9]+)?)";
     let scheme_chars = r"[\w\-.~:/?#@!$&*+,;=%]";
     let path_chars = r"[\w\-.~:\/?#@!$&*+;=%]";
@@ -964,6 +965,39 @@ mod tests {
         for input in ["input/output", "foo/bar", "$10/bar", "$10/$20", "$10/bar.txt", "foo/bar,baz.txt", "foo$BAR/baz.txt", "foo~/bar.txt", "// foo bar", "//foo"] {
             assert_eq!(first(input), None, "{input:?}");
         }
+    }
+
+    #[test]
+    fn editor_remote_links_keep_their_whole_uri() {
+        for url in [
+            "cursor://vscode-remote/ssh-remote+dev_host/data/1/user/my_project",
+            "vscode://vscode-remote/ssh-remote+dev_host/data/1/user/my_project",
+        ] {
+            let text = format!("Open {url} to continue.");
+            let at = text.find(url).unwrap();
+            let range = find(&text, at).unwrap();
+            assert_eq!(&text[range.clone()], url);
+            assert_eq!(resolve(&text[range], None), Some(Target::Url(url.into())));
+        }
+    }
+
+    #[test]
+    fn editor_links_are_found_from_any_character_and_beside_other_links() {
+        // A Windows drive inside an editor URI, and a line and column after it.
+        let cursor = "cursor://file/C:/Users/me/project/src/main.rs:12:5";
+        let https = "https://example.com/a";
+        let text = format!("{cursor} {https}");
+        for at in [0, 3, cursor.len() - 1] {
+            assert_eq!(find(&text, at).map(|r| &text[r]), Some(cursor), "at {at}");
+        }
+        assert_eq!(find(&text, cursor.len()), None, "the space between them is no link");
+        let at = text.find(https).unwrap();
+        assert_eq!(find(&text, at).map(|r| &text[r]), Some(https), "other schemes are unchanged");
+        assert_eq!(resolve(cursor, None), Some(Target::Url(cursor.into())));
+        assert_eq!(resolve(https, None), Some(Target::Url(https.into())));
+        // Only the `//` form is a scheme the pattern knows.
+        assert_eq!(find("cursor:foo", 0), None);
+        assert_eq!(find("vscode", 0), None);
     }
 
     #[test]

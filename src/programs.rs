@@ -153,12 +153,24 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Vec<String> {
             args.extend(installed_powershell(commands));
             crate::mods::run_here(&crate::core_bin::path().to_string_lossy(), &args).unwrap_or_default()
         }
-        None => {
-            let shell = crate::window::shell();
-            let line = installed_line(commands, base(&shell) == "fish");
-            crate::mods::run_here(&shell, &["-ic".into(), line]).unwrap_or_default()
-        }
+        None => return installed_here(&crate::window::shell(), commands),
     };
+    installed_found(commands, &out)
+}
+
+/// The check in the person's shell; a shell that can't run it (nushell) leaves no
+/// completion mark, so sh searches the app's PATH instead, which is where agents for
+/// such shells start (`window::unix_agent_argv`).
+fn installed_here(shell: &str, commands: &[String]) -> Vec<String> {
+    let mark = "printf 'h0x-check-complete\\n'";
+    let run = |shell: &str, args: [String; 2]| crate::mods::run_here(shell, &args).filter(|out| out.lines().any(|l| l == "h0x-check-complete"));
+    let out = run(shell, ["-ic".into(), format!("{} {mark}", installed_line(commands, base(shell) == "fish"))])
+        .or_else(|| run("/bin/sh", ["-c".into(), format!("{} {mark}", installed_line(commands, false))]))
+        .unwrap_or_default();
+    installed_found(commands, &out)
+}
+
+fn installed_found(commands: &[String], out: &str) -> Vec<String> {
     let found: std::collections::HashSet<&str> = out.split("h0x-has:").skip(1).filter_map(|s| s.split_whitespace().next()).collect();
     commands.iter().filter(|c| found.contains(c.as_str())).cloned().collect()
 }
@@ -483,12 +495,13 @@ fn resolve(t: &Table, app: Option<&str>, argv: &[String]) -> Value {
             None => shown("agent", t.programs.get("agent").unwrap_or(&Entry::default()), Some(app), false, true),
         };
     }
-    // The app starts commands in the person's shell: `zsh -ic '"$@"; exec "$0" -i' zsh <cmd>...`.
+    // The app starts commands in the person's shell: `zsh -ic '"$@"; exec "$0" -i' zsh <cmd>...`,
+    // or fish's `command $argv[2..]; exec $argv[1] -i`; on macOS both as login shells (`-lic`, `-li`).
     if argv.len() > 4
         && t.shells.iter().any(|s| s == base(&argv[0]))
         && argv[1].starts_with('-')
         && argv[1].ends_with('c')
-        && (argv[2].contains("\"$@\"") || argv[2] == "command $argv[2..]; exec $argv[1] -i")
+        && (argv[2].contains("\"$@\"") || matches!(argv[2].as_str(), "command $argv[2..]; exec $argv[1] -i" | "command $argv[2..]; exec $argv[1] -li"))
     {
         return resolve(t, None, &argv[4..]);
     }
@@ -773,8 +786,13 @@ mod tests {
         assert_eq!(key(None, &["mytool"]), "program");
         assert_eq!(key(None, &["/bin/zsh", "-ic", "\"$@\"; exec \"$0\" -i", "/bin/zsh", "vi", "x"]), "vim");
         assert_eq!(key(None, &["/usr/bin/fish", "-ic", "command $argv[2..]; exec $argv[1] -i", "/usr/bin/fish", "vi", "x"]), "vim");
+        // macOS starts agents from a login shell (`-lic`, then `exec fish -li`).
+        assert_eq!(key(None, &["/bin/zsh", "-lic", "\"$@\"; exec \"$0\" -li", "/bin/zsh", "cursor-agent"]), "cursor");
+        assert_eq!(key(None, &["/opt/homebrew/bin/fish", "-lic", "command $argv[2..]; exec $argv[1] -li", "/opt/homebrew/bin/fish", "cursor-agent"]), "cursor");
         let line = powershell_line(&["codex".into(), "fix it".into()]);
         assert_eq!(key(None, &["pwsh.exe", "-NoExit", "-Command", &line]), "codex");
+        assert_eq!(key(None, &[r"C:\Program Files\PowerShell\7\pwsh.exe", "-NoExit", "-Command", &line]), "codex");
+        assert_eq!(key(None, &[r"C:\Program Files\PowerShell\7\pwsh.exe"]), "shell");
         assert_eq!(key(None, &[r"C:\Windows\powershell.exe"]), "shell");
     }
 
@@ -807,6 +825,75 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8(out.stdout).unwrap(), "h0x-has:issue57_function\nh0x-has:printf\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_check_runs_in_the_persons_shell_and_falls_back_to_sh_only_when_it_cannot() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let dir = temp.join(format!("h0x-other-shell-check-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("rc")).unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        // Only the person's shell can find it: its rc adds `rc` to PATH.
+        script("rc/issue240-rc-agent", "");
+        // A sh-compatible shell under a name nothing knows; and nushell, which rejects sh syntax.
+        let posix = script("mksh-custom", &format!("PATH={}:$PATH exec /bin/sh \"$@\"", dir.join("rc").display()));
+        let nu = script("nu", "echo \"Error: nu::parser::shell_outerr\" >&2\nexit 1");
+        let commands = ["sh", "issue240-rc-agent", "issue240-missing-agent"].map(String::from);
+        let (posix, nu) = (installed_here(&posix, &commands), installed_here(&nu, &commands));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(posix, ["sh", "issue240-rc-agent"]);
+        assert_eq!(nu, ["sh"]);
+    }
+
+    #[test]
+    fn found_commands_are_whole_words_in_the_asked_order() {
+        let commands = ["claude", "codex", "gemini"].map(String::from);
+        assert_eq!(installed_found(&commands, ""), Vec::<String>::new());
+        assert_eq!(installed_found(&[], "h0x-has:codex\n"), Vec::<String>::new());
+        // A longer name is not the command, nor is a bare mention of it.
+        assert_eq!(installed_found(&commands, "h0x-has:codexx\nsee codex\n"), Vec::<String>::new());
+        // Order follows the question; PowerShell's CRLF and a chatty profile change nothing.
+        assert_eq!(installed_found(&commands, "Welcome!\r\nh0x-has:gemini\r\nh0x-has:claude\r\nh0x-has:claude\r\n"), ["claude", "gemini"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_that_cannot_start_or_stops_early_falls_back_to_sh() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let dir = temp.join(format!("h0x-early-shell-check-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Claims an agent, then fails before the completion mark: its answer is not trusted.
+        let liar = dir.join("liar");
+        std::fs::write(&liar, "#!/bin/sh\nprintf 'h0x-has:h0x-fake-agent\\n'\nexit 1\n").unwrap();
+        std::fs::set_permissions(&liar, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let commands = ["h0x-fake-agent", "sh"].map(String::from);
+        let liar = installed_here(&liar.to_string_lossy(), &commands);
+        let missing = installed_here(&dir.join("no-such-shell").to_string_lossy(), &commands);
+        let empty = installed_here("", &commands);
+        let nothing = installed_here("/bin/sh", &[]);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(liar, ["sh"]);
+        assert_eq!(missing, ["sh"]);
+        assert_eq!(empty, ["sh"]);
+        assert!(nothing.is_empty());
+    }
+
+    #[test]
+    fn agents_in_the_sh_fallback_for_other_shells_are_named() {
+        // How `window::unix_agent_argv` starts an agent under nushell and the like.
+        let argv = ["/bin/sh", "-c", "PATH='/usr/bin:/bin' \"$@\"; exec \"$0\" -i", "/usr/bin/nu", "cursor-agent"];
+        assert_eq!(key(None, &argv), "cursor");
+        // Fish's wrapper only in its two exact forms.
+        assert_eq!(key(None, &["/usr/bin/fish", "-ic", "command $argv[2..]; exec $argv[1] -li", "/usr/bin/fish", "vi", "x"]), "vim");
+        assert_ne!(key(None, &["/usr/bin/fish", "-ic", "command $argv[2..]; exec $argv[1] -x", "/usr/bin/fish", "vi", "x"]), "vim");
     }
 
     #[test]

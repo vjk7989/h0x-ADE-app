@@ -1103,6 +1103,22 @@ fn startup_target<'a>(running: &str, staged: Option<&'a str>, relaunched: Option
     staged.filter(|version| newer(version, running))
 }
 
+/// Windows can't rename a folder that is a process's working directory, and a
+/// launcher or shortcut may start the app in its own folder. Leave it before
+/// the core and terminals inherit it, or no update could ever be put in place.
+pub fn leave_install_folder() {
+    if !cfg!(windows) {
+        return;
+    }
+    let (Some(root), Ok(cwd)) = (root(), std::env::current_dir()) else { return };
+    if cwd.canonicalize().is_ok_and(|cwd| cwd.starts_with(&root))
+        && let Some(home) = std::env::home_dir()
+        && let Err(e) = std::env::set_current_dir(&home)
+    {
+        tracing::warn!("update: cannot leave the install folder for {}: {e}", home.display());
+    }
+}
+
 /// Recover a staged hotfix even when the previous window never quit cleanly.
 /// The inherited expected version allows only one automatic relaunch.
 pub fn apply_on_startup() -> bool {
@@ -1119,7 +1135,7 @@ pub fn apply_on_startup() -> bool {
     let Some(root) = checks_app() else { return false };
     let staged = staged_version(&root);
     let Some(version) = startup_target(env!("CARGO_PKG_VERSION"), staged.as_deref(), expected.as_deref()) else { return false };
-    if !swap(&root, version) {
+    if swap(&root, version).is_err() {
         return false;
     }
     relaunch_expected(Some(version))
@@ -1203,29 +1219,29 @@ pub fn after_start() {
 }
 
 /// Puts the downloaded version in place of this one. The running app keeps
-/// its files open, so it can go on until it quits. True if it swapped.
+/// its files open, so it can go on until it quits. Ok(false) means nothing is ready.
 /// Windows lets a running program's folder be renamed, not deleted: the old
 /// one is kept as `<install>.previous` (see `swap`).
-pub fn apply() -> bool {
-    let Some(root) = root() else { return false };
+pub fn apply() -> std::io::Result<bool> {
+    let Some(root) = root() else { return Ok(false) };
     let staged = staged_version(&root);
-    let Some(version) = staged.as_deref().filter(|version| newer(version, env!("CARGO_PKG_VERSION"))) else { return false };
+    let Some(version) = staged.as_deref().filter(|version| newer(version, env!("CARGO_PKG_VERSION"))) else { return Ok(false) };
     if ready().as_deref() != Some(version) {
-        return false;
+        return Ok(false);
     }
-    swap(&root, version)
+    swap(&root, version).map(|()| true)
 }
 
 /// Swaps `version` in. The working version stays as `<install>.previous` until the
 /// new one has started OK 3 times (`started_ok`), so a rollback has it to go back to.
-fn swap(root: &Path, version: &str) -> bool {
+fn swap(root: &Path, version: &str) -> std::io::Result<()> {
     let staged = beside(root, ".new");
     let old = beside(root, ".previous");
     let _ = std::fs::remove_dir_all(&old);
     if let Err(e) = std::fs::rename(root, &old) {
         tracing::warn!("update: cannot move {} aside: {e}", root.display());
         crate::analytics::report("update_failed", "swap", &format!("cannot move the old version aside: {e}"));
-        return false;
+        return Err(e);
     }
     if let Err(e) = std::fs::rename(&staged, root) {
         tracing::warn!("update: cannot put the new version in place: {e}");
@@ -1234,7 +1250,7 @@ fn swap(root: &Path, version: &str) -> bool {
             tracing::error!("update: cannot restore the previous version: {rollback}");
             crate::analytics::report("update_failed", "rollback", &rollback.to_string());
         }
-        return false;
+        return Err(e);
     }
     let _ = std::fs::remove_file(beside(root, ".new.json"));
     *READY.lock().unwrap() = None;
@@ -1245,7 +1261,7 @@ fn swap(root: &Path, version: &str) -> bool {
     // A marker an earlier try of this version left must not count for this one.
     let _ = std::fs::remove_file(started_marker(version));
     let _ = std::fs::remove_file(quit_marker(version));
-    true
+    Ok(())
 }
 
 /// Opens the app again once this process has exited (after `apply`).
@@ -2107,6 +2123,72 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         std::fs::write(&receipt, r#"{"version":"0.1.8"}"#).unwrap();
         assert_eq!(staged_version(&root), None);
         assert!(!staged.exists());
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[test]
+    fn failed_swap_keeps_the_download_and_reports_the_os_error() {
+        let work = std::env::temp_dir().join(format!("h0x-update-blocked-{}", std::process::id()));
+        let root = work.join(PACKED);
+        let staged = beside(&root, ".new");
+        let receipt = beside(&root, ".new.json");
+        let old = beside(&root, ".previous");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(&receipt, r#"{"version":"9.9.9"}"#).unwrap();
+        // A file at the backup path blocks renaming the installed folder.
+        std::fs::write(&old, "blocker").unwrap();
+        let error = swap(&root, "9.9.9").unwrap_err();
+        assert!(error.raw_os_error().is_some(), "{error}");
+        assert!(root.is_dir());
+        assert!(staged.is_dir());
+        assert!(receipt.is_file());
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "blocker");
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[test]
+    fn failed_install_restores_the_previous_version() {
+        let work = std::env::temp_dir().join(format!("h0x-update-rollback-{}", std::process::id()));
+        let root = work.join(PACKED);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("previous"), "keep me").unwrap();
+        // The missing stage fails only after the installed folder was moved.
+        let error = swap(&root, "9.9.9").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read_to_string(root.join("previous")).unwrap(), "keep me");
+        assert!(!beside(&root, ".previous").exists());
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[test]
+    fn a_missing_install_is_an_error_and_leaves_the_download_alone() {
+        let work = std::env::temp_dir().join(format!("h0x-update-no-install-{}", std::process::id()));
+        let root = work.join(PACKED);
+        let staged = beside(&root, ".new");
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("next"), "new").unwrap();
+        let error = swap(&root, "9.9.9").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(!root.exists());
+        assert_eq!(std::fs::read_to_string(staged.join("next")).unwrap(), "new");
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[test]
+    fn a_failed_install_over_an_older_backup_still_restores_the_running_version() {
+        let work = std::env::temp_dir().join(format!("h0x-update-old-backup-{}", std::process::id()));
+        let root = work.join(PACKED);
+        let old = beside(&root, ".previous");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("current"), "running").unwrap();
+        // A backup from an earlier update is in the way of the new one.
+        std::fs::create_dir_all(old.join("nested")).unwrap();
+        std::fs::write(old.join("nested/stale"), "older").unwrap();
+        let error = swap(&root, "9.9.9").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read_to_string(root.join("current")).unwrap(), "running");
+        assert!(!beside(&root, ".new").exists());
         std::fs::remove_dir_all(work).unwrap();
     }
 
@@ -3469,7 +3551,7 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         assert_eq!(check_from(&root, &url), Ok(Some("99.0.0".to_owned())));
         assert_eq!(asked().iter().filter(|p| *p == file).count(), 1);
         // Applied on quit: the install holds the new version, `.previous` the old one.
-        assert!(swap(&root, "99.0.0"));
+        assert!(swap(&root, "99.0.0").is_ok());
         assert_eq!(version_of(&root).as_deref(), Some("99.0.0"));
         assert_eq!(version_of(&beside(&root, ".previous")).as_deref(), Some(env!("CARGO_PKG_VERSION")));
         assert!(!beside(&root, ".new").exists() && !beside(&root, ".new.json").exists());
@@ -3501,7 +3583,7 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
         let asked = release_server(listener, routes);
         for round in 1..=2u32 {
             assert_eq!(check_from(&root, &url), Ok(Some("99.0.0".to_owned())), "round {round}");
-            assert!(swap(&root, "99.0.0"), "round {round}");
+            assert!(swap(&root, "99.0.0").is_ok(), "round {round}");
             let w = watch(&root).expect("a watch with a previous version");
             // What `relaunch_expected` runs, for an app that has already quit (no such pid).
             let status = Command::new("sh")

@@ -452,6 +452,23 @@ impl Model {
         self.tab_mut(ctx).is_some_and(|c| c.settled.take().is_some())
     }
 
+    /// Zooms a pane, or unzooms it when it's the zoomed one. A tab with one
+    /// pane doesn't zoom. Zooming focuses the pane: a zoomed tab never hides
+    /// the pane that has the keyboard. Returns whether the pane is now zoomed.
+    pub fn toggle_zoom(&mut self, pane_id: &str) -> bool {
+        let Some(c) = self.tab_of_mut(pane_id) else { return false };
+        if c.root.panes().len() < 2 {
+            return false;
+        }
+        if c.zoomed.as_deref() == Some(pane_id) {
+            c.zoomed = None;
+            return false;
+        }
+        c.zoomed = Some(pane_id.to_owned());
+        c.focus(pane_id);
+        true
+    }
+
     /// Focuses a pane anywhere: selects its space and tab.
     pub fn focus_pane(&mut self, pane_id: &str) -> bool {
         let Some(c) = self.tab_of_mut(pane_id) else { return false };
@@ -1037,6 +1054,44 @@ mod tests {
         // A tab nobody zoomed stays unzoomed when focus moves.
         m.tab_mut("c1").unwrap().zoomed = None;
         assert!(m.focus_pane("x2"));
+        assert_eq!(m.tab("c1").unwrap().zoomed, None);
+    }
+
+    #[test]
+    fn zooming_a_pane_focuses_it() {
+        let mut m = model_with_one();
+        // A tab with one pane doesn't zoom.
+        assert!(!m.toggle_zoom("x1"));
+        assert!(m.split("x1", Axis::Row, "x2", "t2"));
+        assert!(m.focus_pane("x2"));
+        // Zooming the other pane (its header's button) shows it and gives it the keyboard.
+        assert!(m.toggle_zoom("x1"));
+        assert_eq!(m.tab("c1").unwrap().zoomed.as_deref(), Some("x1"));
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+        assert_eq!(m.tab("c1").unwrap().before, ["x2"]);
+        // Unzooming leaves focus where it is.
+        assert!(!m.toggle_zoom("x1"));
+        assert_eq!(m.tab("c1").unwrap().zoomed, None);
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+    }
+
+    #[test]
+    fn zooming_another_pane_moves_the_zoom_and_unknown_panes_change_nothing() {
+        let mut m = model_with_one();
+        assert!(!m.toggle_zoom(""), "an empty id is no pane");
+        assert!(!m.toggle_zoom("nope"));
+        assert!(m.split("x1", Axis::Row, "x2", "t2"));
+        assert!(m.toggle_zoom("x1"));
+        // Zooming the other pane while one is zoomed moves the zoom and the keyboard to it.
+        assert!(m.toggle_zoom("x2"));
+        assert_eq!(m.tab("c1").unwrap().zoomed.as_deref(), Some("x2"));
+        assert_eq!(m.focused_pane().as_deref(), Some("x2"));
+        // An unknown pane leaves the zoom and the focus alone.
+        assert!(!m.toggle_zoom("nope"));
+        assert_eq!(m.tab("c1").unwrap().zoomed.as_deref(), Some("x2"));
+        assert_eq!(m.focused_pane().as_deref(), Some("x2"));
+        // Toggling the zoomed pane again unzooms it.
+        assert!(!m.toggle_zoom("x2"));
         assert_eq!(m.tab("c1").unwrap().zoomed, None);
     }
 
