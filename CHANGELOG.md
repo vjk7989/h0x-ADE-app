@@ -2,17 +2,26 @@
 
 ## [Unreleased]
 
+## [0.1.39] - 2026-11-23
+
+Beta launch: Terms and Privacy at sign-in, a Tokens card, and the phone panel through Tailscale. Bundles h0x-core 0.1.19.
+
 ### Added
 
 - A Tokens card on your Profile, and a required Terms and Privacy Policy checkbox at sign-in.
+- Settings → Remote → Phone / web panel can be reached through Tailscale.
 
 ### Changed
 
 - Beta analytics now include agent usage and prompts with secrets removed; see the Privacy Policy.
+- Token Saver is now on by default; you can turn it off in Settings → 0x Modes. Your Profile shows whether it is on.
+- A new look for the sign-in screen.
+- HyperOx uses almost no CPU or GPU while its window is minimized.
 
-### Changed
+### Fixed
 
-- Token Saver is now on by default; you can turn it off in Settings → 0x Modes.
+- Smart routing no longer loses the task for some Claude routes.
+- A security update for a third-party library.
 
 ## [0.1.38] - 2026-11-20
 
