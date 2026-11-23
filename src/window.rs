@@ -156,6 +156,15 @@ fn default_layout(name: &str) -> Node {
     serde_json::from_str(shipped_layout(name)).expect("defaults/layouts are valid")
 }
 
+/// `Name key = value`, built rather than parsed: gpui's parser never returns
+/// on a value with a character like `.` (a mod folder `a.b`), so names go in whole.
+fn key_context(name: &'static str, key: &'static str, value: &str) -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add(name);
+    context.set(key, value.to_owned());
+    context
+}
+
 fn layout_path(name: &str) -> PathBuf {
     file(&format!("layouts/{name}.json"))
 }
@@ -3099,12 +3108,7 @@ impl AppWindow {
             }
             "tab.move" => {
                 let (Some(id), Some(i)) = (Self::arg(a, "id"), a.get("index").and_then(Value::as_u64)) else { return self.fail("tab.move needs id and index") };
-                let Some(pid) = self.model.space_of(id).map(|p| p.id.clone()) else { return self.fail(format!("no tab {id:?}")) };
-                let p = self.model.space_mut(&pid).unwrap();
-                let from = p.tabs.iter().position(|c| c.id == id).unwrap();
-                let c = p.tabs.remove(from);
-                let to = (i as usize).saturating_sub(1).min(p.tabs.len());
-                p.tabs.insert(to, c);
+                if !self.model.move_tab(id, i as usize) { return self.fail(format!("no tab {id:?}")); }
             }
             "tab.settle" | "tab.unsettle" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab") };
@@ -4460,7 +4464,7 @@ impl AppWindow {
         match self.copies.get(slot) {
             Some(Copy { root: Some(root), inst, .. }) => div()
                 .size_full()
-                .key_context(format!("Mod mod = {}", inst.name).as_str())
+                .key_context(key_context("Mod", "mod", &inst.name))
                 .when(in_pane, |d| {
                     let id = slot.to_owned();
                     d.on_any_mouse_down(cx.listener(move |this, _, _, cx| {
@@ -4565,14 +4569,15 @@ impl AppWindow {
         let Some(d) = &self.drag else { return };
         let (container, index, axis) = (d.container.clone(), d.index, d.axis);
         let Some(node) = self.find_node_mut(&container).map(|n| n.clone()) else { return };
+        if !node.resizable() { return; }
         let shown: Vec<&Node> = node.children().iter().filter(|c| !c.hidden).collect();
         let (Some(a), Some(b)) = (shown.get(index), shown.get(index + 1)) else { return };
         let bounds = self.bounds.borrow();
         let (Some(ba), Some(bb)) = (bounds.get(&a.id).copied(), bounds.get(&b.id).copied()) else { return };
         drop(bounds);
-        let (start, end, p) = match axis {
-            Axis::Row => (f32::from(ba.left()), f32::from(bb.right()), f32::from(pos.x)),
-            Axis::Column => (f32::from(ba.top()), f32::from(bb.bottom()), f32::from(pos.y)),
+        let (start, p) = match axis {
+            Axis::Row => (f32::from(ba.left()), f32::from(pos.x)),
+            Axis::Column => (f32::from(ba.top()), f32::from(pos.y)),
         };
         let (la, lb) = match axis {
             Axis::Row => (f32::from(ba.size.width), f32::from(bb.size.width)),
@@ -4580,9 +4585,11 @@ impl AppWindow {
         };
         // Measured on screen; sizes are stored as designed (unzoomed).
         let zoom = settings::zoom();
-        let (la, lb, start, end, p) = (la / zoom, lb / zoom, start / zoom, end / zoom, p / zoom);
+        let (la, lb, start, p) = (la / zoom, lb / zoom, start / zoom, p / zoom);
         let total = la + lb;
-        let mut new_a = (p - start).clamp(24.0, (end - start) - 24.0);
+        // Squeezed and zero-size siblings cannot both keep the drag minimum.
+        if total <= 48.0 { return; }
+        let mut new_a = (p - start).clamp(24.0, total - 24.0);
         if let Some(min) = a.min {
             new_a = new_a.max(min);
         }
@@ -5306,7 +5313,7 @@ impl Render for AppWindow {
             .id("h0x")
             .track_focus(&self.focus)
             // `layout:<name>` key sections apply while that layout shows.
-            .key_context(format!("HyperOx layout = {}", self.layout_name).as_str())
+            .key_context(key_context("HyperOx", "layout", &self.layout_name))
             .size_full()
             .relative()
             .bg(c("background"))
@@ -6861,6 +6868,7 @@ export default class Files extends View {
     }
 
     include!("window/pane_size_tests.rs");
+    include!("window/drag_tests.rs");
 
     /// The whole path, in a real window: a layout names the toast mod, a
     /// notification opens it with its props, and it can close itself (as one
@@ -6922,6 +6930,134 @@ export default class SystemToast extends View {
         let (id, name) = notify(cx);
         assert_eq!(name, "toast");
         assert!(shown(&id, cx), "an empty mod name falls back to the shipped toast");
+    }
+
+    #[test]
+    fn mods_and_layouts_named_with_any_characters_render() {
+        in_own_process("odd_names_render");
+    }
+
+    #[gpui::test]
+    fn odd_names_render(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("odd_names_render") {
+            return;
+        }
+        let name = "zz-probe.off";
+        let probe = r#"import { View, div } from "gpui-kit";
+export default class Probe extends View { render() { return div().child("probe"); } }
+"#;
+        let layout = json!({
+            "id": "root", "type": "row",
+            "children": [{"id": "block", "type": "block", "content": {"mod": name}}],
+            "floating": [{"id": "float", "content": {"mod": name}}]
+        });
+        let (view, cx) = open_window(cx, name, probe, layout.clone());
+        view.update_in(cx, |this, window, cx| this.run("mod.open", json!({ "name": name }), window, cx));
+        cx.run_until_parked();
+        std::fs::write(crate::mods::app_dir().join("layouts/my.copy.json"), layout.to_string()).unwrap();
+        view.update_in(cx, |this, window, cx| {
+            this.load_layout("my.copy");
+            this.sync(window, cx);
+        });
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            assert_eq!(this.layout_name, "my.copy");
+            let mounted: Vec<&str> = this.copies.iter().filter(|(_, c)| c.inst.name == name && c.root.is_some()).map(|(slot, _)| slot.as_str()).collect();
+            assert_eq!(mounted.len(), 3, "block, float and popup: {mounted:?}");
+        });
+        for (section, kind, value) in [("mod:zz-probe.off", "mod", name), ("layout:my.copy", "layout", "my.copy")] {
+            let bindings = crate::keys::parse(&json!({ (section): { "f6": "app.help" }, "global": { "f7": "app.help" } }).to_string()).unwrap();
+            assert_eq!(bindings.len(), 2);
+            let predicate = gpui::KeyBindingContextPredicate::Equal(kind.into(), value.into());
+            assert!(bindings.iter().any(|binding| binding.predicate().as_deref() == Some(&predicate)));
+        }
+    }
+
+    /// Names made only of dots, or with leading, trailing or doubled dots, spaces or
+    /// `==`: the context holds them whole, and keys.json's sections for them match it.
+    #[test]
+    fn dotted_names_build_a_context_their_shortcuts_match() {
+        use gpui::KeyBindingContextPredicate as P;
+        let names = [".", "..", "...", ".hidden", "trailing.", "a..b", "a.b.c", "a == b", "-", "x\\y", ""];
+        for name in names {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let owned = name.to_owned();
+            // The old string parser never returned on some of these: a hang fails here instead.
+            std::thread::spawn(move || {
+                let layout = super::key_context("HyperOx", "layout", &owned);
+                let pane = super::key_context("Mod", "mod", &owned);
+                let stack = [layout.clone(), pane.clone()];
+                let mut found = vec![
+                    layout.contains("HyperOx"),
+                    layout.get("layout").map(|v| v.to_string() == owned) == Some(true),
+                    pane.contains("Mod"),
+                    pane.get("mod").map(|v| v.to_string() == owned) == Some(true),
+                ];
+                if !owned.is_empty() {
+                    let keys = serde_json::json!({
+                        (format!("mod:{owned}")): { "f6": "app.help" },
+                        (format!("layout:{owned}")): { "f7": "app.help" },
+                        "global": { "f8": "app.help" }
+                    });
+                    let bindings = crate::keys::parse(&keys.to_string()).unwrap();
+                    let depth = |want: &P| bindings.iter().filter_map(|b| b.predicate()).find(|p| **p == *want).and_then(|p| p.depth_of(&stack));
+                    found.push(bindings.len() == 3);
+                    // Global keys apply under the window's `HyperOx` context, a mod's inside its block.
+                    found.push(depth(&P::Identifier("HyperOx".into())) == Some(1));
+                    found.push(depth(&P::Equal("layout".into(), owned.clone().into())) == Some(1));
+                    found.push(depth(&P::Equal("mod".into(), owned.clone().into())) == Some(2));
+                    // A name never matches another name's section.
+                    let other = P::Equal("mod".into(), format!("{owned}.").into());
+                    found.push(!other.eval(&stack));
+                }
+                let _ = tx.send(found);
+            });
+            let found = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or_else(|_| panic!("{name:?} hung"));
+            assert!(found.iter().all(|ok| *ok), "{name:?}: {found:?}");
+        }
+        // An empty name is no section.
+        for section in ["mod:", "layout:"] {
+            let err = crate::keys::parse(&serde_json::json!({ (section): { "f6": "app.help" } }).to_string()).unwrap_err();
+            assert!(err.contains("unknown section"), "{section}: {err}");
+        }
+    }
+
+    #[test]
+    fn tab_move_refuses_a_pane_or_unknown_id_without_panicking() {
+        in_own_process("tab_move_refuses_non_tabs");
+    }
+
+    #[gpui::test]
+    fn tab_move_refuses_non_tabs(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("tab_move_refuses_non_tabs") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.model.add_tab("sp1", crate::model::Tab::new("tb2", "", "p2", "t2"));
+            this.model.split("p1", super::Axis::Column, "p3", "t3");
+            this.documents.entry(String::new()).or_default().available = true;
+            this.sync(window, cx);
+            let tabs = |this: &super::AppWindow| this.model.space("sp1").unwrap().tabs.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+            // Before, a pane id found its space and then unwrapped a tab position that isn't there.
+            for id in ["p1", "p3", "sp1", "t1", "nope", "", "C:\\Users\\me"] {
+                let reply = this.run_as("tab.move", json!({"id": id, "index": 1}), false, window, cx);
+                assert!(reply.get("error").is_some(), "{id:?}: {reply}");
+                assert_eq!(tabs(this), ["tb1", "tb2"], "{id:?}");
+            }
+            for index in [0, 1, u64::MAX] {
+                let reply = this.run_as("tab.move", json!({"id": "tb2", "index": index}), false, window, cx);
+                assert!(reply.get("error").is_none(), "{index}: {reply}");
+            }
+            assert_eq!(tabs(this), ["tb1", "tb2"]);
+            let reply = this.run_as("tab.move", json!({"id": "tb2"}), false, window, cx);
+            assert!(reply.get("error").is_some(), "{reply}");
+        }));
     }
 
     #[test]
