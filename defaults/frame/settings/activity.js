@@ -1,6 +1,6 @@
 // Settings > Profile > "Agent activity · this computer": a 53 x 7 heatmap of the last year, read from
 // <app home>/usage/activity.json (src/activity.rs writes it; it never leaves this computer).
-//   {"version":1,"days":{"YYYY-MM-DD":{"seconds":n,"sessions":n,"tokens":n}}}  (local dates)
+//   {"version":1,"days":{"YYYY-MM-DD":{"seconds":n,"sessions":n,"tokens":n,"by_agent":{"claude":n},"cost_usd":x,"saved":n}}}  (local dates)
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -14,11 +14,22 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 const LEVELS = [0, 1, 15, 60, 180];
 const SHARE = [0, 0.4, 0.62, 0.82, 1];
 
+// Dollars per million input tokens (Claude Sonnet's price): turns tokens saved into the "~$" shown beside them.
+export const SAVED_USD_PER_MILLION_TOKENS = 3;
+const PERIODS = [["today", "Today", 1], ["week", "7 days", 7], ["month", "30 days", 30], ["all", "All time", Infinity]];
+const AGENT_NAMES = new Map([["claude", "Claude Code"], ["codex", "Codex"]]);
+
 const pad = (n) => String(n).padStart(2, "0");
 const key = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const nth = (from, n) => new Date(from.getFullYear(), from.getMonth(), from.getDate() + n);
 // 8,692 (the runtime has no Intl, so no toLocaleString grouping).
-const grouped = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+// Whole numbers only, never in exponent form (1e21 and up go through BigInt); anything not finite is 0.
+const grouped = (n) => (Number.isFinite(n) ? (n >= 1e21 ? BigInt(Math.round(n)).toString() : String(n)) : "0").replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+// A real "YYYY-MM-DD" (2026-02-30 and 2026-00-00 are not).
+const isDate = (k) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k);
+  return Boolean(m) && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= new Date(+m[1], +m[2], 0).getDate();
+};
 const count = (n, one, many) => `${grouped(n)} ${n === 1 ? one : many}`;
 
 export const minutesOf = (day) => (day && day.seconds > 0 ? Math.max(1, Math.round(day.seconds / 60)) : 0);
@@ -42,9 +53,13 @@ export function parseActivity(text) {
     if (!file || file.version !== 1 || typeof file.days !== "object" || file.days === null || Array.isArray(file.days)) return {};
     const days = {};
     for (const [k, v] of Object.entries(file.days)) {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(k) || !v || typeof v !== "object") continue;
+      if (!isDate(k) || !v || typeof v !== "object") continue;
       const num = (x) => (Number.isFinite(x) && x > 0 ? Math.floor(x) : 0);
-      days[k] = { seconds: num(v.seconds), sessions: num(v.sessions), tokens: num(v.tokens) };
+      const by_agent = Object.create(null); // the file's own names: "constructor" and "__proto__" are plain names
+      if (v.by_agent && typeof v.by_agent === "object" && !Array.isArray(v.by_agent)) {
+        for (const [name, n] of Object.entries(v.by_agent)) if (num(n) > 0) by_agent[name] = num(n);
+      }
+      days[k] = { seconds: num(v.seconds), sessions: num(v.sessions), tokens: num(v.tokens), by_agent, cost_usd: Number.isFinite(v.cost_usd) && v.cost_usd > 0 ? v.cost_usd : 0, saved: num(v.saved) };
     }
     return days;
   } catch {
@@ -72,6 +87,39 @@ export function summarize(weeks, days) {
   }
   return { minutes, active, longest };
 }
+
+// Tokens, estimated cost, tokens saved and tokens per agent over the last `n` days up to `today` (all days for Infinity).
+export function tokenTotals(days, today) {
+  const to = key(today);
+  const sums = PERIODS.map(([, , n]) => ({ from: Number.isFinite(n) ? key(nth(today, 1 - n)) : "", used: 0, cost: 0, saved: 0, agents: Object.create(null) }));
+  for (const k in days) {
+    if (k > to) continue;
+    const d = days[k];
+    for (const s of sums) {
+      if (k < s.from) continue;
+      s.used += d.tokens;
+      s.cost += d.cost_usd;
+      s.saved += d.saved;
+      for (const name in d.by_agent) s.agents[name] = (s.agents[name] ?? 0) + d.by_agent[name];
+    }
+  }
+  const out = {};
+  PERIODS.forEach(([id], i) => {
+    const { used, cost, saved, agents } = sums[i];
+    out[id] = { used, cost, saved, agents: Object.keys(agents).map((name) => [name, agents[name]]).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)) };
+  });
+  return out;
+}
+
+// Dollars and cents, the whole amount rounded to cents first: 0.999 is 1.00.
+const cents = (c) => {
+  const n = Number.isFinite(c) && c > 0 ? Math.round(c * 100) : 0;
+  return `${grouped(Math.floor(n / 100))}.${pad(n % 100)}`;
+};
+export const costText = (c) => (c > 0 && c < 0.01 ? "<$0.01" : `$${cents(c)}`);
+// 100% only when nothing was used; otherwise at most 99%.
+export const savedPercent = (saved, used) => (saved + used > 0 ? (used === 0 ? 100 : Math.min(99, Math.round((saved * 100) / (saved + used)))) : 0);
+const tokensText = (n) => `${grouped(n)} ${n === 1 ? "token" : "tokens"}`;
 
 export function tooltip(d, day) {
   const parts = [`${DAY_NAMES[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`, `${minutesOf(day)} min`, count(day?.sessions ?? 0, "session", "sessions")];
@@ -132,6 +180,7 @@ export function activityInit(view) {
   view.activityHover = null; // [week, row]
   view.activityModel = null;
   view.activityWidth = DEFAULT_WIDTH; // the row's measured width
+  view.tokenPeriod = "today"; // the Tokens card's period: today, week, month or all
 }
 
 // The graph is a retained nested view of its own: Settings > Profile draws it once and rebuilds it only when the
@@ -198,6 +247,35 @@ export function columnRuns(weeks, levels) {
     });
     return runs;
   });
+}
+
+// The Tokens card: used, split by agent, estimated cost and saved, for the chosen period.
+function tokensCard(view, t) {
+  const none = !view.activity || Object.keys(view.activity.days).length === 0;
+  const period = PERIODS.find((p) => p[0] === view.tokenPeriod) ?? PERIODS[0];
+  const now = new Date(), kept = view.tokenModel;
+  const totals = kept && kept.record === view.activity && kept.today === key(now) ? kept.totals : tokenTotals(view.activity?.days ?? {}, now);
+  view.tokenModel = { record: view.activity, today: key(now), totals };
+  const sum = totals[period[0]];
+  const text = (v) => (none ? "—" : v);
+  const label = (s) => mono(div().text_size(11).text_color(t.dim)).child(s);
+  const value = (id, s) => mono(div().id(id).text_size(12).text_color(t.foreground)).child(s);
+  const agents = none ? [] : sum.agents;
+  const tab = ([id, name]) => {
+    const on = id === period[0];
+    return mono(div().id(`st-prof-tokens-${id}`).h(22).px(8).flex().items_center().rounded(5).cursor_pointer().text_size(11)
+      .text_color(on ? t.foreground : t.muted).when(on, (el) => el.bg(t.raised)).when(!on, (el) => el.hover((s) => s.bg(t.hover)))
+      .on_click((_e, cx) => { view.tokenPeriod = id; cx.notify(); })).child(name);
+  };
+  return v_flex().id("st-prof-tokens").w_full().mt(14).gap(8)
+    .child(h_flex().w_full().items_center().justify_between()
+      .child(div().text_size(13).line_height("18px").font_semibold().text_color(t.foreground).child("Tokens"))
+      .child(h_flex().id("st-prof-tokens-period").gap(2).children(PERIODS.map(tab))))
+    .child(h_flex().w_full().justify_between().child(label("Used")).child(value("st-prof-tokens-used", text(tokensText(sum.used)))))
+    .children(agents.map(([name, n]) => h_flex().w_full().pl(12).justify_between().child(label(AGENT_NAMES.get(name) ?? (name || "unknown"))).child(value(`st-prof-tokens-agent-${name || "unknown"}`, grouped(n)))))
+    .child(h_flex().w_full().justify_between().child(label("API-equivalent est.")).child(value("st-prof-tokens-cost", text(costText(sum.cost)))))
+    .child(h_flex().w_full().justify_between().child(label("Saved")).child(value("st-prof-tokens-saved", text(`${tokensText(sum.saved)} (~$${cents((sum.saved * SAVED_USD_PER_MILLION_TOKENS) / 1e6)}) · ${savedPercent(sum.saved, sum.used)}%`))))
+    .child(mono(div().text_size(10.5).text_color(t.dim)).child("Counted for agents started in HyperOx."));
 }
 
 export function activityBlock(view, t) {
@@ -279,5 +357,6 @@ export function activityBlock(view, t) {
           .child(num(count(minutes, "min", "min")))
           .child(note("·")).child(num(count(active, "active day", "active days")))
           .child(note("·")).child(note("longest streak")).child(num(count(longest, "day", "days"))))
-      .when(!empty, (el) => el.child(legend)));
+      .when(!empty, (el) => el.child(legend)))
+    .child(tokensCard(view, t));
 }

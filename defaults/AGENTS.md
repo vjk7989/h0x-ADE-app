@@ -783,10 +783,10 @@ What's about the user, never a look:
   Info has the switch. `found_via`: the answer to the welcome's one-time "How did
   you find HyperOx?" (`friend`, `x`, `github`, `search`, `other` or `skip`); once
   set it is not asked again.
-- `token_saver`: `true` turns Token Saver on, which shrinks big tool outputs (long
-  logs, large files, JSON) before an agent reads them (default `false`, off);
+- `token_saver`: `false` turns Token Saver off (default `true`, on), which shrinks
+  big tool outputs (long logs, large files, JSON) before an agent reads them;
   Settings → 0x Modes has the switch. It applies to new Claude Code terminals;
-  any value other than `true` reads as off.
+  any value other than `false` reads as on.
 - `smart_routing`: `true` lets the core pick a tool set and, for read-only work, a
   cheaper model for a Claude Code launch that has a task (default `false`); it
   needs `token_saver` on, and any failure leaves the plain Token Saver launch.
