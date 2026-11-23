@@ -1554,9 +1554,11 @@ mod tests {
         let (_keep, requests) = async_channel::unbounded::<crate::mods::Request>();
         cx.update(|app| super::open(crate::core_link::offline(), requests, app));
         let handle = cx.windows().into_iter().find_map(|w| w.downcast::<super::SignIn>()).expect("the sign-in window");
+        // The root entity, taken outside any window update (inside one the window is leased out: "window not found").
+        let sign_in = handle.entity(&*cx).expect("the sign-in view");
         let cx = &mut VisualTestContext::from_window(handle.into(), cx);
         cx.run_until_parked();
-        let frame = |cx: &mut VisualTestContext| cx.update(|_, app| handle.read(app).unwrap().frame);
+        let frame = |cx: &mut VisualTestContext| sign_in.read_with(cx, |s, _| s.frame);
         let advance = |cx: &mut VisualTestContext, ms: u64| {
             cx.executor().advance_clock(Duration::from_millis(ms));
             cx.run_until_parked();
