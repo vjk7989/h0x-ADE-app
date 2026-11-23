@@ -3,8 +3,9 @@
 //! Only builds made with `H0X_ADE_POSTHOG_TOKEN` (the release workflow) send anything; every
 //! other build is a no-op. Events wait in the app home (`analytics/queue.jsonl` for usage,
 //! `reports/*.json` for failures, one file each) and go out every minute and when the app quits.
-//! Usage events stop when `share_analytics` is off (what is queued is still sent); failure
-//! reports always go. Every event is scrubbed of paths and long text first.
+//! Usage events are kept only while `share_analytics` is on and the current terms are agreed
+//! (what is queued is still sent when the switch goes off); failure reports always go. Every
+//! event is scrubbed of paths and long text first.
 
 use serde_json::{Value, json};
 mod crash;
@@ -40,15 +41,19 @@ struct Analytics {
 }
 
 static GLOBAL: OnceLock<Analytics> = OnceLock::new();
+/// The `share_analytics` setting; usage is kept only with `CONSENT` too (`on`).
 static SHARING: AtomicBool = AtomicBool::new(false);
+/// The current terms are agreed (`Person::consent_current`).
+static CONSENT: AtomicBool = AtomicBool::new(false);
 static STARTED: OnceLock<Instant> = OnceLock::new();
 /// Serializes the queue file and the reports folder inside this process.
 static FILES: Mutex<()> = Mutex::new(());
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// Starts the once-a-minute flusher (a no-op in builds without a token). `share` is the
-/// `share_analytics` setting; the flusher re-reads it every minute.
-pub fn start(share: bool) {
+/// `share_analytics` setting and `consent` whether the current terms are agreed; the flusher
+/// re-reads both every minute.
+pub fn start(share: bool, consent: bool) {
     let _ = STARTED.set(Instant::now());
     let Some(token) = TOKEN.filter(|t| !t.is_empty()) else {
         return;
@@ -73,6 +78,7 @@ pub fn start(share: bool) {
         return;
     }
     set_sharing(share);
+    set_consent(consent);
     let spawned = std::thread::Builder::new()
         .name("analytics".into())
         .spawn(|| {
@@ -80,6 +86,7 @@ pub fn start(share: bool) {
                 std::thread::sleep(TICK);
                 if let Ok(person) = crate::settings::load_person() {
                     set_sharing(person.share_analytics);
+                    set_consent(person.consent_current());
                 }
                 flush();
             }
@@ -94,19 +101,28 @@ pub fn set_sharing(on: bool) {
     SHARING.store(on, Ordering::Relaxed);
 }
 
+/// The person has agreed (or not) to the current terms; usage is kept only while they have.
+pub fn set_consent(on: bool) {
+    CONSENT.store(on, Ordering::Relaxed);
+}
+
+fn on() -> bool {
+    SHARING.load(Ordering::Relaxed) && CONSENT.load(Ordering::Relaxed)
+}
+
 /// Seconds since `start`.
 pub fn session_seconds() -> u64 {
     STARTED.get().map_or(0, |t| t.elapsed().as_secs())
 }
 
-/// Whether usage events are being kept (the Settings switch).
+/// Whether usage events are being kept (the Settings switch and the agreed terms).
 pub fn sharing() -> bool {
-    SHARING.load(Ordering::Relaxed)
+    on()
 }
 
 /// A usage event, dropped when sharing is off. `props` must hold no free text from a terminal (the redacted typed prompt in `$ai_input` apart).
 pub fn event(name: &str, props: Value) {
-    if SHARING.load(Ordering::Relaxed)
+    if on()
         && let Some(a) = GLOBAL.get()
     {
         a.record(false, name, props);
@@ -115,7 +131,7 @@ pub fn event(name: &str, props: Value) {
 
 /// `event` for something that happened at `at` (Unix milliseconds), such as a turn read late.
 pub fn event_at(name: &str, props: Value, at: u64) {
-    if SHARING.load(Ordering::Relaxed)
+    if on()
         && let Some(a) = GLOBAL.get()
     {
         a.record_at(false, name, props, Some(at));
@@ -126,7 +142,7 @@ pub fn event_at(name: &str, props: Value, at: u64) {
 /// Signing in also links the install id to the account, but only while sharing is on.
 pub fn identify(account: Option<&crate::auth::Account>) {
     if let Some(a) = GLOBAL.get() {
-        a.identify(account.map(|x| (x.uid.as_str(), x.provider.as_str())), SHARING.load(Ordering::Relaxed));
+        a.identify(account.map(|x| (x.uid.as_str(), x.provider.as_str())), on());
     }
 }
 
@@ -726,6 +742,7 @@ mod tests {
     #[test]
     fn off_switch_drops_usage_events_but_keeps_failures() {
         // The module-level gate: nothing is recorded while sharing is off or before start.
+        let _gate = Gate::hold();
         set_sharing(false);
         event("x", json!({}));
         failure("y", json!({}));
@@ -737,6 +754,188 @@ mod tests {
         set_sharing(false);
         let sent = sent_batches(&a, true);
         assert_eq!(sent[0]["body"]["batch"][0]["event"], "queued_before");
+    }
+
+    /// `SHARING`, `CONSENT` and `GLOBAL` are process-wide: tests that touch them hold this, and
+    /// both switches go back off when it is let go (also after a failed assertion).
+    static GATE: Mutex<()> = Mutex::new(());
+
+    struct Gate(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl Gate {
+        fn hold() -> Gate {
+            Gate(GATE.lock().unwrap_or_else(|e| e.into_inner()))
+        }
+    }
+
+    impl Drop for Gate {
+        fn drop(&mut self) {
+            set_sharing(false);
+            set_consent(false);
+        }
+    }
+
+    /// The module-level instance for gate tests: a token and a temp home, never sent anywhere
+    /// (only `flush()` sends, and these tests read the files instead).
+    fn global() -> &'static Analytics {
+        GLOBAL.get_or_init(|| make(&home_dir("module-gate"), Some("t")))
+    }
+
+    fn queued(a: &Analytics) -> Vec<Value> {
+        std::fs::read_to_string(a.queue())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    }
+
+    fn queued_names(a: &Analytics) -> Vec<String> {
+        queued(a).iter().filter_map(|e| e["event"].as_str().map(String::from)).collect()
+    }
+
+    fn report_names(a: &Analytics) -> Vec<String> {
+        std::fs::read_dir(a.reports())
+            .map(|d| {
+                d.filter_map(|e| std::fs::read_to_string(e.ok()?.path()).ok())
+                    .filter_map(|s| serde_json::from_str::<Value>(&s).ok())
+                    .filter_map(|e| e["event"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn sharing_is_on_only_with_the_switch_and_the_current_terms_both_agreed() {
+        let _gate = Gate::hold();
+        // Every combination, in an order that flips each switch back and forth.
+        for (share, consent) in [(false, false), (true, false), (false, true), (true, true), (true, false), (true, true), (false, true), (false, false), (true, true)] {
+            set_sharing(share);
+            set_consent(consent);
+            assert_eq!(sharing(), share && consent, "share {share}, consent {consent}");
+        }
+        // The order the two are set in does not matter.
+        set_sharing(false);
+        set_consent(false);
+        set_consent(true);
+        assert!(!sharing(), "consent alone is not enough");
+        set_sharing(true);
+        assert!(sharing());
+    }
+
+    #[test]
+    fn revoked_consent_shuts_the_gate_and_the_settings_switch_cannot_reopen_it() {
+        let _gate = Gate::hold();
+        set_sharing(true);
+        set_consent(true);
+        assert!(sharing());
+        set_consent(false);
+        assert!(!sharing(), "consent revoked");
+        // Settings turning the switch on again (`set_sharing`) does not bypass consent.
+        set_sharing(true);
+        set_sharing(true);
+        assert!(!sharing());
+        set_sharing(false);
+        set_sharing(true);
+        assert!(!sharing());
+        set_consent(true);
+        assert!(sharing(), "agreeing again reopens it");
+    }
+
+    #[test]
+    fn module_events_are_kept_only_with_sharing_and_consent_but_failures_always() {
+        let _gate = Gate::hold();
+        let a = global();
+        let combos = [(false, false), (true, false), (false, true), (true, true)];
+        for (share, consent) in combos {
+            set_sharing(share);
+            set_consent(consent);
+            event(&format!("gate_event_{share}_{consent}"), json!({}));
+            event_at(&format!("gate_event_at_{share}_{consent}"), json!({}), 1_700_000_000_000);
+            failure(&format!("gate_failure_{share}_{consent}"), json!({}));
+        }
+        // Consent revoked after it was given: nothing more is kept.
+        set_sharing(true);
+        set_consent(true);
+        set_consent(false);
+        event("gate_event_revoked", json!({}));
+        event_at("gate_event_at_revoked", json!({}), 1_700_000_000_000);
+        failure("gate_failure_revoked", json!({}));
+        let names = queued_names(a);
+        let ours: Vec<&str> = names.iter().map(String::as_str).filter(|n| n.starts_with("gate_event")).collect();
+        assert_eq!(ours, ["gate_event_true_true", "gate_event_at_true_true"], "usage kept only with both on");
+        let reports = report_names(a);
+        for name in ["false_false", "true_false", "false_true", "true_true", "revoked"] {
+            let want = format!("failure_gate_failure_{name}");
+            assert!(reports.contains(&want), "failure reports go whatever the gate says: {want} in {reports:?}");
+        }
+    }
+
+    #[test]
+    fn identify_with_consent_missing_queues_no_identify_even_with_the_switch_on() {
+        let _gate = Gate::hold();
+        let a = global();
+        let account = |uid: &str| crate::auth::Account {
+            uid: uid.into(),
+            provider: "gate-probe".into(),
+            name: None,
+            email: None,
+            picture: None,
+        };
+        let linked = |a: &Analytics| -> Vec<String> {
+            queued(a)
+                .iter()
+                .filter(|e| e["event"] == "$identify" && e["properties"]["$set"]["provider"] == "gate-probe")
+                .filter_map(|e| e["distinct_id"].as_str().map(String::from))
+                .collect()
+        };
+        set_sharing(true);
+        set_consent(false);
+        identify(Some(&account("gate_no_consent")));
+        set_sharing(false);
+        set_consent(true);
+        identify(Some(&account("gate_switch_off")));
+        set_sharing(true);
+        set_consent(true);
+        set_consent(false);
+        identify(Some(&account("gate_revoked")));
+        assert!(linked(a).is_empty(), "no account is linked without both: {:?}", linked(a));
+        set_consent(true);
+        identify(Some(&account("gate_agreed")));
+        assert_eq!(linked(a), ["account:gate_agreed"]);
+        set_consent(false);
+        identify(None);
+    }
+
+    #[test]
+    fn a_build_without_a_token_starts_nothing_and_leaves_the_gate_shut() {
+        if TOKEN.is_some_and(|t| !t.is_empty()) {
+            // A token build would start the real flusher against the real home: not here.
+            return;
+        }
+        let _gate = Gate::hold();
+        set_sharing(false);
+        set_consent(false);
+        start(true, true);
+        assert!(!SHARING.load(Ordering::Relaxed) && !CONSENT.load(Ordering::Relaxed), "start returns before touching the switches");
+        assert!(!sharing());
+        start(false, false);
+        assert!(!sharing());
+    }
+
+    #[test]
+    fn start_and_the_minute_reread_both_pass_the_terms_through() {
+        // `start` and the flusher need a token and the real home, so their wiring is read here.
+        let source = include_str!("analytics.rs").split("#[cfg(test)]").next().unwrap();
+        let reread = source.split("std::thread::sleep(TICK);").nth(1).unwrap();
+        let reread = &reread[..reread.find("flush();").unwrap()];
+        assert!(reread.contains("set_sharing(person.share_analytics);") && reread.contains("set_consent(person.consent_current());"), "{reread}");
+        let begin = &source[source.find("pub fn start(share: bool, consent: bool)").unwrap()..];
+        let begin = &begin[..begin.find(".spawn(").unwrap()];
+        assert!(begin.contains("set_sharing(share);") && begin.contains("set_consent(consent);"), "{begin}");
+        let main = include_str!("main.rs");
+        assert!(main.contains("person.as_ref().is_ok_and(|p| p.consent_current())"), "a missing or unreadable person file means no consent");
+        // `sharing()` and every usage path read the combined gate, never the bare switch.
+        assert_eq!(source.matches("SHARING.load(").count(), 1, "only `on()` reads the switch");
     }
 
     #[test]

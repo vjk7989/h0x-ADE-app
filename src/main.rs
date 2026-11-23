@@ -200,8 +200,11 @@ fn main() {
         update::hold_until_welcomed();
     }
     update::start();
-    // On by default: a first run shares until the welcome's switch says otherwise.
-    analytics::start(person.as_ref().map_or(true, |p| p.share_analytics));
+    // On by default, but nothing is kept until the terms are agreed (the sign-in screen).
+    analytics::start(
+        person.as_ref().map_or(true, |p| p.share_analytics),
+        person.as_ref().is_ok_and(|p| p.consent_current()),
+    );
     update::after_start();
     if !welcomed {
         analytics::event("first_run", serde_json::json!({}));

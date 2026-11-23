@@ -325,7 +325,10 @@ impl SignIn {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         if person.accept_terms(now) {
             match crate::settings::write_person(&person) {
-                Ok(()) => crate::analytics::event("consent_set", consent_event(crate::settings::TERMS_VERSION)),
+                Ok(()) => {
+                    crate::analytics::set_consent(true);
+                    crate::analytics::event("consent_set", consent_event(crate::settings::TERMS_VERSION));
+                }
                 Err(e) => tracing::warn!("consent not remembered: {e}"),
             }
         }
@@ -2412,5 +2415,21 @@ mod tests {
         }
         // Back to idle so closing the test window does not cancel a sign-in.
         cx.update(|_, app| view.update(app, |v, _| v.state = State::Idle));
+    }
+
+    #[test]
+    fn agreeing_to_the_terms_opens_the_analytics_gate_only_once_they_are_saved() {
+        // `record_consent` needs the real home and a window, so its order is read here.
+        let source = include_str!("signin.rs").split("#[cfg(test)]").next().unwrap();
+        let body = &source[source.find("fn record_consent(").expect("record_consent")..];
+        let body = &body[..body.find("\n    }\n").expect("its end")];
+        assert_eq!(body.matches("set_consent(").count(), 1, "{body}");
+        let saved = body.find("Ok(()) =>").expect("the saved arm");
+        let open = body.find("crate::analytics::set_consent(true);").expect("consent switched on");
+        let event = body.find("crate::analytics::event(\"consent_set\"").expect("the consent event");
+        assert!(saved < open && open < event, "switched on after the save and before its own event: {body}");
+        let failed = body.find("Err(e) => tracing::warn!(\"consent not remembered").expect("the failed save");
+        assert!(open < failed && !body[failed..].contains("set_consent"), "a failed save keeps consent off: {body}");
+        assert!(!source.contains("set_consent(false)"), "the sign-in screen never revokes");
     }
 }
