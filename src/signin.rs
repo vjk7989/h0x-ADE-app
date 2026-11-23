@@ -535,8 +535,8 @@ fn compact_width(window_width: f32) -> f32 {
 
 // ---- the code texture ------------------------------------------------------------------------
 
-/// One step of the texture, in time (about 9 frames a second).
-const TICK: Duration = Duration::from_millis(110);
+/// One step of the texture, in time (about 5 frames a second).
+const TICK: Duration = Duration::from_millis(200);
 const GLYPHS: &[u8] = b"0123456789abcdef{}[]<>()=+-*/;:$#&|_.";
 const RAIN_SEED: u32 = 0x48304f58;
 const CELL_H: f32 = 14.0;
@@ -1520,7 +1520,107 @@ mod tests {
         assert!(!rain_runs(false, false), "a window behind others does not repaint");
         assert_eq!(shown_frame(57, true), 57);
         assert_eq!(shown_frame(57, false), 0, "static: the first frame, whatever the tick");
-        assert_eq!(super::TICK.as_millis(), 110);
+        assert_eq!(super::TICK.as_millis(), 200);
+    }
+
+    // IDLE-VIS: the screen `open` shows, on the test clock: the rain steps one frame per 200 ms tick (5 a second) while
+    // the window is in front, holds its frame while it is behind others or motion is reduced, and goes on from there.
+    // In a child process with its own app home: `open` reads the person's settings and sets the theme for the process.
+    #[test]
+    fn the_rain_steps_once_per_200_ms_only_in_front_and_with_motion() {
+        const NAME: &str = "signin::tests::rain_ticks_window";
+        let home = std::env::temp_dir().join(format!("h0x-signin-rain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env("H0X_TEST_SIGNIN_RAIN", "1")
+            .env("H0X_ADE_HOME", &home)
+            .env_remove("H0X_ADE_SKIP_SIGNIN")
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && log.contains("1 passed"), "{log}");
+    }
+
+    #[gpui::test]
+    fn rain_ticks_window(cx: &mut gpui::TestAppContext) {
+        use gpui::VisualTestContext;
+        use std::time::Duration;
+        if std::env::var_os("H0X_TEST_SIGNIN_RAIN").is_none() {
+            return;
+        }
+        let (_keep, requests) = async_channel::unbounded::<crate::mods::Request>();
+        cx.update(|app| super::open(crate::core_link::offline(), requests, app));
+        let handle = cx.windows().into_iter().find_map(|w| w.downcast::<super::SignIn>()).expect("the sign-in window");
+        // The root entity, taken outside any window update (inside one the window is leased out: "window not found").
+        let sign_in = handle.entity(&*cx).expect("the sign-in view");
+        let cx = &mut VisualTestContext::from_window(handle.into(), cx);
+        cx.run_until_parked();
+        let frame = |cx: &mut VisualTestContext| sign_in.read_with(cx, |s, _| s.frame);
+        let advance = |cx: &mut VisualTestContext, ms: u64| {
+            cx.executor().advance_clock(Duration::from_millis(ms));
+            cx.run_until_parked();
+        };
+        cx.update(|_, app| app.set_reduce_motion(false));
+        cx.update(|window, _| window.activate_window());
+        assert_eq!(frame(cx), 0, "nothing before the first tick");
+        // The timer started with the window: the first tick is at 200 ms, not 110 and not 199.
+        advance(cx, 110);
+        assert_eq!(frame(cx), 0, "no tick at the old 110 ms");
+        advance(cx, 89);
+        assert_eq!(frame(cx), 0, "no tick at 199 ms");
+        advance(cx, 1);
+        assert_eq!(frame(cx), 1, "one frame at 200 ms");
+        // About 5 frames a second, one frame per tick (none skipped, none doubled).
+        for n in 2..=6 {
+            advance(cx, 199);
+            assert_eq!(frame(cx), n - 1, "199 ms into tick {n}");
+            advance(cx, 1);
+            assert_eq!(frame(cx), n, "tick {n}");
+        }
+        advance(cx, 1000);
+        assert_eq!(frame(cx), 11, "5 frames in one second");
+
+        // Behind other windows: the frame holds, however long.
+        cx.deactivate_window();
+        advance(cx, 1000);
+        assert_eq!(frame(cx), 11, "inactive: no frames");
+        // Back in front mid-tick: the next tick (on the same 200 ms grid) steps again.
+        advance(cx, 100);
+        cx.update(|window, _| window.activate_window());
+        advance(cx, 99);
+        assert_eq!(frame(cx), 11);
+        advance(cx, 1);
+        assert_eq!(frame(cx), 12, "in front again: the next tick steps");
+        // Toggled within one tick, ending in front: the tick steps once; ending behind: it holds.
+        advance(cx, 50);
+        cx.deactivate_window();
+        advance(cx, 50);
+        cx.update(|window, _| window.activate_window());
+        advance(cx, 100);
+        assert_eq!(frame(cx), 13);
+        advance(cx, 50);
+        cx.update(|window, _| window.activate_window());
+        advance(cx, 50);
+        cx.deactivate_window();
+        advance(cx, 100);
+        assert_eq!(frame(cx), 13, "behind at the tick: held");
+
+        // Reduced motion: the frame holds even in front, and the rain goes on once it is allowed again.
+        cx.update(|window, _| window.activate_window());
+        cx.update(|_, app| app.set_reduce_motion(true));
+        advance(cx, 1000);
+        assert_eq!(frame(cx), 13, "reduced motion: no frames");
+        cx.update(|_, app| app.set_reduce_motion(false));
+        advance(cx, 200);
+        assert_eq!(frame(cx), 14, "motion allowed again: one frame per tick");
+        // Both at once: still nothing.
+        cx.update(|_, app| app.set_reduce_motion(true));
+        cx.deactivate_window();
+        advance(cx, 600);
+        assert_eq!(frame(cx), 14, "reduced and behind");
     }
 
     #[test]

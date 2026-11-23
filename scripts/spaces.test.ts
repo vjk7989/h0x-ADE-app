@@ -284,7 +284,7 @@ test("no reconciliation without a rendered sidebar", () => {
   expect(h.order()).toEqual(["main", "topic"]);
 });
 
-// checkNew runs every 250 ms: it must cost nothing while the host's revision stands still, and
+// checkNew runs every 500 ms: it must cost nothing while the host's revision stands still, and
 // keep reacting to events (a new space, a finished command) while the window is in the background.
 function watching(active = true) {
   const h = harness([], new Map(), [{ id: "a", folder: "/a" }]);
@@ -364,13 +364,13 @@ test("machines are not refreshed while the window is in the background, and catc
   const h = watching();
   h.win.visible = false;
   h.timers[15000](h.cx);
-  h.timers[250](h.cx);
+  h.timers[500](h.cx);
   expect(h.refreshes.machines).toBe(0);
   h.win.visible = true;
   h.revision.n++; // the window snapshot changed
-  h.timers[250](h.cx);
+  h.timers[500](h.cx);
   expect(h.refreshes.machines).toBe(1);
-  h.timers[250](h.cx);
+  h.timers[500](h.cx);
   h.timers[15000](h.cx);
   expect(h.refreshes.machines).toBe(2); // the regular timer is back to normal
 });
@@ -386,16 +386,16 @@ test("started while the window is in the background: machines are asked once at 
   const h = watching(false);
   expect(h.started).toBe(1);
   for (let i = 0; i < 4; i++) h.timers[15000](h.cx);
-  h.timers[250](h.cx);
+  h.timers[500](h.cx);
   expect(h.refreshes.machines).toBe(0);
   h.win.visible = true;
   h.revision.n++;
-  h.timers[250](h.cx);
-  h.timers[250](h.cx);
+  h.timers[500](h.cx);
+  h.timers[500](h.cx);
   expect(h.refreshes.machines).toBe(1);
 });
 
-test("an hour in the background ends in one machines refresh and one look, while new spaces are still noticed", () => {
+test("two hours in the background ends in one machines refresh and one look, while new spaces are still noticed", () => {
   const h = watching();
   h.view.checkNew(h.cx);
   h.view.shown = new Set(["a"]);
@@ -408,7 +408,7 @@ test("an hour in the background ends in one machines refresh and one look, while
       h.revision.n += 2; // spaces and panes in the same tick
       h.view.shown.add("b");
     }
-    h.timers[250](h.cx);
+    h.timers[500](h.cx);
     if (i % 60 === 0) h.timers[15000](h.cx);
   }
   expect(h.refreshes.machines).toBe(0);
@@ -416,7 +416,7 @@ test("an hour in the background ends in one machines refresh and one look, while
   expect(h.view.ids).toEqual(["a", "b"]);
   h.win.visible = true;
   h.revision.n++;
-  for (let i = 0; i < 10; i++) h.timers[250](h.cx);
+  for (let i = 0; i < 10; i++) h.timers[500](h.cx);
   expect(h.refreshes.machines).toBe(1);
   expect(h.due).toHaveLength(4);
 });
@@ -429,4 +429,65 @@ test("a visible but unfocused window keeps refreshing machines; a minimized one 
   h.win.visible = false;
   h.timers[15000](h.cx);
   expect(h.refreshes.machines).toBe(1);
+});
+
+// IDLE-VIS: the look for new spaces moved from every 250 ms to every 500 ms; what it notices did not change.
+test("the spaces mod sets up exactly two timers: the 500 ms look and the 15 s machines refresh", () => {
+  const h = watching();
+  expect(Object.keys(h.timers).map(Number).sort((a, b) => a - b)).toEqual([500, 15000]);
+  expect(h.timers[250]).toBeUndefined(); // the old cadence is gone, not kept beside the new one
+  expect(h.timers[499]).toBeUndefined();
+  expect(h.timers[1000]).toBeUndefined();
+});
+
+test("each 500 ms tick is one checkNew with the timer's cx, nothing more", () => {
+  const h = watching();
+  const check = spyOn(h.view, "checkNew");
+  h.timers[500](h.cx);
+  expect(check).toHaveBeenCalledTimes(1);
+  expect(check.mock.calls[0][0]).toBe(h.cx);
+  h.timers[500](h.cx);
+  expect(check).toHaveBeenCalledTimes(2);
+});
+
+for (const visible of [true, false]) {
+  test(`a new space is noticed on the very next 500 ms tick (window ${visible ? "visible" : "in the background"})`, () => {
+    const h = watching();
+    h.timers[500](h.cx);
+    h.view.shown = new Set(["a"]);
+    h.view.wake = Infinity;
+    h.win.visible = visible;
+    h.timers[500](h.cx); // nothing new yet
+    const looks = h.due.length;
+    h.snapshot.push({ id: "b", folder: "/b" });
+    h.revision.n++;
+    h.timers[500](h.cx); // one period later
+    expect(h.due).toHaveLength(looks + 1);
+    expect(h.view.ids).toEqual(["a", "b"]);
+  });
+}
+
+test("from no spaces at all, the first space is noticed within one tick", () => {
+  const h = harness([], new Map(), []);
+  const timers: Record<number, (cx: unknown) => void> = {};
+  const cx = { timer: { every(ms: number, f: (cx: unknown) => void) { timers[ms] = f; } }, notify() {}, spawn() {} };
+  h.view.refreshGit = () => {};
+  h.view.init({}, cx);
+  timers[500](cx);
+  expect(h.view.ids).toEqual([]);
+  h.snapshot.push({ id: "a", folder: "/a" });
+  h.revision.n++;
+  timers[500](cx);
+  expect(h.view.ids).toEqual(["a"]);
+});
+
+test("ticks with an unchanged revision read no snapshot, however many there are", () => {
+  const h = watching();
+  h.timers[500](h.cx);
+  h.view.shown = new Set(["a"]);
+  h.view.wake = Infinity;
+  const reads = h.reads.spaces + h.reads.panes;
+  for (let i = 0; i < 120; i++) h.timers[500](h.cx); // a minute at the new cadence
+  expect(h.reads.spaces + h.reads.panes).toBe(reads);
+  expect(h.due).toHaveLength(1);
 });
