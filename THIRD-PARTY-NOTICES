@@ -2,7 +2,7 @@ HyperOx third-party notices
 =========================
 Regenerate with just notices. See licenses/README.md.
 
-Input-SHA256: 91b51531414fe829724f314886823c6dee16fdf47eb23b3db994a9225bd2812a Cargo.lock
+Input-SHA256: c4a8511a0763a7bb74a00541258e6704f696ced8c5fdb7f547778d8ccce2b0be Cargo.lock
 Input-SHA256: 33e5f157281bcd7ab9fd2bb2cf9ea02698b7065ecc2e05ab08112840c6e89617 Cargo.toml
 Input-SHA256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 LICENSE
 Input-SHA256: e58cb0de2dde300bcda769ca993fde2737f42c0274082f038621ab22975a49e2 about.toml
@@ -1888,7 +1888,6 @@ Apache License 2.0 (Apache-2.0)
   windows-sys 0.48.0 — https://github.com/microsoft/windows-rs
   windows-sys 0.52.0 — https://github.com/microsoft/windows-rs
   windows-sys 0.59.0 — https://github.com/microsoft/windows-rs
-  windows-sys 0.60.2 — https://github.com/microsoft/windows-rs
   windows-sys 0.61.2 — https://github.com/microsoft/windows-rs
   windows-targets 0.48.5 — https://github.com/microsoft/windows-rs
   windows-targets 0.52.6 — https://github.com/microsoft/windows-rs
@@ -7557,7 +7556,7 @@ Apache License 2.0 (Apache-2.0)
   arrayvec 0.7.8 — https://github.com/bluss/arrayvec
   async-channel 2.5.0 — https://github.com/smol-rs/async-channel
   async-compression 0.4.44 — https://github.com/Nullus157/async-compression
-  async-executor 1.14.0 — https://github.com/smol-rs/async-executor
+  async-executor 1.14.1 — https://github.com/smol-rs/async-executor
   async-fs 2.2.0 — https://github.com/smol-rs/async-fs
   async-io 2.6.0 — https://github.com/smol-rs/async-io
   async-lock 3.4.2 — https://github.com/smol-rs/async-lock
@@ -7631,7 +7630,7 @@ Apache License 2.0 (Apache-2.0)
   hashbrown 0.16.1 — https://github.com/rust-lang/hashbrown
   hashbrown 0.17.1 — https://github.com/rust-lang/hashbrown
   hdrhistogram 7.6.0 — https://github.com/HdrHistogram/HdrHistogram_rust.git
-  heapless 0.9.3 — https://github.com/rust-embedded/heapless
+  heapless 0.9.4 — https://github.com/rust-embedded/heapless
   heck 0.4.1 — https://github.com/withoutboats/heck
   heck 0.5.0 — https://github.com/withoutboats/heck
   hermit-abi 0.5.3 — https://github.com/hermit-os/hermit-rs
@@ -8655,7 +8654,7 @@ Apache License 2.0 (Apache-2.0)
   spki 0.8.1 — https://github.com/RustCrypto/formats
   sponge-cursor 0.1.0 — https://github.com/RustCrypto/utils
   universal-hash 0.6.1 — https://github.com/RustCrypto/traits
-  wnaf 0.14.0 — https://github.com/RustCrypto/elliptic-curves
+  wnaf 0.14.1 — https://github.com/RustCrypto/elliptic-curves
 
                               Apache License
                         Version 2.0, January 2004
