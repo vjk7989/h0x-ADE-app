@@ -77,7 +77,7 @@ export default class Spaces extends View {
     });
     // `git status` walks the whole tree, on another machine a process there:
     // only when its answer could have changed (see `due`).
-    cx.timer.every(250, (cx) => this.checkNew(cx));
+    cx.timer.every(500, (cx) => this.checkNew(cx));
   }
 
   checkNew(cx) {

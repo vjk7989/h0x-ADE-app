@@ -609,7 +609,9 @@ impl AppWindow {
                 if this.update_in(cx, |this, window, cx| this.poll(window, cx)).is_err() {
                     break;
                 }
-                cx.background_executor().timer(Duration::from_millis(400)).await;
+                // Slow (1000 ms) whenever the window is not active (unfocused, minimized or hidden); focus is noticed by the next poll.
+                let idle = this.update(cx, |this, _| !this.window_active).unwrap_or(false);
+                cx.background_executor().timer(Duration::from_millis(if idle { 1000 } else { 400 })).await;
             }
         }));
         if let Some(events) = w.file_events.clone() {
@@ -722,7 +724,9 @@ impl AppWindow {
                     this.fit_hidden_tabs(window, cx);
                     this.flush_documents(refresh, window, cx);
                 }).is_err() { break; }
-                cx.background_executor().timer(Duration::from_millis(500)).await;
+                // Slow (1000 ms) whenever the window is not active (unfocused, minimized or hidden).
+                let idle = this.update(cx, |this, _| !this.window_active).unwrap_or(false);
+                cx.background_executor().timer(Duration::from_millis(if idle { 1000 } else { 500 })).await;
             }
         }));
         w._tasks.push(cx.spawn_in(window, async move |this, cx| {
@@ -6620,6 +6624,176 @@ export default class Probe extends View {
             assert_eq!(seen(cx), Some(json!(true)), "focused: {:?}", crate::mods::shared("probe.seen"));
             cx.deactivate_window();
             assert_eq!(seen(cx), Some(json!(false)), "blurred: {:?}", crate::mods::shared("probe.seen"));
+        }
+    }
+
+    /// IDLE-VIS: the window's poll runs every 400 ms while the window is active and every
+    /// 1000 ms while it is not; focus that comes back mid-sleep is noticed by the poll that
+    /// ends the slow sleep (at most 1000 ms later), which syncs and goes fast again.
+    #[test]
+    fn the_poll_slows_down_while_the_window_is_inactive_and_speeds_up_on_focus() {
+        in_own_process("poll_cadence_window");
+    }
+
+    #[gpui::test]
+    fn poll_cadence_window(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        use std::time::Duration;
+        if !running_alone("poll_cadence_window") {
+            return;
+        }
+        let probe = "import { View, div } from \"gpui-kit\";\nexport default class P extends View { render() { return div(); } }";
+        let (view, cx) = open_window(cx, "cadence-probe", probe, json!({ "id": "probe", "type": "block", "content": { "mod": "cadence-probe" } }));
+        cx.run_until_parked();
+        let polls = |cx: &mut gpui::VisualTestContext| view.read_with(cx, |this, _| this.polls);
+        let active = |cx: &mut gpui::VisualTestContext| view.read_with(cx, |this, _| this.window_active);
+        let advance = |cx: &mut gpui::VisualTestContext, ms: u64| {
+            cx.executor().advance_clock(Duration::from_millis(ms));
+            cx.run_until_parked();
+        };
+        // Steps 1 ms at a time until a poll runs: the clock then stands exactly on a poll.
+        let to_next_poll = |cx: &mut gpui::VisualTestContext| {
+            let start = polls(cx);
+            for _ in 0..1500 {
+                advance(cx, 1);
+                if polls(cx) != start {
+                    assert_eq!(polls(cx), start + 1, "one poll at a time");
+                    return;
+                }
+            }
+            panic!("no poll in 1500 ms");
+        };
+        // Exactly `ms` from a poll: nothing at `ms - 1`, one poll at `ms`.
+        let period_is = |cx: &mut gpui::VisualTestContext, ms: u64, why: &str| {
+            let start = polls(cx);
+            advance(cx, ms - 1);
+            assert_eq!(polls(cx), start, "{why}: no poll {}ms after the last", ms - 1);
+            advance(cx, 1);
+            assert_eq!(polls(cx), start + 1, "{why}: one poll {ms}ms after the last");
+        };
+
+        // Active: 400 ms, as before (the active cadence did not change), several periods in a row.
+        cx.update(|window, _| window.activate_window());
+        to_next_poll(cx);
+        to_next_poll(cx);
+        assert!(active(cx), "focused");
+        for _ in 0..3 {
+            period_is(cx, 400, "active");
+        }
+
+        // Losing focus mid-sleep: the 400 ms sleep already started ends as planned, that poll
+        // sees the window inactive, and from there on the period is 1000 ms (not 400, not 500).
+        advance(cx, 100);
+        cx.deactivate_window();
+        let start = polls(cx);
+        advance(cx, 299);
+        assert_eq!(polls(cx), start, "the fast sleep is not cut short");
+        assert!(active(cx), "not noticed before the next poll");
+        advance(cx, 1);
+        assert_eq!(polls(cx), start + 1);
+        assert!(!active(cx), "the poll noticed the lost focus");
+        let start = polls(cx);
+        advance(cx, 400);
+        assert_eq!(polls(cx), start, "inactive: no poll at 400 ms");
+        advance(cx, 100);
+        assert_eq!(polls(cx), start, "inactive: no poll at 500 ms");
+        advance(cx, 499);
+        assert_eq!(polls(cx), start, "inactive: no poll at 999 ms");
+        advance(cx, 1);
+        assert_eq!(polls(cx), start + 1, "inactive: one poll at 1000 ms");
+        for _ in 0..3 {
+            period_is(cx, 1000, "inactive");
+        }
+
+        // Focus back mid-sleep: noticed by the poll ending the slow sleep, within 1000 ms of it
+        // starting; that poll syncs, and the next periods are 400 ms again.
+        advance(cx, 300);
+        cx.update(|window, _| window.activate_window());
+        let start = polls(cx);
+        advance(cx, 699);
+        assert_eq!(polls(cx), start, "the slow sleep runs out first");
+        assert!(!active(cx));
+        advance(cx, 1);
+        assert_eq!(polls(cx), start + 1, "focus is noticed at most one slow period after the last poll");
+        assert!(active(cx), "and the window is active (synced) again");
+        for _ in 0..3 {
+            period_is(cx, 400, "active again");
+        }
+
+        // Focus back right at a slow poll's start: the worst case, a full 1000 ms.
+        cx.deactivate_window();
+        to_next_poll(cx);
+        assert!(!active(cx));
+        period_is(cx, 1000, "inactive");
+        cx.update(|window, _| window.activate_window());
+        period_is(cx, 1000, "the sleep that started inactive");
+        assert!(active(cx), "noticed by that poll");
+        period_is(cx, 400, "fast again");
+
+        // Rapid toggling during a slow sleep that ends inactive: the poll sees inactive, stays slow.
+        cx.deactivate_window();
+        to_next_poll(cx);
+        period_is(cx, 1000, "inactive");
+        for _ in 0..5 {
+            advance(cx, 50);
+            cx.update(|window, _| window.activate_window());
+            advance(cx, 50);
+            cx.deactivate_window();
+        }
+        let start = polls(cx);
+        advance(cx, 499);
+        assert_eq!(polls(cx), start, "toggling does not wake the poll early");
+        advance(cx, 1);
+        assert_eq!(polls(cx), start + 1);
+        assert!(!active(cx), "it ended inactive");
+        period_is(cx, 1000, "still slow");
+
+        // Rapid toggling during a slow sleep that ends active: fast from that poll on.
+        for _ in 0..5 {
+            advance(cx, 50);
+            cx.deactivate_window();
+            advance(cx, 50);
+            cx.update(|window, _| window.activate_window());
+        }
+        let start = polls(cx);
+        advance(cx, 499);
+        assert_eq!(polls(cx), start, "toggling does not wake the poll early");
+        advance(cx, 1);
+        assert_eq!(polls(cx), start + 1);
+        assert!(active(cx), "it ended active");
+        period_is(cx, 400, "fast again after toggling");
+
+        // Toggling within a fast sleep that ends active: never seen inactive, stays at 400 ms.
+        cx.deactivate_window();
+        advance(cx, 100);
+        cx.update(|window, _| window.activate_window());
+        advance(cx, 300);
+        assert!(active(cx));
+        period_is(cx, 400, "a blur shorter than a poll changes nothing");
+    }
+
+    /// IDLE-VIS: the core subscription loop sleeps 500 ms while the window is active and
+    /// 1000 ms while it is not; the window's poll 400 ms and 1000 ms. The offline test core
+    /// gives no way to count the core loop's turns, so its sleep is checked in the source.
+    #[test]
+    fn the_core_loop_and_the_poll_sleep_by_the_window_focus() {
+        // Up to the test module (an inline `#[cfg(test)]` argument sits above the loops).
+        let full = include_str!("window.rs");
+        let source = &full[..full.find("\nmod tests {").expect("the test module")];
+        let sleeps: Vec<&str> = source.lines().map(str::trim).filter(|l| l.contains("if idle {")).collect();
+        assert_eq!(
+            sleeps,
+            [
+                "cx.background_executor().timer(Duration::from_millis(if idle { 1000 } else { 400 })).await;",
+                "cx.background_executor().timer(Duration::from_millis(if idle { 1000 } else { 500 })).await;",
+            ],
+            "the poll, then the core loop"
+        );
+        let idle: Vec<&str> = source.lines().map(str::trim).filter(|l| l.starts_with("let idle =")).collect();
+        assert_eq!(idle.len(), 2);
+        for line in idle {
+            // Idle means not active; a window that's gone (update fails) does not count as idle.
+            assert_eq!(line, "let idle = this.update(cx, |this, _| !this.window_active).unwrap_or(false);");
         }
     }
 
