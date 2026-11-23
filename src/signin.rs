@@ -2420,7 +2420,9 @@ mod tests {
     #[test]
     fn agreeing_to_the_terms_opens_the_analytics_gate_only_once_they_are_saved() {
         // `record_consent` needs the real home and a window, so its order is read here.
-        let source = include_str!("signin.rs").split("#[cfg(test)]").next().unwrap();
+        // A Windows checkout may have CRLF line endings.
+        let full = include_str!("signin.rs").replace("\r\n", "\n");
+        let source = full.split("#[cfg(test)]").next().unwrap();
         let body = &source[source.find("fn record_consent(").expect("record_consent")..];
         let body = &body[..body.find("\n    }\n").expect("its end")];
         assert_eq!(body.matches("set_consent(").count(), 1, "{body}");
