@@ -2816,6 +2816,25 @@ fn logo_menu_waits_while_an_account_change_runs_and_the_user_mod_only_opens_the_
 }
 
 #[gpui::test]
+fn settings_profile_token_saving_row_shows_the_real_state_signed_in_or_out_and_is_not_a_sign_in_feature(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let signed_in = account_value(&[("u1", "google.com", "vijay")], Some("u1"));
+    // Default (no file, empty file, true) is on; only an explicit false is off.
+    for (label, account, heading) in [("signed in", signed_in, "Included with your account"), ("signed out", account_value(&[], None), "Turned on when you sign in")] {
+        for (file, on) in [(None, true), (Some("{}"), true), (Some(r#"{"token_saver": true}"#), true), (Some(r#"{"token_saver": false}"#), false)] {
+            let (trees, _) = describe_pressing(cx, &staged, "frame/settings", profile_values(account.clone()), file, "", 0);
+            let tree = &trees[0];
+            let at = tree.find("st-prof-tokens").unwrap_or_else(|| panic!("{label} {file:?}: {tree}"));
+            let row = &tree[at..tree.find("st-prof-observe").unwrap_or(tree.len())];
+            let (shown, hidden) = if on { ("text \"on\"", "text \"off\"") } else { ("text \"off\"", "text \"on\"") };
+            assert!(row.contains("Token saving") && row.contains(shown) && !row.contains(hidden), "{label} {file:?}: {row}");
+            assert!(at < tree.find(heading).unwrap(), "{label} {file:?}: Token saving sits above the sign-in list: {tree}");
+        }
+    }
+}
+
+#[gpui::test]
 fn settings_profile_with_saved_accounts_but_none_current_lists_them_all_with_no_check(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();

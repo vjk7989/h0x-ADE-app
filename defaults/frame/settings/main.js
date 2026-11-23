@@ -53,9 +53,8 @@ const DEFAULT_UI_FONT = "Geist";
 const PROVIDERS = { "google.com": "Google", "github.com": "GitHub", password: "Email" };
 const accountName = (a) => a.name || a.email || "Account";
 
-// What signing in turns on: [row id, title, what it is for]. The wording says what each is for, not that it already works.
+// What signing in turns on (Token saving is on for everyone, so it has its own row): [row id, title, what it is for]. The wording says what each is for, not that it already works.
 const FEATURES = [
-  ["st-prof-tokens", "Token saving", "For helping your agents spend fewer tokens on each task.", "gauge"],
   ["st-prof-observe", "Observability engine", "For seeing what your agents and machines did, and when.", "activity"],
   ["st-prof-pii", "Blockchain security for PII masking", "For masking personal data before it leaves this computer.", "shield-check"],
 ];
@@ -1497,6 +1496,12 @@ export default class Settings extends View {
         div().text_color(t.foreground).child("Add account"))));
   }
 
+  // Token saving is on unless its setting is explicitly false, signed in or not.
+  tokenRow(t) {
+    const on = this.person.token_saver !== false;
+    return this.profileRow(t, "st-prof-tokens", "Token saving", "For helping your agents spend fewer tokens on each task.", this.stateTag(t, on, on ? "on" : "off"), "gauge");
+  }
+
   // Settings > Profile: who is signed in (or that nobody is), this computer's agent activity, and what signing in turns on.
   profile(t) {
     const acct = account();
@@ -1522,6 +1527,7 @@ export default class Settings extends View {
             // Accounts are saved but none is current: they can still be switched to.
             .when(acct.accounts.length > 0 && !this.signingIn, (el) => el.child(h_flex().pt(6).child(this.acctBusy ? busy : this.switchButton(t)))))))
         .child(div().id("st-prof-activity").w_full().child(this.graph))
+        .child(this.tokenRow(t))
         .child(this.subheading(t, "Turned on when you sign in"))
         .children(FEATURES.map(([id, title, about, icon]) => this.profileRow(t, id, title, about, this.stateTag(t, false, "off"), icon)))
         .child(pairing(this.stateTag(t, false, "needs sign-in")));
@@ -1538,6 +1544,7 @@ export default class Settings extends View {
           .child(this.button(t, "st-acct-signout", "Sign out", (_e, cx) => this.accountDo(() => accountSignOut(cur.uid), cx), "log-out", "first"))))
       .when(this.signingIn, (el) => el.child(h_flex().w_full().pt(12).child(this.waitingLine(t)))))
       .child(div().id("st-prof-activity").w_full().child(this.graph))
+      .child(this.tokenRow(t))
       .child(this.subheading(t, "Included with your account"))
       .children(FEATURES.map(([id, title, about, icon]) => this.profileRow(t, id, title, about, this.stateTag(t, true, "included"), icon)))
       .child(pairing(this.button(t, "st-prof-remote", "Set up in Remote", (_e, cx) => this.openSection("remote", cx), "arrow-right")))
