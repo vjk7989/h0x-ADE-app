@@ -274,7 +274,7 @@ function tokensCard(view, t) {
     .child(h_flex().w_full().justify_between().child(label("Used")).child(value("st-prof-tokens-used", text(tokensText(sum.used)))))
     .children(agents.map(([name, n]) => h_flex().w_full().pl(12).justify_between().child(label(AGENT_NAMES.get(name) ?? (name || "unknown"))).child(value(`st-prof-tokens-agent-${name || "unknown"}`, grouped(n)))))
     .child(h_flex().w_full().justify_between().child(label("API-equivalent est.")).child(value("st-prof-tokens-cost", text(costText(sum.cost)))))
-    .child(h_flex().w_full().justify_between().child(label("Saved")).child(value("st-prof-tokens-saved", text(`${tokensText(sum.saved)} (~$${cents((sum.saved * SAVED_USD_PER_MILLION_TOKENS) / 1e6)}) ·${savedPercent(sum.saved, sum.used)}%`))))
+    .child(h_flex().w_full().justify_between().child(label("Saved")).child(value("st-prof-tokens-saved", text(`${tokensText(sum.saved)} (~$${cents((sum.saved * SAVED_USD_PER_MILLION_TOKENS) / 1e6)}) · ${savedPercent(sum.saved, sum.used)}%`))))
     .child(mono(div().text_size(10.5).text_color(t.dim)).child("Counted for agents started in HyperOx."));
 }
 
