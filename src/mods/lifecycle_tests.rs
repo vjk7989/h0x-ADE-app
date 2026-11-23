@@ -632,6 +632,12 @@ fn reload_reports_the_tasks_it_strands(cx: &mut TestAppContext) {
     let _log = tracing::subscriber::set_default(
         tracing_subscriber::fmt().with_writer(move || writer.clone()).with_max_level(tracing::Level::WARN).finish(),
     );
+    // tracing caches each callsite's interest process-wide. While one dispatcher is
+    // registered, a callsite first hit on another test thread (a parallel reload that
+    // strands its own task) asks that thread's default, gets `never`, and this
+    // thread's warning is then dropped. A second registered dispatcher makes every
+    // registration consult this one as well; events still go to the thread default.
+    let _shared_interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new());
 
     cx.update(gpui_shell::init);
     for (pending, summary) in [(true, Some("2 cx.sleep(ms)")), (false, None)] {
