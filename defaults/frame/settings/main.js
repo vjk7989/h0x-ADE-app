@@ -390,7 +390,7 @@ export default class Settings extends View {
 
   // A button that can't be pressed now.
   disabledButton(t, id, label) {
-    return div().id(id).px(12).py(5).rounded(7).border_1().border_color(t.border).bg(t.raised).opacity(0.45).text_size(13).text_color(t.dim).child(label);
+    return div().id(id).px(12).py(5).rounded(7).border_1().border_color(t.border).bg(t.raised).text_size(13).text_color(t.dim).child(label);
   }
 
   // − value +
@@ -1115,7 +1115,7 @@ export default class Settings extends View {
     const when = (ms) => (ms ? new Date(ms).toLocaleDateString() : "");
     return v_flex().w_full()
       .child(this.heading(t, "Status"))
-      .child(this.row(t, `Remote control: ${r.locked ? "Locked" : "On"}`, r.locked ? "Paired devices can't run commands until you unlock." : "Paired devices can reach your terminals.",
+      .child(this.row(t, `Remote control: ${r.locked ? "Locked" : r.identities.length === 0 ? "Unlocked" : "On"}`, r.locked ? "Paired devices can't run commands until you unlock." : r.identities.length === 0 ? "No devices paired yet." : "Paired devices can reach your terminals.",
         this.remoteButton(t, "st-r-lock", r.locked ? "Unlock" : "Lock", () => this.coreJson(["bridge", r.locked ? "unlock" : "lock"]))))
       .children(r.identities.map((i) => this.row(t, i.label || i.user_id || i.id, `${i.transport} · paired ${when(i.paired_at_ms)}`,
         this.remoteButton(t, `st-r-unpair-${i.id}`, "Remove", () => this.coreJson(["bridge", "unpair", i.id])))))
@@ -1172,7 +1172,7 @@ export default class Settings extends View {
       .child(this.row(t, "Bot", on ? "Running" : "Stopped", on
         ? this.remoteButton(t, "st-r-bot-stop", "Stop bot", () => this.coreJson(["kill", "h0x-bridge-telegram"]))
         : this.remoteButton(t, "st-r-bot-start", "Start bot", () => this.coreJson(this.startArgs("h0x-bridge-telegram", "h0x-bridge=telegram", ["bridge", "run"])))))
-      .child(this.button(t, "st-r-help", this.showHelp ? "Hide how to use" : "How to use", (_e, cx) => { this.showHelp = !this.showHelp; cx.notify(); }))
+      .child(div().pt(8).pb(14).child(this.button(t, "st-r-help", this.showHelp ? "Hide how to use" : "How to use", (_e, cx) => { this.showHelp = !this.showHelp; cx.notify(); })))
       .when(this.showHelp, (el) => el.child(v_flex().w_full().py(8).gap(4)
         .children(commands.map(([name, what]) => h_flex().gap(10)
           .child(div().w(90).flex_none().text_size(12.5).font_semibold().text_color(t.foreground).child(name))
@@ -1386,7 +1386,7 @@ export default class Settings extends View {
         : [result, check("st-check-app")];
     const c = u.core;
     const coreRow = c.managed
-      ? [`Managed by ${c.managed}: update it there.`, null]
+      ? [`Managed by ${c.managed}: update it there.${c.ready ? ` ${c.ready} is available.` : ""}`, u.checks ? check("st-check-core") : null]
       : c.updating
         ? ["Updating\u2026 your terminals keep running.", null]
         : c.error
@@ -1605,7 +1605,7 @@ export default class Settings extends View {
     return v_flex()
       .w_full()
       .child(h_flex().w_full().gap(14).pb(18).items_center().border_b(1).border_color(t.border)
-        .child(image("frame/welcome/hyperox.png").w(40).h(40).rounded(9).border_1().border_color(t.border).flex_none())
+        .child(div().w(40).h(40).rounded(9).border_1().border_color(t.border).bg(t.raised).flex_none().flex().items_center().justify_center().child(svg("mods/workspace-chrome/hyperox-mark.svg").size(26).text_color(t.foreground)))
         .child(v_flex().flex_1().min_w(0).gap(2)
           .child(h_flex().gap(8).items_center()
             .child(div().text_size(20).line_height("26px").font_semibold().text_color(t.foreground).child("HyperOx"))

@@ -24,9 +24,11 @@ let platform = "linux";
 const icons: string[] = [];
 let dark = true;
 const shipped = [["graphite", false], ["ink", false], ["moss", false], ["paper", true], ["atom-one-dark", false], ["mine-light", true], ["win98", true]];
+// More app commands for a test that needs them; empty otherwise.
+const extraCommands: { name: string; args: unknown[]; about: string }[] = [];
 const values = {
   View: class {}, div: element, svg: (path: string) => { icons.push(path); return element(); }, v_flex: element, h_flex: element, Input: { new: element }, theme: () => ({}), keys: () => [], win: () => ({ platform }),
-  commands: () => [{ name: "app.theme", args: [{ name: "name", required: true }], about: "Use a theme." }], layouts: () => ["main", "win98"], shared: () => "main",
+  commands: () => [{ name: "app.theme", args: [{ name: "name", required: true }], about: "Use a theme." }, ...extraCommands], layouts: () => ["main", "win98"], shared: () => "main",
   themes: () => shipped.map(([name, light]) => ({ name, light })), settings: () => ({ dark }),
 };
 const Palette = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Palette", "return class Palette"))(...Object.values(values));
@@ -146,3 +148,107 @@ test("the palette keeps a new-session row for each installed or custom agent, by
 test("no agents found leaves no new-session rows", () => {
   expect(paletteRows([]).filter((e: any) => e.name === "agent.new")).toEqual([]);
 });
+
+test("a multi-word query needs every word to start a word in the row", () => {
+  const view = new Palette();
+  view.recent = []; view.agents = [];
+  const titles = (q: string) => { view.query = q; return view.rows().map((r: any) => r.e.title); };
+  expect(titles("theme atom")).toContain("Theme: atom one dark");
+  expect(titles("theme atom").every((t: string) => /theme/i.test(t) && /atom/i.test(t))).toBe(true);
+  expect(titles("zzz theme")).toEqual([]);
+  expect(titles("thm").length).toBeGreaterThan(0); // one word stays fuzzy
+});
+
+// VQA-POLISH-1 D4: several words each start a word of the row (group, title, name or keywords); one word stays fuzzy.
+function searching(agents: unknown[] = []) {
+  extraCommands.splice(0, extraCommands.length,
+    { name: "pane.close", args: [], about: "Close the pane." },
+    { name: "pane.go", args: [], about: "Move focus." },
+    { name: "terminal.paste", args: [], about: "Paste text." },
+    { name: "terminal.paste_image", args: [], about: "Put an image into the terminal." },
+    { name: "terminal.copy_screen", args: [], about: "Copy what the terminal shows." },
+    { name: "app.whats_new", args: [], about: "What changed." },
+  );
+  const view = new Palette();
+  view.recent = []; view.agents = agents;
+  return (q: string) => { view.query = q; return view.rows().map((r: any) => r.e.title as string); };
+}
+function searchingWith(check: (titles: (q: string) => string[]) => void, agents: unknown[] = []) {
+  try { check(searching(agents)); } finally { extraCommands.length = 0; dark = true; }
+}
+
+test("close pan finds Close pane, not Paste image terminal or Copy screen terminal", () => searchingWith((titles) => {
+  const found = titles("close pan");
+  expect(found).toContain("Close pane");
+  expect(found).not.toContain("Paste image terminal");
+  expect(found).not.toContain("Copy screen terminal");
+  expect(found[0]).toBe("Close pane");
+}));
+
+test("extra spaces and tabs around and between words change nothing", () => searchingWith((titles) => {
+  const want = titles("close pan");
+  for (const q of ["  close pan", "close pan  ", "close    pan", "\tclose\t pan\n"]) expect(titles(q)).toEqual(want);
+}));
+
+test("multi-word search ignores case", () => searchingWith((titles) => {
+  for (const q of ["CLOSE PAN", "Close Pane", "cLoSe pAnE"]) {
+    expect(titles(q)).toContain("Close pane");
+    expect(titles(q)).not.toContain("Paste image terminal");
+  }
+}));
+
+test("a repeated word matches the same word of the row", () => searchingWith((titles) => {
+  expect(titles("pane pane")).toContain("Close pane");
+  expect(titles("close close")).toContain("Close pane");
+  expect(titles("close close")).not.toContain("Paste image terminal");
+}));
+
+test("a word may start at the group, the command name or a keyword", () => searchingWith((titles) => {
+  expect(titles("pane kill")).toContain("Close pane"); // group + keyword
+  expect(titles("terminal paste")).toEqual(expect.arrayContaining(["Paste", "Paste image terminal"])); // group + title
+  expect(titles("terminal paste")).not.toContain("Copy screen terminal");
+}));
+
+test("a word that only matches mid-word does not match a multi-word query", () => searchingWith((titles) => {
+  for (const q of ["lose pane", "close ane", "los pan", "ose ane"]) expect(titles(q)).not.toContain("Close pane");
+  expect(titles("lose")).toContain("Close pane"); // one word: fuzzy, as before
+}));
+
+test("one word keeps fuzzy matching; the same letters split in two do not", () => searchingWith((titles) => {
+  expect(titles("clspn")).toContain("Close pane");
+  expect(titles("cls pn")).not.toContain("Close pane");
+  expect(titles("thm").length).toBeGreaterThan(0);
+}));
+
+test("three or more words all have to match", () => searchingWith((titles) => {
+  expect(titles("focus pane left")).toEqual(["Focus pane left"]);
+  expect(titles("focus pane le")).toEqual(["Focus pane left"]);
+  expect(titles("focus pane")).toEqual(expect.arrayContaining(["Focus pane left", "Focus pane right", "Focus pane up", "Focus pane down"]));
+  expect(titles("focus pane left zzz")).toEqual([]);
+  expect(titles("theme atom one dark")).toEqual(["Theme: atom one dark"]);
+}));
+
+test("an empty query and a query of only spaces both show the grouped list", () => searchingWith((titles) => {
+  const empty = titles("");
+  expect(empty.length).toBeGreaterThan(0);
+  expect(empty).toContain("Close pane");
+  for (const q of [" ", "   ", "\t", " \t \n "]) expect(titles(q)).toEqual(empty);
+}));
+
+test("a query typed with the row's own punctuation still finds it", () => searchingWith((titles) => {
+  expect(titles("what's new")).toContain("What's new");
+  expect(titles("theme: atom")).toContain("Theme: atom one dark");
+  expect(titles("pane.close kill")).toContain("Close pane");
+}));
+
+test("unicode titles match by their words, typed in full or in part", () => searchingWith((titles) => {
+  expect(titles("café")).toContain("New Café session"); // one word: fuzzy
+  expect(titles("new caf")).toContain("New Café session");
+  expect(titles("new café")).toContain("New Café session");
+  expect(titles("NEW CAFÉ")).toContain("New Café session");
+  expect(titles("new 日本")).toContain("New 日本 session");
+  expect(titles("new café")).not.toContain("New 日本 session");
+}, [
+  { slot: 1, installed: true, name: "Café", key: "cafe" },
+  { slot: 2, installed: true, name: "日本", key: "nihon" },
+]));

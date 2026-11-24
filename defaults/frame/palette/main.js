@@ -194,7 +194,15 @@ export default class Palette extends View {
       return [...recent.map((e) => ({ e, head: "Recent" })), ...[...rest, ...others].map((e) => ({ e, head: e.group }))];
     }
     const rank = (e) => this.recent.indexOf(e.id);
+    // Several words: each must start a word in the item, so "close pan" skips "Paste image terminal".
+    const split = (text) => text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    const words = split(this.query);
+    const starts = (e) => {
+      const have = split(`${e.group} ${e.title} ${e.name} ${e.words}`);
+      return words.every((w) => have.some((h) => h.startsWith(w)));
+    };
     return all
+      .filter((e) => words.length < 2 || starts(e))
       .map((e) => {
         const title = fuzzy(q, e.title);
         const more = fuzzy(q, `${e.group} ${e.title} ${e.name} ${e.words}`);

@@ -636,7 +636,7 @@ impl Rain {
     }
 }
 
-/// How much of a glyph shows: faded over the top 56 px of the band, and (to 55%) behind the cards.
+/// How much of a glyph shows: faded over the top 56 px of the band, and (to 20%) behind the cards, so text on them stays legible.
 /// `y` is the cell's top in the band, `distance` the gap from its box to the card.
 fn cell_weight(y: f32, band: f32, distance: f32, light: bool) -> f32 {
     if band <= 0.0 {
@@ -644,7 +644,7 @@ fn cell_weight(y: f32, band: f32, distance: f32, light: bool) -> f32 {
     }
     let t = (y / 56.0).min(1.0);
     let fade = t * t * (3.0 - 2.0 * t);
-    fade * if light { 1.15 } else { 1.0 } * (0.55 + 0.45 * ((distance - 6.0) / 28.0).clamp(0.0, 1.0))
+    fade * if light { 1.15 } else { 1.0 } * (0.2 + 0.8 * ((distance - 6.0) / 28.0).clamp(0.0, 1.0))
 }
 
 /// The distance between a cell's box and the card's box (0 when they overlap).
@@ -884,7 +884,7 @@ fn consent_row(agreed: bool, focus: &FocusHandle, s: f32, light: bool, toggle: i
     div()
         .flex()
         .items_center()
-        .gap(z(4.0, s))
+        .gap(z(8.0, s))
         .child(
             div()
                 .id("signin-consent")
@@ -1217,7 +1217,7 @@ impl Render for SignIn {
             .flex()
             .flex_col()
             .gap(z(gap, s))
-            .child(div().h(z(LEAD_H, s)).pl(z(4.0, s)).text_size(z(12.0, s)).line_height(z(LEAD_H, s)).text_color(c("muted")).child(PERKS_LEAD))
+            .child(div().h(z(LEAD_H, s)).self_start().px(z(8.0, s)).rounded(z(4.0, s)).bg(c("raised")).text_size(z(12.0, s)).line_height(z(LEAD_H, s)).text_color(c("muted")).child(PERKS_LEAD))
             .child(div().flex().gap(z(gap, s)).children(features));
 
         // The grid, centred as one piece (8 above the middle when compact).
@@ -1505,14 +1505,78 @@ mod tests {
         assert!((cell_weight(190.0, 200.0, 1000.0, false) - 1.0).abs() < 1e-6);
         assert!(cell_weight(28.0, 200.0, 1000.0, false) > 0.0 && cell_weight(28.0, 200.0, 1000.0, false) < 1.0);
         assert!((cell_weight(150.0, 200.0, 1000.0, true) - 1.15).abs() < 1e-6, "light themes are boosted to match dark");
-        assert!((cell_weight(150.0, 200.0, 6.0, false) - 0.55).abs() < 1e-6, "within 6 px of the card: 55%");
-        assert!((cell_weight(150.0, 200.0, 20.0, false) - 0.775).abs() < 1e-6);
+        assert!((cell_weight(150.0, 200.0, 6.0, false) - 0.2).abs() < 1e-6, "within 6 px of the card: 20%");
+        assert!((cell_weight(150.0, 200.0, 20.0, false) - 0.6).abs() < 1e-6);
         assert!((cell_weight(150.0, 200.0, 34.0, false) - 1.0).abs() < 1e-6);
         let card = (100.0, 100.0, 500.0, 400.0);
         assert_eq!(card_distance((200.0, 200.0, 9.0, 14.0), card), 0.0, "inside");
         assert_eq!(card_distance((520.0, 200.0, 9.0, 14.0), card), 20.0, "right of it");
         assert_eq!(card_distance((200.0, 420.0, 9.0, 14.0), card), 20.0, "below it");
         assert_eq!(card_distance((60.0, 60.0, 10.0, 10.0), card), (30.0_f32).hypot(30.0), "diagonal");
+    }
+
+    // VQA-POLISH-1 D1: behind a card the rain drops to 20% so card text stays legible; outside it shows in full.
+    #[test]
+    fn the_rain_is_dimmed_inside_and_at_the_card_and_full_away_from_it() {
+        use super::{card_distance, cell_weight};
+        let card = (100.0, 100.0, 500.0, 400.0);
+        let weight = |cell: (f32, f32, f32, f32)| cell_weight(150.0, 200.0, card_distance(cell, card), false);
+        assert!((weight((200.0, 200.0, 9.0, 14.0)) - 0.2).abs() < 1e-6, "inside the card: 20%");
+        assert!((weight((491.0, 200.0, 9.0, 14.0)) - 0.2).abs() < 1e-6, "flush with the right edge, inside: 20%");
+        assert!((weight((500.0, 200.0, 9.0, 14.0)) - 0.2).abs() < 1e-6, "starting on the right edge: 20%");
+        assert!((weight((95.0, 200.0, 9.0, 14.0)) - 0.2).abs() < 1e-6, "overlapping the left edge: 20%");
+        assert!((weight((506.0, 200.0, 9.0, 14.0)) - 0.2).abs() < 1e-6, "6 px out: still 20%");
+        let just_past = weight((507.0, 200.0, 9.0, 14.0));
+        assert!(just_past > 0.2 && just_past < 1.0, "7 px out: rising, {just_past}");
+        assert!((weight((534.0, 200.0, 9.0, 14.0)) - 1.0).abs() < 1e-6, "34 px out: full");
+        assert!((weight((535.0, 200.0, 9.0, 14.0)) - 1.0).abs() < 1e-6, "35 px out: full, never more");
+        assert!((weight((5000.0, 5000.0, 9.0, 14.0)) - 1.0).abs() < 1e-6, "far away: full");
+        // Both sides of each limit on the distance itself.
+        for (d, want) in [(-5.0, 0.2), (0.0, 0.2), (5.999, 0.2), (6.0, 0.2), (34.0, 1.0), (34.001, 1.0), (1e9, 1.0)] {
+            assert!((cell_weight(150.0, 200.0, d, false) - want).abs() < 1e-4, "distance {d}");
+        }
+        assert!(cell_weight(150.0, 200.0, 6.5, false) > 0.2 && cell_weight(150.0, 200.0, 33.5, false) < 1.0);
+        // Outside shows five times what a card lets through, in both themes.
+        for light in [false, true] {
+            let (inside, outside) = (cell_weight(150.0, 200.0, 0.0, light), cell_weight(150.0, 200.0, 100.0, light));
+            assert!(inside > 0.0, "light {light}: the rain stays visible behind a card");
+            assert!((outside / inside - 5.0).abs() < 1e-4, "light {light}: {outside} / {inside}");
+        }
+        // A zero-size card is a point: a cell over it is dimmed, one away from it is not, and nothing is NaN.
+        let point = (300.0, 300.0, 300.0, 300.0);
+        assert_eq!(card_distance((295.0, 295.0, 10.0, 10.0), point), 0.0);
+        assert_eq!(card_distance((400.0, 300.0, 9.0, 14.0), point), 100.0);
+        assert_eq!(card_distance((300.0, 300.0, 0.0, 0.0), point), 0.0, "a zero-size cell on a zero-size card");
+        for cell in [(295.0, 295.0, 10.0, 10.0), (400.0, 300.0, 9.0, 14.0), (300.0, 300.0, 0.0, 0.0)] {
+            let w = cell_weight(150.0, 200.0, card_distance(cell, point), false);
+            assert!(w.is_finite() && (0.2 - 1e-6..=1.0 + 1e-6).contains(&w), "{cell:?}: {w}");
+        }
+        // No band, or a negative one, shows nothing even far from the card.
+        assert_eq!(cell_weight(150.0, 0.0, 1000.0, true), 0.0);
+        assert_eq!(cell_weight(150.0, -1.0, 1000.0, false), 0.0);
+        assert!(cell_weight(150.0, 0.001, 1000.0, false) > 0.0, "the smallest band still shows");
+    }
+
+    // VQA-POLISH-1 D1/D2: the lead label has its own backing, and the consent tick's ring keeps clear of the Terms link.
+    #[test]
+    fn the_perks_lead_has_a_backing_and_the_consent_ring_has_a_gap() {
+        let source = include_str!("signin.rs").replace("\r\n", "\n");
+        let source = source.split("#[cfg(test)]").next().unwrap();
+        let lead = source.find(".child(PERKS_LEAD)").expect("the lead label");
+        let line = &source[source[..lead].rfind('\n').unwrap()..lead];
+        assert!(line.contains(".bg(c(\"raised\"))"), "the lead has a backing: {line}");
+        assert!(line.contains(".self_start()") && line.contains(".px(z(8.0, s))"), "a pill sized to its text, padded both sides: {line}");
+        assert!(!line.contains(".pl("), "no one-sided nudge out of the card column: {line}");
+        // The ring's outer spread, and the gap between the consent toggle and the Terms link.
+        let ring = &source[source.find("fn ring()").expect("ring")..];
+        let spread = ring.find(".spread_radius(px(").expect("a spread") + ".spread_radius(px(".len();
+        let spread: f32 = ring[spread..spread + ring[spread..].find(')').unwrap()].parse().unwrap();
+        let row = &source[source.find("fn consent_row(").expect("consent_row")..];
+        let row = &row[..row.find(".id(\"signin-consent\")").expect("the toggle")];
+        let gap = row.rfind(".gap(z(").expect("the row gap") + ".gap(z(".len();
+        let gap: f32 = row[gap..gap + row[gap..].find(',').unwrap()].parse().unwrap();
+        assert!(gap > spread, "the ring ({spread} px) must not reach the Terms link ({gap} px away)");
+        assert!(gap >= 8.0, "{gap}");
     }
 
     #[test]
@@ -2189,9 +2253,9 @@ mod tests {
                 }
             }
         }
-        // Inside a card (distance 0) the texture still shows, at 55% of its strength.
-        assert!((cell_weight(300.0, 400.0, 0.0, false) - 0.55).abs() < 1e-6);
-        assert!((cell_weight(300.0, 400.0, 0.0, true) - 0.6325).abs() < 1e-6);
+        // Inside a card (distance 0) the texture still shows, at 20% of its strength.
+        assert!((cell_weight(300.0, 400.0, 0.0, false) - 0.2).abs() < 1e-6);
+        assert!((cell_weight(300.0, 400.0, 0.0, true) - 0.23).abs() < 1e-6);
         // Closer to the card never shows more.
         let mut last = 0.0;
         for d in 0..=60 {
@@ -2212,7 +2276,7 @@ mod tests {
         let (_, head) = Rain::new(5, 10).cell(0, 4, 0).expect("column 0's first head");
         let level = |w: f32| (head * w * 100.0).round() as u8;
         assert_eq!((level(cell_weight(190.0, 200.0, 1000.0, false)), level(cell_weight(190.0, 200.0, 1000.0, true))), (80, 92));
-        assert_eq!((level(cell_weight(190.0, 200.0, 0.0, false)), level(cell_weight(190.0, 200.0, 0.0, true))), (44, 51));
+        assert_eq!((level(cell_weight(190.0, 200.0, 0.0, false)), level(cell_weight(190.0, 200.0, 0.0, true))), (16, 18));
         // The faintest glyph (a trail's end or noise, 0.10) behind a card still paints in both themes.
         assert!(((0.10_f32 * cell_weight(190.0, 200.0, 0.0, true) * 100.0).round() as u8) > 0);
     }
