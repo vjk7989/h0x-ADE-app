@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.1.40] - 2026-11-24
+
+Privacy and stability fixes, updates that go through on Windows, and less CPU in the background. Bundles h0x-core 0.1.21.
+
+### Changed
+
+- HyperOx uses less CPU while its window is in the background, and the sign-in animation is calmer.
+- Heavy terminal output no longer makes the window stop responding.
+- Mouse, paste and drag-and-drop in terminals work more reliably, with clearer feedback when you drop or paste files.
+- Underline styles and colours show correctly, and text lines up better across fonts.
+- Spaces, tabs and the worktree dialog handle long names, unusual folder names and bare repositories.
+
+### Fixed
+
+- Updates on Windows: HyperOx no longer blocks its own folder, and a failed update now says why instead of "no update is ready yet".
+- Agents start correctly from more shells, including fish and PowerShell.
+- No usage data is recorded or sent until you have agreed to the Terms and Privacy Policy.
+- Rewriting a settings file keeps its private file permissions.
+- Previewing a special file (such as a pipe) can no longer hang the app, and files read from another machine are size-limited.
+- Saving a space keeps settings that this version does not know about.
+- Mods and layouts with dots in their names work, and a few rare crashes are fixed.
+- Security updates for third-party libraries.
+
 ## [0.1.39] - 2026-11-23
 
 Beta launch: Terms and Privacy at sign-in, a Tokens card, and the phone panel through Tailscale. Bundles h0x-core 0.1.19.
