@@ -1314,6 +1314,7 @@ export default class Settings extends View {
             : div().w(36).h(20).rounded(10).p(2).bg(t.hover).child(div().w(16).h(16).rounded(8).bg(t.muted)),
         ),
       )
+      .child(div().pt(8).pb(4).text_size(12.5).text_color(t.muted).child(`Tokens saved: ${this.savedText()}`))
       .child(
         this.row(
           t,
@@ -1322,7 +1323,6 @@ export default class Settings extends View {
           this.toggle(t, "st-start-at-login", Boolean(settings().start_at_login), () => run("app.start_at_login", { on: !settings().start_at_login })),
         ),
       )
-      .child(div().pt(8).pb(4).text_size(12.5).text_color(t.muted).child(`Tokens saved: ${this.savedText()}`))
       .child(soon("Security"))
       .child(soon("ZK Proofs"))
       .child(soon("Observability"));

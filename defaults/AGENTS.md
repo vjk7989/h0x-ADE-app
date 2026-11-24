@@ -640,7 +640,9 @@ The main ones:
   there is no history, so nothing moves),
   `terminal.pin {terminal, pinned}` (pins an agent to the top of the agent lists;
   kept on the terminal as `h0x.pinned`, so every HyperOx client shows it, and
-  gone when the terminal ends; read it as `agents()` `pinned`). Copy, paste, paste-image and implicit
+  gone when the terminal ends; read it as `agents()` `pinned`),
+  `terminal.resume {terminal, on}` (auto-resume of the terminal's agent session; on by default,
+  `on: false` sets the label `h0x.resume` to `off`, `on: true` removes it; works on any machine). Copy, paste, paste-image and implicit
   right-click targeting follow keyboard focus, including peek and floating terminals;
   with no terminal holding keyboard focus, they use the focused pane or block.
   Dragging a text selection past the terminal's top or bottom scrolls while held;
@@ -663,6 +665,7 @@ The main ones:
   `app.check_updates` (only a successful check reports Up to date; a failed check clears the checked time and can be retried), `app.update_core` (a newer h0x-core of this generation, terminals kept;
   never one a package manager owns), `app.welcome`, `app.whats_new`, `app.feedback {message?, from?}` (from `"person"` or `"agent"`; opens a review window, where the person can paste up to 3 screenshots; nothing happens until the person clicks Open issue, which opens a prefilled GitHub issue in the browser), `app.reset`,
   `app.theme {name}`, `app.zoom_in`, `app.zoom_out`, `app.zoom_reset`,
+  `app.start_at_login {on}` (open the HyperOx window at login; off by default; a failure leaves the setting as it was),
   `app.update` (restart into a downloaded update).
   Add machine lists all named ssh-config hosts in a scrollable list. Machines
   that need a password, a new host key or h0x-core installed show what to run
