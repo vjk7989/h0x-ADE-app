@@ -6990,10 +6990,21 @@ mod tests {
             export default class Heavy extends View {{ render() {{ return div().child(String(kept.length)); }} }}\n")
     }
 
+    /// The person allows these mods' current code (ADR-048): an edit of a mod that didn't ship asks again.
+    fn allow_mods(view: &gpui::Entity<super::AppWindow>, names: &[&str], cx: &mut gpui::VisualTestContext) {
+        view.update(cx, |this, _| {
+            for name in names {
+                let hash = crate::mods::content_hash(&crate::mods::app_dir().join("mods").join(name));
+                this.person.mods.insert((*name).to_owned(), crate::settings::ModChoice { hash, allow: true });
+            }
+        });
+    }
+
     /// Saves `heavy`'s main.js as `version` and lets the window apply it, then
     /// returns the mounted copies and their errors.
     fn edit_heavy(view: &gpui::Entity<super::AppWindow>, version: usize, mib: usize, cx: &mut gpui::VisualTestContext) -> (usize, Vec<String>) {
         std::fs::write(crate::mods::app_dir().join("mods/heavy/main.js"), heavy_mod(version, mib)).unwrap();
+        allow_mods(view, &["heavy"], cx);
         cx.update(|window, cx| view.update(cx, |this, cx| this.files_changed(vec!["mods/heavy/main.js".into()], window, cx)));
         cx.executor().advance_clock(std::time::Duration::from_secs(1));
         cx.run_until_parked();
@@ -7191,6 +7202,7 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("mod.json"), r#"{"place":"none"}"#).unwrap();
         std::fs::write(folder.join("main.js"), broken).unwrap();
+        allow_mods(&view, &["broken"], cx);
         crate::mods::set_shared("vmdead.sentinel".into(), serde_json::json!(42));
         cx.update(|window, cx| view.update(cx, |this, cx| {
             this.open_overlay("dialog".into(), serde_json::json!({"kind":"dialog","mod":"heavy"}), window, cx);
@@ -7275,6 +7287,7 @@ mod tests {
             }).to_string()).unwrap();
         }
         let (view, cx) = open_heavy(cx, 200);
+        allow_mods(&view, &["broken", "other"], cx);
         let first = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
         cx.update(|window, cx| view.update(cx, |this, cx| {
             this.sync_folders(window, cx);
@@ -7309,6 +7322,7 @@ mod tests {
             });
         }
         std::fs::write(home.join("mods/broken/main.js"), "throw null;").unwrap();
+        allow_mods(&view, &["broken"], cx);
         cx.update(|window, cx| view.update(cx, |this, cx| {
             this.files_changed(vec!["mods/broken/main.js".into()], window, cx);
         }));

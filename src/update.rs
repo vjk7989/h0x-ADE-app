@@ -3906,13 +3906,16 @@ ZJhj3MtbsDPyt278bwB0BcVRB5ZoKqA6VCCZ5s51lq49BobYTBUuzlJqofyqGhaBwWB6iLyCd1cVXXQh
             assert_eq!(check_core(), Ok(()));
             assert_eq!(core().ready, None, "{version} generation {generation}");
         }
-        // A core a package manager owns, or none connected, is never checked.
+        // A core a package manager owns is still checked, to report a release (never installed here)...
         let before = asked.lock().unwrap().len();
         set_core(Some("0.1.0".into()), Some("homebrew".into()));
         assert_eq!(check_core(), Ok(()));
+        let managed = asked.lock().unwrap().len();
+        assert!(managed > before, "a managed core's release check is made");
+        // ...but none connected is never checked.
         set_core(None, None);
         assert_eq!(check_core(), Ok(()));
-        assert_eq!(asked.lock().unwrap().len(), before);
+        assert_eq!(asked.lock().unwrap().len(), managed);
         assert!(take_notices().is_empty());
     }
 
