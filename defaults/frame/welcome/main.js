@@ -664,7 +664,7 @@ export default class Welcome extends View {
           .items_center()
           .border_b(1)
           .border_color(t.border)
-          .child(image("frame/welcome/hyperox.png").w(22).h(22).rounded(5).flex_none())
+          .child(svg("mods/workspace-chrome/hyperox-mark.svg").size(20).text_color(t.foreground).flex_none())
           .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("Welcome to HyperOx"))
           .child(div().px(5).h(18).flex().items_center().rounded(4).border_1().border_color(t.input).text_color(t.muted).font_family(this.mono()).text_size(10.5).child("beta"))
           .child(div().flex_1())

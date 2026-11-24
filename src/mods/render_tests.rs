@@ -2831,12 +2831,20 @@ fn settings_profile_without_a_name_shows_the_email_and_without_either_says_accou
 
 // The Remote page with the bridge answering `ls`, and `account` replaced.
 fn describe_remote_account(cx: &mut TestAppContext, staged: &Staged, account: Value, ls: Value) -> String {
+    describe_remote_account_themed(cx, staged, account, ls, &[])
+}
+
+// The same, with some theme colours replaced (a light theme, say).
+fn describe_remote_account_themed(cx: &mut TestAppContext, staged: &Staged, account: Value, ls: Value, colors: &[(&str, &str)]) -> String {
     let calls = Rc::new(RefCell::new(Calls::default()));
     calls.borrow_mut().replies = remote_replies(ls, json!([])).into_iter().map(|(k, v)| (k.to_string(), v)).collect();
     let mut p = props();
     p["section"] = json!("remote");
     let mut values = fixture(true, p, updates("current", "current"));
     values.insert("account".into(), account);
+    for (key, color) in colors {
+        values.get_mut("theme").unwrap()[*key] = json!(color);
+    }
     let policy = Policy::new()
         .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
         .with_host_module(module(values, calls))
@@ -2862,11 +2870,11 @@ fn settings_remote_pairing_is_gated_on_signing_in_but_existing_pairings_stay(cx:
         let tree = describe_remote_account(cx, &staged, signed_out.clone(), bridge_ls(ids.clone(), false, "set"));
         assert!(tree.contains("Sign in to pair a phone or Telegram.") && tree.contains("st-r-signin"), "{label}: {tree}");
         assert!(tree.contains("st-r-pair") && tree.contains("st-r-web-start"), "{label}: the buttons are there, disabled: {tree}");
-        // Disabled: dimmed, no pointer, no click handler.
+        // Disabled: the standard disabled colours (VQA-POLISH-1 D3: no opacity), no pointer, no click handler.
         let pair_line = tree.lines().find(|l| l.contains("\"st-r-pair\"")).unwrap_or_else(|| panic!("{label}: {tree}"));
-        assert!(pair_line.contains(".opacity[") && !pair_line.contains(":on_click(fn)") && !pair_line.contains(".cursor_pointer"), "{label}: {pair_line}");
+        assert!(!pair_line.contains(".opacity[") && !pair_line.contains(":on_click(fn)") && !pair_line.contains(".cursor_pointer"), "{label}: {pair_line}");
         let web_line = tree.lines().find(|l| l.contains("\"st-r-web-start\"")).unwrap_or_else(|| panic!("{label}: {tree}"));
-        assert!(web_line.contains(".opacity[") && !web_line.contains(":on_click(fn)"), "{label}: {web_line}");
+        assert!(!web_line.contains(".opacity[") && !web_line.contains(":on_click(fn)"), "{label}: {web_line}");
         if ids != json!([]) {
             assert!(tree.contains("Paired with 1 account") && tree.contains("st-r-unpair-i1") && tree.contains("st-r-lock"), "{label}: existing pairings keep working: {tree}");
         }
@@ -2875,6 +2883,92 @@ fn settings_remote_pairing_is_gated_on_signing_in_but_existing_pairings_stay(cx:
         assert!(!tree.contains("Sign in to pair") && !tree.contains("st-r-signin"), "{label}: {tree}");
         let pair_line = tree.lines().find(|l| l.contains("\"st-r-pair\"")).unwrap_or_else(|| panic!("{label}: {tree}"));
         assert!(pair_line.contains(":on_click(fn)") && !pair_line.contains(".opacity["), "{label}: {pair_line}");
+    }
+}
+
+// VQA-POLISH-1 D3: a disabled Start/Pair is drawn in the theme's own disabled colours, never faded, in dark and light.
+#[gpui::test]
+fn settings_remote_disabled_buttons_use_the_theme_disabled_colours_in_dark_and_light(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let light: &[(&str, &str)] = &[("raised", "#dfdfdf"), ("dim", "#6b6b6b"), ("border", "#c8c8c8"), ("foreground", "#1c1c1c")];
+    for (label, colors) in [("dark", &[][..]), ("light", light)] {
+        let mut theme = fixture(true, props(), updates("current", "current"))["theme"].clone();
+        for (key, color) in colors {
+            theme[*key] = json!(color);
+        }
+        let tree = describe_remote_account_themed(cx, &staged, account_value(&[], None), bridge_ls(json!([]), false, "set"), colors);
+        for id in ["st-r-pair", "st-r-web-start"] {
+            let quoted = format!("\"{id}\"");
+            let line = tree.lines().find(|l| l.contains(&quoted)).unwrap_or_else(|| panic!("{label} {id}: {tree}"));
+            assert!(!line.contains(".opacity["), "{label} {id}: no opacity hack: {line}");
+            for (call, key) in [("text_color", "dim"), ("bg", "raised"), ("border_color", "border")] {
+                let want = format!(".{call}[Str({})]", theme[key]);
+                assert!(line.contains(&want), "{label} {id}: {want}: {line}");
+            }
+            assert!(!line.contains(":on_click(fn)") && !line.contains(".cursor_pointer"), "{label} {id}: {line}");
+        }
+    }
+}
+
+// VQA-POLISH-1 D3: the "How to use" button sits in its own padded row, apart from the heading above it.
+#[gpui::test]
+fn settings_remote_how_to_use_row_is_spaced_from_its_heading(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let replies = remote_replies(bridge_ls(json!([]), false, "set"), json!([]));
+    for setup in ["", "this.showHelp = true;"] {
+        let (tree, _) = describe_remote(cx, &staged, &replies, setup);
+        let lines: Vec<&str> = tree.lines().collect();
+        let at = lines.iter().position(|l| l.contains("\"st-r-help\"")).unwrap_or_else(|| panic!("{setup:?}: {tree}"));
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let parent = lines[..at].iter().rev().find(|&&l| indent(l) < indent(lines[at])).unwrap_or_else(|| panic!("{setup:?}: no parent: {tree}"));
+        assert!(parent.contains(".pt[Number(8.0)]") && parent.contains(".pb[Number(14.0)]"), "{setup:?}: {parent}");
+    }
+}
+
+// VQA-POLISH-1 D5: unlocked with no devices says Unlocked, unlocked with devices says On, locked is unchanged either way.
+#[gpui::test]
+fn settings_remote_status_reads_unlocked_on_or_locked(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let paired = json!([{"id":"i1", "transport":"telegram", "user_id":"42", "label":"My phone", "paired_at_ms":1700000000000i64}]);
+    let status = |cx: &mut TestAppContext, ids: Value, locked: bool| describe_remote(cx, &staged, &remote_replies(bridge_ls(ids, locked, "set"), json!([])), "").0;
+    let tree = status(cx, json!([]), false);
+    assert!(tree.contains("Remote control: Unlocked") && tree.contains("No devices paired yet."), "no devices: {tree}");
+    assert!(!tree.contains("Remote control: On") && !tree.contains("Paired devices can reach your terminals."), "no devices: {tree}");
+    assert!(tree.contains("st-r-lock"), "it can still be locked: {tree}");
+    let tree = status(cx, paired.clone(), false);
+    assert!(tree.contains("Remote control: On") && tree.contains("Paired devices can reach your terminals."), "one device: {tree}");
+    assert!(!tree.contains("Remote control: Unlocked") && !tree.contains("No devices paired yet."), "one device: {tree}");
+    for (label, ids) in [("locked, one device", paired), ("locked, no devices", json!([]))] {
+        let tree = status(cx, ids, true);
+        assert!(tree.contains("Remote control: Locked") && tree.contains("until you unlock.") && tree.contains("Unlock"), "{label}: {tree}");
+        assert!(!tree.contains("Remote control: On") && !tree.contains("Remote control: Unlocked") && !tree.contains("No devices paired yet."), "{label}: {tree}");
+    }
+}
+
+// VQA-POLISH-1 D6: the Info tile and the welcome header draw the HyperOx mark in the theme's foreground, no PNG.
+#[gpui::test]
+fn settings_info_and_welcome_use_the_theme_coloured_mark_in_dark_and_light(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mark = "mods/workspace-chrome/hyperox-mark.svg";
+    for (theme, foreground) in [("dark", "#ededed"), ("light", "#1c1c1c")] {
+        for (entry, section, size) in [("frame/settings", Some("info"), 26.0), ("frame/welcome", None, 20.0)] {
+            let mut p = props();
+            if let Some(section) = section {
+                p["section"] = json!(section);
+            }
+            let mut values = fixture(true, p, updates("current", "current"));
+            values.get_mut("theme").unwrap()["foreground"] = json!(foreground);
+            let tree = describe_with_values(cx, &staged, entry, values, None).unwrap_or_else(|e| panic!("{theme} {entry}: {e:#}"));
+            let sized = format!(".size[Number({size:?})]");
+            let logo = tree.lines().find(|l| l.contains(mark) && l.contains(&sized)).unwrap_or_else(|| panic!("{theme} {entry}: no {size} px mark: {tree}"));
+            assert!(logo.trim_start().starts_with("svg"), "{theme} {entry}: an svg, not an image: {logo}");
+            assert!(logo.contains(&format!(".text_color[Str(\"{foreground}\")]")), "{theme} {entry}: coloured by the foreground: {logo}");
+            assert!(!tree.contains("hyperox.png"), "{theme} {entry}: no PNG logo: {tree}");
+        }
     }
 }
 
@@ -4299,7 +4393,7 @@ fn settings_remote_page_shows_unpaired_paired_and_locked(cx: &mut TestAppContext
     let staged = Staged::new();
     let paired = json!([{"id":"i1", "transport":"telegram", "user_id":"42", "label":"My phone", "paired_at_ms":1700000000000i64}]);
     let (tree, _) = describe_remote(cx, &staged, &remote_replies(bridge_ls(json!([]), false, "unset"), json!([])), "");
-    for want in ["Remote control: On", "No paired devices yet.", "Not set", "@BotFather", "Stopped", "Same Wi-Fi", "ACTIVITY", "send"] {
+    for want in ["Remote control: Unlocked", "No paired devices yet.", "Not set", "@BotFather", "Stopped", "Same Wi-Fi", "ACTIVITY", "send"] {
         assert!(tree.contains(want), "unpaired page lacks {want:?}: {tree}");
     }
     let (tree, _) = describe_remote(cx, &staged, &remote_replies(bridge_ls(paired.clone(), false, "set"), json!([])), "");
@@ -4371,7 +4465,7 @@ fn settings_remote_page_with_an_older_core_says_to_update(cx: &mut TestAppContex
     let old = json!({"code":2, "stdout":"", "stderr":"error: unrecognized subcommand 'bridge'\n"});
     let (tree, _) = describe_remote(cx, &staged, &[("bridge", old)], "");
     assert!(tree.contains("Update h0x-core to use remote control."), "{tree}");
-    assert!(!tree.contains("unrecognized") && !tree.contains("Remote control: On"), "{tree}");
+    assert!(!tree.contains("unrecognized") && !tree.contains("Remote control: Unlocked"), "{tree}");
 }
 
 #[gpui::test]
@@ -4893,7 +4987,7 @@ fn settings_remote_stopping_a_bridge_that_is_gone_shows_why(cx: &mut TestAppCont
     let setup = "this.remoteAction('st-r-web-stop', () => this.coreJson(['kill', 'h0x-bridge-web']), cx);";
     let (tree, calls) = describe_remote(cx, &staged, &replies, setup);
     assert!(calls.borrow().cores.iter().any(|a| *a == ["kill", "h0x-bridge-web"]), "{:?}", calls.borrow().cores);
-    assert!(tree.contains("fixture not_found") && tree.contains("Remote control: On") && tree.contains("st-r-web-stop"), "{tree}");
+    assert!(tree.contains("fixture not_found") && tree.contains("Remote control: Unlocked") && tree.contains("st-r-web-stop"), "{tree}");
 }
 
 #[gpui::test]
@@ -4912,7 +5006,7 @@ fn settings_remote_activity_keeps_the_newest_twenty_newest_first(cx: &mut TestAp
     };
     for (label, reply) in [("no entries", log(0)), ("a failed log", core_error("log"))] {
         let (tree, _) = describe_remote(cx, &staged, &with_log(reply), "");
-        assert!(tree.contains("Nothing yet.") && tree.contains("Remote control: On"), "{label}: {tree}");
+        assert!(tree.contains("Nothing yet.") && tree.contains("Remote control: Unlocked"), "{label}: {tree}");
         assert!(!tree.contains("cmd-") && !tree.contains("fixture log"), "{label}: {tree}");
     }
     let (tree, calls) = describe_remote(cx, &staged, &with_log(log(20)), "");
@@ -4972,7 +5066,7 @@ fn settings_remote_unreadable_bridge_answers_show_a_message(cx: &mut TestAppCont
     ] {
         let (tree, _) = describe_remote(cx, &staged, &[("bridge ls", reply)], "");
         assert!(tree.contains(want), "{label}: {tree}");
-        assert!(!tree.contains("Reading remote control") && !tree.contains("Remote control: On"), "{label}: {tree}");
+        assert!(!tree.contains("Reading remote control") && !tree.contains("Remote control: Unlocked"), "{label}: {tree}");
     }
 }
 
