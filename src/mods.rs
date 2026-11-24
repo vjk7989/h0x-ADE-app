@@ -2725,12 +2725,16 @@ mod tests {
             assert!(!mark.contains(other), "no {other} in the mark: {mark}");
         }
         assert!(DEFAULT_MODS.iter().all(|(p, _)| !p.ends_with("hyperox-white.png")), "the white PNG is gone");
-        // The welcome, settings and what's-new pages keep the PNG.
+        // What's new keeps the PNG; the welcome header and the Info tile use the theme-aware mark
+        // (VQA-POLISH-1 D6: the PNG was unreadable in one theme).
         let png = file(FRAME_MODS, "welcome/hyperox.png");
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "a PNG");
-        for page in ["welcome/main.js", "settings/main.js", "whatsnew/main.js"] {
+        let whatsnew = std::str::from_utf8(file(FRAME_MODS, "whatsnew/main.js")).unwrap();
+        assert!(whatsnew.contains("image(\"frame/welcome/hyperox.png\")"), "{whatsnew}");
+        for page in ["welcome/main.js", "settings/main.js"] {
             let page = std::str::from_utf8(file(FRAME_MODS, page)).unwrap();
-            assert!(page.contains("image(\"frame/welcome/hyperox.png\")"), "{page}");
+            assert!(page.contains("svg(\"mods/workspace-chrome/hyperox-mark.svg\")"), "{page}");
+            assert!(!page.contains("image(\"frame/welcome/hyperox.png\")"), "{page}");
         }
         // The chrome mod names exactly the path the app installs it under, and no PNG logo.
         let chrome = std::str::from_utf8(file(DEFAULT_MODS, "workspace-chrome/main.js")).unwrap();
