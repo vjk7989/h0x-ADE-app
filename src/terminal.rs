@@ -6115,7 +6115,7 @@ mod tests {
         use std::rc::Rc;
         use std::time::Duration;
 
-        let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx));
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::core_link::offline(), "t1".into(), (40, 5), cx));
         let notifies = Rc::new(Cell::new(0usize));
         let _sub = cx.update(|cx| {
             cx.observe(&terminal, {
@@ -6130,7 +6130,7 @@ mod tests {
 
         terminal.update(cx, |terminal, cx| {
             terminal.mark_shown();
-            assert!(terminal.ingest([crate::hc::Stream::Data(b"hello output\r\n".to_vec())], cx));
+            assert!(terminal.ingest([crate::core_link::Stream::Data(b"hello output\r\n".to_vec())], cx));
         });
         assert_eq!(notifies.get(), 0, "output clock batches notifications until 33ms elapses");
 
