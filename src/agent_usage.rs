@@ -1,6 +1,6 @@
-//! Token totals and per-turn records of an agent session (Claude Code / Codex)
-//! read from the agent's own on-disk session logs. `usage` keeps only counters,
-//! model names, ids and timestamps; `turns` also returns the typed prompt text.
+//! Per-turn records of an agent session HyperOx itself started, read from the
+//! agent's own on-disk session log and chosen by the exact session id (never by
+//! folder or time, so a session started in a plain terminal is never read).
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Upper bound on log bytes read by one `usage` call.
+/// Upper bound on log bytes read by one `turns` call.
 const MAX_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,44 +28,9 @@ pub struct Usage {
     pub cost_usd: Option<f64>,
 }
 
-/// Token totals for the agent session that ran in `folder` between `start` and
-/// `end`. `None` when nothing was found or the logs are unreadable.
-pub fn usage(kind: AgentKind, folder: &Path, start: SystemTime, end: SystemTime) -> Option<Usage> {
-    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
-    let home = PathBuf::from(env("USERPROFILE").or_else(|| env("HOME"))?);
-    usage_in(&home, kind, folder, start, end)
-}
-
-fn usage_in(
-    home: &Path,
-    kind: AgentKind,
-    folder: &Path,
-    start: SystemTime,
-    end: SystemTime,
-) -> Option<Usage> {
-    let (start_ms, end_ms) = (millis(start)?, millis(end)?);
-    let mut budget = MAX_BYTES;
-    let mut out = match kind {
-        AgentKind::Claude => claude(home, folder, start, start_ms, end_ms, &mut budget)?,
-        AgentKind::Codex => codex(home, folder, start, start_ms, end_ms, &mut budget)?,
-    };
-    out.cost_usd = out.model.as_deref().and_then(|m| cost(m, &out));
-    Some(out)
-}
-
 fn millis(t: SystemTime) -> Option<i64> {
     let d = t.duration_since(UNIX_EPOCH).ok()?;
     i64::try_from(d.as_millis()).ok()
-}
-
-/// Claude Code project directory name: every non-alphanumeric character of
-/// the folder path becomes '-' (`G:\pavii-ade` -> `G--pavii-ade`).
-fn slug(folder: &Path) -> String {
-    folder
-        .to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
 }
 
 /// Parse `YYYY-MM-DDTHH:MM:SS[.fff]Z` (UTC) into unix milliseconds.
@@ -106,270 +71,6 @@ fn parse_ts(s: &str) -> Option<i64> {
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
     Some(((days * 24 + hh) * 60 + mm) * 60_000 + ss * 1000 + frac)
-}
-
-/// Visit the lines of a file, charging `budget`; stops when it is exhausted.
-fn for_each_line(path: &Path, budget: &mut u64, mut f: impl FnMut(&[u8])) {
-    let Ok(file) = File::open(path) else { return };
-    let mut reader = BufReader::new(file);
-    let mut buf = Vec::new();
-    loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) | Err(_) => return,
-            Ok(n) => {
-                let n = n as u64;
-                if n > *budget {
-                    *budget = 0;
-                    return;
-                }
-                *budget -= n;
-                f(&buf);
-            }
-        }
-    }
-}
-
-fn modified_since(path: &Path, start: SystemTime) -> bool {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .is_ok_and(|m| m >= start)
-}
-
-#[derive(serde::Deserialize)]
-struct ClaudeLine {
-    timestamp: Option<String>,
-    #[serde(rename = "requestId")]
-    request_id: Option<String>,
-    message: Option<ClaudeMsg>,
-}
-
-#[derive(serde::Deserialize)]
-struct ClaudeMsg {
-    id: Option<String>,
-    model: Option<String>,
-    usage: Option<ClaudeUsage>,
-}
-
-#[derive(serde::Deserialize, Default, Clone, Copy)]
-struct ClaudeUsage {
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    cache_read_input_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,
-}
-
-fn claude(
-    home: &Path,
-    folder: &Path,
-    start: SystemTime,
-    start_ms: i64,
-    end_ms: i64,
-    budget: &mut u64,
-) -> Option<Usage> {
-    let dir = home.join(".claude").join("projects").join(slug(folder));
-    let mut by_id: HashMap<String, ClaudeUsage> = HashMap::new();
-    let mut anonymous: Vec<ClaudeUsage> = Vec::new();
-    let mut model: Option<String> = None;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl")
-            || !modified_since(&path, start)
-        {
-            continue;
-        }
-        for_each_line(&path, budget, |line| {
-            let Ok(l) = serde_json::from_slice::<ClaudeLine>(line) else {
-                return;
-            };
-            let Some(ts) = l.timestamp.as_deref().and_then(parse_ts) else {
-                return;
-            };
-            if ts < start_ms || ts > end_ms {
-                return;
-            }
-            let Some(msg) = l.message else { return };
-            let Some(u) = msg.usage else { return };
-            if msg.model.as_deref().is_some_and(|m| m != SYNTHETIC) {
-                model = msg.model;
-            }
-            let key = match (msg.id, l.request_id) {
-                (Some(id), _) => Some(format!("m:{id}")),
-                (None, Some(id)) => Some(format!("r:{id}")),
-                (None, None) => None,
-            };
-            match key {
-                // A streamed response repeats its id with growing counters.
-                Some(id) => {
-                    let e = by_id.entry(id).or_default();
-                    e.input_tokens = e.input_tokens.max(u.input_tokens);
-                    e.output_tokens = e.output_tokens.max(u.output_tokens);
-                    e.cache_read_input_tokens =
-                        e.cache_read_input_tokens.max(u.cache_read_input_tokens);
-                    e.cache_creation_input_tokens = e
-                        .cache_creation_input_tokens
-                        .max(u.cache_creation_input_tokens);
-                }
-                None => anonymous.push(u),
-            }
-        });
-    }
-    if by_id.is_empty() && anonymous.is_empty() {
-        return None;
-    }
-    let mut out = Usage {
-        model,
-        ..Usage::default()
-    };
-    for u in by_id.values().chain(anonymous.iter()) {
-        out.input = out.input.saturating_add(u.input_tokens.unwrap_or(0));
-        out.output = out.output.saturating_add(u.output_tokens.unwrap_or(0));
-        out.cache_read = out.cache_read.saturating_add(u.cache_read_input_tokens.unwrap_or(0));
-        out.cache_write = out.cache_write.saturating_add(u.cache_creation_input_tokens.unwrap_or(0));
-    }
-    Some(out)
-}
-
-#[derive(serde::Deserialize)]
-struct CodexLine {
-    timestamp: Option<String>,
-    payload: Option<CodexPayload>,
-}
-
-#[derive(serde::Deserialize)]
-struct CodexPayload {
-    cwd: Option<String>,
-    model: Option<String>,
-    info: Option<CodexInfo>,
-}
-
-#[derive(serde::Deserialize)]
-struct CodexInfo {
-    total_token_usage: Option<CodexTotals>,
-}
-
-#[derive(serde::Deserialize, Default, Clone, Copy)]
-struct CodexTotals {
-    input_tokens: Option<u64>,
-    cached_input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    reasoning_output_tokens: Option<u64>,
-}
-
-impl CodexTotals {
-    fn weight(&self) -> u64 {
-        self.input_tokens
-            .unwrap_or(0)
-            .saturating_add(self.output_tokens.unwrap_or(0))
-    }
-}
-
-fn same_dir(a: &str, b: &str) -> bool {
-    let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
-    norm(a) == norm(b)
-}
-
-fn numeric_subdirs(dir: &Path) -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    rd.flatten()
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-        })
-        .map(|e| e.path())
-        .collect()
-}
-
-fn codex(
-    home: &Path,
-    folder: &Path,
-    start: SystemTime,
-    start_ms: i64,
-    end_ms: i64,
-    budget: &mut u64,
-) -> Option<Usage> {
-    let root = home.join(".codex").join("sessions");
-    let want = folder.to_string_lossy();
-    let mut out = Usage::default();
-    let mut found = false;
-    for year in numeric_subdirs(&root) {
-        for month in numeric_subdirs(&year) {
-            for day in numeric_subdirs(&month) {
-                let Ok(rd) = std::fs::read_dir(&day) else {
-                    continue;
-                };
-                for entry in rd.flatten() {
-                    let path = entry.path();
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    if !name.starts_with("rollout-")
-                        || !name.ends_with(".jsonl")
-                        || !modified_since(&path, start)
-                    {
-                        continue;
-                    }
-                    let mut best: Option<CodexTotals> = None;
-                    let mut model = None;
-                    let mut cwd_ok = false;
-                    let mut cwd_seen = false;
-                    for_each_line(&path, budget, |line| {
-                        if cwd_seen && !cwd_ok {
-                            return;
-                        }
-                        let Ok(l) = serde_json::from_slice::<CodexLine>(line) else {
-                            return;
-                        };
-                        let Some(p) = l.payload else { return };
-                        if !cwd_seen {
-                            if let Some(c) = p.cwd.as_deref() {
-                                cwd_seen = true;
-                                cwd_ok = same_dir(c, &want);
-                                if !cwd_ok {
-                                    return;
-                                }
-                            }
-                        }
-                        if p.model.is_some() {
-                            model = p.model;
-                        }
-                        let Some(t) = p.info.and_then(|i| i.total_token_usage) else {
-                            return;
-                        };
-                        let in_window = l
-                            .timestamp
-                            .as_deref()
-                            .and_then(parse_ts)
-                            .is_some_and(|ts| ts >= start_ms && ts <= end_ms);
-                        if in_window && best.is_none_or(|b| t.weight() >= b.weight()) {
-                            best = Some(t);
-                        }
-                    });
-                    if !cwd_ok {
-                        continue;
-                    }
-                    let Some(t) = best else { continue };
-                    found = true;
-                    // Codex input counts include cached tokens; split them.
-                    let cached = t.cached_input_tokens.unwrap_or(0);
-                    out.input = out
-                        .input
-                        .saturating_add(t.input_tokens.unwrap_or(0).saturating_sub(cached));
-                    out.cache_read = out.cache_read.saturating_add(cached);
-                    out.output = out.output.saturating_add(t.output_tokens.unwrap_or(0));
-                    out.reasoning = out
-                        .reasoning
-                        .saturating_add(t.reasoning_output_tokens.unwrap_or(0));
-                    if model.is_some() {
-                        out.model = model;
-                    }
-                }
-            }
-        }
-    }
-    found.then_some(out)
 }
 
 /// Hard cap for one transcript line; longer lines are skipped unparsed.
@@ -419,13 +120,39 @@ const MAX_SEEN: usize = 10_000;
 /// Model name Claude Code logs for its own zero-usage error replies.
 const SYNTHETIC: &str = "<synthetic>";
 
-/// New completed turns of the session that ran in `folder` with a prompt in
-/// `start..=end`, read from `cursor`. The turn still being written stays
-/// unread (the cursor holds at its prompt) unless `finish` is set, which
-/// closes it too (agent ended).
+/// A session id is a canonical lower-case UUID (Claude names its logs so), not nil: no path
+/// separator, `..` or anything else that could leave the log folder.
+pub fn valid_session_id(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => matches!(b, b'0'..=b'9' | b'a'..=b'f'),
+        })
+        && s.bytes().any(|b| b != b'0' && b != b'-')
+}
+
+/// The Claude log `<session>.jsonl` under any project folder of `~/.claude/projects`.
+fn claude_file(home: &Path, session: &str) -> Option<PathBuf> {
+    if !valid_session_id(session) {
+        return None;
+    }
+    let name = format!("{session}.jsonl");
+    std::fs::read_dir(home.join(".claude").join("projects"))
+        .ok()?
+        .flatten()
+        .map(|e| e.path().join(&name))
+        .find(|p| p.is_file())
+}
+
+/// New completed turns of the session `session` (the id HyperOx gave the agent
+/// at launch) with a prompt in `start..=end`, read from `cursor`. The turn still
+/// being written stays unread (the cursor holds at its prompt) unless `finish`
+/// is set, which closes it too (agent ended). No id, an invalid id or no log of
+/// that id: no turns. Codex: no turns until it has a per-launch id (planned
+/// per-launch notify, SA-3); it is never matched by folder or time.
 pub fn turns(
     kind: AgentKind,
-    folder: &Path,
+    session: &str,
     start: SystemTime,
     end: SystemTime,
     cursor: &mut TurnCursor,
@@ -435,13 +162,13 @@ pub fn turns(
     let Some(home) = env("USERPROFILE").or_else(|| env("HOME")) else {
         return Vec::new();
     };
-    turns_in(&PathBuf::from(home), kind, folder, (start, end), cursor, finish, MAX_BYTES)
+    turns_in(&PathBuf::from(home), kind, session, (start, end), cursor, finish, MAX_BYTES)
 }
 
 fn turns_in(
     home: &Path,
     kind: AgentKind,
-    folder: &Path,
+    session: &str,
     (start, end): (SystemTime, SystemTime),
     cursor: &mut TurnCursor,
     finish: bool,
@@ -453,35 +180,11 @@ fn turns_in(
     let mut out = Vec::new();
     match kind {
         AgentKind::Claude => {
-            let dir = home.join(".claude").join("projects").join(slug(folder));
-            let Ok(rd) = std::fs::read_dir(dir) else {
-                return out;
-            };
-            let mut files: Vec<PathBuf> = rd
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.extension().and_then(|e| e.to_str()) == Some("jsonl")
-                        && modified_since(p, start)
-                })
-                .collect();
-            files.sort();
-            for path in files {
+            if let Some(path) = claude_file(home, session) {
                 out.extend(scan_turns(&path, cursor, &mut budget, finish, claude_line));
             }
         }
-        AgentKind::Codex => {
-            let want = folder.to_string_lossy();
-            for path in codex_files(&home.join(".codex").join("sessions"), start) {
-                if !codex_cwd(&path).is_some_and(|c| same_dir(&c, &want)) {
-                    continue;
-                }
-                let mut model: Option<String> = None;
-                out.extend(scan_turns(&path, cursor, &mut budget, finish, |v, off, open, done| {
-                    codex_line(&mut model, v, off, open, done)
-                }));
-            }
-        }
+        AgentKind::Codex => {}
     }
     out.retain(|t| t.timestamp_ms >= start_ms && t.timestamp_ms <= end_ms);
     out.sort_by_key(|t| t.timestamp_ms);
@@ -799,97 +502,6 @@ fn claude_line(
     }
 }
 
-fn codex_line(
-    model: &mut Option<String>,
-    v: &serde_json::Value,
-    off: u64,
-    open: &mut Option<Open>,
-    done: &mut Vec<Turn>,
-) {
-    let Some(ts) = v["timestamp"].as_str().and_then(parse_ts) else {
-        return;
-    };
-    let p = &v["payload"];
-    if let Some(m) = p["model"].as_str() {
-        *model = Some(m.to_string());
-        if let Some(o) = open.as_mut() {
-            o.model = Some(m.to_string());
-        }
-    }
-    if v["type"].as_str() == Some("event_msg") && p["type"].as_str() == Some("user_message") {
-        let prompt = p["message"].as_str().and_then(typed_text).map(str::to_string);
-        let mut o = Open::new("openai", off, ts, prompt);
-        o.model = model.clone();
-        done.extend(open.replace(o).and_then(Open::close));
-        return;
-    }
-    let Some(o) = open.as_mut() else { return };
-    o.last_ts = o.last_ts.max(ts);
-    match (v["type"].as_str(), p["type"].as_str()) {
-        (Some("response_item"), Some("function_call" | "custom_tool_call")) => {
-            if let Some(name) = p["name"].as_str() {
-                o.tool(name);
-            }
-        }
-        (Some("event_msg"), Some("token_count")) => {
-            let info = &p["info"];
-            let (total, last) = (&info["total_token_usage"], &info["last_token_usage"]);
-            // Codex repeats a token_count event with unchanged totals.
-            if last.is_object() && o.last_total.as_ref() != Some(total) {
-                o.last_total = Some(total.clone());
-                let n = |k: &str| last[k].as_u64().unwrap_or(0);
-                let cached = n("cached_input_tokens");
-                // Codex input counts include cached tokens; split them.
-                o.anonymous
-                    .push([n("input_tokens").saturating_sub(cached), n("output_tokens"), cached, 0]);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn codex_files(root: &Path, start: SystemTime) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for year in numeric_subdirs(root) {
-        for month in numeric_subdirs(&year) {
-            for day in numeric_subdirs(&month) {
-                let Ok(rd) = std::fs::read_dir(&day) else {
-                    continue;
-                };
-                for e in rd.flatten() {
-                    let name = e.file_name();
-                    let name = name.to_string_lossy();
-                    if name.starts_with("rollout-")
-                        && name.ends_with(".jsonl")
-                        && modified_since(&e.path(), start)
-                    {
-                        out.push(e.path());
-                    }
-                }
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-/// Working directory a Codex rollout ran in (from its first lines).
-fn codex_cwd(path: &Path) -> Option<String> {
-    let mut budget = MAX_LINE;
-    let mut cwd = None;
-    let mut seen = 0;
-    let _ = lines_from(path, 0, &mut budget, |line, _| {
-        seen += 1;
-        if cwd.is_none() && seen <= 20 {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
-                cwd = v["payload"]["cwd"].as_str().map(str::to_string);
-            }
-        }
-        cwd.is_none() && seen < 20
-    });
-    cwd
-}
-
 /// USD per 1M tokens: (model name contains, input, output, cache read, cache write).
 /// Update when prices change. First match wins, so specific names come first.
 const PRICES: &[(&str, f64, f64, f64, f64)] = &[
@@ -934,18 +546,11 @@ mod tests {
         UNIX_EPOCH + Duration::from_secs(secs)
     }
 
+    const SID: &str = "11111111-1111-4111-8111-111111111111";
+    const OTHER: &str = "22222222-2222-4222-8222-222222222222";
+
     // 2026-01-01T00:00:00Z
     const T0: u64 = 1_767_225_600;
-
-    #[test]
-    fn slug_rule() {
-        assert_eq!(slug(Path::new(r"G:\pavii-ade")), "G--pavii-ade");
-        assert_eq!(
-            slug(Path::new(r"G:\pavii-ade\.cache\my proj")),
-            "G--pavii-ade--cache-my-proj"
-        );
-        assert_eq!(slug(Path::new("/home/u/app")), "-home-u-app");
-    }
 
     #[test]
     fn timestamps() {
@@ -960,97 +565,6 @@ mod tests {
     }
 
     #[test]
-    fn claude_sums_dedupes_and_hides_content() {
-        let home = tmp("claude");
-        let folder = Path::new(r"G:\my proj\app");
-        let dir = home.join(".claude/projects").join(slug(folder));
-        std::fs::create_dir_all(&dir).unwrap();
-        let lines = [
-            r#"{"timestamp":"2026-01-01T00:00:10Z","requestId":"r1","message":{"id":"m1","model":"claude-opus-4-5","content":"SECRET-PROMPT","usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":100,"cache_creation_input_tokens":5}}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:11Z","requestId":"r1","message":{"id":"m1","model":"claude-opus-4-5","usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":100,"cache_creation_input_tokens":5}}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:12Z","requestId":"r2","message":{"model":"claude-opus-4-5","usage":{"input_tokens":1,"output_tokens":2}}}"#,
-            r#"{"timestamp":"2025-12-31T00:00:00Z","requestId":"r3","message":{"usage":{"input_tokens":999,"output_tokens":999}}}"#,
-            r#"{"timestamp":"2026-02-01T00:00:00Z","requestId":"r4","message":{"usage":{"input_tokens":999,"output_tokens":999}}}"#,
-            "not json at all",
-            r#"{"timestamp":"2026-01-01T00:00:13Z","message":{"content":"SECRET-REPLY"}}"#,
-            "",
-        ];
-        std::fs::write(dir.join("a.jsonl"), lines.join("\n")).unwrap();
-        std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
-        let u = usage_in(&home, AgentKind::Claude, folder, at(T0), at(T0 + 3600)).unwrap();
-        assert_eq!(u.input, 11);
-        assert_eq!(u.output, 22);
-        assert_eq!(u.cache_read, 100);
-        assert_eq!(u.cache_write, 5);
-        assert_eq!(u.model.as_deref(), Some("claude-opus-4-5"));
-        assert!(u.cost_usd.unwrap() > 0.0);
-        assert!(!format!("{u:?}").contains("SECRET"));
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn claude_missing_or_empty_is_none() {
-        let home = tmp("claude-none");
-        let folder = Path::new(r"G:\nowhere");
-        assert!(usage_in(&home, AgentKind::Claude, folder, at(T0), at(T0 + 10)).is_none());
-        let dir = home.join(".claude/projects").join(slug(folder));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("a.jsonl"), "").unwrap();
-        assert!(usage_in(&home, AgentKind::Claude, folder, at(T0), at(T0 + 10)).is_none());
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn codex_takes_max_cumulative_and_matches_cwd() {
-        let home = tmp("codex");
-        let day = home.join(".codex/sessions/2026/01/01");
-        std::fs::create_dir_all(&day).unwrap();
-        let tc = |ts: &str, i: u64, c: u64, o: u64, r: u64| {
-            format!(
-                r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{i},"cached_input_tokens":{c},"output_tokens":{o},"reasoning_output_tokens":{r}}}}}}}}}"#
-            )
-        };
-        let mine = [
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"session_meta","payload":{"cwd":"G:\\My Proj\\","base_instructions":"SECRET-SYS"}}"#.to_string(),
-            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"turn_context","payload":{"model":"gpt-5-codex"}}"#.to_string(),
-            tc("2026-01-01T00:00:05Z", 100, 40, 10, 3),
-            tc("2026-01-01T00:00:09Z", 300, 100, 50, 7),
-            tc("2026-03-01T00:00:09Z", 9000, 0, 9000, 0),
-            "{broken".to_string(),
-        ];
-        std::fs::write(day.join("rollout-a.jsonl"), mine.join("\n")).unwrap();
-        let other = [
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"session_meta","payload":{"cwd":"G:\\else"}}"#.to_string(),
-            tc("2026-01-01T00:00:05Z", 5000, 0, 5000, 0),
-        ];
-        std::fs::write(day.join("rollout-b.jsonl"), other.join("\n")).unwrap();
-        let u = usage_in(
-            &home,
-            AgentKind::Codex,
-            Path::new(r"G:\my proj"),
-            at(T0),
-            at(T0 + 3600),
-        )
-        .unwrap();
-        assert_eq!(
-            (u.input, u.cache_read, u.output, u.reasoning),
-            (200, 100, 50, 7)
-        );
-        assert_eq!(u.model.as_deref(), Some("gpt-5-codex"));
-        assert!(u.cost_usd.is_some());
-        assert!(!format!("{u:?}").contains("SECRET"));
-        let none = usage_in(
-            &home,
-            AgentKind::Codex,
-            Path::new(r"G:\zzz"),
-            at(T0),
-            at(T0 + 3600),
-        );
-        assert!(none.is_none());
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
     fn unknown_model_has_no_cost() {
         let u = Usage {
             input: 1,
@@ -1058,16 +572,6 @@ mod tests {
         };
         assert_eq!(cost("mystery-model", &u), None);
         assert!(cost("claude-sonnet-4-5", &u).is_some());
-    }
-
-    #[test]
-    fn slug_rule_handles_non_ascii_spaces_and_unc_paths() {
-        assert_eq!(
-            slug(Path::new(r"C:\Users\Jörg Müller\my app")),
-            "C--Users-J-rg-M-ller-my-app"
-        );
-        assert_eq!(slug(Path::new(r"\\server\share\x")), "--server-share-x");
-        assert_eq!(slug(Path::new("")), "");
     }
 
     #[test]
@@ -1086,188 +590,6 @@ mod tests {
         );
         assert_eq!(parse_ts("2000-02-29T23:59:59.999Z"), Some(951_868_799_999));
         assert_eq!(parse_ts("2100-03-01T00:00:00Z"), Some(4_107_542_400_000));
-    }
-
-    fn claude_dir(home: &Path, folder: &Path) -> PathBuf {
-        let dir = home.join(".claude").join("projects").join(slug(folder));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn claude_window_is_inclusive_and_a_backwards_window_finds_nothing() {
-        let home = tmp("claude-window");
-        let folder = Path::new(r"C:\Users\Jörg Müller\my app");
-        let line = |ts: &str, id: &str, n: u64| {
-            format!(
-                r#"{{"timestamp":"{ts}","requestId":"{id}","message":{{"usage":{{"input_tokens":{n}}}}}}}"#
-            )
-        };
-        let lines = [
-            line("2026-01-01T00:00:00Z", "a", 1),
-            line("2026-01-01T00:00:10Z", "b", 2),
-            line("2026-01-01T00:00:10.001Z", "c", 4),
-            line("2025-12-31T23:59:59.999Z", "d", 8),
-            line("2026-01-01T05:30:00+05:30", "e", 16),
-        ];
-        std::fs::write(claude_dir(&home, folder).join("s.jsonl"), lines.join("\n")).unwrap();
-        let u = usage_in(&home, AgentKind::Claude, folder, at(T0), at(T0 + 10)).unwrap();
-        assert_eq!(u.input, 3);
-        // The clock went backwards: end before start.
-        assert!(usage_in(&home, AgentKind::Claude, folder, at(T0 + 10), at(T0)).is_none());
-        assert!(usage_in(&home, AgentKind::Codex, folder, at(T0 + 10), at(T0)).is_none());
-        // A start before 1970 is not a window.
-        let before = UNIX_EPOCH - Duration::from_secs(1);
-        assert!(usage_in(&home, AgentKind::Claude, folder, before, at(T0 + 10)).is_none());
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn claude_keeps_the_max_of_each_field_and_sums_lines_without_ids() {
-        let home = tmp("claude-max");
-        let folder = Path::new(r"G:\max");
-        let ts = "2026-01-01T00:00:05Z";
-        let mut text = Vec::new();
-        for l in [
-            // Same requestId: the larger value of each field, even when a later line is smaller.
-            format!(
-                r#"{{"timestamp":"{ts}","requestId":"r1","message":{{"model":"mystery-1","usage":{{"input_tokens":10,"output_tokens":1}}}}}}"#
-            ),
-            format!(
-                r#"{{"timestamp":"{ts}","requestId":"r1","message":{{"usage":{{"input_tokens":5,"output_tokens":20}}}}}}"#
-            ),
-            // No requestId: message.id dedupes.
-            format!(
-                r#"{{"timestamp":"{ts}","message":{{"id":"m9","usage":{{"input_tokens":3}}}}}}"#
-            ),
-            format!(
-                r#"{{"timestamp":"{ts}","message":{{"id":"m9","usage":{{"input_tokens":4}}}}}}"#
-            ),
-            // No id at all: every line counts.
-            format!(
-                r#"{{"timestamp":"{ts}","message":{{"usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
-            ),
-            format!(
-                r#"{{"timestamp":"{ts}","message":{{"usage":{{"input_tokens":2,"output_tokens":2}}}}}}"#
-            ),
-        ] {
-            // Windows line endings.
-            text.extend_from_slice(l.as_bytes());
-            text.extend_from_slice(b"\r\n");
-        }
-        // A line that is not UTF-8 is skipped.
-        text.extend_from_slice(b"\xff\xfe{\"timestamp\"\r\n");
-        std::fs::write(claude_dir(&home, folder).join("s.jsonl"), text).unwrap();
-        let u = usage_in(&home, AgentKind::Claude, folder, at(T0), at(T0 + 60)).unwrap();
-        assert_eq!((u.input, u.output), (10 + 4 + 1 + 2, 20 + 1 + 2));
-        assert_eq!(u.model.as_deref(), Some("mystery-1"));
-        assert_eq!(u.cost_usd, None);
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn a_huge_line_is_counted_without_keeping_its_text() {
-        let home = tmp("claude-huge");
-        let folder = Path::new(r"G:\huge");
-        let secret = format!("SECRET{}", "x".repeat(4 * 1024 * 1024));
-        let line = format!(
-            r#"{{"timestamp":"2026-01-01T00:00:05Z","requestId":"r1","message":{{"content":"{secret}","usage":{{"input_tokens":7}}}}}}"#
-        );
-        std::fs::write(claude_dir(&home, folder).join("s.jsonl"), line).unwrap();
-        let u = usage_in(&home, AgentKind::Claude, folder, at(T0), at(T0 + 60)).unwrap();
-        assert_eq!(u.input, 7);
-        assert!(!format!("{u:?}").contains("SECRET"));
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn the_budget_admits_a_line_of_exactly_its_size_and_a_missing_file_costs_nothing() {
-        let home = tmp("budget-edge");
-        let p = home.join("x.jsonl");
-        std::fs::write(&p, "aaaa\nbbbb\n").unwrap();
-        let (mut budget, mut n) = (5, 0);
-        for_each_line(&p, &mut budget, |_| n += 1);
-        assert_eq!((n, budget), (1, 0));
-        let (mut budget, mut n) = (10, 0);
-        for_each_line(&p, &mut budget, |_| n += 1);
-        assert_eq!((n, budget), (2, 0));
-        let (mut budget, mut n) = (0, 0);
-        for_each_line(&p, &mut budget, |_| n += 1);
-        assert_eq!((n, budget), (0, 0));
-        let (mut budget, mut n) = (10, 0);
-        for_each_line(&home.join("missing.jsonl"), &mut budget, |_| n += 1);
-        assert_eq!((n, budget), (0, 10));
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn codex_sums_matching_rollouts_and_ignores_other_names_and_folders() {
-        let home = tmp("codex-sum");
-        let sessions = home.join(".codex").join("sessions");
-        let tc = |ts: &str, i: u64, c: u64, o: u64, r: u64| {
-            format!(
-                r#"{{"timestamp":"{ts}","payload":{{"info":{{"total_token_usage":{{"input_tokens":{i},"cached_input_tokens":{c},"output_tokens":{o},"reasoning_output_tokens":{r}}}}}}}}}"#
-            )
-        };
-        let write = |rel: &str, cwd: &str, rest: &[String]| {
-            let p = sessions.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            let meta =
-                format!(r#"{{"timestamp":"2026-01-01T00:00:01Z","payload":{{"cwd":"{cwd}"}}}}"#);
-            let mut lines = vec![meta];
-            lines.extend_from_slice(rest);
-            std::fs::write(p, lines.join("\n")).unwrap();
-        };
-        // The same folder written two ways (case, separators, trailing slash, non-ASCII).
-        write(
-            "2026/01/01/rollout-a.jsonl",
-            "c:/users/jörg müller/app/",
-            &[
-                tc("2026-01-01T00:00:05Z", 100, 40, 10, 1),
-                // No timestamp: not in the window.
-                r#"{"payload":{"info":{"total_token_usage":{"input_tokens":9999,"output_tokens":9999}}}}"#.to_string(),
-            ],
-        );
-        // More cached than input: input saturates at 0.
-        write(
-            "2026/01/02/rollout-b.jsonl",
-            r"C:\\Users\\JÖRG Müller\\app",
-            &[tc("2026-01-01T00:00:06Z", 50, 60, 5, 0)],
-        );
-        // Not a rollout file, and not under a numeric year folder.
-        write(
-            "2026/01/01/notes.jsonl",
-            "c:/users/jörg müller/app",
-            &[tc("2026-01-01T00:00:05Z", 7000, 0, 7000, 0)],
-        );
-        write(
-            "archive/01/01/rollout-c.jsonl",
-            "c:/users/jörg müller/app",
-            &[tc("2026-01-01T00:00:05Z", 8000, 0, 8000, 0)],
-        );
-        let u = usage_in(
-            &home,
-            AgentKind::Codex,
-            Path::new(r"C:\Users\JÖRG Müller\app"),
-            at(T0),
-            at(T0 + 3600),
-        )
-        .unwrap();
-        assert_eq!(
-            (u.input, u.cache_read, u.output, u.reasoning),
-            (60, 100, 15, 1)
-        );
-        // No model line: no model, so no cost.
-        assert_eq!((u.model, u.cost_usd), (None, None));
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn an_empty_home_finds_nothing() {
-        let folder = Path::new(r"Z:\h0x-agent-usage-no-such-folder");
-        for kind in [AgentKind::Claude, AgentKind::Codex] {
-            assert!(usage_in(Path::new(""), kind, folder, at(T0), at(T0 + 10)).is_none());
-        }
     }
 
     #[test]
@@ -1294,24 +616,12 @@ mod tests {
         assert_eq!(cost("", &one_in), None);
     }
 
-    #[test]
-    fn budget_stops_reading() {
-        let home = tmp("budget");
-        let p = home.join("x.jsonl");
-        std::fs::write(&p, "aaaa\nbbbb\n").unwrap();
-        let mut budget = 6;
-        let mut n = 0;
-        for_each_line(&p, &mut budget, |_| n += 1);
-        assert_eq!(n, 1);
-        assert_eq!(budget, 0);
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
     fn claude_home(name: &str, folder: &Path, lines: &[String]) -> (PathBuf, PathBuf) {
         let home = tmp(name);
-        let dir = home.join(".claude/projects").join(slug(folder));
+        let project: String = folder.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        let dir = home.join(".claude/projects").join(project);
         std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("s.jsonl");
+        let file = dir.join(format!("{SID}.jsonl"));
         std::fs::write(&file, lines.join("\n") + "\n").unwrap();
         (home, file)
     }
@@ -1326,8 +636,8 @@ mod tests {
         )
     }
 
-    fn run(home: &Path, folder: &Path, cur: &mut TurnCursor, finish: bool) -> Vec<Turn> {
-        turns_in(home, AgentKind::Claude, folder, (at(T0), at(T0 + 3600)), cur, finish, MAX_BYTES)
+    fn run(home: &Path, session: &str, cur: &mut TurnCursor, finish: bool) -> Vec<Turn> {
+        turns_in(home, AgentKind::Claude, session, (at(T0), at(T0 + 3600)), cur, finish, MAX_BYTES)
     }
 
     fn two_turns() -> Vec<String> {
@@ -1356,7 +666,7 @@ mod tests {
         let folder = Path::new(r"G:\my proj\app");
         let (home, _) = claude_home("t-multi", folder, &two_turns());
         let mut cur = TurnCursor::default();
-        let t = run(&home, folder, &mut cur, true);
+        let t = run(&home, SID, &mut cur, true);
         assert_eq!(t.len(), 2);
         assert_eq!(t[0].prompt.as_deref(), Some("first prompt"));
         assert_eq!(t[0].provider, "anthropic");
@@ -1386,7 +696,7 @@ mod tests {
             asst("2026-01-01T00:00:06Z", "b", 1, "[]"),
         ];
         let (home, _) = claude_home("t-inject", folder, &lines);
-        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        let t = run(&home, SID, &mut TurnCursor::default(), true);
         assert_eq!(t.len(), 2);
         assert!(t.iter().all(|t| t.prompt.is_none()));
         assert!(!format!("{t:?}").contains("SECRET"));
@@ -1400,18 +710,18 @@ mod tests {
         let (home, file) = claude_home("t-cursor", folder, &all[..5]);
         let mut cur = TurnCursor::default();
         // turn 1 is still open: nothing is final yet
-        assert!(run(&home, folder, &mut cur, false).is_empty());
+        assert!(run(&home, SID, &mut cur, false).is_empty());
         std::fs::write(&file, all.join("\n") + "\n").unwrap();
-        let t = run(&home, folder, &mut cur, false);
+        let t = run(&home, SID, &mut cur, false);
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].prompt.as_deref(), Some("first prompt"));
         assert_eq!(t[0].output, 12);
-        assert!(run(&home, folder, &mut cur, false).is_empty());
+        assert!(run(&home, SID, &mut cur, false).is_empty());
         // agent ended: the open second turn closes, exactly once
-        let t = run(&home, folder, &mut cur, true);
+        let t = run(&home, SID, &mut cur, true);
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].prompt.as_deref(), Some("second prompt"));
-        assert!(run(&home, folder, &mut cur, true).is_empty());
+        assert!(run(&home, SID, &mut cur, true).is_empty());
         // cursor survives a round trip through JSON
         let json = serde_json::to_string(&cur).unwrap();
         assert_eq!(serde_json::from_str::<TurnCursor>(&json).unwrap(), cur);
@@ -1426,9 +736,9 @@ mod tests {
         text.push_str(&user("2026-01-01T00:01:00Z", r#""second""#)[..20]);
         std::fs::write(&file, &text).unwrap();
         let mut cur = TurnCursor::default();
-        assert!(run(&home, folder, &mut cur, false).is_empty());
+        assert!(run(&home, SID, &mut cur, false).is_empty());
         std::fs::write(&file, two_turns().join("\n") + "\n").unwrap();
-        assert_eq!(run(&home, folder, &mut cur, false).len(), 1);
+        assert_eq!(run(&home, SID, &mut cur, false).len(), 1);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1437,9 +747,9 @@ mod tests {
         let folder = Path::new("/home/u/app");
         let mut cur = TurnCursor::default();
         let home = tmp("t-missing");
-        assert!(run(&home, folder, &mut cur, true).is_empty());
+        assert!(run(&home, SID, &mut cur, true).is_empty());
         let (home, file) = claude_home("t-empty", folder, &[]);
-        assert!(run(&home, folder, &mut cur, true).is_empty());
+        assert!(run(&home, SID, &mut cur, true).is_empty());
         // a line over MAX_LINE is skipped, the turn after it is still read
         let mut text = String::from("{\"x\":\"");
         text.push_str(&"a".repeat(MAX_LINE as usize + 10));
@@ -1447,10 +757,10 @@ mod tests {
         text.push_str(&two_turns().join("\n"));
         text.push('\n');
         std::fs::write(&file, text).unwrap();
-        assert_eq!(run(&home, folder, &mut TurnCursor::default(), true).len(), 2);
+        assert_eq!(run(&home, SID, &mut TurnCursor::default(), true).len(), 2);
         // over the read budget: stop safely, nothing consumed
         let mut cur = TurnCursor::default();
-        let t = turns_in(&home, AgentKind::Claude, folder, (at(T0), at(T0 + 3600)), &mut cur, true, 1000);
+        let t = turns_in(&home, AgentKind::Claude, SID, (at(T0), at(T0 + 3600)), &mut cur, true, 1000);
         assert!(t.is_empty());
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -1462,7 +772,7 @@ mod tests {
         let t = turns_in(
             &home,
             AgentKind::Claude,
-            folder,
+            SID,
             (at(T0 + 30), at(T0 + 3600)),
             &mut TurnCursor::default(),
             true,
@@ -1470,54 +780,6 @@ mod tests {
         );
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].prompt.as_deref(), Some("second prompt"));
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn codex_turns_split_per_user_message() {
-        let home = tmp("t-codex");
-        let day = home.join(".codex/sessions/2026/01/01");
-        std::fs::create_dir_all(&day).unwrap();
-        let tc = |ts: &str, ti: u64, li: u64, lc: u64, lo: u64| {
-            format!(
-                r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{ti}}},"last_token_usage":{{"input_tokens":{li},"cached_input_tokens":{lc},"output_tokens":{lo}}}}}}}}}"#
-            )
-        };
-        let um = |ts: &str, m: &str| {
-            format!(r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"user_message","message":"{m}"}}}}"#)
-        };
-        let lines = [
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"session_meta","payload":{"cwd":"G:\\My Proj\\"}}"#.to_string(),
-            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"turn_context","payload":{"model":"gpt-5-codex"}}"#.to_string(),
-            um("2026-01-01T00:00:10Z", "do a thing"),
-            r#"{"timestamp":"2026-01-01T00:00:11Z","type":"response_item","payload":{"type":"function_call","name":"shell"}}"#.to_string(),
-            r#"{"timestamp":"2026-01-01T00:00:11Z","type":"response_item","payload":{"type":"function_call","name":"mcp__docs__search"}}"#.to_string(),
-            tc("2026-01-01T00:00:12Z", 100, 100, 40, 10),
-            tc("2026-01-01T00:00:12Z", 100, 100, 40, 10),
-            tc("2026-01-01T00:00:15Z", 250, 150, 50, 20),
-            um("2026-01-01T00:01:00Z", "again"),
-            tc("2026-01-01T00:01:02Z", 300, 50, 0, 5),
-        ];
-        std::fs::write(day.join("rollout-a.jsonl"), lines.join("\n") + "\n").unwrap();
-        let other = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"session_meta","payload":{"cwd":"G:\\else"}}"#;
-        std::fs::write(day.join("rollout-b.jsonl"), other).unwrap();
-        let mut cur = TurnCursor::default();
-        let go = |cur: &mut TurnCursor, finish| {
-            turns_in(&home, AgentKind::Codex, Path::new(r"G:\my proj"), (at(T0), at(T0 + 3600)), cur, finish, MAX_BYTES)
-        };
-        let t = go(&mut cur, false);
-        assert_eq!(t.len(), 1);
-        assert_eq!(t[0].provider, "openai");
-        assert_eq!(t[0].prompt.as_deref(), Some("do a thing"));
-        assert_eq!((t[0].input, t[0].cache_read, t[0].output), (160, 90, 30));
-        assert_eq!(t[0].tools, ["shell", "mcp__docs__search"]);
-        assert_eq!(t[0].mcp_servers, ["docs"]);
-        assert_eq!(t[0].model.as_deref(), Some("gpt-5-codex"));
-        assert_eq!(t[0].latency_ms, Some(5000));
-        let t = go(&mut cur, true);
-        assert_eq!(t.len(), 1);
-        assert_eq!((t[0].prompt.as_deref(), t[0].input, t[0].output), (Some("again"), 50, 5));
-        assert!(go(&mut cur, true).is_empty());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1545,7 +807,7 @@ mod tests {
             asst("2026-01-01T00:00:06Z", "c", 4, "[]"),
         ];
         let (home, _) = claude_home("t-blocks", folder, &lines);
-        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        let t = run(&home, SID, &mut TurnCursor::default(), true);
         assert_eq!(t.len(), 2);
         assert_eq!(t[0].prompt.as_deref(), Some("look at this\npasted file:\nfn main() {}"));
         assert_eq!((t[0].output, t[0].latency_ms), (3, Some(3000)));
@@ -1579,7 +841,7 @@ mod tests {
             asst("2026-01-01T00:00:14Z", "d", 1, "[]"),
         ];
         let (home, _) = claude_home("t-meta", folder, &lines);
-        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        let t = run(&home, SID, &mut TurnCursor::default(), true);
         let prompts: Vec<_> = t.iter().map(|t| t.prompt.as_deref()).collect();
         assert_eq!(prompts, [None, None, None, Some("real prompt")]);
         assert!(!format!("{t:?}").contains("SECRET"));
@@ -1597,7 +859,7 @@ mod tests {
             asst("2026-01-01T00:00:02Z", "a", 1, "[]"),
         ];
         let (home, _) = claude_home("t-hook", folder, &lines);
-        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        let t = run(&home, SID, &mut TurnCursor::default(), true);
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].prompt.as_deref(), Some("fix the build"));
         let _ = std::fs::remove_dir_all(&home);
@@ -1614,103 +876,228 @@ mod tests {
             asst("2026-01-01T00:00:02Z", "a", 1, "[]"),
         ];
         let (home, _) = claude_home("t-midtag", folder, &lines);
-        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        let t = run(&home, SID, &mut TurnCursor::default(), true);
         assert_eq!(t.len(), 1);
         assert!(!format!("{t:?}").contains("SECRET"), "{:?}", t[0].prompt);
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn two_interleaved_sessions_in_one_folder_keep_their_own_turns() {
+    fn a_plain_terminal_session_in_the_same_folder_and_time_window_is_not_read() {
         let folder = Path::new(r"G:\my proj\app");
-        let a = vec![
+        let ours = vec![
             user("2026-01-01T00:00:10Z", r#""a1""#),
             asst("2026-01-01T00:00:20Z", "x1", 1, "[]"),
-            user("2026-01-01T00:00:40Z", r#""a2""#),
-            asst("2026-01-01T00:00:45Z", "x2", 2, "[]"),
         ];
-        let (home, file) = claude_home("t-interleave", folder, &a);
-        let b = [
-            user("2026-01-01T00:00:15Z", r#""b1""#),
+        let (home, file) = claude_home("t-plain", folder, &ours);
+        let plain = [
+            user("2026-01-01T00:00:15Z", r#""SECRET-b1""#),
             asst("2026-01-01T00:00:30Z", "y1", 10, "[]"),
         ];
-        std::fs::write(file.with_file_name("t.jsonl"), b.join("\n") + "\n").unwrap();
+        std::fs::write(file.with_file_name(format!("{OTHER}.jsonl")), plain.join("\n") + "\n").unwrap();
+        let t = run(&home, SID, &mut TurnCursor::default(), true);
+        assert_eq!(t.iter().map(|t| (t.prompt.as_deref(), t.output)).collect::<Vec<_>>(), [(Some("a1"), 1)]);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_missing_or_unsafe_session_id_reads_nothing() {
+        let folder = Path::new("/home/u/app");
+        let (home, file) = claude_home("t-ids", folder, &two_turns());
+        std::fs::write(home.join(".claude").join("evil.jsonl"), two_turns().join("\n") + "\n").unwrap();
+        let bad = [
+            "".to_string(),
+            "s".to_string(),
+            "..".to_string(),
+            "../evil".to_string(),
+            r"..\evil".to_string(),
+            format!("../{SID}"),
+            format!("{SID}/x"),
+            format!(r"{SID}\x"),
+            "11111111-1111-4111-8111-11111111111".to_string(),
+            "11111111-1111-4111-8111-1111111111111".to_string(),
+            "1111111g-1111-4111-8111-111111111111".to_string(),
+            "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA".to_string(),
+            "00000000-0000-0000-0000-000000000000".to_string(),
+        ];
+        for b in &bad {
+            assert!(!valid_session_id(b), "{b:?}");
+            assert!(run(&home, b, &mut TurnCursor::default(), true).is_empty(), "{b:?}");
+        }
+        assert!(valid_session_id(SID));
+        // A valid id with no log: nothing.
+        assert!(run(&home, OTHER, &mut TurnCursor::default(), true).is_empty());
+        assert_eq!(run(&home, SID, &mut TurnCursor::default(), true).len(), 2);
+        // Codex is never read, with or without an id.
+        let codex = |s: &str| turns_in(&home, AgentKind::Codex, s, (at(T0), at(T0 + 3600)), &mut TurnCursor::default(), true, MAX_BYTES);
+        assert!(codex(SID).is_empty() && codex("").is_empty());
+        assert!(file.is_file());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn non_canonical_uuid_spellings_read_nothing_and_case_is_accepted() {
+        let folder = Path::new("/home/u/app");
+        let (home, _) = claude_home("t-noncanon", folder, &two_turns());
+        let no_dash = SID.replace('-', "");
+        for b in [
+            format!("{{{SID}}}"),
+            format!("urn:uuid:{SID}"),
+            no_dash.clone(),
+            format!("{no_dash}0000"),
+            format!(" {SID}"),
+            format!("{SID} "),
+            format!("{SID}\0"),
+            format!("{SID}.jsonl"),
+            SID.replacen('-', "_", 1),
+            SID.replacen('-', "1", 1).replacen('1', "-", 1),
+            format!("{}-", &SID[..35]),
+            "-".repeat(36),
+            "é".repeat(18),
+            format!("{}*", &SID[..35]),
+            format!("{}?", &SID[..35]),
+        ] {
+            assert!(!valid_session_id(&b), "{b:?}");
+            assert!(run(&home, &b, &mut TurnCursor::default(), true).is_empty(), "{b:?}");
+        }
+        // Lower-case hex in the 8-4-4-4-12 shape, v4 or not: valid. Upper/mixed case and the nil: not.
+        for ok in ["aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "11111111-1111-1111-c111-111111111111"] {
+            assert!(valid_session_id(ok), "{ok}");
+        }
+        for bad in ["AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE", "aAaAaAaA-bBbB-4cCc-8dDd-eEeEeEeEeEeE", "00000000-0000-0000-0000-000000000000"] {
+            assert!(!valid_session_id(bad), "{bad}");
+        }
+        // An upper-case spelling of our id reads nothing.
+        assert!(run(&home, "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA", &mut TurnCursor::default(), true).is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_same_session_id_in_two_project_folders_reads_exactly_one_log() {
+        // Windows-like home with a space and non-ASCII letters.
+        let home = tmp("t-two-dirs Jörg Müller");
+        let projects = home.join(".claude").join("projects");
+        let one = projects.join("C--Users-J-rg-M-ller-a");
+        let two = projects.join("C--Users-J-rg-M-ller-b");
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        let log = |p: &str, id: &str| [user("2026-01-01T00:00:10Z", &format!(r#""{p}""#)), asst("2026-01-01T00:00:20Z", id, 1, "[]")].join("\n") + "\n";
+        std::fs::write(one.join(format!("{SID}.jsonl")), log("in-a", "ma")).unwrap();
+        std::fs::write(two.join(format!("{SID}.jsonl")), log("in-b", "mb")).unwrap();
         let mut cur = TurnCursor::default();
-        let t = run(&home, folder, &mut cur, false);
-        assert_eq!(t.len(), 1);
-        assert_eq!(
-            (t[0].prompt.as_deref(), t[0].output, t[0].latency_ms),
-            (Some("a1"), 1, Some(10_000))
-        );
-        let t = run(&home, folder, &mut cur, true);
-        let got: Vec<_> = t.iter().map(|t| (t.prompt.as_deref(), t.output, t.latency_ms)).collect();
-        assert_eq!(got, [(Some("b1"), 10, Some(15_000)), (Some("a2"), 2, Some(5_000))]);
-        assert!(run(&home, folder, &mut cur, true).is_empty());
+        let t = run(&home, SID, &mut cur, true);
+        // Which folder wins depends on directory order; never both, never merged.
+        assert_eq!(t.len(), 1, "{t:?}");
+        assert!(matches!(t[0].prompt.as_deref(), Some("in-a" | "in-b")), "{t:?}");
+        assert_eq!(cur.offsets.len(), 1);
+        // The same cursor does not then pick up the other folder's copy.
+        assert!(run(&home, SID, &mut cur, true).is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_directory_named_like_the_log_or_a_projects_file_reads_nothing_wrong() {
+        let home = tmp("t-dir-named-log");
+        let projects = home.join(".claude").join("projects");
+        // A directory called `<id>.jsonl` is skipped; the real log in another folder is read.
+        std::fs::create_dir_all(projects.join("a").join(format!("{SID}.jsonl"))).unwrap();
+        std::fs::create_dir_all(projects.join("b")).unwrap();
+        std::fs::write(projects.join("b").join(format!("{SID}.jsonl")), two_turns().join("\n") + "\n").unwrap();
+        assert_eq!(run(&home, SID, &mut TurnCursor::default(), true).len(), 2);
+        // A log directly in `projects` (no project folder) is not one of ours.
+        let flat = tmp("t-flat-log");
+        std::fs::create_dir_all(flat.join(".claude").join("projects")).unwrap();
+        std::fs::write(flat.join(".claude").join("projects").join(format!("{SID}.jsonl")), two_turns().join("\n") + "\n").unwrap();
+        assert!(run(&flat, SID, &mut TurnCursor::default(), true).is_empty());
+        // `projects` is a file, not a folder: nothing, no panic.
+        let odd = tmp("t-projects-file");
+        std::fs::create_dir_all(odd.join(".claude")).unwrap();
+        std::fs::write(odd.join(".claude").join("projects"), "x").unwrap();
+        assert!(run(&odd, SID, &mut TurnCursor::default(), true).is_empty());
+        // An empty log and an empty home: nothing.
+        let empty = tmp("t-empty-log");
+        std::fs::create_dir_all(empty.join(".claude/projects/p")).unwrap();
+        std::fs::write(empty.join(".claude/projects/p").join(format!("{SID}.jsonl")), "").unwrap();
+        assert!(run(&empty, SID, &mut TurnCursor::default(), true).is_empty());
+        assert!(run(&tmp("t-bare-home"), SID, &mut TurnCursor::default(), true).is_empty());
+        for d in [home, flat, odd, empty, tmp("t-bare-home")] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_project_folder_is_followed_and_a_dangling_link_reads_nothing() {
+        use std::os::unix::fs::symlink;
+        let home = tmp("t-symlink");
+        let elsewhere = tmp("t-symlink-target");
+        std::fs::write(elsewhere.join(format!("{SID}.jsonl")), two_turns().join("\n") + "\n").unwrap();
+        let projects = home.join(".claude").join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        symlink(&elsewhere, projects.join("linked")).unwrap();
+        // The log is chosen by its file name (our id), so a linked folder holding it is read.
+        assert_eq!(run(&home, SID, &mut TurnCursor::default(), true).len(), 2);
+        // A dangling link and a link to a log of another id read nothing.
+        let other = tmp("t-symlink-other");
+        std::fs::create_dir_all(other.join(".claude/projects/p")).unwrap();
+        symlink(elsewhere.join("gone.jsonl"), other.join(".claude/projects/p").join(format!("{SID}.jsonl"))).unwrap();
+        assert!(run(&other, SID, &mut TurnCursor::default(), true).is_empty());
+        assert!(run(&home, OTHER, &mut TurnCursor::default(), true).is_empty());
+        for d in [home, elsewhere, other] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn a_large_log_is_read_within_the_budget_across_calls() {
+        let folder = Path::new("/home/u/app");
+        let ts = |s: u64| format!("2026-01-01T{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60);
+        let pad = "x".repeat(4096);
+        let mut lines = Vec::new();
+        for i in 0..200u64 {
+            lines.push(user(&ts(2 * i), &format!(r#""p{i} {pad}""#)));
+            lines.push(asst(&ts(2 * i + 1), &format!("m{i}"), 1, "[]"));
+        }
+        let (home, file) = claude_home("t-large", folder, &lines);
+        let len = std::fs::metadata(&file).unwrap().len();
+        assert!(len > 800_000);
+        let window = (at(T0), at(T0 + 86_399));
+        // A zero budget reads nothing and does not move the cursor.
+        let mut cur = TurnCursor::default();
+        assert!(turns_in(&home, AgentKind::Claude, SID, window, &mut cur, true, 0).is_empty());
+        assert_eq!(cur.offsets.get(&file).copied().unwrap_or(0), 0);
+        // A budget one byte under the first line: still nothing.
+        let first = lines[0].len() as u64 + 1;
+        assert!(turns_in(&home, AgentKind::Claude, SID, window, &mut cur, true, first - 1).is_empty());
+        assert_eq!(cur.offsets.get(&file).copied().unwrap_or(0), 0);
+        // 64 KiB per call: each call stays bounded, and all turns arrive exactly once.
+        let mut all = Vec::new();
+        let mut calls = 0;
+        loop {
+            let before = cur.offsets.get(&file).copied().unwrap_or(0);
+            all.extend(turns_in(&home, AgentKind::Claude, SID, window, &mut cur, true, 64 * 1024));
+            let after = cur.offsets.get(&file).copied().unwrap_or(0);
+            assert!(after - before <= 64 * 1024, "{before}..{after}");
+            calls += 1;
+            if after == len || calls > 100 {
+                break;
+            }
+        }
+        assert_eq!(all.len(), 200);
+        assert!(all.windows(2).all(|w| w[0].timestamp_ms < w[1].timestamp_ms));
+        assert!(turns_in(&home, AgentKind::Claude, SID, window, &mut cur, true, MAX_BYTES).is_empty());
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn turn_copied_into_a_resumed_session_file_is_counted_once() {
         // A resumed Claude session copies earlier lines (same message ids) into a
-        // new file; `usage` counts each message id once, `turns` must agree.
+        // new file of another id; only the file of our id is read.
         let folder = Path::new("/home/u/app");
         let (home, file) = claude_home("t-resume", folder, &two_turns());
         std::fs::write(file.with_file_name("resumed.jsonl"), two_turns().join("\n") + "\n").unwrap();
-        let t = run(&home, folder, &mut TurnCursor::default(), true);
-        let u = usage_in(&home, AgentKind::Claude, folder, at(T0), at(T0 + 3600)).unwrap();
+        let t = run(&home, SID, &mut TurnCursor::default(), true);
         assert_eq!(t.len(), 2, "{t:?}");
-        assert_eq!(t.iter().map(|t| t.output).sum::<u64>(), u.output);
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn codex_turn_without_token_count_mcp_names_and_model_switch() {
-        let home = tmp("t-codex-edge");
-        let day = home.join(".codex/sessions/2026/01/01");
-        std::fs::create_dir_all(&day).unwrap();
-        let ev = |ts: &str, kind: &str, payload: &str| {
-            format!(r#"{{"timestamp":"{ts}","type":"{kind}","payload":{payload}}}"#)
-        };
-        let lines = [
-            ev("2026-01-01T00:00:01Z", "session_meta", r#"{"cwd":"C:\\Users\\Jörg Müller\\my app"}"#),
-            ev("2026-01-01T00:00:02Z", "turn_context", r#"{"model":"gpt-5"}"#),
-            // no token usage at all: the turn is dropped, never merged into the next
-            ev("2026-01-01T00:00:10Z", "event_msg", r#"{"type":"user_message","message":"one"}"#),
-            ev("2026-01-01T00:00:11Z", "event_msg", r#"{"type":"token_count","info":null}"#),
-            ev("2026-01-01T00:00:20Z", "event_msg", r#"{"type":"user_message","message":"two"}"#),
-            ev("2026-01-01T00:00:21Z", "response_item", r#"{"type":"function_call","name":"mcp__srv__do"}"#),
-            ev("2026-01-01T00:00:21Z", "response_item", r#"{"type":"function_call","name":"mcp____empty"}"#),
-            ev("2026-01-01T00:00:21Z", "response_item", r#"{"type":"custom_tool_call","name":"mcp__"}"#),
-            ev("2026-01-01T00:00:21Z", "response_item", r#"{"type":"function_call","name":"docs__search"}"#),
-            ev(
-                "2026-01-01T00:00:22Z",
-                "event_msg",
-                r#"{"type":"token_count","info":{"total_token_usage":{"input_tokens":100},"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}}"#,
-            ),
-            ev("2026-01-01T00:00:30Z", "event_msg", r#"{"type":"user_message","message":"three"}"#),
-            ev("2026-01-01T00:00:30Z", "turn_context", r#"{"model":"gpt-5-mini"}"#),
-            ev(
-                "2026-01-01T00:00:31Z",
-                "event_msg",
-                r#"{"type":"token_count","info":{"total_token_usage":{"input_tokens":200},"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}}"#,
-            ),
-        ];
-        std::fs::write(day.join("rollout-x.jsonl"), lines.join("\n") + "\n").unwrap();
-        let t = turns_in(
-            &home,
-            AgentKind::Codex,
-            Path::new(r"c:\users\JÖRG MÜLLER\my app\"),
-            (at(T0), at(T0 + 3600)),
-            &mut TurnCursor::default(),
-            true,
-            MAX_BYTES,
-        );
-        let got: Vec<_> = t.iter().map(|t| (t.prompt.as_deref(), t.model.as_deref())).collect();
-        assert_eq!(got, [(Some("two"), Some("gpt-5")), (Some("three"), Some("gpt-5-mini"))]);
-        assert_eq!(t[0].tools, ["mcp__srv__do", "mcp____empty", "mcp__", "docs__search"]);
-        assert_eq!(t[0].mcp_servers, ["srv"]);
-        assert_eq!((t[0].input, t[0].output, t[0].latency_ms), (100, 10, Some(2000)));
-        assert!(t[1].cost_usd.unwrap() < t[0].cost_usd.unwrap());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1726,7 +1113,7 @@ mod tests {
             asst("2026-01-01T00:00:21Z", "c", 5, "[]"),
         ];
         let (home, _) = claude_home("t-model", folder, &lines);
-        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        let t = run(&home, SID, &mut TurnCursor::default(), true);
         let models: Vec<_> = t.iter().map(|t| t.model.as_deref()).collect();
         assert_eq!(
             models,
@@ -1748,7 +1135,7 @@ mod tests {
             r#"{"type":"assistant","timestamp":"2026-01-01T00:00:03Z","message":{"id":"syn","model":"<synthetic>","content":[{"type":"text","text":"API Error"}],"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#.to_string(),
         ];
         let (home, _) = claude_home("t-synthetic", folder, &lines);
-        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        let t = run(&home, SID, &mut TurnCursor::default(), true);
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].model.as_deref(), Some("claude-sonnet-4-5"));
         assert!(t[0].cost_usd.is_some());
@@ -1770,14 +1157,14 @@ mod tests {
             asst("2026-01-01T01:00:01Z", "d", 1, "[]"),
         ];
         let (home, _) = claude_home("t-edges", folder, &lines);
-        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        let t = run(&home, SID, &mut TurnCursor::default(), true);
         let got: Vec<_> = t.iter().map(|t| (t.prompt.as_deref(), t.latency_ms)).collect();
         assert_eq!(got, [(Some("at start"), Some(1_800_000)), (Some("at end"), Some(500))]);
         // inverted window: nothing
         let none = turns_in(
             &home,
             AgentKind::Claude,
-            folder,
+            SID,
             (at(T0 + 3600), at(T0)),
             &mut TurnCursor::default(),
             true,
@@ -1804,7 +1191,7 @@ mod tests {
             asst("2026-01-01T00:00:05Z", "b", 2, "[]"),
         ];
         let (home, _) = claude_home("t-badts", folder, &lines);
-        let t = run(&home, folder, &mut TurnCursor::default(), true);
+        let t = run(&home, SID, &mut TurnCursor::default(), true);
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].prompt.as_deref(), Some("first"));
         assert!(!format!("{t:?}").contains("SECRET"));
@@ -1816,19 +1203,19 @@ mod tests {
         let folder = Path::new("/home/u/app");
         let (home, file) = claude_home("t-rotate", folder, &two_turns());
         let mut cur = TurnCursor::default();
-        assert_eq!(run(&home, folder, &mut cur, true).len(), 2);
+        assert_eq!(run(&home, SID, &mut cur, true).len(), 2);
         // the cursor still names the deleted file: harmless
         std::fs::remove_file(&file).unwrap();
-        assert!(run(&home, folder, &mut cur, true).is_empty());
+        assert!(run(&home, SID, &mut cur, true).is_empty());
         let fresh = [
             user("2026-01-01T00:02:00Z", r#""after rotate""#),
             asst("2026-01-01T00:02:01Z", "n", 1, "[]"),
         ];
         std::fs::write(&file, fresh.join("\n") + "\n").unwrap();
-        let t = run(&home, folder, &mut cur, true);
+        let t = run(&home, SID, &mut cur, true);
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].prompt.as_deref(), Some("after rotate"));
-        assert!(run(&home, folder, &mut cur, true).is_empty());
+        assert!(run(&home, SID, &mut cur, true).is_empty());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1846,13 +1233,13 @@ mod tests {
         let window = (at(T0), at(T0 + 3600));
         // a budget of exactly the file size reads everything
         let len = std::fs::metadata(&file).unwrap().len();
-        let t = turns_in(&home, AgentKind::Claude, folder, window, &mut TurnCursor::default(), true, len);
+        let t = turns_in(&home, AgentKind::Claude, SID, window, &mut TurnCursor::default(), true, len);
         assert_eq!(t.len(), 2);
         // the budget runs out after p1's first reply; the rest comes next call
         let cut = (lines[0].len() + lines[1].len() + 2) as u64;
         let mut cur = TurnCursor::default();
-        let mut all = turns_in(&home, AgentKind::Claude, folder, window, &mut cur, true, cut);
-        all.extend(turns_in(&home, AgentKind::Claude, folder, window, &mut cur, true, MAX_BYTES));
+        let mut all = turns_in(&home, AgentKind::Claude, SID, window, &mut cur, true, cut);
+        all.extend(turns_in(&home, AgentKind::Claude, SID, window, &mut cur, true, MAX_BYTES));
         let got: Vec<_> = all.iter().map(|t| (t.prompt.as_deref(), t.output)).collect();
         assert_eq!(got, [(Some("p1"), 12), (Some("p2"), 1)]);
         let _ = std::fs::remove_dir_all(&home);
@@ -1871,10 +1258,10 @@ mod tests {
         let window = (at(T0), at(T0 + 86_399));
         let started = std::time::Instant::now();
         let mut cur = TurnCursor::default();
-        let t = turns_in(&home, AgentKind::Claude, folder, window, &mut cur, true, MAX_BYTES);
+        let t = turns_in(&home, AgentKind::Claude, SID, window, &mut cur, true, MAX_BYTES);
         assert_eq!(t.len(), 10_000);
         assert_eq!(t.iter().map(|t| t.output).sum::<u64>(), 10_000);
-        assert!(turns_in(&home, AgentKind::Claude, folder, window, &mut cur, true, MAX_BYTES).is_empty());
+        assert!(turns_in(&home, AgentKind::Claude, SID, window, &mut cur, true, MAX_BYTES).is_empty());
         assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -1884,18 +1271,18 @@ mod tests {
         let folder = Path::new(r"C:\Users\Jörg Müller\my app");
         let (home, _) = claude_home("t-cursor-jörg müller", folder, &two_turns());
         let mut cur = TurnCursor::default();
-        assert_eq!(run(&home, folder, &mut cur, false).len(), 1);
+        assert_eq!(run(&home, SID, &mut cur, false).len(), 1);
         let mut cur: TurnCursor = serde_json::from_str(&serde_json::to_string(&cur).unwrap()).unwrap();
-        let t = run(&home, folder, &mut cur, true);
+        let t = run(&home, SID, &mut cur, true);
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].prompt.as_deref(), Some("second prompt"));
-        assert!(run(&home, folder, &mut cur, true).is_empty());
+        assert!(run(&home, SID, &mut cur, true).is_empty());
         // a stale entry for a file that is gone is harmless
         let mut stale: TurnCursor =
             serde_json::from_str(r#"{"offsets":{"C:\\Users\\Jörg Müller\\gone.jsonl":42}}"#).unwrap();
         assert_eq!(stale.offsets.get(Path::new(r"C:\Users\Jörg Müller\gone.jsonl")), Some(&42));
         let empty = tmp("t-cursor-empty");
-        assert!(run(&empty, folder, &mut stale, true).is_empty());
+        assert!(run(&empty, SID, &mut stale, true).is_empty());
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(&empty);
     }

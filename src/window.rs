@@ -2178,7 +2178,7 @@ impl AppWindow {
             let prev = self.model.agents.get(addr).and_then(|a| a.word.clone());
             let child = rec.get("parent").and_then(Value::as_str).is_some_and(|p| !p.is_empty());
             if let Some(app) = &app {
-                running.push(crate::events::Seen { address: addr.clone(), app: app.clone(), folder: self.cwds.get(addr).cloned() });
+                running.push(crate::events::Seen { address: addr.clone(), app: app.clone(), folder: self.cwds.get(addr).cloned(), session: rec.pointer("/labels/h0x.session").and_then(Value::as_str).map(str::to_owned) });
             }
             if let Some(alert) = self.model.alert_for(addr, child, prev.as_deref(), word.as_deref(), looking) {
                 alerts.push((addr.clone(), alert, looking));
@@ -2627,6 +2627,7 @@ impl AppWindow {
         let folder = folder.or_else(here).unwrap_or_else(|| if on.is_some() { String::new() } else { home() });
         let (space, ctx, pane) = (self.model.fresh_id_on("sp", on), self.model.fresh_id_on("tb", on), self.model.fresh_id_on("p", on));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
+        let argv = session_argv(argv, on);
         let program = argv.clone().unwrap_or_default();
         let route = Self::route_for(|p| self.core.call_timeout("route", p, std::time::Duration::from_millis(300)), argv.as_deref().unwrap_or_default(), &folder, task, on);
         let (addr, folder) = self.spawn(Self::agent_argv(argv.clone(), task, on, route.as_ref()).or(argv), &program, folder, follow, &space, &ctx, on, size, window)?;
@@ -2649,6 +2650,7 @@ impl AppWindow {
         let on = self.machine_of(&space);
         let (ctx, pane) = (self.model.fresh_id_on("tb", on.as_deref()), self.model.fresh_id_on("p", on.as_deref()));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
+        let argv = session_argv(argv, on.as_deref());
         let program = argv.clone().unwrap_or_default();
         let route = Self::route_for(|p| self.core.call_timeout("route", p, std::time::Duration::from_millis(300)), argv.as_deref().unwrap_or_default(), &folder, task, on.as_deref());
         let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref(), route.as_ref()).or(argv), &program, folder, follow, &space, &ctx, on.as_deref(), size, window)?;
@@ -2688,6 +2690,7 @@ impl AppWindow {
         root.split(&target, axis, Node::block(new.clone(), Content::Terminal { terminal: String::new() }), "initial-size".into());
         let size = self.model.active_tab().filter(|tab| tab.id == ctx)
             .and_then(|_| self.initial_size(&root, &new, window));
+        let argv = session_argv(argv, on.as_deref());
         let program = argv.clone().unwrap_or_default();
         let argv = argv.map(|a| crate::programs::with_token_saver(crate::settings::get().token_saver, a));
         let (addr, _) = self.spawn(argv, &program, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
@@ -5233,7 +5236,16 @@ fn spawn_labels(space: &str, tab: &str, on: Option<&str>, program: &[String]) ->
     if let Some(agent) = crate::programs::agent(program) {
         labels["h0x.agent"] = agent.into();
     }
+    // Which Claude log is this terminal's own (the usage read takes no other); not shown anywhere.
+    if on.is_none() && let Some(id) = crate::programs::session_of(program) {
+        labels["h0x.session"] = format!("claude:{id}").into();
+    }
     labels
+}
+
+/// A local Claude gets its own session id; on another machine it stays as asked (no usage is read there).
+fn session_argv(argv: Option<Vec<String>>, on: Option<&str>) -> Option<Vec<String>> {
+    argv.map(|a| if on.is_none() { crate::programs::with_session_id(a) } else { a })
 }
 
 fn program_of(report: &Value, argv: Option<&Value>) -> Value {
@@ -5773,6 +5785,53 @@ mod tests {
         // The other labels stay as before, local to the machine.
         let labels = super::spawn_labels("mac/sp1", "mac/tb1", Some("mac"), &argv(&["/bin/zsh"]));
         assert_eq!(labels, json!({ "h0x.space": "sp1", "h0x.tab": "tb1", "h0x.seen": "0" }));
+    }
+
+    #[test]
+    fn spawn_labels_record_the_claude_session_of_a_local_launch_only() {
+        use serde_json::json;
+        let id = "0b0c3f5e-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
+        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let session = |on: Option<&str>, program: &[String]| super::spawn_labels("sp1", "tb1", on, program).get("h0x.session").cloned();
+        let ours = super::session_argv(Some(argv(&["claude", "go"])), None).unwrap();
+        assert_eq!(ours[1], "--session-id");
+        assert_eq!(session(None, &ours), Some(json!(format!("claude:{}", ours[2]))));
+        assert_eq!(super::session_argv(Some(argv(&["claude"])), Some("mac")), Some(argv(&["claude"])));
+        assert_eq!(session(Some("mac"), &ours), None);
+        assert_eq!(session(None, &argv(&["claude", "--resume", id])), Some(json!(format!("claude:{id}"))));
+        // No explicit id (continue, a search term, a bad id), another agent, a shell: nothing recorded.
+        for p in [argv(&["claude", "--continue"]), argv(&["claude", "--resume", "x"]), argv(&["claude", "--session-id", "../x"]), argv(&["codex"]), argv(&["/bin/zsh"]), vec![]] {
+            assert_eq!(session(None, &p), None, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn remote_launches_get_no_session_id_and_no_session_label() {
+        let id = "0b0c3f5e-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
+        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        // No argv (a shell) stays none, local or remote.
+        assert_eq!(super::session_argv(None, None), None);
+        assert_eq!(super::session_argv(None, Some("box")), None);
+        for on in ["box", "box/t3", "user@host"] {
+            for p in [argv(&["claude"]), argv(&["claude", "--resume", id]), argv(&[r"C:\Program Files\claude\claude.exe", "go"]), argv(&["codex"])] {
+                assert_eq!(super::session_argv(Some(p.clone()), Some(on)), Some(p.clone()), "{on} {p:?}");
+                assert!(super::spawn_labels("sp1", "tb1", Some(on), &p).get("h0x.session").is_none(), "{on} {p:?}");
+            }
+        }
+        // Local: a Windows path to Claude is labelled with the id it was given.
+        let ours = super::session_argv(Some(argv(&[r"C:\Program Files\claude\claude.exe", "go"])), None).unwrap();
+        assert_eq!(
+            super::spawn_labels("sp1", "tb1", None, &ours).get("h0x.session").cloned(),
+            Some(serde_json::json!(format!("claude:{}", ours[2])))
+        );
+        // Local edge argv: an empty `--session-id=` or a trailing `-r` is kept and labels nothing.
+        for p in [argv(&["claude", "--session-id="]), argv(&["claude", "-r"]), argv(&["claude", "--continue", "--session-id", id])] {
+            let kept = super::session_argv(Some(p.clone()), None).unwrap();
+            assert_eq!(kept, p);
+            let label = super::spawn_labels("sp1", "tb1", None, &kept).get("h0x.session").cloned();
+            let want = p.iter().any(|a| a == id).then(|| serde_json::json!(format!("claude:{id}")));
+            assert_eq!(label, want, "{p:?}");
+        }
     }
 
     fn words(w: &[&str]) -> Vec<String> {

@@ -351,6 +351,8 @@ pub struct Seen {
     pub address: String,
     pub app: String,
     pub folder: Option<String>,
+    /// The terminal's `h0x.session` label (`claude:<uuid>`): the log HyperOx's own launch writes.
+    pub session: Option<String>,
 }
 
 struct Running {
@@ -358,6 +360,8 @@ struct Running {
     since: Instant,
     started: SystemTime,
     folder: Option<String>,
+    /// The agent session id HyperOx gave this run; empty when it has none (nothing is read then).
+    session: String,
     /// One id for this run (`$ai_trace_id`).
     trace: String,
     last_read: Instant,
@@ -412,6 +416,7 @@ pub fn agents(now: &[Seen], first: bool, core: &Arc<crate::core_link::Core>) {
                     since: Instant::now().checked_sub(started.elapsed().unwrap_or_default()).unwrap_or_else(Instant::now),
                     started,
                     folder: s.folder.clone().or_else(|| saved.as_ref().map(|e| e.folder.clone()).filter(|f| !f.is_empty())),
+                    session: session_id(kind, s.session.as_deref()).or_else(|| saved.as_ref().map(|e| e.session.clone())).unwrap_or_default(),
                     trace: saved.as_ref().map_or_else(new_trace_id, |e| e.trace.clone()),
                     last_read: Instant::now(),
                     turns: Arc::new(AtomicU64::new(saved.as_ref().map_or(0, |e| e.turns))),
@@ -501,6 +506,8 @@ struct Job {
     kind: &'static str,
     usage_kind: AgentKind,
     folder: PathBuf,
+    /// Empty: no session id, so no turns.
+    session: String,
     started: SystemTime,
     trace: String,
     turns: Arc<AtomicU64>,
@@ -521,12 +528,20 @@ impl Running {
             kind: self.kind,
             usage_kind,
             folder: PathBuf::from(folder),
+            session: self.session.clone(),
             started: self.started,
             trace: self.trace.clone(),
             turns: self.turns.clone(),
             seconds: 0,
         })
     }
+}
+
+/// The session id in an `h0x.session` label of this agent kind (`claude:<uuid>`), when it is a valid
+/// UUID. Codex has none (no per-launch id yet, SA-3), so its runs read no turns.
+fn session_id(kind: &str, label: Option<&str>) -> Option<String> {
+    let id = label?.strip_prefix(kind)?.strip_prefix(':')?;
+    (kind == "claude" && crate::agent_usage::valid_session_id(id)).then(|| id.to_owned())
 }
 
 /// One id per HyperOx agent run; PostHog groups the run's generations as one trace.
@@ -579,7 +594,7 @@ struct Ctx<'a> {
 /// never read again. Returns how many turns were read.
 fn read_run(ctx: &Ctx, job: &Job, finish: bool) -> usize {
     read_with(ctx, job, finish, |cursor| {
-        crate::agent_usage::turns(job.usage_kind, &job.folder, job.started, SystemTime::now(), cursor, finish)
+        crate::agent_usage::turns(job.usage_kind, &job.session, job.started, SystemTime::now(), cursor, finish)
     })
 }
 
@@ -614,6 +629,7 @@ fn read_with(ctx: &Ctx, job: &Job, finish: bool, read: impl FnOnce(&mut TurnCurs
             started_ms: job.started.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
             agent: job.kind.to_owned(),
             folder: job.folder.to_string_lossy().into_owned(),
+            session: job.session.clone(),
             turns: total,
             cursor,
         };
@@ -694,6 +710,8 @@ struct RunCursor {
     #[serde(default)]
     folder: String,
     #[serde(default)]
+    session: String,
+    #[serde(default)]
     turns: u64,
     cursor: TurnCursor,
 }
@@ -711,6 +729,7 @@ impl RunCursor {
             kind,
             usage_kind,
             folder: PathBuf::from(&self.folder),
+            session: self.session.clone(),
             started: UNIX_EPOCH + Duration::from_millis(self.started_ms),
             trace: self.trace.clone(),
             turns: Arc::new(AtomicU64::new(self.turns)),
@@ -841,6 +860,7 @@ mod tests {
             kind: "claude",
             usage_kind: AgentKind::Claude,
             folder: PathBuf::from("/x/y"),
+            session: String::new(),
             started: SystemTime::now(),
             trace: trace.into(),
             turns: Arc::new(AtomicU64::new(0)),
@@ -1148,7 +1168,7 @@ mod tests {
         assert_eq!((got[0].1["$ai_trace_id"].clone(), got[1].1["turns"].clone()), (json!("h0x-run-1"), json!(3)));
         assert!(Cursors::load(&d).runs.is_empty());
         // An entry that cannot say what ran where is not finished.
-        let bare = RunCursor { at: 1, trace: String::new(), started_ms: 0, agent: String::new(), folder: String::new(), turns: 0, cursor: TurnCursor::default() };
+        let bare = RunCursor { at: 1, trace: String::new(), started_ms: 0, agent: String::new(), folder: String::new(), session: String::new(), turns: 0, cursor: TurnCursor::default() };
         assert!(bare.job("t").is_none());
     }
 
@@ -1310,12 +1330,81 @@ mod tests {
     }
 
     #[test]
+    fn session_label_edge_spellings_name_no_session() {
+        let id = "0b0c3f5e-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
+        for label in [
+            format!("Claude:{id}"),
+            format!("CLAUDE:{id}"),
+            format!("claude::{id}"),
+            format!("claude: {id}"),
+            format!("claude:{id} "),
+            format!("claude:{{{id}}}"),
+            format!("claude:urn:uuid:{id}"),
+            format!("claude={id}"),
+            format!("claude{id}"),
+            format!(" claude:{id}"),
+            format!("claude:{id}/../x"),
+            id.to_owned(),
+        ] {
+            assert_eq!(session_id("claude", Some(&label)), None, "{label:?}");
+        }
+        // Upper-case hex is not a Claude log name: nothing.
+        let upper = id.to_ascii_uppercase();
+        assert_eq!(session_id("claude", Some(&format!("claude:{upper}"))), None);
+        // Codex never names a session, even with its own prefix; an empty kind neither.
+        assert_eq!(session_id("codex", Some(&format!("codex:{id}"))), None);
+        assert_eq!(session_id("", Some(&format!(":{id}"))), None);
+    }
+
+    #[test]
+    fn a_restarted_app_keeps_the_runs_session_id_and_an_old_entry_reads_nothing() {
+        let d = dir("session-restart");
+        let emit = |_: &str, _: Value, _: u64| ();
+        let usage = |_: &str, _: u64, _: f64| ();
+        let ctx = Ctx { dir: &d, sharing: true, token_saver: false, redact: &|_| None, emit: &emit, usage: &usage };
+        let id = "0b0c3f5e-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
+        let mut j = job("term-s");
+        j.session = id.into();
+        read_with(&ctx, &j, false, |_| vec![turn(None)]);
+        let saved = Cursors::load(&d).runs.remove("term-s").unwrap();
+        assert_eq!(saved.session, id);
+        assert_eq!(saved.job("term-s").unwrap().session, id);
+        // A cursor file written before sessions existed loads with no session: nothing is read for it.
+        let old = dir("session-old");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(
+            old.join("cursors.json"),
+            r#"{"runs":{"term-o":{"at":1,"trace":"h0x-run-9","started_ms":1,"agent":"claude","folder":"/x","turns":3,"cursor":{}}}}"#,
+        )
+        .unwrap();
+        let entry = Cursors::load(&old).runs.remove("term-o").unwrap();
+        let again = entry.job("term-o").unwrap();
+        assert_eq!((again.session.as_str(), again.turns.load(Ordering::Relaxed)), ("", 3));
+        // A stored session of the wrong shape is kept as text but `turns` reads nothing for it.
+        let bad = RunCursor { session: "../x".into(), ..entry };
+        assert_eq!(bad.job("term-o").unwrap().session, "../x");
+        assert!(!crate::agent_usage::valid_session_id(&bad.session));
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&old);
+    }
+
+    #[test]
+    fn only_a_valid_claude_session_label_names_a_session_to_read() {
+        let id = "0b0c3f5e-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
+        assert_eq!(session_id("claude", Some(&format!("claude:{id}"))).as_deref(), Some(id));
+        for (kind, label) in [("claude", None), ("claude", Some("")), ("claude", Some("claude:")), ("claude", Some("claude:../x")), ("claude", Some("codex:0b0c3f5e-1a2b-4c3d-8e4f-5a6b7c8d9e0f")), ("codex", Some("codex:0b0c3f5e-1a2b-4c3d-8e4f-5a6b7c8d9e0f")), ("gemini", Some("claude:0b0c3f5e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"))] {
+            assert_eq!(session_id(kind, label), None, "{kind} {label:?}");
+        }
+    }
+
+    #[test]
     fn only_local_claude_and_codex_runs_with_a_folder_are_read() {
         let running = |kind: &'static str, folder: Option<&str>, remote: bool| Running {
             kind,
             since: Instant::now(),
             started: SystemTime::now(),
             folder: folder.map(Into::into),
+            session: String::new(),
             trace: "t".into(),
             last_read: Instant::now(),
             turns: Arc::new(AtomicU64::new(0)),

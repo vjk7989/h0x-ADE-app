@@ -283,6 +283,63 @@ fn has_settings(argv: &[String]) -> bool {
     argv.iter().any(|a| a == "--settings" || a.starts_with("--settings="))
 }
 
+/// A random UUID v4 for one Claude launch. Not a secret: it only names the log file.
+fn new_session_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // `RandomState` is seeded randomly per process; two keyed hashes give 128 bits.
+    let part = |salt: u64| {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(nanos);
+        h.write_u64(n ^ salt);
+        h.write_u32(std::process::id());
+        h.finish()
+    };
+    let (hi, lo) = (part(1), part(2));
+    let hi = (hi & !0xF000) | 0x4000; // version 4
+    let lo = (lo & !(0b11 << 62)) | (0b10 << 62); // variant 10
+    format!("{:08x}-{:04x}-{:04x}-{:04x}-{:012x}", hi >> 32, (hi >> 16) & 0xFFFF, hi & 0xFFFF, lo >> 48, lo & 0xFFFF_FFFF_FFFF)
+}
+
+const SESSION_FLAGS: [&str; 2] = ["--session-id", "--resume"];
+
+/// `claude --session-id <new uuid> <the person's args>`, so HyperOx knows which log is its
+/// session (agent_usage reads that one only). A Claude that already chose its session
+/// (`--session-id`, `--resume`/`-r`, `--continue`/`-c`, `--from-pr`) stays exactly as asked;
+/// `session_of` then reads the explicit id, if any. Anything else stays as asked.
+pub fn with_session_id(mut argv: Vec<String>) -> Vec<String> {
+    if starts_claude(&argv) && !gave(&argv, &["--session-id", "--resume", "-r", "--continue", "-c", "--from-pr"]) {
+        argv.splice(1..1, ["--session-id".to_owned(), new_session_id()]);
+    }
+    argv
+}
+
+/// The explicit Claude session id in `argv` (`--session-id`, `--resume`, `-r`; as `flag id` or
+/// `flag=id`), when it is a valid UUID. A `--continue`, a search term or no flag: none, so
+/// nothing is recorded for that terminal.
+pub fn session_of(argv: &[String]) -> Option<String> {
+    // A fork writes to a new id we do not know: record nothing, never the old log.
+    if !starts_claude(argv) || argv.iter().any(|a| a == "--fork-session") {
+        return None;
+    }
+    let mut found = None;
+    let mut it = argv.iter().skip(1);
+    while let Some(a) = it.next() {
+        let value = if SESSION_FLAGS.contains(&a.as_str()) || a == "-r" {
+            it.next().map(String::as_str)
+        } else {
+            SESSION_FLAGS.iter().find_map(|f| a.strip_prefix(f).and_then(|r| r.strip_prefix('=')))
+        };
+        // Claude uses the last one given.
+        if let Some(v) = value.filter(|v| crate::agent_usage::valid_session_id(v)) {
+            found = Some(v.to_owned());
+        }
+    }
+    found
+}
+
 /// The core "route" output for a session: which tools it needs, whether the code
 /// map helps, and a cheaper model for read-only work. Other fields are ignored.
 #[derive(Debug, Default, Deserialize)]
@@ -1014,6 +1071,142 @@ mod tests {
         let mut v = argv(&["claude", "--settings", TOKEN_SAVER_SETTINGS]);
         v.extend(argv(rest));
         v
+    }
+
+    #[test]
+    fn claude_gets_its_own_session_id_unless_the_person_chose_a_session() {
+        let id = "0b0c3f5e-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
+        let out = with_session_id(argv(&["claude", "go"]));
+        assert_eq!((out[0].as_str(), out[1].as_str(), out[3].as_str()), ("claude", "--session-id", "go"));
+        assert!(crate::agent_usage::valid_session_id(&out[2]), "{out:?}");
+        assert_eq!(session_of(&out).as_deref(), Some(out[2].as_str()));
+        assert_ne!(with_session_id(argv(&["claude"]))[2], out[2], "one id per launch");
+        // Version 4, variant 10.
+        assert_eq!((out[2].as_bytes()[14], matches!(out[2].as_bytes()[19], b'8' | b'9' | b'a' | b'b')), (b'4', true));
+        // The person's own choice is respected: argv unchanged, an explicit id is used.
+        for a in [argv(&["claude", "--session-id", id]), argv(&["claude", "--resume", id]), argv(&["claude", "-r", id]), argv(&["claude", &format!("--session-id={id}")]), argv(&["claude", &format!("--resume={id}")])] {
+            assert_eq!(with_session_id(a.clone()), a);
+            assert_eq!(session_of(&a).as_deref(), Some(id), "{a:?}");
+        }
+        for a in [argv(&["claude", "--continue"]), argv(&["claude", "-c"]), argv(&["claude", "--resume"]), argv(&["claude", "--resume", "fix the bug"]), argv(&["claude", "--from-pr", "7"]), argv(&["claude", "--session-id", "../x"]), argv(&["claude", "--resume", r"..\..\x"])] {
+            assert_eq!(with_session_id(a.clone()), a);
+            assert_eq!(session_of(&a), None, "{a:?}");
+        }
+        // Not Claude: unchanged, no session.
+        for a in [argv(&["codex"]), argv(&["bash", "--session-id", id]), argv(&[]), argv(&[""])] {
+            assert_eq!(with_session_id(a.clone()), a);
+            assert_eq!(session_of(&a), None, "{a:?}");
+        }
+        // Token Saver and routing still find their place after it.
+        assert_eq!(with_token_saver(true, out.clone())[..3], hooked(&[])[..3]);
+    }
+
+    #[test]
+    fn new_session_ids_are_uuid_v4_shaped_and_unique_across_ten_thousand_calls_and_threads() {
+        let check = |id: &str| {
+            let b = id.as_bytes();
+            assert!(crate::agent_usage::valid_session_id(id), "{id}");
+            assert!(id.bytes().all(|c| c == b'-' || c.is_ascii_digit() || (b'a'..=b'f').contains(&c)), "lowercase hex: {id}");
+            assert_eq!(b[14], b'4', "version nibble: {id}");
+            assert!(matches!(b[19], b'8' | b'9' | b'a' | b'b'), "variant 10: {id}");
+        };
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..10_000 {
+            let id = new_session_id();
+            check(&id);
+            assert!(seen.insert(id.clone()), "repeated id {id}");
+        }
+        // Each thread seeds its own `RandomState` keys; ids from parallel launches never repeat either.
+        let handles: Vec<_> = (0..4).map(|_| std::thread::spawn(|| (0..2_500).map(|_| new_session_id()).collect::<Vec<_>>())).collect();
+        for h in handles {
+            for id in h.join().unwrap() {
+                check(&id);
+                assert!(seen.insert(id.clone()), "repeated id across threads {id}");
+            }
+        }
+        assert_eq!(seen.len(), 20_000);
+    }
+
+    #[test]
+    fn session_flags_edge_cases_keep_argv_and_record_only_an_explicit_valid_id() {
+        let id = "0b0c3f5e-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
+        let other = "1c1d4a6f-2b3c-4d4e-9f50-6b7c8d9e0f1a";
+        let unchanged = |a: Vec<String>| assert_eq!(with_session_id(a.clone()), a, "{a:?}");
+        // Empty values and a value-less flag at the end: the person chose a session flag, nothing recorded.
+        for a in [
+            argv(&["claude", "--session-id="]),
+            argv(&["claude", "--resume="]),
+            argv(&["claude", "go", "-r"]),
+            argv(&["claude", "--session-id"]),
+            argv(&["claude", "--session-id", ""]),
+            argv(&["claude", "--from-pr=7"]),
+            argv(&["claude", "-r", "--continue"]),
+        ] {
+            unchanged(a.clone());
+            assert_eq!(session_of(&a), None, "{a:?}");
+        }
+        // `-r=<id>` is not a form Claude takes; the flag is respected but no id is recorded.
+        let a = argv(&["claude", &format!("-r={id}")]);
+        unchanged(a.clone());
+        assert_eq!(session_of(&a), None);
+        // `--resume` given twice: a search term then an id records the id.
+        let a = argv(&["claude", "--resume", "fix it", "--resume", id]);
+        unchanged(a.clone());
+        assert_eq!(session_of(&a).as_deref(), Some(id));
+        // Two ids: one of the person's own ids, never a fresh one.
+        let a = argv(&["claude", "--resume", id, "--resume", other]);
+        unchanged(a.clone());
+        assert_eq!(session_of(&a).as_deref(), Some(other), "the last one wins");
+        let a = argv(&["claude", "--session-id", other, "--resume", id]);
+        assert_eq!(session_of(&a).as_deref(), Some(id));
+        // A fork writes a new, unknown id: nothing recorded, argv kept.
+        for a in [argv(&["claude", "-r", id, "--fork-session"]), argv(&["claude", "--fork-session", "--resume", id]), argv(&["claude", "--session-id", id, "--fork-session"])] {
+            unchanged(a.clone());
+            assert_eq!(session_of(&a), None, "{a:?}");
+        }
+        // `--continue` / `-c` combined with an explicit id: argv kept, that id recorded.
+        for a in [
+            argv(&["claude", "--continue", "--session-id", id]),
+            argv(&["claude", "--session-id", id, "--continue"]),
+            argv(&["claude", "-c", &format!("--session-id={id}")]),
+        ] {
+            unchanged(a.clone());
+            assert_eq!(session_of(&a).as_deref(), Some(id), "{a:?}");
+        }
+        // Non-canonical UUID spellings are respected but never recorded.
+        for v in [
+            format!("{{{id}}}"),
+            format!("urn:uuid:{id}"),
+            id.replace('-', ""),
+            format!(" {id}"),
+            format!("{id} "),
+            format!("{id}\n"),
+            format!("{id}.jsonl"),
+            id[..35].to_owned(),
+            format!("{id}0"),
+            id.replacen('-', "_", 1),
+            "\u{ff10}".repeat(36),
+        ] {
+            for a in [argv(&["claude", "--session-id", &v]), argv(&["claude", &format!("--resume={v}")]), argv(&["claude", "-r", &v])] {
+                unchanged(a.clone());
+                assert_eq!(session_of(&a), None, "{a:?}");
+            }
+        }
+        // Claude's logs are named in lower case: upper or mixed case is respected but never recorded.
+        let upper = id.to_ascii_uppercase();
+        assert_eq!(session_of(&argv(&["claude", "--session-id", &upper])), None);
+        // The nil UUID is never recorded.
+        assert_eq!(session_of(&argv(&["claude", "--session-id", "00000000-0000-0000-0000-000000000000"])), None);
+        // A flag that only starts like ours is not ours: Claude still gets its own id.
+        let out = with_session_id(argv(&["claude", "--session-idx", id]));
+        assert_eq!((out[1].as_str(), out.len()), ("--session-id", 5));
+        assert_ne!(out[2], id);
+        // Windows and Unix paths to Claude get an id too, after argv[0].
+        for exe in [r"C:\Program Files\claude\claude.exe", r"\\server\share\CLAUDE.EXE", "/usr/local/bin/claude"] {
+            let out = with_session_id(argv(&[exe, ""]));
+            assert_eq!((out[0].as_str(), out[1].as_str(), out[3].as_str()), (exe, "--session-id", ""), "{out:?}");
+            assert_eq!(session_of(&out).as_deref(), Some(out[2].as_str()));
+        }
     }
 
     #[test]
