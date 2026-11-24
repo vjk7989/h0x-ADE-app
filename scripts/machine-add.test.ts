@@ -371,7 +371,8 @@ for (const name of ["box", "my-box.lan", "a", "9lives_2", "a".repeat(32)]) test(
 });
 
 for (const name of ["my box", "it's", "a$b", "$(whoami)", "a\"b", "Box", "-box", ".box", "a".repeat(33), "box\nrm -rf ~", ""]) test(`a login toast naming ${JSON.stringify(name)} offers no command to copy`, () => {
-  const t = toast({ title: "Machine", body: loginBody(name) });
+  // The bundled toast grows to fit its text (a833e0b), so it shows the whole message; only a fixed-height toast clips to the first line.
+  const t = toast({ title: "Machine", body: loginBody(name), fitHeight: true });
   expect(t.byId(t.render(), "toast-login-copy")).toBeUndefined();
   expect(t.texts()).toContain("Machine");
   expect(t.texts()).toContain(loginBody(name));
