@@ -6574,8 +6574,13 @@ mod tests {
             crate::settings::set(crate::settings::Settings::compose(&person, &look, false));
             let run = super::AppWindow::agent_argv(Some(words(&["claude"])), None, None, None);
             crate::settings::set((*original).clone());
-            let want = if on { crate::programs::with_token_saver(true, words(&["claude"])) } else { words(&["claude"]) };
-            assert_eq!(run, Some(local_agent_argv(want)), "{text}");
+            // ADR-129: off is not bare any more: the session hook-only settings.
+            let want = crate::programs::with_token_saver(on, words(&["claude"]));
+            assert_eq!(want.contains(&"--settings".to_owned()), true, "{text}");
+            assert_eq!(want[2].contains("PostToolUse"), on, "{text}");
+            assert_eq!(run, Some(local_agent_argv(want.clone())), "{text}");
+            let remote = with_token_saver_setting(on, || super::AppWindow::agent_argv(Some(words(&["claude"])), None, Some("box"), None));
+            assert_eq!(remote, Some(crate::remote_shell::launch(want)), "remote {text}");
         }
     }
 
