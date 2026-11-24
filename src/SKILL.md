@@ -22,6 +22,9 @@ its terminals.
 
 `app.check_updates` checks for newer releases. Settings reports "Up to date"
 only after a successful check; on failure, check the connection and retry.
+Package-managed cores are checked but updated through their package manager.
+Dismiss a core update error with its × or `overlay.close {id:"core-update-error"}`;
+it stays dismissed until the error changes or the update recovers.
 
 ## Show something when asked
 
@@ -135,7 +138,7 @@ untouched. Never call a mod done without a passing check. Then confirm it is
 shown correctly in the running window with `shot`; don't claim a visual
 check you haven't made.
 
-`h0x-ade shot [file.png]` saves the window's last frame and prints its
+`h0x-ade shot [file.png]` saves the window's current frame and prints its
 absolute path (default: `h0x-shot.png` in your current folder). It is the
 app's own rendering at full pixel size: terminals, images, overlays and
 floats included, even when the window is covered or minimized. No screen

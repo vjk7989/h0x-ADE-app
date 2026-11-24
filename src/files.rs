@@ -38,6 +38,12 @@ impl Revisions {
 }
 
 impl FileEvents {
+    #[cfg(test)]
+    pub fn for_test(root: PathBuf) -> Self {
+        let (_, changes) = async_channel::unbounded();
+        Self { changes, root, revisions: Arc::new(Mutex::new(Revisions::default())) }
+    }
+
     pub fn revision_provider(&self) -> impl Fn(&Path) -> Option<u64> + 'static {
         let base = self.root.clone();
         let revisions = self.revisions.clone();
@@ -429,6 +435,33 @@ pub fn counts_as_edit(changed: &Path, known_mod: bool) -> bool {
         return !known_mod;
     }
     !is_generated_helper(rest)
+}
+
+/// Source file metadata, excluding generated editor helpers and directory mtimes.
+pub type ModStamp = Option<std::collections::BTreeMap<PathBuf, (u64, Option<std::time::SystemTime>)>>;
+
+pub fn mod_stamp(root: &Path) -> ModStamp {
+    let mut stamp = std::collections::BTreeMap::new();
+    let mut pending = vec![(root.to_path_buf(), 0)];
+    let mut count = 0;
+    while let Some((dir, depth)) = pending.pop() {
+        for entry in std::fs::read_dir(dir).ok()? {
+            let entry = entry.ok()?;
+            count += 1;
+            if count > 4096 { return None; }
+            let path = entry.path();
+            let Ok(relative) = path.strip_prefix(root) else { continue };
+            if !gpui_shell::application_file_counts(relative) { continue; }
+            let meta = std::fs::metadata(&path).ok()?;
+            if meta.is_dir() {
+                if depth >= 8 { return None; }
+                pending.push((path, depth + 1));
+            } else if meta.is_file() {
+                stamp.insert(relative.to_path_buf(), (meta.len(), meta.modified().ok()));
+            }
+        }
+    }
+    Some(stamp)
 }
 
 /// The mod a changed path belongs to (`mods/<name>/...`).
@@ -928,6 +961,124 @@ mod tests {
         wait_for_change(&dir, &dir.join("b.md"));
         folders().remove(&dir);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn stamp_dir(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("h0x-mod-stamp-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_mod_stamp_is_none_for_a_missing_folder_and_empty_for_an_empty_one() {
+        let root = stamp_dir("empty");
+        assert_eq!(mod_stamp(&root), Some(Default::default()), "an empty mod has an empty stamp");
+        assert_eq!(mod_stamp(&root.join("missing")), None, "a missing folder cannot prove anything");
+        std::fs::write(root.join("file.js"), "").unwrap();
+        assert_eq!(mod_stamp(&root.join("file.js")), None, "a file is not a mod folder");
+        std::fs::write(root.join("empty.js"), "").unwrap();
+        let stamp = mod_stamp(&root).unwrap();
+        assert_eq!(stamp.get(Path::new("empty.js")).map(|s| s.0), Some(0), "an empty file still counts");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_mod_stamp_changes_with_the_source_and_ignores_generated_helpers() {
+        let root = stamp_dir("helpers");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("main.js"), "one").unwrap();
+        let before = mod_stamp(&root).unwrap();
+        assert_eq!(before.keys().cloned().collect::<Vec<_>>(), [PathBuf::from("main.js")]);
+        for helper in ["jsconfig.json", "gpui-kit.d.ts", "lib/gpui-kit.d.ts", ".hidden.js", "main.js~", "node_modules/a.js"] {
+            std::fs::create_dir_all(root.join(helper).parent().unwrap()).unwrap();
+            std::fs::write(root.join(helper), "x").unwrap();
+        }
+        assert_eq!(mod_stamp(&root), Some(before.clone()), "helpers, dot files, backups and node_modules are not the mod's source");
+        // An author's jsconfig.json deeper in the mod is source.
+        std::fs::write(root.join("lib/jsconfig.json"), "{}").unwrap();
+        let deeper = mod_stamp(&root).unwrap();
+        assert!(deeper.contains_key(Path::new("lib/jsconfig.json")));
+        std::fs::write(root.join("main.js"), "two!").unwrap();
+        assert_ne!(mod_stamp(&root).unwrap().get(Path::new("main.js")), deeper.get(Path::new("main.js")), "a saved edit changes the stamp");
+        std::fs::remove_file(root.join("main.js")).unwrap();
+        assert!(!mod_stamp(&root).unwrap().contains_key(Path::new("main.js")), "a deleted file leaves the stamp");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_mod_stamp_gives_up_past_4096_entries() {
+        let root = stamp_dir("count");
+        for i in 0..4096 {
+            std::fs::write(root.join(format!("{i}.js")), "").unwrap();
+        }
+        assert_eq!(mod_stamp(&root).map(|s| s.len()), Some(4096), "exactly the limit is scanned");
+        // Ignored entries still cost a read.
+        std::fs::write(root.join(".extra"), "").unwrap();
+        assert_eq!(mod_stamp(&root), None, "one past the limit is an incomplete scan");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_mod_stamp_gives_up_past_8_folders_deep() {
+        let root = stamp_dir("depth");
+        let mut deepest = root.clone();
+        for level in 1..=8 {
+            deepest = deepest.join(format!("d{level}"));
+        }
+        std::fs::create_dir_all(&deepest).unwrap();
+        std::fs::write(deepest.join("leaf.js"), "x").unwrap();
+        let stamp = mod_stamp(&root).expect("8 folders deep is scanned");
+        assert_eq!(stamp.len(), 1, "folders themselves carry no stamp: {stamp:?}");
+        std::fs::create_dir(deepest.join("d9")).unwrap();
+        assert_eq!(mod_stamp(&root), None, "a ninth folder is too deep, even empty");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mod_stamp_follows_links_and_gives_up_on_broken_or_looping_ones() {
+        let root = stamp_dir("links");
+        let outside = stamp_dir("links-outside");
+        std::fs::write(outside.join("shared.js"), "12345").unwrap();
+        std::fs::write(root.join("main.js"), "x").unwrap();
+        std::os::unix::fs::symlink(outside.join("shared.js"), root.join("shared.js")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("lib")).unwrap();
+        let stamp = mod_stamp(&root).unwrap();
+        assert_eq!(stamp.get(Path::new("shared.js")).map(|s| s.0), Some(5), "a linked file is stamped by its target");
+        assert!(stamp.contains_key(Path::new("lib/shared.js")), "a linked folder is scanned");
+
+        std::os::unix::fs::symlink(root.join("gone.js"), root.join("broken.js")).unwrap();
+        assert_eq!(mod_stamp(&root), None, "a broken link cannot prove the source is unchanged");
+        std::fs::remove_file(root.join("broken.js")).unwrap();
+
+        std::os::unix::fs::symlink(root.join("self.js"), root.join("self.js")).unwrap();
+        assert_eq!(mod_stamp(&root), None, "a link to itself");
+        std::fs::remove_file(root.join("self.js")).unwrap();
+
+        std::os::unix::fs::symlink(&root, root.join("up")).unwrap();
+        assert_eq!(mod_stamp(&root), None, "a folder loop stops at the depth limit");
+        std::fs::remove_file(root.join("up")).unwrap();
+        assert_eq!(mod_stamp(&root), Some(stamp), "the stamp is the same once the links are gone");
+
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_mod_stamp_has_the_same_names_through_a_verbatim_path() {
+        let root = stamp_dir("verbatim");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("main.js"), "x").unwrap();
+        std::fs::write(root.join(r"lib\util.js"), "y").unwrap();
+        let verbatim = root.canonicalize().unwrap();
+        assert!(verbatim.to_string_lossy().starts_with(r"\\?\"), "{verbatim:?}");
+        let plain = mod_stamp(&root).unwrap();
+        assert_eq!(mod_stamp(&verbatim), Some(plain.clone()), "a `\\\\?\\` root names the same files");
+        assert!(plain.contains_key(Path::new(r"lib\util.js")));
+        assert_eq!(mod_stamp(Path::new(r"\\?\C:\h0x-no-such-mod-folder")), None);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
 

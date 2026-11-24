@@ -60,7 +60,7 @@ Usage:
   h0x-ade feedback <text>        draft feedback for the person to review and send
   h0x-ade commands               every command, its arguments, what it does
   h0x-ade status                 what the window shows, and any errors
-  h0x-ade shot [file.png]        save the last window frame (default: h0x-shot.png)
+  h0x-ade shot [file.png]        save the current window frame (default: h0x-shot.png)
   h0x-ade check <mod folder>     load a mod once and report what's wrong
   h0x-ade --skill                Agent Skill: driving the window, and where h0x-core fits
   h0x-ade --version
@@ -192,8 +192,8 @@ fn main() {
     };
     #[cfg(target_os = "macos")]
     core_bin::install_cli_link();
-    if core.is_ok() {
-        update::after_update();
+    if let Ok(core) = &core {
+        update::after_update(core.clone());
     }
     // A first run: no update check, and no usage event, before the welcome has shown the setting.
     let welcomed = mods::shared("frame.welcomed").is_some();
@@ -217,7 +217,8 @@ fn main() {
     }
 
     gpui_platform::application()
-        .with_assets(gpui_shell::AppAssets::new(mods::app_dir()))
+        // Mods run programs already; the user's own links (dotfiles, Nix) may point out.
+        .with_assets(gpui_shell::AppAssets::new(mods::app_dir()).following_links())
         .run(move |cx| {
             let fonts = settings::BUNDLED_FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
             if let Err(e) = cx.text_system().add_fonts(fonts) {
