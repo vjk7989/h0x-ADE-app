@@ -798,6 +798,14 @@ export default class Settings extends View {
           "While an agent in a terminal on this PC is working, the PC doesn't go to sleep. The display can still turn off and the screen still locks. Saved as keep_awake in h0x-core's config.toml.",
           this.toggle(t, "st-keep-awake", this.keepAwake, (_e, cx) => this.setKeepAwake(!this.keepAwake, cx)),
         ),
+      )
+      .child(
+        this.row(
+          t,
+          "Start HyperOx at login",
+          "Opens the HyperOx window when you log in to this computer.",
+          this.toggle(t, "st-start-at-login", Boolean(settings().start_at_login), () => run("app.start_at_login", { on: !settings().start_at_login })),
+        ),
       );
   }
 
@@ -1315,14 +1323,6 @@ export default class Settings extends View {
         ),
       )
       .child(div().pt(8).pb(4).text_size(12.5).text_color(t.muted).child(`Tokens saved: ${this.savedText()}`))
-      .child(
-        this.row(
-          t,
-          "Start HyperOx at login",
-          "Opens the HyperOx window when you log in to this computer.",
-          this.toggle(t, "st-start-at-login", Boolean(settings().start_at_login), () => run("app.start_at_login", { on: !settings().start_at_login })),
-        ),
-      )
       .child(soon("Security"))
       .child(soon("ZK Proofs"))
       .child(soon("Observability"));
