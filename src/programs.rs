@@ -260,19 +260,33 @@ pub fn agent(argv: &[String]) -> Option<String> {
     })
 }
 
-/// Token Saver's PostToolUse hook, as Claude Code's `--settings` JSON. Core sets
-/// `H0X_CORE_EXE` in every terminal; Claude runs the command through a shell.
-const TOKEN_SAVER_SETTINGS: &str = r#"{"hooks":{"PostToolUse":[{"matcher":"^(Bash|Read|Grep)$","hooks":[{"type":"command","command":"\"$H0X_CORE_EXE\" gate","timeout":20}]}]}}"#;
+/// Claude Code's `--settings` JSON for a HyperOx launch. Core sets `H0X_CORE_EXE` in
+/// every terminal; Claude runs each command through a shell, so the hooks read it (and
+/// `H0X_SCOPE`) at run time, never from argv. Always a SessionStart hook that records the
+/// session id (it changes on `/clear` and resume; ADR-129); with `token_saver`, also the
+/// PostToolUse hook.
+fn settings_json(token_saver: bool) -> String {
+    let mut hooks = json!({"SessionStart": [{"hooks": [{"type": "command", "command": "\"$H0X_CORE_EXE\" hook session --agent claude", "timeout": 10}]}]});
+    if token_saver {
+        hooks["PostToolUse"] = json!([{"matcher": "^(Bash|Read|Grep)$", "hooks": [{"type": "command", "command": "\"$H0X_CORE_EXE\" gate", "timeout": 20}]}]);
+    }
+    json!({ "hooks": hooks }).to_string()
+}
 
-/// `argv` for a new terminal, with Token Saver's hook added when `on` and it
-/// starts Claude Code: `claude --settings <json> <the person's args>`. Anything
-/// else, and a Claude that already has `--settings` (the person's choice wins),
+/// `argv` for a new terminal that starts Claude Code: `claude --settings <json> <the
+/// person's args>`, the JSON being the session hook, plus Token Saver's hook when `on`.
+/// Anything else, and a Claude that already has `--settings` (the person's choice wins),
 /// stays exactly as asked.
 pub fn with_token_saver(on: bool, mut argv: Vec<String>) -> Vec<String> {
-    if on && starts_claude(&argv) && !has_settings(&argv) {
-        argv.splice(1..1, ["--settings".to_owned(), TOKEN_SAVER_SETTINGS.to_owned()]);
+    if gets_settings(&argv) {
+        argv.splice(1..1, ["--settings".to_owned(), settings_json(on)]);
     }
     argv
+}
+
+/// Whether HyperOx adds its `--settings` to this launch (so Token Saver is in force when on).
+pub(crate) fn gets_settings(argv: &[String]) -> bool {
+    starts_claude(argv) && !has_settings(argv)
 }
 
 pub(crate) fn starts_claude(argv: &[String]) -> bool {
@@ -384,10 +398,14 @@ pub fn with_routing(route: &Route, mut argv: Vec<String>) -> Vec<String> {
     if route.graft && !argv.iter().any(|a| a.starts_with("--append-system-prompt")) {
         add.extend(["--append-system-prompt".to_owned(), MAP_HINT.to_owned()]);
     }
-    let ours = argv.get(1).is_some_and(|a| a == "--settings") && argv.get(2).is_some_and(|a| a == TOKEN_SAVER_SETTINGS);
+    let ours = argv.get(1).is_some_and(|a| a == "--settings") && argv.get(2).is_some_and(|a| *a == settings_json(true) || *a == settings_json(false));
     if ours || !has_settings(&argv) {
-        let mut settings: Value = serde_json::from_str(if ours { TOKEN_SAVER_SETTINGS } else { "{}" }).unwrap_or_default();
-        settings["hooks"]["SessionStart"] = json!([{"matcher": "clear", "hooks": [{"type": "command", "command": HANDOFF_COMMAND}]}]);
+        let mut settings: Value = if ours { serde_json::from_str(&argv[2]).unwrap_or_default() } else { json!({}) };
+        let handoff = json!({"matcher": "clear", "hooks": [{"type": "command", "command": HANDOFF_COMMAND}]});
+        match settings["hooks"]["SessionStart"].as_array_mut() {
+            Some(list) => list.insert(0, handoff),
+            None => settings["hooks"]["SessionStart"] = json!([handoff]),
+        }
         let json = settings.to_string();
         if ours {
             argv[2] = json;
@@ -1068,7 +1086,7 @@ mod tests {
         a.iter().map(|s| s.to_string()).collect()
     }
     fn hooked(rest: &[&str]) -> Vec<String> {
-        let mut v = argv(&["claude", "--settings", TOKEN_SAVER_SETTINGS]);
+        let mut v = argv(&["claude", "--settings", &settings_json(true)]);
         v.extend(argv(rest));
         v
     }
@@ -1212,7 +1230,18 @@ mod tests {
     #[test]
     fn token_saver_adds_the_hook_to_claude_only_when_on() {
         assert_eq!(with_token_saver(true, argv(&["claude"])), hooked(&[]));
-        assert_eq!(with_token_saver(false, argv(&["claude"])), argv(&["claude"]), "off: unchanged");
+        // Off: only the session hook (ADR-129), no PostToolUse; the person's args stay after it.
+        let off = with_token_saver(false, argv(&["claude", "go"]));
+        assert_eq!((off[0].as_str(), off[1].as_str(), off[3].as_str(), off.len()), ("claude", "--settings", "go", 4));
+        assert_eq!(off[2], settings_json(false));
+        let s: Value = serde_json::from_str(&off[2]).unwrap();
+        assert_eq!(s, json!({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "\"$H0X_CORE_EXE\" hook session --agent claude", "timeout": 10}]}]}}));
+        // On: the Token Saver hook and the session hook, in one JSON.
+        let s: Value = serde_json::from_str(&hooked(&[])[2]).unwrap();
+        assert_eq!(s["hooks"]["SessionStart"], json!([{"hooks": [{"type": "command", "command": "\"$H0X_CORE_EXE\" hook session --agent claude", "timeout": 10}]}]));
+        assert_eq!(s["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "\"$H0X_CORE_EXE\" gate");
+        // No secret or scope in argv: the hooks read the environment when they run.
+        assert!(!hooked(&[])[2].contains("H0X_SCOPE") && !off[2].contains("H0X_SCOPE"));
         assert_eq!(with_token_saver(true, argv(&["claude.exe"]))[1..], hooked(&[])[1..]);
         assert_eq!(with_token_saver(true, argv(&[r"C:\Program Files\claude\claude.exe"]))[0], r"C:\Program Files\claude\claude.exe");
         assert_eq!(with_token_saver(true, argv(&[r"C:\Program Files\claude\claude.exe"]))[1], "--settings");
@@ -1227,12 +1256,13 @@ mod tests {
     fn token_saver_leaves_everything_else_alone() {
         for a in [argv(&[]), argv(&["codex"]), argv(&["opencode", "x"]), argv(&["pwsh"]), argv(&["claude", "--settings", "{}"]), argv(&["claude", "--settings=x.json"])] {
             assert_eq!(with_token_saver(true, a.clone()), a);
+            assert_eq!(with_token_saver(false, a.clone()), a, "off too: the session hook is not forced on the person's own settings");
         }
     }
 
     #[test]
     fn token_saver_json_is_valid_and_survives_the_powershell_line() {
-        let v: Value = serde_json::from_str(TOKEN_SAVER_SETTINGS).unwrap();
+        let v: Value = serde_json::from_str(&settings_json(true)).unwrap();
         assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "\"$H0X_CORE_EXE\" gate");
         let cmd = with_token_saver(true, argv(&["claude", "go"]));
         assert_eq!(powershell_words(&powershell_line(&cmd)), Some(cmd));
@@ -1285,9 +1315,9 @@ mod tests {
         let line = powershell_line(&cmd);
         assert_eq!(powershell_words(&line), Some(cmd.clone()));
         // The JSON is one single-quoted PowerShell word: `$H0X_CORE_EXE` is left for Claude's shell.
-        let arg = windows_arg(TOKEN_SAVER_SETTINGS);
+        let arg = windows_arg(&settings_json(true));
         assert!(line.contains(&format!(", {}, ", powershell_quote(&arg))), "{line}");
-        assert_eq!(windows_unquote(&arg), TOKEN_SAVER_SETTINGS);
+        assert_eq!(windows_unquote(&arg), settings_json(true));
         // A `claude.cmd` shim goes through cmd.exe: `^` and `|` in the matcher stay inside its quotes.
         let mut inside = false;
         for ch in arg.chars() {
@@ -1442,11 +1472,23 @@ mod tests {
         assert_eq!(out[3..], argv(&["--tools", "Bash,Read", "--model", "haiku", "--append-system-prompt", MAP_HINT])[..]);
         let s: Value = serde_json::from_str(&out[2]).expect("valid json");
         let hooks = s["hooks"].as_object().unwrap();
-        assert_eq!(hooks.keys().map(String::as_str).collect::<Vec<_>>(), ["PostToolUse", "SessionStart"]);
-        let saver: Value = serde_json::from_str(TOKEN_SAVER_SETTINGS).unwrap();
+        let mut keys = hooks.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(keys, ["PostToolUse", "SessionStart"]);
+        let saver: Value = serde_json::from_str(&settings_json(true)).unwrap();
         assert_eq!(s["hooks"]["PostToolUse"], saver["hooks"]["PostToolUse"], "token saver hook unchanged");
-        assert_eq!(s["hooks"]["SessionStart"], json!([{"matcher": "clear", "hooks": [{"type": "command", "command": "\"$H0X_CORE_EXE\" handoff"}]}]));
-        // Token Saver off: the same flags, and a settings JSON with only the handoff hook.
+        // All three hooks (ADR-129): the handoff, then the session hook.
+        assert_eq!(s["hooks"]["SessionStart"], json!([
+            {"matcher": "clear", "hooks": [{"type": "command", "command": "\"$H0X_CORE_EXE\" handoff"}]},
+            {"hooks": [{"type": "command", "command": "\"$H0X_CORE_EXE\" hook session --agent claude", "timeout": 10}]},
+        ]));
+        // Token Saver off, routing on (as the app builds it): the session hook and the handoff, no PostToolUse.
+        let off = with_routing(&full(), with_token_saver(false, argv(&["claude"])));
+        assert_eq!(off.len(), 9, "{off:?}");
+        let s = settings_of(&off);
+        assert_eq!(s["hooks"]["SessionStart"].as_array().map(Vec::len), Some(2));
+        assert!(s["hooks"].get("PostToolUse").is_none());
+        // Routing alone on bare argv: the same flags, and a settings JSON with only the handoff hook.
         let out = with_routing(&full(), argv(&["claude"]));
         assert_eq!(out.len(), 9, "{out:?}");
         let s = settings_of(&out);
@@ -1518,6 +1560,213 @@ mod tests {
         // Only the local `claude` command is changed; a remote or wrapped one is not ours to rewrite.
         for a in [argv(&["ssh", "host", "claude"]), argv(&["ssh", "-t", "me@host", "claude", "--model", "opus"]), argv(&["wsl", "claude"]), argv(&["wsl.exe", "-e", "claude"]), argv(&[r"C:\Windows\System32\OpenSSH\ssh.exe", "host", "claude"]), argv(&[""])] {
             assert_eq!(with_routing(&full(), with_token_saver(true, a.clone())), a, "{a:?}");
+        }
+    }
+
+    /// SessionStart's session hook as HyperOx writes it (ADR-129).
+    fn session_hook() -> Value {
+        json!({"hooks": [{"type": "command", "command": "\"$H0X_CORE_EXE\" hook session --agent claude", "timeout": 10}]})
+    }
+    fn handoff_hook() -> Value {
+        json!({"matcher": "clear", "hooks": [{"type": "command", "command": "\"$H0X_CORE_EXE\" handoff"}]})
+    }
+    /// Every word that is a `--settings` flag of any spelling.
+    fn settings_words(v: &[String]) -> usize {
+        v.iter().filter(|a| *a == "--settings" || a.starts_with("--settings=")).count()
+    }
+    /// A Windows command line split the way C runtimes since 2008 read it (`""` inside quotes is one `"`).
+    fn crt_split(line: &str) -> Vec<String> {
+        let (mut out, mut cur, mut in_word, mut quoted, mut slashes) = (Vec::new(), String::new(), false, false, 0);
+        let mut chars = line.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\\' => {
+                    slashes += 1;
+                    in_word = true;
+                    continue;
+                }
+                '"' => {
+                    cur.extend(std::iter::repeat_n('\\', slashes / 2));
+                    if slashes % 2 == 1 {
+                        cur.push('"');
+                    } else if quoted && chars.peek() == Some(&'"') {
+                        chars.next();
+                        cur.push('"');
+                    } else {
+                        quoted = !quoted;
+                    }
+                    in_word = true;
+                }
+                ' ' | '\t' if !quoted => {
+                    cur.extend(std::iter::repeat_n('\\', slashes));
+                    if in_word {
+                        out.push(std::mem::take(&mut cur));
+                        in_word = false;
+                    }
+                }
+                _ => {
+                    cur.extend(std::iter::repeat_n('\\', slashes).chain([ch]));
+                    in_word = true;
+                }
+            }
+            slashes = 0;
+        }
+        cur.extend(std::iter::repeat_n('\\', slashes));
+        if in_word {
+            out.push(cur);
+        }
+        out
+    }
+
+    #[test]
+    fn every_claude_spelling_gets_the_session_hook_on_and_off() {
+        // Full Windows paths with spaces, `claude.exe`, WSL-style paths and npm's extensionless global shim.
+        for name in [
+            r"C:\Program Files\Anthropic Claude\claude.exe",
+            r"C:\Users\Jane Doe\AppData\Roaming\npm\claude",
+            "claude.exe",
+            "/mnt/c/Users/Jane Doe/AppData/Roaming/npm/claude",
+            r"\\wsl.localhost\Ubuntu\home\me\.npm-global\bin\claude",
+            "/home/me/.npm-global/bin/claude",
+        ] {
+            for on in [true, false] {
+                let out = with_token_saver(on, argv(&[name, "go"]));
+                assert_eq!(out.len(), 4, "{name} {on}: {out:?}");
+                assert_eq!((out[0].as_str(), out[1].as_str(), out[3].as_str()), (name, "--settings", "go"), "{name} {on}");
+                assert_eq!(out[2], settings_json(on), "{name} {on}");
+                let s: Value = serde_json::from_str(&out[2]).unwrap();
+                assert_eq!(s["hooks"]["SessionStart"], json!([session_hook()]), "{name} {on}");
+                assert_eq!(s["hooks"].get("PostToolUse").is_some(), on, "{name} {on}");
+                assert!(gets_settings(&argv(&[name])), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_shim_that_is_not_claude_itself_gets_no_hooks_and_no_label() {
+        // `claude.cmd`/`claude.ps1` are skipped (programs.rs base() only drops `.exe`): argv and
+        // `gets_settings` (which drives the `h0x.ts` label) must agree.
+        for a in [argv(&["claude.cmd"]), argv(&[r"C:\Users\Jane Doe\AppData\Roaming\npm\claude.cmd", "go"]), argv(&["claude.ps1"])] {
+            for on in [true, false] {
+                assert_eq!(with_token_saver(on, a.clone()), a, "{a:?} {on}");
+            }
+            assert!(!gets_settings(&a), "{a:?}");
+        }
+        assert!(!gets_settings(&[]) && !gets_settings(&argv(&[""])) && !gets_settings(&argv(&["codex"])));
+    }
+
+    #[test]
+    fn a_settings_flag_with_no_value_or_an_empty_value_is_the_persons_own() {
+        for a in [argv(&["claude", "go", "--settings"]), argv(&["claude", "--settings="]), argv(&["claude", "--settings=", "go"]), argv(&["claude", "--model", "opus", "--settings"])] {
+            for on in [true, false] {
+                assert_eq!(with_token_saver(on, a.clone()), a, "{a:?} {on}");
+                // Routing on top adds its flags but never a second `--settings` nor any hook.
+                let out = with_routing(&full(), with_token_saver(on, a.clone()));
+                assert_eq!(settings_words(&out), 1, "{out:?}");
+                assert!(!out.iter().any(|x| x.contains("SessionStart") || x.contains("hook session")), "{out:?}");
+            }
+            assert!(!gets_settings(&a), "{a:?}");
+        }
+    }
+
+    #[test]
+    fn routing_with_token_saver_off_puts_the_handoff_before_the_session_hook() {
+        let out = with_routing(&full(), with_token_saver(false, argv(&["claude", "go"])));
+        assert_eq!((out[0].as_str(), out[1].as_str(), out.last().map(String::as_str)), ("claude", "--settings", Some("go")));
+        assert_eq!(settings_words(&out), 1);
+        assert_eq!(settings_of(&out), json!({"hooks": {"SessionStart": [handoff_hook(), session_hook()]}}));
+        // An empty route still merges the handoff, in place: no other words.
+        let out = with_routing(&Route::default(), with_token_saver(false, argv(&["claude", "go"])));
+        assert_eq!(out.len(), 4, "{out:?}");
+        assert_eq!(settings_of(&out), json!({"hooks": {"SessionStart": [handoff_hook(), session_hook()]}}));
+        // Token Saver on: the same order, plus PostToolUse.
+        let s = settings_of(&with_routing(&Route::default(), with_token_saver(true, argv(&["claude"]))));
+        assert_eq!(s["hooks"]["SessionStart"], json!([handoff_hook(), session_hook()]));
+        assert_eq!(s["hooks"]["PostToolUse"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn token_saver_and_routing_twice_add_no_hook_twice() {
+        for name in ["claude", r"C:\Program Files\Anthropic Claude\claude.exe"] {
+            for on in [true, false] {
+                let once = with_token_saver(on, argv(&[name, "go"]));
+                assert_eq!(with_token_saver(on, once.clone()), once, "{name} {on}");
+                assert_eq!(with_token_saver(!on, once.clone()), once, "{name} {on}: the other setting does not add a second one");
+                let routed = with_routing(&full(), once);
+                assert_eq!(with_routing(&full(), routed.clone()), routed, "{name} {on}");
+                assert_eq!(with_token_saver(on, routed.clone()), routed, "{name} {on}");
+                assert_eq!(settings_words(&routed), 1);
+                let s = settings_of(&routed);
+                assert_eq!(s["hooks"]["SessionStart"], json!([handoff_hook(), session_hook()]), "{name} {on}");
+                assert_eq!(s["hooks"]["PostToolUse"].as_array().map(Vec::len), on.then_some(1), "{name} {on}");
+            }
+        }
+    }
+
+    #[test]
+    fn settings_json_is_small_one_line_and_parses_back() {
+        let routed = |on| with_routing(&full(), with_token_saver(on, argv(&["claude"])))[2].clone();
+        for json in [settings_json(true), settings_json(false), routed(true), routed(false)] {
+            assert!(!json.is_empty() && json.len() <= 1024, "{} bytes: {json}", json.len());
+            // cmd.exe (npm's `.cmd` shim) ends a line at a break and expands `%` and `!` even in quotes.
+            assert!(!json.contains(['\n', '\r', '%', '!']), "{json}");
+            let v: Value = serde_json::from_str(&json).expect("valid json");
+            assert_eq!(v.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()), Some(vec!["hooks".to_owned()]), "{json}");
+            assert_eq!(v.to_string(), json, "round trip");
+        }
+    }
+
+    #[test]
+    fn hook_commands_have_no_shell_metacharacters_but_the_quoted_core_path() {
+        for on in [true, false] {
+            let out = with_routing(&full(), with_token_saver(on, argv(&["claude", "go"])));
+            let s = settings_of(&out);
+            let mut n = 0;
+            for list in s["hooks"].as_object().unwrap().values() {
+                for entry in list.as_array().unwrap() {
+                    for hook in entry["hooks"].as_array().unwrap() {
+                        let cmd = hook["command"].as_str().unwrap();
+                        let rest = cmd.strip_prefix("\"$H0X_CORE_EXE\" ").unwrap_or_else(|| panic!("{cmd}"));
+                        assert!(!rest.is_empty() && rest.chars().all(|c| c.is_ascii_lowercase() || c == ' ' || c == '-'), "{cmd}");
+                        n += 1;
+                    }
+                }
+            }
+            assert_eq!(n, if on { 3 } else { 2 });
+            // No scope or secret in any word of argv.
+            assert!(!out.iter().any(|a| a.contains("SCOPE") || a.contains("TOKEN") || a.contains("SECRET")), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn the_settings_json_survives_the_final_windows_command_line() {
+        let task = "say \"hi\" to C:\\dir\\ & | > ^ done\\";
+        for prog in ["claude", r"C:\Program Files\Anthropic Claude\claude.exe"] {
+            for on in [true, false] {
+                for routed in [false, true] {
+                    let mut cmd = with_token_saver(on, argv(&[prog]));
+                    if routed {
+                        cmd = with_routing(&full(), cmd);
+                    }
+                    cmd.push(task.to_owned());
+                    // PowerShell's words, then the native command line it hands Claude, parsed back.
+                    let words = powershell_words(&powershell_line(&cmd)).expect("powershell line");
+                    assert_eq!(words, cmd, "{prog} {on} {routed}");
+                    let line = words.iter().map(|w| windows_arg(w)).collect::<Vec<_>>().join(" ");
+                    assert_eq!(crt_split(&line), cmd, "{line}");
+                    // cmd.exe's metacharacters in the JSON stay inside its quotes.
+                    let arg = windows_arg(&cmd[2]);
+                    let mut inside = false;
+                    for ch in arg.chars() {
+                        if ch == '"' {
+                            inside = !inside;
+                        } else if "^|&<>".contains(ch) {
+                            assert!(inside, "{ch:?} outside quotes in {arg}");
+                        }
+                    }
+                    assert!(!inside, "the quotes close: {arg}");
+                }
+            }
         }
     }
 }

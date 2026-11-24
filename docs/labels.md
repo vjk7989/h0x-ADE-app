@@ -79,3 +79,11 @@ Set at launch on a local terminal that HyperOx starts as Claude Code
 (`claude --session-id <uuid>`, or the explicit id of the person's own
 `--session-id`/`--resume`). Usage reads only that session's log, never one
 picked by folder or time. No label: nothing is read.
+
+## `h0x.ts=on`: Token Saver's hooks are in this Claude launch
+
+Set at launch on a Claude Code terminal that HyperOx starts with Token Saver on
+(local or on another machine), when HyperOx added its own `--settings`: the
+person's own `--settings` means no hooks of ours and no label. A later
+auto-resume reads it to add Token Saver's hooks again (ADR-129). Private like
+`h0x.session`: not shown anywhere, and it never holds a secret or scope.
