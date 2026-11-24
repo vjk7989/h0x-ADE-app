@@ -3332,6 +3332,20 @@ impl AppWindow {
                     })
                     .detach();
             }
+            "terminal.resume" => {
+                let params = match resume_params(a, |t| self.live.contains_key(t)) {
+                    Ok(p) => p,
+                    Err(e) => return self.fail(e),
+                };
+                let core = self.core.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Err(e) = core.call("terminal.label", params) {
+                            tracing::warn!("resume label: {e:#}");
+                        }
+                    })
+                    .detach();
+            }
             "terminal.kill" => {
                 let t = Self::arg(a, "terminal").unwrap_or_default();
                 if !self.live.contains_key(t) {
@@ -3667,6 +3681,10 @@ impl AppWindow {
                 });
                 self.write_person(|p| p.zoom = zoom, window, cx);
             }
+            "app.start_at_login" => match login_start_change(a, crate::login_start::apply) {
+                Ok(on) => self.write_person(|p| p.start_at_login = on, window, cx),
+                Err(e) => return self.fail(e),
+            },
             "app.quit" => cx.quit(),
             "app.update" => {
                 match crate::update::apply() {
@@ -5028,6 +5046,25 @@ fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
         (Some(dir @ ("left" | "right" | "up" | "down")), None) => Ok(SwapBy::Direction(dir)),
         (Some(dir), None) => Err(format!("pane.swap direction is left, right, up or down, not {dir:?}")),
     }
+}
+
+/// The `terminal.label` params of `terminal.resume {terminal, on}`: off sets `h0x.resume` to
+/// "off", on removes it (empty). A terminal that is not running or a non-bool `on` is refused.
+fn resume_params(a: &Value, is_live: impl Fn(&str) -> bool) -> Result<Value, String> {
+    let Some(on) = a.get("on").and_then(Value::as_bool) else { return Err("terminal.resume on is true or false".into()) };
+    let t = a.get("terminal").and_then(Value::as_str).unwrap_or_default();
+    if !is_live(t) {
+        return Err(format!("no running terminal {t:?}"));
+    }
+    Ok(json!({ "terminal": t, "labels": { "h0x.resume": if on { "" } else { "off" } } }))
+}
+
+/// `app.start_at_login {on}`: runs `apply(on)` and returns `on` to keep in settings.json only
+/// when it worked; a non-bool `on` or a failed `apply` is an error and changes nothing.
+fn login_start_change(a: &Value, apply: impl FnOnce(bool) -> Result<(), String>) -> Result<bool, String> {
+    let Some(on) = a.get("on").and_then(Value::as_bool) else { return Err("app.start_at_login on is true or false".into()) };
+    apply(on).map_err(|e| format!("Couldn't change start at login: {e}"))?;
+    Ok(on)
 }
 
 /// Tells the Files panel to open `path`: `open:<path>`, then (for a link like `file.rs:12`)
@@ -7552,6 +7589,109 @@ export default class Probe extends View { render() { return div().child("probe")
         for name in ["pane.focus", "terminal.copy", "terminal.copy_screen", "terminal.paste", "terminal.paste_image", "terminal.right_click"] {
             assert!(!super::needs_model_pane(name, &json!({})), "{name}");
         }
+    }
+
+    #[test]
+    fn login_start_applies_then_keeps_the_setting() {
+        use serde_json::json;
+        for on in [true, false] {
+            let mut seen = None;
+            assert_eq!(super::login_start_change(&json!({"on": on}), |v| { seen = Some(v); Ok(()) }), Ok(on));
+            assert_eq!(seen, Some(on));
+        }
+    }
+
+    #[test]
+    fn login_start_leaves_the_setting_when_the_write_fails_or_on_is_not_a_bool() {
+        use serde_json::json;
+        let err = super::login_start_change(&json!({"on": true}), |_| Err("access denied".into())).unwrap_err();
+        assert!(err.contains("access denied"), "{err}");
+        for a in [json!({}), json!({"on": "true"}), json!({"on": 1}), json!({"on": null})] {
+            let mut called = false;
+            assert!(super::login_start_change(&a, |_| { called = true; Ok(()) }).is_err(), "{a}");
+            assert!(!called, "{a}: nothing is applied");
+        }
+    }
+
+    #[test]
+    fn terminal_resume_sets_or_clears_the_label() {
+        use serde_json::json;
+        let live = |t: &str| t == "t1" || t == "box/t2";
+        for t in ["t1", "box/t2"] {
+            assert_eq!(super::resume_params(&json!({"terminal": t, "on": false}), live), Ok(json!({"terminal": t, "labels": {"h0x.resume": "off"}})));
+            assert_eq!(super::resume_params(&json!({"terminal": t, "on": true}), live), Ok(json!({"terminal": t, "labels": {"h0x.resume": ""}})));
+        }
+    }
+
+    #[test]
+    fn terminal_resume_refuses_an_unknown_terminal_and_a_non_bool_on() {
+        use serde_json::json;
+        let live = |t: &str| t == "t1";
+        assert!(super::resume_params(&json!({"terminal": "t9", "on": true}), live).is_err());
+        assert!(super::resume_params(&json!({"on": true}), live).is_err());
+        for on in [json!("off"), json!(0), json!(null)] {
+            assert!(super::resume_params(&json!({"terminal": "t1", "on": on}), live).is_err(), "{on}");
+        }
+        assert!(super::resume_params(&json!({"terminal": "t1"}), live).is_err());
+    }
+
+    #[test]
+    fn terminal_resume_edges_remote_ids_empty_ids_and_every_non_bool_on() {
+        use serde_json::json;
+        let live = |t: &str| t == "t1" || t == "machine/t3" || t == "my box/t12";
+        // Remote ids (machine/tN, a machine name with a space) pass through as given.
+        for t in ["machine/t3", "my box/t12"] {
+            assert_eq!(super::resume_params(&json!({"terminal": t, "on": false}), live).unwrap()["terminal"], json!(t));
+        }
+        // The same id on another machine, a bare machine, an empty or non-string id: unknown.
+        for t in [json!("other/t3"), json!("machine/"), json!("machine"), json!(""), json!(null), json!(1), json!(["t1"])] {
+            let err = super::resume_params(&json!({"terminal": t, "on": false}), live).unwrap_err();
+            assert!(err.contains("no running terminal"), "{t}: {err}");
+        }
+        // Only a JSON bool is `on`: "true", 1, null, arrays and objects are refused, on a live terminal.
+        for on in [json!("true"), json!("false"), json!(1), json!(0), json!(null), json!([true]), json!({"on": true})] {
+            let err = super::resume_params(&json!({"terminal": "t1", "on": on}), live).unwrap_err();
+            assert!(err.contains("true or false"), "{on}: {err}");
+        }
+        // No args at all, or not an object.
+        assert!(super::resume_params(&json!({}), live).is_err());
+        assert!(super::resume_params(&json!(null), live).is_err());
+        assert!(super::resume_params(&json!([{"terminal": "t1", "on": true}]), live).is_err());
+        // Off is "off" exactly, on is "" exactly (removes it); only the one label is touched.
+        let off = super::resume_params(&json!({"terminal": "t1", "on": false, "extra": 1}), live).unwrap();
+        assert_eq!(off, json!({"terminal": "t1", "labels": {"h0x.resume": "off"}}));
+        let on = super::resume_params(&json!({"terminal": "t1", "on": true}), live).unwrap();
+        assert_eq!(on["labels"].as_object().unwrap().len(), 1);
+        assert_eq!(on["labels"]["h0x.resume"], json!(""));
+    }
+
+    #[test]
+    fn terminal_resume_does_not_ask_who_is_live_for_a_bad_on() {
+        use serde_json::json;
+        let asked = std::cell::Cell::new(false);
+        assert!(super::resume_params(&json!({"terminal": "t1", "on": "true"}), |_| { asked.set(true); true }).is_err());
+        assert!(!asked.get());
+    }
+
+    #[test]
+    fn login_start_fails_both_ways_and_refuses_every_non_bool() {
+        use serde_json::json;
+        // A failed apply is an error whether turning on or off; the reason is kept.
+        for on in [true, false] {
+            let err = super::login_start_change(&json!({"on": on}), |_| Err("reg: ERROR: Access is denied.".into())).unwrap_err();
+            assert!(err.contains("Access is denied"), "{on}: {err}");
+        }
+        // An empty reason still errors.
+        assert!(super::login_start_change(&json!({"on": false}), |_| Err(String::new())).is_err());
+        for a in [json!({"on": "false"}), json!({"on": 0}), json!({"on": [true]}), json!({"on": {}}), json!({"On": true}), json!(null), json!(true)] {
+            let mut called = false;
+            assert!(super::login_start_change(&a, |_| { called = true; Ok(()) }).is_err(), "{a}");
+            assert!(!called, "{a}: nothing is applied");
+        }
+        // Extra args do not change what is applied.
+        let mut seen = None;
+        assert_eq!(super::login_start_change(&json!({"on": false, "terminal": "t1"}), |v| { seen = Some(v); Ok(()) }), Ok(false));
+        assert_eq!(seen, Some(false));
     }
 
     #[test]

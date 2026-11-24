@@ -164,6 +164,15 @@ Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pi
 | `terminal` | yes |
 | `pinned` | yes |
 
+## `terminal.resume`
+
+Turn auto-resume of a terminal's agent session on (default) or off (on false). Kept with the terminal, on any machine.
+
+| Argument | Required |
+|---|---|
+| `terminal` | yes |
+| `on` | yes |
+
 ## `terminal.kill`
 
 End a terminal and its sub-agents.
@@ -536,6 +545,14 @@ No arguments.
 Back to normal size.
 
 No arguments.
+
+## `app.start_at_login`
+
+Open the HyperOx window when you log in to the computer (on true) or not (false). Off by default; a failure to set it leaves the setting as it was.
+
+| Argument | Required |
+|---|---|
+| `on` | yes |
 
 ## `app.update`
 

@@ -415,6 +415,9 @@ pub struct Person {
     /// 0x Modes > Smart routing (needs Token Saver): pick the tools and model for a task started with a prompt. Off unless set.
     #[serde(skip_serializing_if = "is_false", deserialize_with = "bool_or_false")]
     pub smart_routing: bool,
+    /// Open the HyperOx window when the person logs in to the computer. Off unless set.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "bool_or_false")]
+    pub start_at_login: bool,
     /// The welcome's one-time "How did you find HyperOx?": the choice, or "skip". Set means asked.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "string_or_none")]
     pub found_via: Option<String>,
@@ -602,6 +605,7 @@ impl Default for Person {
             share_analytics: true,
             token_saver: true,
             smart_routing: false,
+            start_at_login: false,
             found_via: None,
             consent: None,
             pane_scrollbars: true,
@@ -648,6 +652,7 @@ pub struct Settings {
     pub share_analytics: bool,
     pub token_saver: bool,
     pub smart_routing: bool,
+    pub start_at_login: bool,
     pub minimum_contrast: f32,
     /// Scrollback lines per new terminal pane.
     pub scrollback_lines: u32,
@@ -696,6 +701,7 @@ impl Default for Settings {
             share_analytics: true,
             token_saver: true,
             smart_routing: false,
+            start_at_login: false,
             minimum_contrast: 1.0,
             scrollback_lines: SCROLLBACK_DEFAULT,
             option_as_alt: OptionAsAlt::Auto,
@@ -740,6 +746,7 @@ impl Settings {
             share_analytics: person.share_analytics,
             token_saver: person.token_saver,
             smart_routing: person.smart_routing,
+            start_at_login: person.start_at_login,
             minimum_contrast: person.minimum_contrast,
             scrollback_lines: person.scrollback_lines,
             option_as_alt: person.option_as_alt,
@@ -1447,6 +1454,39 @@ mod tests {
             assert!(!person.smart_routing, "{bad:?}");
         }
         assert!(parse_person(r#"{"smart_routing":false,"zoom":1.5}"#).unwrap().zoom == 1.5);
+    }
+
+    #[test]
+    fn start_at_login_defaults_off_round_trips_and_a_bad_value_keeps_the_file() {
+        let absent: Person = serde_json::from_str(r#"{"zoom":1.5}"#).unwrap();
+        assert!(!absent.start_at_login && !Person::default().start_at_login && !Settings::default().start_at_login);
+        assert!(serde_json::to_value(&absent).unwrap().get("start_at_login").is_none());
+        let on: Person = serde_json::from_str(r#"{"start_at_login":true}"#).unwrap();
+        assert!(on.start_at_login && Settings::compose(&on, &crate::layout::Look::default(), true).start_at_login);
+        assert_eq!(serde_json::to_value(&on).unwrap()["start_at_login"], serde_json::json!(true));
+        for bad in [r#"{"start_at_login":"yes"}"#, r#"{"start_at_login":1}"#, r#"{"start_at_login":null}"#, r#"{"start_at_login":"true","zoom":1.5}"#] {
+            let person = parse_person(bad).unwrap_or_else(|e| panic!("{bad:?}: {e}"));
+            assert!(!person.start_at_login, "{bad:?}");
+        }
+        assert!(parse_person(r#"{"start_at_login":false,"zoom":1.5}"#).unwrap().zoom == 1.5);
+    }
+
+    #[test]
+    fn start_at_login_survives_a_write_and_read_both_ways_and_crlf() {
+        let mut person = parse_person(r#"{"zoom":1.25,"smart_routing":true}"#).unwrap();
+        assert!(!person.start_at_login && !Settings::compose(&person, &crate::layout::Look::default(), true).start_at_login);
+        for on in [true, false, true] {
+            person.start_at_login = on;
+            let text = serde_json::to_string_pretty(&person).unwrap();
+            assert_eq!(text.contains("start_at_login"), on, "off is not written: {text}");
+            let back = parse_person(&text).unwrap();
+            assert_eq!(back.start_at_login, on, "{text}");
+            assert!(back.zoom == 1.25 && back.smart_routing, "neighbours kept: {text}");
+            assert_eq!(Settings::compose(&back, &crate::layout::Look::default(), true).start_at_login, on);
+            assert_eq!(parse_person(&text.replace('\n', "\r\n")).unwrap().start_at_login, on, "CRLF");
+        }
+        assert!(parse_person("\u{feff}{\"start_at_login\":true}").unwrap().start_at_login, "BOM");
+        assert!(!parse_person("{}").unwrap().start_at_login && !parse_person("").map(|p| p.start_at_login).unwrap_or(false));
     }
 
     #[test]

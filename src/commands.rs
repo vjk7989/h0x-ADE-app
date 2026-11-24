@@ -46,6 +46,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("terminal.park", &[req("terminal")], "Take a terminal's pane away and disable core keep; it keeps running (a sub-agent shows under its parent again)."),
     cmd("terminal.right_click", &[req("to"), opt("terminal")], "Where right-clicks in a terminal (default: the focused one) go when its program takes the mouse: \"program\" or \"menu\" (HyperOx's, the default). Shift+right-click is always the menu."),
     cmd("terminal.pin", &[req("terminal"), req("pinned")], "Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pins are kept with the terminal, so every HyperOx client shows them, and end with it."),
+    cmd("terminal.resume", &[req("terminal"), req("on")], "Turn auto-resume of a terminal's agent session on (default) or off (on false). Kept with the terminal, on any machine."),
     cmd("terminal.kill", &[req("terminal")], "End a terminal and its sub-agents."),
     // What you see.
     cmd("space.select", &[opt("index"), opt("id")], "Show a space (by position or id)."),
@@ -98,6 +99,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("app.zoom_in", &[], "Make everything bigger."),
     cmd("app.zoom_out", &[], "Make everything smaller."),
     cmd("app.zoom_reset", &[], "Back to normal size."),
+    cmd("app.start_at_login", &[req("on")], "Open the HyperOx window when you log in to the computer (on true) or not (false). Off by default; a failure to set it leaves the setting as it was."),
     cmd("app.update", &[], "Restart into the update HyperOx downloaded (your terminals keep running)."),
     cmd("app.quit", &[], "Quit the app."),
     cmd("app.hide", &[], "Hide the app (macOS)."),

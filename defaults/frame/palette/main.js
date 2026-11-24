@@ -7,7 +7,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { commands, layouts, keys, run, theme, themes, settings, props, closeOverlay, openOverlay, shared, spaces, knownAgents, window as win } from "h0x";
+import { commands, layouts, keys, run, theme, themes, settings, props, closeOverlay, openOverlay, shared, spaces, knownAgents, terminals, focused, window as win } from "h0x";
 
 // The list keeps one height while you move: rows and group titles have fixed
 // heights, and the window shows as many as fit in LIST_H.
@@ -98,6 +98,13 @@ function entries(agents) {
   // A session of each agent that is installed (or the person's own), by its slot: the key is agent.new:<slot>.
   for (const a of agents) {
     if (a.slot && (a.installed || a.custom)) list.push({ name: "agent.new", args: { index: a.slot }, group: "Agent", title: `New ${a.name} session`, words: `start agent ${a.key}` });
+  }
+  // Auto-resume of the terminal you are in: the entry flips it.
+  const here = focused()?.terminal;
+  const term = here && known.has("terminal.resume") ? terminals().find((t) => t.address === here) : null;
+  if (term) {
+    const on = term.labels?.["h0x.resume"] !== "off";
+    list.push({ name: "terminal.resume", args: { terminal: term.address, on: !on }, group: "Terminal", title: `Auto-resume: ${on ? "turn off" : "turn on"}`, words: "resume session restart agent" });
   }
   // Anything new in the app shows up too, until it gets a better name here.
   const named = new Set(NAMED.map(([n]) => n));

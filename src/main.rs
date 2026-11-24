@@ -19,6 +19,7 @@ mod launch;
 mod layout;
 mod layout_sync;
 mod links;
+mod login_start;
 mod model;
 mod mirror;
 mod mirror_sync;

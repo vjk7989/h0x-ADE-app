@@ -9501,7 +9501,7 @@ fn terminal_menu_offers_pane_items_only_for_a_pane_in_a_tab_and_never_on_a_sessi
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let pane_items = ["Split right", "Split down", "Zoom", "Close pane"];
-    let items = |tree: &str| (0..8).filter(|i| tree.contains(&format!(":id[Str(\"mi-{i}\")]"))).count();
+    let items = |tree: &str| (0..10).filter(|i| tree.contains(&format!(":id[Str(\"mi-{i}\")]"))).count();
     let menu = |cx: &mut TestAppContext, populated: bool, target: Value, kept: bool| {
         let mut p = props();
         p["tab"] = json!("pane");
@@ -9522,7 +9522,8 @@ fn terminal_menu_offers_pane_items_only_for_a_pane_in_a_tab_and_never_on_a_sessi
         }
         // Copy and Paste (0.1.29) come first on every terminal.
         assert!(tree.contains("Copy") && tree.contains("Paste"), "{pane}: {tree}");
-        assert_eq!(items(&tree), 7, "{pane}: {tree}");
+        assert_eq!(items(&tree), 8, "{pane}: {tree}");
+        assert!(tree.contains("Auto-resume") && tree.contains("✓"), "{pane}: on by default: {tree}");
     }
 
     // A terminal block in a layout or a window: its pane is the block's id, in no tab.
@@ -9531,12 +9532,18 @@ fn terminal_menu_offers_pane_items_only_for_a_pane_in_a_tab_and_never_on_a_sessi
         assert!(!tree.contains(label), "{label}: {tree}");
     }
     assert!(tree.contains("Send right-clicks to pane"), "the terminal's own item stays: {tree}");
-    assert_eq!(items(&tree), 3, "{tree}");
+    assert_eq!(items(&tree), 4, "{tree}");
 
     // A kept sub-agent in a window still goes back under its parent.
     let tree = menu(cx, true, json!({"pane":"w1:term", "terminal":"t3"}), true);
     assert!(tree.contains("Send back to Build") && !tree.contains("Close pane") && !tree.contains("Zoom"), "{tree}");
-    assert_eq!(items(&tree), 4, "{tree}");
+    assert_eq!(items(&tree), 5, "{tree}");
+
+    // Auto-resume off: the item stays, unchecked.
+    let mut values = fixture(true, { let mut p = props(); p["tab"] = json!("pane"); p["target"] = json!({"pane":"p1", "terminal":"t1"}); p }, updates("current", "current"));
+    values.get_mut("terminals").unwrap().as_array_mut().unwrap().iter_mut().find(|t| t["address"] == "t1").unwrap()["labels"] = json!({"h0x.resume":"off"});
+    let tree = describe_with_values(cx, &staged, "mods/menu", values, None).unwrap();
+    assert!(tree.contains("Auto-resume") && !tree.contains("✓"), "{tree}");
 
     // No panes at all, no terminal, no pane id: nothing to offer, and it still renders.
     for target in [json!({"pane":"p1", "terminal":"missing"}), json!({})] {
@@ -9555,6 +9562,72 @@ fn terminal_menu_offers_pane_items_only_for_a_pane_in_a_tab_and_never_on_a_sessi
     }
     for label in ["Resume", "Resume in new tab", "Pin", "Rename", "Copy resume command", "Show file", "Delete"] {
         assert!(tree.contains(label), "{label}: {tree}");
+    }
+}
+
+// A pane menu on t1 (or a palette) with t1's labels set to `labels`.
+fn resume_values(labels: Value) -> BTreeMap<String, Value> {
+    let mut p = props();
+    p["tab"] = json!("pane");
+    p["target"] = json!({"pane":"p1", "terminal":"t1"});
+    let mut values = fixture(true, p, updates("current", "current"));
+    values.get_mut("terminals").unwrap().as_array_mut().unwrap().iter_mut().find(|t| t["address"] == "t1").unwrap()["labels"] = labels;
+    values
+}
+
+#[gpui::test]
+fn auto_resume_is_unchecked_only_for_off_and_its_item_flips_it(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Absent, empty, any other value (case counts): on, so checked, and choosing it turns it off.
+    // Exactly "off": unchecked, and choosing it turns it on.
+    for (labels, checked) in [
+        (json!({}), true),
+        (Value::Null, true),
+        (json!({"h0x.resume":""}), true),
+        (json!({"h0x.resume":"on"}), true),
+        (json!({"h0x.resume":"OFF"}), true),
+        (json!({"h0x.resume":"off "}), true),
+        (json!({"h0x.resume":"off"}), false),
+    ] {
+        let tree = describe_with_values(cx, &staged, "mods/menu", resume_values(labels.clone()), None).unwrap();
+        let at = tree.find("Auto-resume").unwrap_or_else(|| panic!("{labels}: no item: {tree}"));
+        assert_eq!(tree.contains("✓"), checked, "{labels}: {tree}");
+        // The item's own row: the last mi-N id before its label.
+        let index: usize = tree[..at].rsplit(":id[Str(\"mi-").next().unwrap().split('"').next().unwrap().parse().unwrap();
+        let setup = format!("this.press = (_e, cx) => this.choose({index}, cx);");
+        let (_, calls) = describe_pressing(cx, &staged, "mods/menu", resume_values(labels.clone()), None, &setup, 1);
+        let c = calls.borrow();
+        let runs: Vec<&Vec<Value>> = c.effects.iter().filter(|(n, _)| n == "run").map(|(_, a)| a).collect();
+        assert_eq!(runs, [&vec![json!("terminal.resume"), json!({"terminal":"t1", "on": !checked})]], "{labels}: {:?}", c.effects);
+    }
+}
+
+#[gpui::test]
+fn palette_auto_resume_flips_the_focused_terminal_and_offers_nothing_without_one(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let setup = "this.press = (_e, cx) => this.go(this.rows().map((r) => r.e).find((e) => e.name === 'terminal.resume'));";
+    let resume_runs = |calls: &Rc<RefCell<Calls>>| -> Vec<Value> {
+        calls.borrow().effects.iter().filter(|(n, a)| n == "run" && a.first() == Some(&json!("terminal.resume"))).map(|(_, a)| Value::Array(a.clone())).collect()
+    };
+    // The focused terminal t1: on by default, so the entry turns it off; off, so it turns it on.
+    for (labels, on) in [(json!({}), false), (json!({"h0x.resume":""}), false), (json!({"h0x.resume":"yes"}), false), (json!({"h0x.resume":"off"}), true)] {
+        let (_, calls) = describe_pressing(cx, &staged, "frame/palette", resume_values(labels.clone()), None, setup, 1);
+        assert_eq!(resume_runs(&calls), [json!(["terminal.resume", {"terminal":"t1", "on": on}])], "{labels}");
+    }
+    // A focused terminal on another machine keeps its machine/tN id.
+    let mut values = resume_values(json!({}));
+    values.get_mut("terminals").unwrap().as_array_mut().unwrap().push(json!({"address":"remote/t5","name":"Far","title":"Far","argv":["pi"],"parent":null,"labels":{"h0x.resume":"off"},"state":"running","status":"working","report":{"app":"pi"},"cwd":"/remote/project"}));
+    values.get_mut("focused").unwrap()["terminal"] = json!("remote/t5");
+    let (_, calls) = describe_pressing(cx, &staged, "frame/palette", values, None, setup, 1);
+    assert_eq!(resume_runs(&calls), [json!(["terminal.resume", {"terminal":"remote/t5", "on": true}])]);
+    // Nothing focused, a focus with no terminal, or a focused terminal that is gone: no entry, nothing runs.
+    for focused in [Value::Null, json!({"space":"s1","tab":"tab1","pane":null,"terminal":null}), json!({"space":"s1","tab":"tab1","pane":"p9","terminal":"t9"})] {
+        let mut values = resume_values(json!({}));
+        values.insert("focused".into(), focused.clone());
+        let (_, calls) = describe_pressing(cx, &staged, "frame/palette", values, None, setup, 1);
+        assert!(resume_runs(&calls).is_empty(), "{focused}: {:?}", calls.borrow().effects);
     }
 }
 
