@@ -32,6 +32,7 @@ function items(p, git) {
       const parent = term?.parent && all.find((t) => t.address === term.parent);
       // Once they go to the program, Shift+right-click still opens this menu.
       const toProgram = term?.labels?.["h0x.right-click"] === "program";
+      const resumeOn = term?.labels?.["h0x.resume"] !== "off";
       // A terminal shown outside a tab (a layout terminal block, a window) has
       // no pane to split, zoom or close: its pane is the block's id.
       const inTab = panes().some((pane) => pane.pane === tg.pane);
@@ -56,6 +57,8 @@ function items(p, git) {
                 : ["Send right-clicks to pane", "terminal.right_click", { terminal: term.address, to: "program" }],
             ]
           : []),
+        // Checked while the terminal's agent session resumes on its own (the default).
+        ...(term ? [["Auto-resume", "terminal.resume", { terminal: term.address, on: !resumeOn }, resumeOn]] : []),
         ...(parent ? [[`Send back to ${parent.name || parent.address}`, "terminal.park", { terminal: term.address }]] : []),
         ...(inTab ? [["Close pane", "pane.close", { pane: tg.pane }]] : []),
       ];
@@ -171,7 +174,7 @@ export default class Menu extends View {
             .on_click((_e, cx) => this.choose(i, cx))
             .child(svg(menuIcon(it[1], it[2])).size(14).flex_none().text_color(t.muted))
             .child(div().flex_1().child(it[0]))
-            .child(div().text_size(11).text_color(t.dim).child(shortcut(it[1], it[2])))),
+            .child(div().text_size(11).text_color(t.dim).child(it[3] ? "✓" : shortcut(it[1], it[2])))),
         ),
       );
   }
