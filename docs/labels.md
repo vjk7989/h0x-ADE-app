@@ -72,3 +72,10 @@ programs get no label.
 Labels suit small values that change at human speed. Use the `h0x.`
 prefix. Bigger or app-wide state belongs in documents (`doc.get`,
 `doc.set`), and state for one device stays on that device.
+
+## `h0x.session=claude:<uuid>`: the Claude log this terminal owns
+
+Set at launch on a local terminal that HyperOx starts as Claude Code
+(`claude --session-id <uuid>`, or the explicit id of the person's own
+`--session-id`/`--resume`). Usage reads only that session's log, never one
+picked by folder or time. No label: nothing is read.
