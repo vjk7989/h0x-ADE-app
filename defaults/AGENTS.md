@@ -62,7 +62,7 @@ commands. They're rewritten on every start to match this version.
 
 ## Seeing the window
 
-`h0x-ade shot [file.png]` saves the last rendered window frame as a PNG
+`h0x-ade shot [file.png]` saves the current window frame as a PNG
 and prints its absolute path (default: `h0x-shot.png` in your current
 folder). Use it when debugging mod UIs: inspect spacing, colors, terminal
 images, overlays, popups and floats. It captures the app, not the desktop,
@@ -168,7 +168,9 @@ the highlighted line shows where it will land.
   looking (it becomes `idle` once they look). A space's and a tab's
   status is the most urgent of its agents: blocked > done > working > idle.
 - **Sub-agents** are terminals an agent started with `h0x-core run`: the core
-  records the starter as `parent` (see `terminals()`). They belong to their
+  records the starter as `parent` (see `terminals()`). Parent addresses use
+  the app's machine names, or a bare ID for this computer, when they can be
+  mapped; otherwise they stay as the core reported them. They belong to their
   parent's tab without a pane; the `agents` mod shows them,
   `terminal.peek` opens one, `terminal.keep` gives one a pane.
   When the shown space is on another machine, the peek's Keep button uses the
@@ -604,6 +606,8 @@ The main ones:
   terminal, or a mod pane), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`.
+  `pane.zoom` also makes the pane its tab's focused one (the tab isn't
+  selected); on the zoomed pane it unzooms and focus stays.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
   `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
@@ -731,6 +735,9 @@ What's about the user, never a look:
   waiting, the next launch installs it before opening a window. The first
   start after an app update also updates h0x-core
   to the latest release of the same generation, keeping terminals running.
+  Package-managed cores stay with their package manager; Settings shows available releases.
+  A core update error can be dismissed with its × or `overlay.close {id:"core-update-error"}`
+  until the error changes or the update recovers.
   Settings → Updates keeps app and core actions together;
   its What's new button opens the waiting update's release range, or this
   version's notes, in the What's new window. Reading never clears the waiting-update dot.

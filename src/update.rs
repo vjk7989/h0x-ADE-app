@@ -411,6 +411,9 @@ pub fn set_core(version: Option<String>, managed: Option<String>) {
     }
     c.version = version;
     c.managed = managed;
+    if c.managed.is_some() {
+        c.error = None;
+    }
 }
 
 fn checks_app() -> Option<PathBuf> {
@@ -562,14 +565,8 @@ fn note_checked(succeeded: bool, now: u64) {
 
 /// Looks for a newer core of this app's generation.
 fn check_core() -> Result<(), String> {
-    let (have, managed) = {
-        let c = CORE.lock().unwrap();
-        (c.version.clone(), c.managed.clone())
-    };
+    let have = CORE.lock().unwrap().version.clone();
     let Some(have) = have else { return Ok(()) };
-    if managed.is_some() {
-        return Ok(());
-    }
     let latest = latest_core()?;
     let same = latest.generation == Some(crate::core_link::GENERATION);
     CORE.lock().unwrap().ready = (same && newer(&latest.version, &have)).then_some(latest.version);
@@ -823,7 +820,7 @@ fn after_update_target<'a>(have: &str, latest: Option<&'a CoreRelease>, generati
 pub fn update_core() {
     {
         let mut c = CORE.lock().unwrap();
-        if c.updating {
+        if c.updating || c.managed.is_some() {
             return;
         }
         c.updating = true;
@@ -1627,12 +1624,15 @@ fn take_pending(path: &Path) -> Option<Pending> {
 /// The first start after an app update brings the core to the latest release
 /// of this app's generation (`h0x-core update --version`, terminals kept). If the
 /// release check fails or offers another generation, keep the minimum pin.
-/// A core a package manager owns is left alone (h0x-core says so).
-pub fn after_update() {
+/// A core a package manager owns is left alone.
+pub fn after_update(connected: std::sync::Arc<crate::core_link::Core>) {
     if std::fs::remove_file(marker()).is_err() {
         return;
     }
-    std::thread::spawn(|| {
+    std::thread::spawn(move || {
+        if after_update_managed(connected.call("server.status", serde_json::json!({})).map_err(|e| e.to_string())) {
+            return;
+        }
         let have = crate::core_bin::version(&crate::core_bin::path()).unwrap_or_default();
         CORE.lock().unwrap().updating = true;
         let latest = latest_core().map_err(|e| tracing::warn!("core release check after app update: {e}")).ok();
@@ -1655,9 +1655,161 @@ pub fn after_update() {
     });
 }
 
+fn after_update_managed(status: Result<serde_json::Value, String>) -> bool {
+    match status {
+        Ok(status) => {
+            let text = |key: &str| status[key].as_str().map(str::to_owned);
+            set_core(text("version").map(|v| v.trim_start_matches("h0x-core ").to_owned()), text("installed_by"));
+            core().managed.is_some()
+        }
+        Err(e) => {
+            tracing::warn!("cannot check core ownership after app update: {e}; attempting the core update");
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_cores_report_new_releases_without_running_updates() {
+        const CHILD: &str = "H0X_ADE_TEST_MANAGED_CORE_UPDATE";
+        if std::env::var_os(CHILD).is_none() {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            // Answers `latest.json` only (a `.minisig` is a 404: the stub is unsigned) and is never joined.
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                    let mut request = Vec::new();
+                    let mut byte = [0];
+                    while !request.ends_with(b"\r\n\r\n") && stream.read_exact(&mut byte).is_ok() {
+                        request.push(byte[0]);
+                    }
+                    if request.starts_with(b"GET /latest/download/latest.json HTTP/1.1\r\n") {
+                        let body = r#"{"version":"0.1.20","generation":1}"#;
+                        let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    } else {
+                        let _ = write!(stream, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    }
+                }
+            });
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "update::tests::managed_cores_report_new_releases_without_running_updates", "--nocapture"])
+                .env(CHILD, "1")
+                .env("H0X_CORE_RELEASES_URL", url)
+                .output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        crate::core_bin::use_core(PathBuf::from("/nonexistent/h0x-core"));
+        for manager in ["nix", "homebrew", "mise", "system package manager"] {
+            CORE.lock().unwrap().error = Some("an earlier update failed".into());
+            set_core(Some("0.1.18".into()), Some(manager.into()));
+            check_core().unwrap();
+            assert_eq!(core().ready.as_deref(), Some("0.1.20"));
+            update_core();
+            let state = core();
+            assert_eq!(state.managed.as_deref(), Some(manager));
+            assert!(!state.updating);
+            assert!(state.error.is_none());
+            assert_eq!(state.ready.as_deref(), Some("0.1.20"));
+            assert!(after_update_managed(Ok(serde_json::json!({"version":"0.1.18", "installed_by":manager}))));
+            assert!(!after_update_managed(Err("connection closed".into())), "a failed ownership lookup must still attempt the update");
+        }
+        assert!(!after_update_managed(Ok(serde_json::json!({"version":"0.1.18", "installed_by":null}))));
+    }
+
+    /// The release server answers only `latest.json` (a `.minisig` is missing, so the
+    /// stub is unsigned) and never blocks the test: it is not joined.
+    #[test]
+    fn after_update_reads_core_ownership_and_managed_cores_still_check_on_loopback() {
+        const CHILD: &str = "H0X_ADE_TEST_AFTER_UPDATE_OWNERSHIP";
+        if std::env::var_os(CHILD).is_none() {
+            use std::io::{Read, Write};
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            assert!(url.starts_with("http://127.0.0.1:"), "loopback only: {url}");
+            let checks = std::sync::Arc::new(AtomicUsize::new(0));
+            std::thread::spawn({
+                let checks = checks.clone();
+                move || {
+                    for stream in listener.incoming() {
+                        let Ok(mut stream) = stream else { continue };
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                        let mut request = Vec::new();
+                        let mut byte = [0];
+                        while !request.ends_with(b"\r\n\r\n") && stream.read_exact(&mut byte).is_ok() {
+                            request.push(byte[0]);
+                        }
+                        if request.starts_with(b"GET /latest/download/latest.json HTTP/1.1\r\n") {
+                            checks.fetch_add(1, Ordering::SeqCst);
+                            let body = r#"{"version":"0.1.20","generation":1}"#;
+                            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                        } else {
+                            let _ = write!(stream, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        }
+                    }
+                }
+            });
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "update::tests::after_update_reads_core_ownership_and_managed_cores_still_check_on_loopback", "--nocapture"])
+                .env(CHILD, "1")
+                .env("H0X_CORE_RELEASES_URL", &url)
+                .env_remove("H0X_ADE_RELEASES_URL")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+            assert!(stdout.contains("1 passed"), "the child must really run the test: {stdout}");
+            assert_eq!(checks.load(Ordering::SeqCst), 2, "one release check per known core version, none without one");
+            return;
+        }
+        crate::core_bin::use_core(PathBuf::from("/nonexistent/h0x-core"));
+
+        // A managed core: the version loses its `h0x-core ` prefix and an old error clears.
+        CORE.lock().unwrap().error = Some("an earlier update failed".into());
+        assert!(after_update_managed(Ok(serde_json::json!({"version":"h0x-core 0.1.18", "installed_by":"nix"}))));
+        let state = core();
+        assert_eq!(state.version.as_deref(), Some("0.1.18"));
+        assert_eq!(state.managed.as_deref(), Some("nix"));
+        assert!(state.error.is_none());
+        check_core().unwrap();
+        assert_eq!(core().ready.as_deref(), Some("0.1.20"), "a managed core still learns of the release");
+        update_core();
+        assert!(!core().updating, "a managed core is never updated here");
+
+        // A failed ownership lookup leaves what is known and still attempts the update.
+        assert!(!after_update_managed(Err(String::new())), "an empty error is still an error");
+        assert_eq!(core().managed.as_deref(), Some("nix"));
+
+        // Unknown or malformed ownership is not managed.
+        for status in [
+            serde_json::json!({"version":"0.1.18", "installed_by":7}),
+            serde_json::json!({"version":"0.1.18", "installed_by":["nix"]}),
+            serde_json::json!({"version":"0.1.18"}),
+            serde_json::json!(null),
+        ] {
+            assert!(!after_update_managed(Ok(status.clone())), "{status}");
+            assert!(core().managed.is_none(), "{status}");
+        }
+        // An unmanaged core checks too (the second release request).
+        set_core(Some("0.1.18".into()), None);
+        CORE.lock().unwrap().ready = None;
+        check_core().unwrap();
+        assert_eq!(core().ready.as_deref(), Some("0.1.20"));
+
+        // No version at all: nothing to compare, so no release request.
+        assert!(!after_update_managed(Ok(serde_json::json!({}))));
+        assert!(core().version.is_none());
+        check_core().unwrap();
+    }
 
     #[test]
     fn failed_check_clears_success_and_recovery_records_a_new_time() {

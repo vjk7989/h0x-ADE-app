@@ -277,8 +277,12 @@ pub fn is_png(path: &std::path::Path) -> bool {
 }
 
 /// Encode before opening the destination: GPU errors must not truncate a good shot.
-pub fn save_shot(window: &gpui::Window, path: &std::path::Path) -> anyhow::Result<()> {
-    let image = window.render_to_image()?;
+pub fn save_shot<C: gpui::AppContext>(
+    window: gpui::AnyWindowHandle,
+    cx: &mut C,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let image = window.render_current_to_image(cx)?;
     let mut bytes = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut bytes, image.width(), image.height());
@@ -349,6 +353,16 @@ mod shot_tests {
         assert!(is_png(Path::new(r"C:\a\b.png")), "a drive letter colon is not in the file name");
         assert!(is_png(Path::new("C:/a/b.png")));
         assert!(is_png(Path::new("/a/b.png")), "one leading slash is local");
+    }
+
+    #[test]
+    fn a_shot_path_at_a_drive_root_or_verbatim_is_judged_the_same_way() {
+        assert!(is_png(Path::new(r"C:\a.png")), "a drive root");
+        assert!(!is_png(Path::new(r"C:\")), "a drive root itself");
+        assert!(!is_png(Path::new("C:a.png")), "drive-relative: the colon is in the file name");
+        assert!(!is_png(Path::new(r"\\?\C:\shots\a.png")), "verbatim paths are refused like UNC");
+        assert!(!is_png(Path::new(r"\\.\C:\a.png")), "a device path");
+        assert!(!is_png(Path::new(r"\\")), "a bare UNC prefix");
     }
 }
 
