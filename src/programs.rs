@@ -1412,7 +1412,8 @@ mod tests {
         // `--flag=` with an empty value is still the person's flag.
         for given in ["--model=", "--agent="] {
             let out = with_routing(&route(&[], false, Some("haiku")), argv(&["claude", given]));
-            assert_eq!(out[3..], argv(&[given])[..], "{given}");
+            // No settings of ours any more: the whole argv is the person's own, and no model is routed.
+            assert_eq!(out, argv(&["claude", given]), "{given}");
         }
         for given in [&["--allowed-tools", "Bash"][..], &["--allowed-tools="], &["--allowedTools="], &["--disallowedTools="], &["--disallowed-tools", "Edit"]] {
             let mut a = argv(&["claude"]);
