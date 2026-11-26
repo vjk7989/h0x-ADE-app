@@ -299,6 +299,10 @@ fn module(mut values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> Hos
                 "core" if first.as_array().and_then(|a| a.first()).and_then(Value::as_str) == Some("session") => {
                     Some(json!({"code":0,"stdout":"{\"sessions\":[]}","stderr":""}))
                 }
+                // The worktree dialog lists the repo of the folder it opens on: here, a folder outside git.
+                "core" if first.as_array().map(|a| a.iter().take(2).map(|v| v.as_str()).collect::<Vec<_>>()) == Some(vec![Some("worktree"), Some("list")]) => {
+                    Some(json!({"code":1,"stdout":"","stderr":"{\"error\":{\"kind\":\"not_git\",\"message\":\"fixture: not a git repository\"}}"}))
+                }
                 // The files panel lists a folder with sh: kind and name pairs.
                 "exec" if first == "sh" && a.get(1).map(from_host).and_then(|v| v.get(2).cloned()) == Some(json!("files")) => {
                     Some(json!({"code":0,"stdout":"d\u{0}src\u{0}f\u{0}README.md\u{0}","stderr":""}))
@@ -4292,58 +4296,33 @@ fn git_ok(stdout: &str) -> Value {
 }
 
 #[gpui::test]
-fn worktree_remove_skips_submodule_names_and_paths_that_leave_the_repo(cx: &mut TestAppContext) {
+fn worktree_remove_sends_one_path_argument_and_shows_a_submodule_refusal(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    // (name, path, probed): .gitmodules records as `git config -z --get-regexp` prints them.
-    let records = [
-        ("ok", "libs/ok", true),
-        ("my lib", "libs/my lib", true),
-        ("./dot", "./dot", true),
-        ("a..b", "libs/a..b", true),
-        ("", "libs/empty", false),
-        ("nopath", "", false),
-        ("..", "up", false),
-        ("x/..", "xdd", false),
-        ("foo/../bar", "foobar", false),
-        ("mixed", "a\\..\\b", false),
-        ("mixed2", "a/..\\b", false),
-        ("trail", "x/..", false),
-        ("abs", "/etc", false),
-        ("/abs", "abs2", false),
-        ("unc", "\\\\server\\x", false),
-        ("\\back", "back", false),
-        ("drive", "C:foo", false),
-        ("C:\\x", "cx", false),
-        ("lower", "c:/x", false),
-    ];
-    let listed: String = records.iter().map(|(name, path, _)| format!("submodule.{name}.path\n{path}\0")).collect();
+    // The linked checkout the space shows: its path goes to core as one argument.
+    let linked = "/fixture/project";
+    let listing = json!({"default_branch":"main","worktrees":[
+        {"path":"/r","branch":"main","main":true,"dirty":false,"ahead":0,"behind":0,"integrated":null,"at":0},
+        {"path":linked,"branch":"topic","main":false,"dirty":false,"ahead":0,"behind":0,"integrated":null,"at":0},
+    ]});
+    let reply = |stdout: Value, stderr: Value| json!({"code":1, "stdout":stdout, "stderr":stderr});
+    let refusal = json!({"error":{"kind":"unpushed","message":"submodules with unpushed commits: libs/a, ../up"}}).to_string();
     let mut p = props();
     p["action"] = json!("remove");
-    let (_, calls) = describe_scripted(cx, &staged, "mods/worktree", p, &[
-        ("git rev-parse --show-toplevel", git_ok("/r\n")),
-        ("git rev-parse --path-format=absolute --git-common-dir", git_ok("/r/.git\n")),
-        ("git --no-optional-locks -c core.fsmonitor=false status --porcelain", git_ok("")),
-        ("git rev-parse --absolute-git-dir", git_ok("/r/.git\n")),
-        ("git --git-dir /r/.git config --file /r/.gitmodules -z --get-regexp", git_ok(&listed)),
-        ("git --git-dir /r/.git rev-parse HEAD:", git_ok("abc123\n")),
-        // Each probed submodule: checked out, an empty nested .gitmodules, nothing unpushed.
-        ("git --git-dir /r/.git/modules/", git_ok("")),
+    p["branch"] = json!("topic"); // starts the removal at once
+    let (tree, calls) = describe_scripted(cx, &staged, "mods/worktree", p, &[
+        ("worktree list --json -- /fixture/project", json!({"code":0, "stdout":listing.to_string(), "stderr":""})),
+        ("worktree remove --json -- /fixture/project", reply(json!(""), json!(refusal))),
     ]);
     let c = calls.borrow();
     assert!(c.unexpected.is_empty(), "{:?}", c.unexpected);
-    let probed: Vec<&str> = c.execs.iter()
-        .filter(|a| a.len() == 5 && a[1] == "--git-dir" && a[3..] == ["rev-parse", "--git-dir"])
-        .map(|a| a[2].strip_prefix("/r/.git/modules/").unwrap_or(&a[2]))
-        .collect();
-    let safe: Vec<&str> = records.iter().filter(|r| r.2).map(|r| r.0).collect();
-    assert_eq!(probed, safe, "{:?}", c.execs);
-    let pinned: Vec<&str> = c.execs.iter().filter_map(|a| a.last()?.strip_prefix("HEAD:")).filter(|p| *p != ".gitmodules").collect();
-    let paths: Vec<&str> = records.iter().filter(|r| r.2).map(|r| r.1).collect();
-    assert_eq!(pinned, paths, "{:?}", c.execs);
-    // The safe ones were checked for unpushed commits; nothing reached outside the repo's modules folder.
-    assert_eq!(c.execs.iter().filter(|a| a.contains(&"rev-list".to_string())).count(), safe.len(), "{:?}", c.execs);
-    assert!(!c.execs.iter().flatten().any(|a| a.contains("modules/..") || a.contains("modules//") || a.contains("modules/C:")), "{:?}", c.execs);
+    let sent: Vec<&str> = c.cores.iter().map(|a| a[1].as_str()).collect();
+    assert_eq!(sent, ["list", "remove"], "{:?}", c.cores);
+    assert_eq!(c.cores[1], ["worktree", "remove", "--json", "--", linked], "{:?}", c.cores);
+    // Core owns the submodule checks: the app runs no git itself and removes nothing on a refusal.
+    assert!(c.execs.is_empty(), "{:?}", c.execs);
+    assert!(!format!("{:?}", c.effects).contains("space.close"), "{:?}", c.effects);
+    assert!(tree.contains("libs/a, ../up") && tree.contains("Enter again removes it anyway"), "{tree}");
 }
 
 #[gpui::test]
