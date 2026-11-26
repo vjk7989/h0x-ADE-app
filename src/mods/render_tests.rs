@@ -289,6 +289,8 @@ fn module(mut values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> Hos
                     .and_then(|p| p.strip_suffix(".json"))
                     .filter(|n| crate::window::shipped_layouts().contains(n))
                     .map(|_| json!("{}")),
+                // Profile's Tokens card reads the Token Saver's total: nothing saved, unless a test scripts it.
+                "core" if first == json!(["gate", "stats", "--json"]) => Some(json!({"code":0,"stdout":"{\"tokens_saved\":0,\"outputs\":0}","stderr":""})),
                 "core" if first == json!(["machine", "ls", "--json"]) => {
                     Some(json!({"code":0,"stdout":"{\"machines\":[{\"name\":\"remote\",\"state\":\"online\"}]}","stderr":""}))
                 }
@@ -3461,9 +3463,9 @@ fn settings_0x_modes_tokens_saved_line_comes_from_one_gate_stats_call_made_when_
     let staged = Staged::new();
     let big = r#"{"tokens_saved":1234567,"outputs":17000,"bytes_in":9,"bytes_shown":1}"#;
     let cases = [
-        (gate_stats_reply(0, r#"{"tokens_saved":12345,"outputs":17,"bytes_in":100,"bytes_shown":10}"#), "Tokens saved: 12,345 (~$0.04) across 17 big outputs"),
-        (gate_stats_reply(0, big), "Tokens saved: 1,234,567 (~$3.70) across 17,000 big outputs"),
-        (gate_stats_reply(0, r#"{"tokens_saved":0,"outputs":0,"bytes_in":0,"bytes_shown":0}"#), "Tokens saved: 0 (~$0.00) across 0 big outputs"),
+        (gate_stats_reply(0, r#"{"tokens_saved":12345,"outputs":17,"bytes_in":100,"bytes_shown":10}"#), "Tokens saved: 12,345 (~$0.04)"),
+        (gate_stats_reply(0, big), "Tokens saved: 1,234,567 (~$3.70)"),
+        (gate_stats_reply(0, r#"{"tokens_saved":0,"outputs":0,"bytes_in":0,"bytes_shown":0}"#), "Tokens saved: 0 (~$0.00)"),
         (gate_stats_reply(0, "not json"), "Tokens saved: \u{2014}"),
         (gate_stats_reply(0, ""), "Tokens saved: \u{2014}"),
         (gate_stats_reply(0, "{}"), "Tokens saved: \u{2014}"),
@@ -3476,10 +3478,155 @@ fn settings_0x_modes_tokens_saved_line_comes_from_one_gate_stats_call_made_when_
         let replies = [("gate stats --json", reply.clone())];
         let (trees, calls) = describe_pressing_replying(cx, &staged, "frame/settings", info_values(), None, &[], &replies, OPEN_MODES, 1);
         assert!(trees[1].contains(line), "{reply}: {line:?}: {}", trees[1]);
+        assert!(!trees[1].contains("big outputs"), "{reply}: {}", trees[1]);
+        assert!(trees[1].contains("st-modes-refresh") && trees[1].contains("Refresh"), "{reply}: {}", trees[1]);
         let c = calls.borrow();
         assert_eq!(c.cores, [["gate", "stats", "--json"]], "{reply}: one call, made on opening the page");
         assert!(c.unexpected.is_empty(), "{reply}: {:?}", c.unexpected);
     }
+}
+
+// Refresh runs the stats call again, as the button does; a second press while one is in flight asks nothing more.
+#[gpui::test]
+fn settings_0x_modes_refresh_asks_the_core_again_and_shows_the_new_total(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let reply = gate_stats_reply(0, r#"{"tokens_saved":2000000,"outputs":3,"bytes_in":9,"bytes_shown":1}"#);
+    let replies = [("gate stats --json", reply)];
+    let setup = "this.press = (_e, cx) => { this.openSection('modes', cx); this.press = (_e, cx) => { this.refreshSaved(cx); this.refreshSaved(cx); }; };";
+    let (trees, calls) = describe_pressing_replying(cx, &staged, "frame/settings", info_values(), None, &[], &replies, setup, 2);
+    assert!(trees[2].contains("Tokens saved: 2,000,000 (~$6.00)") && trees[2].contains("st-modes-refresh"), "{}", trees[2]);
+    assert_eq!(calls.borrow().cores.len(), 2, "one call on opening, one on Refresh: {:?}", calls.borrow().cores);
+    assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
+}
+
+// The `gate stats --json` calls the core was asked.
+fn gate_stats_calls(calls: &Rc<RefCell<Calls>>) -> usize {
+    calls.borrow().cores.iter().filter(|c| *c == &["gate", "stats", "--json"]).count()
+}
+
+// Odd answers, the largest whole number JS keeps exactly, thousands separators and the dollars either side of each
+// half cent: the line is exactly "Tokens saved: <n> (~$x.xx)" or a dash, never an exponent or NaN.
+#[gpui::test]
+fn settings_0x_modes_tokens_saved_line_with_huge_partial_odd_and_boundary_answers(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let dash = "Tokens saved: \u{2014}";
+    let cases = [
+        (r#"{"tokens_saved":999,"outputs":1}"#, "Tokens saved: 999 (~$0.00)"),
+        (r#"{"tokens_saved":1000,"outputs":1}"#, "Tokens saved: 1,000 (~$0.00)"),
+        (r#"{"tokens_saved":999999,"outputs":1}"#, "Tokens saved: 999,999 (~$3.00)"),
+        (r#"{"tokens_saved":1000000,"outputs":1}"#, "Tokens saved: 1,000,000 (~$3.00)"),
+        // $0.004998 and $0.005001; $0.024999 and $0.025002.
+        (r#"{"tokens_saved":1666,"outputs":1}"#, "Tokens saved: 1,666 (~$0.00)"),
+        (r#"{"tokens_saved":1667,"outputs":1}"#, "Tokens saved: 1,667 (~$0.01)"),
+        (r#"{"tokens_saved":8333,"outputs":1}"#, "Tokens saved: 8,333 (~$0.02)"),
+        (r#"{"tokens_saved":8334,"outputs":1}"#, "Tokens saved: 8,334 (~$0.03)"),
+        // Partial or out-of-range answers.
+        (r#"{"tokens_saved":9007199254740992,"outputs":1}"#, dash),
+        (r#"{"tokens_saved":1.5,"outputs":1}"#, dash),
+        (r#"{"tokens_saved":null,"outputs":1}"#, dash),
+        (r#"{"tokens_saved":5000}"#, dash),
+        (r#"{"tokens_saved":5000,"outputs":-1}"#, dash),
+        (r#"{"outputs":3}"#, dash),
+        ("null", dash),
+        ("[]", dash),
+        (r#"[{"tokens_saved":1,"outputs":1}]"#, dash),
+        ("\"12345\"", dash),
+    ];
+    for (stdout, line) in cases {
+        let replies = [("gate stats --json", gate_stats_reply(0, stdout))];
+        let (trees, calls) = describe_pressing_replying(cx, &staged, "frame/settings", info_values(), None, &[], &replies, OPEN_MODES, 1);
+        assert!(trees[1].contains(&format!("{line:?}")), "{stdout}: {line:?}: {}", trees[1]);
+        let saved = trees[1].lines().find(|l| l.contains("Tokens saved:")).unwrap_or_else(|| panic!("{stdout}: {}", trees[1]));
+        assert!(!saved.contains("NaN") && !saved.contains("e+") && !trees[1].contains("big outputs"), "{stdout}: {saved}");
+        assert!(trees[1].contains("\"Refresh\"") && !trees[1].contains("Refreshing"), "{stdout}: done loading: {}", trees[1]);
+        assert_eq!(gate_stats_calls(&calls), 1, "{stdout}: {:?}", calls.borrow().cores);
+    }
+    // Number.MAX_SAFE_INTEGER: every digit kept and grouped, the dollars written out in full.
+    let replies = [("gate stats --json", gate_stats_reply(0, r#"{"tokens_saved":9007199254740991,"outputs":9007199254740991}"#))];
+    let (trees, _) = describe_pressing_replying(cx, &staged, "frame/settings", info_values(), None, &[], &replies, OPEN_MODES, 1);
+    let saved = trees[1].lines().find(|l| l.contains("Tokens saved:")).unwrap_or_else(|| panic!("{}", trees[1]));
+    assert!(saved.contains("Tokens saved: 9,007,199,254,740,991 (~$27") && saved.trim_end().ends_with(".22)\""), "{saved}");
+    assert!(!saved.contains("e+") && !saved.contains("NaN"), "{saved}");
+}
+
+// The same tokens cost the same on 0x Modes and on the Profile card: a half cent rounds up on both. 5,000 tokens are
+// $0.015, which the Profile card shows as $0.02 (Math.round); a float toFixed(2) shows $0.01.
+#[gpui::test]
+fn settings_0x_modes_rounds_a_half_cent_up_like_the_profile_card(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (tokens, dollars) in [(5000, "0.02"), (15000, "0.05"), (25000, "0.08"), (35000, "0.11")] {
+        let replies = [("gate stats --json", gate_stats_reply(0, &format!(r#"{{"tokens_saved":{tokens},"outputs":1}}"#)))];
+        let (trees, _) = describe_pressing_replying(cx, &staged, "frame/settings", info_values(), None, &[], &replies, OPEN_MODES, 1);
+        assert!(trees[1].contains(&format!("(~${dollars})\"")), "{tokens}: 0x Modes must show ~${dollars} as Profile does (main.js savedText uses toFixed): {}", trees[1]);
+        let tree = describe_tokens_live(cx, &staged, "[]", "all", &tokens.to_string());
+        assert!(text_under(&tree, "st-prof-tokens-saved").contains(&format!("(~${dollars})")), "{tokens}: {tree}");
+    }
+}
+
+// Refresh pressed twice while the opening's request is still in flight: one call in all.
+#[gpui::test]
+fn settings_0x_modes_refresh_while_the_opening_request_is_in_flight_asks_nothing_more(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let replies = [("gate stats --json", gate_stats_reply(0, r#"{"tokens_saved":42,"outputs":1}"#))];
+    let setup = "this.press = (_e, cx) => { this.openSection('modes', cx); this.refreshSaved(cx); this.refreshSaved(cx); };";
+    let (trees, calls) = describe_pressing_replying(cx, &staged, "frame/settings", info_values(), None, &[], &replies, setup, 1);
+    assert!(trees[1].contains("\"Tokens saved: 42 (~$0.00)\""), "{}", trees[1]);
+    assert_eq!(gate_stats_calls(&calls), 1, "{:?}", calls.borrow().cores);
+}
+
+// While a request is in flight the button reads Refreshing... and neither opening, Refresh nor the timer asks again.
+#[gpui::test]
+fn settings_0x_modes_shows_refreshing_and_asks_nothing_while_a_request_is_in_flight(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let replies = [("gate stats --json", gate_stats_reply(0, r#"{"tokens_saved":42,"outputs":1}"#))];
+    let setup = "this.savedLoading = true; this.press = (_e, cx) => { this.openSection('modes', cx); this.press = (_e, cx) => this.refreshSaved(cx); };";
+    let (trees, calls) = describe_pressing_replying(cx, &staged, "frame/settings", info_values(), None, &[], &replies, setup, 36);
+    let last = trees.last().unwrap();
+    assert!(last.contains("st-modes-refresh") && last.contains("\"Refreshing\u{2026}\""), "{last}");
+    assert!(last.contains("\"Tokens saved: \u{2014}\""), "{last}");
+    assert_eq!(gate_stats_calls(&calls), 0, "{:?}", calls.borrow().cores);
+}
+
+// About every 5 s while 0x Modes is shown; nothing more once another page is shown, and opening Settings on 0x
+// Modes catches up at the first tick.
+#[gpui::test]
+fn settings_0x_modes_refreshes_every_five_seconds_while_shown_and_stops_when_left(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let replies = [("gate stats --json", gate_stats_reply(0, r#"{"tokens_saved":7000,"outputs":2}"#))];
+    // 71 descriptions 150 ms apart: about 10.6 s on the page.
+    let (trees, calls) = describe_pressing_replying(cx, &staged, "frame/settings", info_values(), None, &[], &replies, OPEN_MODES, 70);
+    let n = gate_stats_calls(&calls);
+    assert!((2..=3).contains(&n), "opening, then about one call per 5 s: {n}: {:?}", calls.borrow().cores);
+    assert!(trees.last().unwrap().contains("\"Tokens saved: 7,000 (~$0.02)\""), "{}", trees.last().unwrap());
+
+    let leave = "this.press = (_e, cx) => { this.openSection('modes', cx); this.press = (_e, cx) => this.openSection('info', cx); };";
+    let (trees, calls) = describe_pressing_replying(cx, &staged, "frame/settings", info_values(), None, &[], &replies, leave, 70);
+    assert!(!trees.last().unwrap().contains("Tokens saved:"), "info is shown: {}", trees.last().unwrap());
+    assert_eq!(gate_stats_calls(&calls), 1, "only the opening; none after leaving: {:?}", calls.borrow().cores);
+
+    let (trees, calls) = describe_pressing_replying(cx, &staged, "frame/settings", modes_values(), None, &[], &replies, "", 36);
+    assert!(gate_stats_calls(&calls) >= 1, "{:?}", calls.borrow().cores);
+    assert!(trees.last().unwrap().contains("\"Tokens saved: 7,000 (~$0.02)\""), "{}", trees.last().unwrap());
+}
+
+// Profile's live total: asked about every 5 s while Profile is shown, never again once another page is.
+#[gpui::test]
+fn settings_profile_live_saved_refreshes_while_shown_and_stops_when_left(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let replies = [("gate stats --json", gate_stats_reply(0, r#"{"tokens_saved":7000,"outputs":2}"#))];
+    let stay = "this.press = (_e, cx) => this.openSection('profile', cx);";
+    let (_, calls) = describe_pressing_replying(cx, &staged, "frame/settings", info_values(), None, &[], &replies, stay, 70);
+    assert!(gate_stats_calls(&calls) >= 2, "opening, then every 5 s: {:?}", calls.borrow().cores);
+    let leave = "this.press = (_e, cx) => { this.openSection('profile', cx); this.press = (_e, cx) => this.openSection('info', cx); };";
+    let (_, calls) = describe_pressing_replying(cx, &staged, "frame/settings", info_values(), None, &[], &replies, leave, 70);
+    assert_eq!(gate_stats_calls(&calls), 1, "only the opening; none after leaving: {:?}", calls.borrow().cores);
 }
 
 #[gpui::test]
@@ -13026,6 +13173,243 @@ fn describe_tokens(cx: &mut TestAppContext, staged: &Staged, days: &str, period:
          }}\n"
     );
     describe_activity(cx, staged, fixture(true, props(), updates("current", "current")), None, Some(&scenario), None)
+}
+
+// The daily record books the Token Saver once a day and stores the live lifetime total at that moment
+// (saved_total_at). Saved adds the live total above that snapshot to every period (never below 0 after a counter reset,
+// never counting booked tokens twice); with no snapshot only All time takes the live total (max(live, booked)).
+// Refresh is always on the card.
+#[gpui::test]
+fn settings_profile_tokens_card_saved_adds_the_live_total_above_the_snapshot_and_has_a_refresh_button(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let booked = "[[0, { tokens: 2000, saved: 1000 }]]";
+    for (period, live, at, record, want) in [
+        ("today", "1500", "1000", booked, "1,500 tokens (~$0.00) \u{b7} 43%"),
+        ("all", "1500", "1000", booked, "1,500 tokens (~$0.00) \u{b7} 43%"),
+        ("today", "1000", "1000", booked, "1,000 tokens (~$0.00) \u{b7} 33%"),
+        ("today", "400", "1000", booked, "1,000 tokens (~$0.00) \u{b7} 33%"),
+        ("today", "null", "1000", booked, "1,000 tokens (~$0.00) \u{b7} 33%"),
+        // No snapshot: Today takes nothing, All time is the live total or the booked days.
+        ("today", "1500", "null", booked, "1,000 tokens (~$0.00) \u{b7} 33%"),
+        ("all", "1500", "null", booked, "1,500 tokens (~$0.00) \u{b7} 43%"),
+        ("all", "400", "null", booked, "1,000 tokens (~$0.00) \u{b7} 33%"),
+        ("all", "3000", "null", "[]", "3,000 tokens (~$0.01) \u{b7} 100%"),
+        ("today", "3000", "null", "[]", "0 tokens (~$0.00) \u{b7} 0%"),
+    ] {
+        let scenario = format!(
+            "import {{ ActivityGraph, parseActivity }} from './frame/settings/activity.js';
+             const p = (x) => String(x).padStart(2, '0');
+             const ago = (n) => {{ const d = new Date(); d.setDate(d.getDate() - n); return `${{d.getFullYear()}}-${{p(d.getMonth() + 1)}}-${{p(d.getDate())}}`; }};
+             export default class Scenario extends ActivityGraph {{
+               init(props, cx) {{ super.init({{ shown: true }}, cx); this.tokenPeriod = '{period}'; }}
+               refresh() {{ const days = {{}}; for (const [n, v] of {record}) days[ago(n)] = v; this.activity = {{ days: parseActivity(JSON.stringify({{ version: 1, days }})), savedTotalAt: {at} }}; this.liveSaved = {live}; }}
+             }}
+"
+        );
+        let tree = describe_activity(cx, &staged, fixture(true, props(), updates("current", "current")), None, Some(&scenario), None);
+        assert_eq!(text_under(&tree, "st-prof-tokens-saved"), format!("text {want:?}"), "{period} {live} {at} {record}: {tree}");
+        assert!(tree.contains("st-prof-tokens-refresh") && tree.contains("\"Refresh\""), "{live}: {tree}");
+    }
+}
+
+// The real read: the file's saved_total_at is the snapshot; a bad one is none.
+#[gpui::test]
+fn settings_profile_tokens_card_reads_saved_total_at_from_the_file(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let reply = Some(gate_stats_reply(0, r#"{"tokens_saved":1500,"outputs":1}"#));
+    // All time: booked 1,000 plus the live 1,500 above the snapshot; a reset (snapshot at or above live) adds 0; a bad
+    // or missing snapshot is none, so All time is the live total.
+    for (at, want) in [("1000", "1,500 tokens"), ("1500", "1,000 tokens"), ("2000", "1,000 tokens"), ("\"x\"", "1,500 tokens"), ("-1", "1,500 tokens"), ("1.5", "1,500 tokens"), ("null", "1,500 tokens")] {
+        let record = format!(r#"{{"version":1,"saved_total_at":{at},"days":{{"2026-01-01":{{"tokens":2000,"saved":1000}}}}}}"#);
+        let (tree, _) = describe_graph_replying(cx, &staged, Some(&record), reply.clone(), true, "this.tokenPeriod = 'all';");
+        let got = text_under(&tree, "st-prof-tokens-saved");
+        assert!(got.starts_with(&format!("text \"{want}")), "{at}: {got}: {tree}");
+    }
+}
+
+// `describe_tokens` with the live lifetime total `live` (a JS value) as the last read left it.
+fn describe_tokens_live(cx: &mut TestAppContext, staged: &Staged, days: &str, period: &str, live: &str) -> String {
+    let scenario = format!(
+        "import {{ ActivityGraph, parseActivity }} from './frame/settings/activity.js';\n\
+         const p = (x) => String(x).padStart(2, '0');\n\
+         const ago = (n) => {{ const d = new Date(); d.setDate(d.getDate() - n); return `${{d.getFullYear()}}-${{p(d.getMonth() + 1)}}-${{p(d.getDate())}}`; }};\n\
+         export default class Scenario extends ActivityGraph {{\n\
+           init(props, cx) {{ super.init({{ shown: true }}, cx); this.tokenPeriod = '{period}'; }}\n\
+           refresh() {{ const days = {{}}; for (const [n, v] of {days}) days[ago(n)] = v; this.activity = {{ days: parseActivity(JSON.stringify({{ version: 1, days }})) }}; this.liveSaved = {live}; }}\n\
+         }}\n"
+    );
+    describe_activity(cx, staged, fixture(true, props(), updates("current", "current")), None, Some(&scenario), None)
+}
+
+// The real graph (its own refresh) with `record` as the activity file (None: no file) and `gate` as the answer to
+// `gate stats --json` (None: the core rejects the call); `shown` and `setup` go to its init. Returns the description
+// and the calls made.
+fn describe_graph_replying(cx: &mut TestAppContext, staged: &Staged, record: Option<&str>, gate: Option<Value>, shown: bool, setup: &str) -> (String, Rc<RefCell<Calls>>) {
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    calls.borrow_mut().replies.insert("fixture-unused".into(), Value::Null);
+    // None: the core rejects the call (the mock's own default would answer 0 saved).
+    calls.borrow_mut().replies.insert("gate stats --json".into(), gate.unwrap_or_else(|| gate_stats_reply(1, "")));
+    if let Some(text) = record {
+        calls.borrow_mut().files.insert("/fixture/app/usage/activity.json".into(), text.into());
+    }
+    let policy = Policy::new()
+        .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+        .with_host_module(module(fixture(true, props(), updates("current", "current")), calls.clone()))
+        .unwrap();
+    let scenario = format!(
+        "import {{ ActivityGraph }} from './frame/settings/activity.js';\nexport default class Scenario extends ActivityGraph {{ init(props, cx) {{ super.init({{ shown: {shown} }}, cx); {setup} }} }}\n"
+    );
+    std::fs::write(staged.0.join("main.js"), scenario).unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window
+        .update(cx, |_, window, cx| DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), staged.0.clone(), policy, window, cx))
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
+    let tree = window.update(cx, |_, window, cx| session.describe(window, cx)).unwrap().unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    (tree, calls)
+}
+
+// The whole number at the start of the Saved row ("1,500 tokens ..."); None for a dash.
+fn saved_tokens(tree: &str) -> Option<u64> {
+    let text = text_under(tree, "st-prof-tokens-saved").strip_prefix("text \"")?;
+    text.split(' ').next()?.replace(',', "").parse().ok()
+}
+
+// Through the real refresh: one `gate stats` call, and Saved is the booked 1,000 plus whatever of the live total is
+// above it, on both sides of the booked sum; a missing, bad, negative, partial or unsafe answer adds nothing.
+#[gpui::test]
+fn settings_profile_tokens_card_reads_the_live_total_from_gate_stats_with_odd_answers(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let record = r#"{"version":1,"days":{"2026-01-01":{"tokens":1000,"saved":600},"2026-01-02":{"tokens":1000,"saved":400}}}"#;
+    let booked = "1,000 tokens (~$0.00) \u{b7} 33%";
+    let ok = |n: &str| Some(gate_stats_reply(0, &format!(r#"{{"tokens_saved":{n},"outputs":1}}"#)));
+    let cases = [
+        (ok("1500"), "1,500 tokens (~$0.00) \u{b7} 43%"),
+        (ok("1001"), "1,001 tokens (~$0.00) \u{b7} 33%"),
+        (ok("1000"), booked),
+        // A counter reset: below the booked sum adds 0.
+        (ok("999"), booked),
+        (ok("0"), booked),
+        (ok("-5"), booked),
+        (ok("1.5"), booked),
+        (ok("9007199254740992"), booked),
+        (ok("9007199254740991"), "9,007,199,254,740,991 tokens (~$27,021,597,764.22) \u{b7} 99%"),
+        (Some(gate_stats_reply(0, r#"{"tokens_saved":5000}"#)), booked),
+        (Some(gate_stats_reply(0, "not json")), booked),
+        (Some(gate_stats_reply(0, "")), booked),
+        (Some(gate_stats_reply(2, "")), booked),
+        (None, booked),
+    ];
+    for (gate, want) in cases {
+        let label = format!("{gate:?}");
+        let (tree, calls) = describe_graph_replying(cx, &staged, Some(record), gate, true, "this.tokenPeriod = 'all';");
+        assert_eq!(text_under(&tree, "st-prof-tokens-saved"), format!("text {want:?}"), "{label}: {tree}");
+        assert_eq!(gate_stats_calls(&calls), 1, "{label}: {:?}", calls.borrow().cores);
+        assert_eq!(text_under(&tree, "st-prof-tokens-refresh"), "text \"Refresh\"", "{label}: done loading: {tree}");
+        let elements = tokens_card_lines(&tree).iter().filter(|l| !l.trim_start().starts_with("text ")).count();
+        assert!(elements <= 30, "{label}: the card is {elements} elements: {tree}");
+    }
+}
+
+// A day whose `saved` is not a whole positive number books 0, so the live total covers it; NaN and Infinity never
+// show.
+#[gpui::test]
+fn settings_profile_tokens_card_corrupt_saved_fields_count_as_unbooked(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let record = r#"{"version":1,"days":{
+        "2026-01-01":{"tokens":10,"saved":"x"},
+        "2026-01-02":{"tokens":10,"saved":-5},
+        "2026-01-03":{"tokens":10,"saved":null},
+        "2026-01-04":{"tokens":10,"saved":{}},
+        "2026-01-05":{"tokens":10,"saved":1e400},
+        "2026-01-06":{"tokens":10,"saved":200}}}"#;
+    for (gate, want) in [
+        (gate_stats_reply(0, r#"{"tokens_saved":700,"outputs":1}"#), "700 tokens (~$0.00) \u{b7} 92%"),
+        (gate_stats_reply(0, r#"{"tokens_saved":150,"outputs":1}"#), "200 tokens (~$0.00) \u{b7} 77%"),
+        (gate_stats_reply(1, ""), "200 tokens (~$0.00) \u{b7} 77%"),
+    ] {
+        let (tree, _) = describe_graph_replying(cx, &staged, Some(record), Some(gate.clone()), true, "this.tokenPeriod = 'all';");
+        assert_eq!(text_under(&tree, "st-prof-tokens-saved"), format!("text {want:?}"), "{gate}: {tree}");
+        assert!(!tree.contains("NaN") && !tree.contains("Infinity"), "{gate}: {tree}");
+    }
+}
+
+// No activity file: the other rows are dashes, Saved is the whole live total, or a dash without one.
+#[gpui::test]
+fn settings_profile_tokens_card_live_total_without_an_activity_file(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let dash = format!("text {:?}", "\u{2014}");
+    let reply = gate_stats_reply(0, r#"{"tokens_saved":3000,"outputs":1}"#);
+    let (tree, calls) = describe_graph_replying(cx, &staged, None, Some(reply), true, "this.tokenPeriod = 'all';");
+    assert_eq!(text_under(&tree, "st-prof-tokens-saved"), "text \"3,000 tokens (~$0.01) \u{b7} 100%\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-used"), dash, "{tree}");
+    assert_eq!(gate_stats_calls(&calls), 1, "{:?}", calls.borrow().cores);
+    for gate in [Some(gate_stats_reply(2, "")), Some(gate_stats_reply(0, "{}")), None] {
+        let label = format!("{gate:?}");
+        let (tree, _) = describe_graph_replying(cx, &staged, None, gate, true, "this.tokenPeriod = 'all';");
+        assert_eq!(text_under(&tree, "st-prof-tokens-saved"), dash, "{label}: {tree}");
+    }
+}
+
+// Refresh while a read is in flight asks nothing more; the button reads Refreshing... until the read ends.
+#[gpui::test]
+fn settings_profile_tokens_card_refresh_runs_one_read_at_a_time(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let reply = gate_stats_reply(0, r#"{"tokens_saved":3000,"outputs":1}"#);
+    // super.init's own read is in flight: two more presses join it.
+    let (tree, calls) = describe_graph_replying(cx, &staged, None, Some(reply.clone()), true, "this.refresh(); this.refresh();");
+    assert_eq!(gate_stats_calls(&calls), 1, "{:?}", calls.borrow().cores);
+    assert_eq!(text_under(&tree, "st-prof-tokens-refresh"), "text \"Refresh\"", "{tree}");
+    // Hidden (nothing read yet) with a read marked in flight: the label says so and pressing asks nothing.
+    let (tree, calls) = describe_graph_replying(cx, &staged, None, Some(reply), false, "this.refreshing = true; this.refresh();");
+    assert_eq!(text_under(&tree, "st-prof-tokens-refresh"), "text \"Refreshing\u{2026}\"", "{tree}");
+    assert_eq!(text_under(&tree, "st-prof-tokens-saved"), format!("text {:?}", "\u{2014}"), "{tree}");
+    assert_eq!(gate_stats_calls(&calls), 0, "{:?}", calls.borrow().cores);
+}
+
+// The live part is added once: All time is exactly max(live, booked) and no period is above it or below its own
+// booked days; shorter periods never show more than longer ones.
+#[gpui::test]
+fn settings_profile_tokens_card_adds_the_unbooked_live_part_once_per_period(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let days = "[[0, { tokens: 1000, saved: 100 }], [3, { saved: 200 }], [20, { saved: 300 }], [100, { saved: 400 }]]";
+    let booked = [("today", 100u64), ("week", 300), ("month", 600), ("all", 1000)];
+    for live in [0u64, 999, 1000, 1001, 1500, 9_007_199_254_740_991] {
+        let all = live.max(1000);
+        let mut last = 0;
+        for (period, own) in booked {
+            let tree = describe_tokens_live(cx, &staged, days, period, &live.to_string());
+            let saved = saved_tokens(&tree).unwrap_or_else(|| panic!("{live} {period}: {tree}"));
+            assert!((own..=all).contains(&saved) && saved >= last, "{live} {period}: {saved} (booked {own}, all {all}): {tree}");
+            assert!(saved - own <= all - 1000, "{live} {period}: the live part is added at most once: {saved}: {tree}");
+            if period == "all" {
+                assert_eq!(saved, all, "{live}: all time is booked plus the unbooked part: {tree}");
+            }
+            last = saved;
+        }
+    }
+}
+
+// The live remainder above the booked sum is what the record never booked: history older than the 371 kept days, or
+// a lifetime from before the record. It belongs to All time, not to Today or 7 days.
+#[gpui::test]
+fn settings_profile_tokens_card_today_and_week_do_not_take_the_all_time_remainder(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let days = "[[0, { tokens: 1000, saved: 100 }], [3, { saved: 200 }], [20, { saved: 300 }], [100, { saved: 400 }]]";
+    for (period, want) in [("all", 1_000_000u64), ("today", 100), ("week", 300)] {
+        let tree = describe_tokens_live(cx, &staged, days, period, "1000000");
+        assert_eq!(saved_tokens(&tree), Some(want), "{period}: activity.js tokensCard adds the all-time live remainder to every period: {tree}");
+    }
 }
 
 const TOKEN_DAYS: &str = r#"[
