@@ -3,7 +3,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, Popup } from "gpui-base";
 import { agentsInit, loadAgents, agentsPage } from "./agents.js";
-import { ActivityGraph, SAVED_USD_PER_MILLION_TOKENS } from "./activity.js";
+import { ActivityGraph, fetchSaved, savedText } from "./activity.js";
 import { core, run, theme, themes, fonts, updates, settings, layouts, layout, shared, setShared, appHome, coreConfig, readTextFile, writeTextFile, removeAppFile, playSound, openLink, copyText, notify, props, closeOverlay, nextCommand, window, account, accountSignIn, accountCancelSignIn, accountSwitch, accountSignOut, accountRemove } from "h0x";
 
 const I = (name) => `frame/settings/${name}.svg`;
@@ -148,6 +148,8 @@ export default class Settings extends View {
         });
       } else cx.notify(); // the pairing countdown
     });
+    // Tokens saved: live while 0x Modes is the page shown.
+    cx.timer.every(5000, (cx) => { if (this.section === "modes") this.refreshSaved(cx); });
     cx.timer.every(200, (cx) => {
       if (this.section !== "remote" || !this.tokenAt || Date.now() - this.tokenAt < 400) return;
       this.tokenAt = 0;
@@ -172,7 +174,7 @@ export default class Settings extends View {
     this.handle.focus();
     if (id === "machines") cx.spawn(async (cx) => { await this.loadMachines(); cx.notify(); });
     if (id === "remote") cx.spawn(async (cx) => { await this.loadRemote(); cx.notify(); });
-    if (id === "modes") cx.spawn(async (cx) => { await this.loadSaved(); cx.notify(); });
+    if (id === "modes") this.refreshSaved(cx);
     if (id === "agents") loadAgents(this, cx);
     this.graph.set_props({ shown: id === "profile" });
     cx.notify();
@@ -1274,26 +1276,26 @@ export default class Settings extends View {
   // 0x Modes -------------------------------------------------------------
 
   // What the Token Saver has saved, from `h0x-core gate stats --json`; null when the core is too old or answers
-  // anything else. Fetched when the page opens, never while rendering.
-  async loadSaved() {
+  // anything else. Fetched when the page opens, every 5 s while it is shown and on Refresh, never while rendering;
+  // one request at a time.
+  refreshSaved(cx) {
     if (this.savedLoading) return;
     this.savedLoading = true;
-    try {
-      const r = await core(["gate", "stats", "--json"]);
-      const s = r.code === 0 ? JSON.parse(r.stdout) : null;
-      this.saved = Number.isSafeInteger(s?.tokens_saved) && s.tokens_saved >= 0 && Number.isSafeInteger(s?.outputs) && s.outputs >= 0 ? s : null;
-    } catch {
-      this.saved = null;
-    } finally {
-      this.savedLoading = false;
-    }
+    cx.spawn(async (cx) => {
+      try {
+        this.saved = await fetchSaved();
+      } finally {
+        this.savedLoading = false;
+      }
+      cx.notify();
+    });
+    cx.notify();
   }
 
   savedText() {
     const s = this.saved;
     if (!s) return "\u2014";
-    const n = (v) => String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-    return `${n(s.tokens_saved)} (~$${((s.tokens_saved * SAVED_USD_PER_MILLION_TOKENS) / 1e6).toFixed(2)}) across ${n(s.outputs)} big outputs`;
+    return savedText(s.tokens_saved);
   }
 
   modes(t) {
@@ -1322,7 +1324,9 @@ export default class Settings extends View {
             : div().w(36).h(20).rounded(10).p(2).bg(t.hover).child(div().w(16).h(16).rounded(8).bg(t.muted)),
         ),
       )
-      .child(div().pt(8).pb(4).text_size(12.5).text_color(t.muted).child(`Tokens saved: ${this.savedText()}`))
+      .child(h_flex().pt(8).pb(4).gap(10).items_center().text_size(12.5).text_color(t.muted)
+        .child(div().child(`Tokens saved: ${this.savedText()}`))
+        .child(this.button(t, "st-modes-refresh", this.savedLoading ? "Refreshing…" : "Refresh", (_e, cx) => this.refreshSaved(cx))))
       .child(soon("Security"))
       .child(soon("ZK Proofs"))
       .child(soon("Observability"));

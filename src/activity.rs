@@ -4,6 +4,7 @@
 //! `{"version":1,"days":{"YYYY-MM-DD":{"seconds":n,"sessions":n,"tokens":n,"by_agent":{"claude":n},"cost_usd":x,"saved":n}}}`,
 //! days are local dates; `by_agent` is tokens per agent, `cost_usd` the API-equivalent estimate, `saved` the tokens the
 //! Token Saver kept out of agents' reading. Files from before those three keys still load (they count as zero).
+//! The top-level `saved_total_at` is the Token Saver's lifetime total at the last booking (older files have none).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -49,6 +50,11 @@ fn cost_or_zero<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error>
 /// A whole number; anything else (text, a negative, a fraction, null) is 0.
 fn count_or_zero<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
     Ok(serde_json::Value::deserialize(d)?.as_u64().unwrap_or(0))
+}
+
+/// A whole number, or nothing for anything else (the rest of the file still loads).
+fn total_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_u64())
 }
 
 /// Tokens per agent; a value that is not a whole number is 0 (the row is dropped), and anything but an object is empty.
@@ -101,6 +107,10 @@ fn tame(text: &str) -> String {
 struct File {
     version: u32,
     days: BTreeMap<String, Day>,
+    /// The Token Saver's lifetime total (`gate stats`) when `saved` was last booked into the days; what it has
+    /// saved since is not in the days yet. Files from before it have none.
+    #[serde(default, deserialize_with = "total_or_none", skip_serializing_if = "Option::is_none")]
+    saved_total_at: Option<u64>,
 }
 
 /// What has happened since the last write; each flush adds it to the file.
@@ -112,11 +122,13 @@ struct Recorder {
     carry_ms: u64,
     /// The latest day seen: a clock set back never moves time to an earlier day.
     latest: Option<String>,
+    /// The lifetime total booked since the last write, to be stored as `saved_total_at`.
+    pending_total: Option<u64>,
 }
 
 impl Recorder {
     const fn new() -> Self {
-        Recorder { pending: BTreeMap::new(), last_tick: None, last_flush: None, carry_ms: 0, latest: None }
+        Recorder { pending: BTreeMap::new(), last_tick: None, last_flush: None, carry_ms: 0, latest: None, pending_total: None }
     }
 
     fn day(&mut self, today: &str) -> &mut Day {
@@ -142,7 +154,7 @@ impl Recorder {
     }
 
     fn flush_due(&self, now: Instant) -> bool {
-        !self.pending.is_empty() && self.last_flush.is_some_and(|t| now.saturating_duration_since(t) >= FLUSH_EVERY)
+        (!self.pending.is_empty() || self.pending_total.is_some()) && self.last_flush.is_some_and(|t| now.saturating_duration_since(t) >= FLUSH_EVERY)
     }
 }
 
@@ -190,10 +202,11 @@ pub struct Saved {
 
 /// Books what the Token Saver saved since the last call: the change from the lifetime counters stored in
 /// `usage/saved.json`, never negative (a counter that was reset gives 0 and is stored as the new base). The
-/// tokens are added to today. Returns the change; None (nothing booked) when the base cannot be stored, since
+/// tokens are added to today, and the lifetime total at this moment is kept in the file for the Profile card. Returns the change; None (nothing booked) when the base cannot be stored, since
 /// the next day would count the whole lifetime again.
 pub fn book_saved(now: Saved) -> Option<Saved> {
     let delta = book_saved_in(&crate::mods::app_dir().join("usage"), now)?;
+    recorder().pending_total = Some(now.tokens);
     if delta.tokens > 0 {
         let today = local_date();
         let mut r = recorder();
@@ -248,19 +261,20 @@ fn add_to(slot: &mut Day, d: &Day) {
 }
 
 fn flush(today: &str) {
-    let taken = {
+    let (taken, total) = {
         let mut r = recorder();
         r.last_flush = Some(Instant::now());
-        std::mem::take(&mut r.pending)
+        (std::mem::take(&mut r.pending), r.pending_total.take())
     };
-    if taken.is_empty() {
+    if taken.is_empty() && total.is_none() {
         return;
     }
     let dir = crate::mods::app_dir().join("usage");
-    if let Err(e) = write_merged(&dir, &taken, today) {
+    if let Err(e) = write_merged(&dir, &taken, today, total) {
         tracing::warn!("cannot save the activity record: {e}");
         // Kept for the next flush.
         let mut r = recorder();
+        r.pending_total = r.pending_total.or(total);
         for (k, d) in &taken {
             add_to(r.pending.entry(k.clone()).or_default(), d);
         }
@@ -269,7 +283,7 @@ fn flush(today: &str) {
 
 /// Adds `delta` to what the file holds now (another HyperOx may have written meanwhile) and
 /// drops the old days. A damaged file is renamed aside and a fresh one started.
-fn write_merged(dir: &Path, delta: &BTreeMap<String, Day>, today: &str) -> std::io::Result<()> {
+fn write_merged(dir: &Path, delta: &BTreeMap<String, Day>, today: &str, total: Option<u64>) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join("activity.json");
     // Only a missing file is empty; bytes that are not text are damage; any other error (permissions,
@@ -282,9 +296,13 @@ fn write_merged(dir: &Path, delta: &BTreeMap<String, Day>, today: &str) -> std::
         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Some(None),
         Err(e) => return Err(e),
     };
+    let mut kept_total = None;
     let mut days = match read {
         None => BTreeMap::new(),
-        Some(Some(file)) => file.days,
+        Some(Some(file)) => {
+            kept_total = file.saved_total_at;
+            file.days
+        }
         Some(None) => {
             // Kept, under a name no other aside has; if it can't be kept it is not overwritten.
             static ASIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -296,7 +314,7 @@ fn write_merged(dir: &Path, delta: &BTreeMap<String, Day>, today: &str) -> std::
     };
     merge(&mut days, delta);
     prune(&mut days, today);
-    let body = serde_json::to_string_pretty(&File { version: 1, days }).map_err(std::io::Error::other)?;
+    let body = serde_json::to_string_pretty(&File { version: 1, days, saved_total_at: total.or(kept_total) }).map_err(std::io::Error::other)?;
     crate::persist::write_atomic(&path, body)
 }
 
@@ -428,8 +446,8 @@ mod tests {
         b.add_usage("claude", 5, 0.25);
         b.add_usage("codex", 3, 1.0);
         b.saved = 6;
-        write_merged(&dir, &[("2026-11-14".to_string(), a)].into(), "2026-11-14").unwrap();
-        write_merged(&dir, &[("2026-11-14".to_string(), b)].into(), "2026-11-14").unwrap();
+        write_merged(&dir, &[("2026-11-14".to_string(), a)].into(), "2026-11-14", None).unwrap();
+        write_merged(&dir, &[("2026-11-14".to_string(), b)].into(), "2026-11-14", None).unwrap();
         let d = &read(&dir)["2026-11-14"];
         assert_eq!((d.tokens, d.saved, d.cost_usd), (18, 10, 1.75));
         assert_eq!(d.by_agent, [("claude".to_string(), 15), ("codex".to_string(), 3)].into());
@@ -545,11 +563,11 @@ mod tests {
     fn a_flush_adds_to_what_another_app_wrote_and_keeps_the_file_valid() {
         let dir = scratch("merge");
         let delta: BTreeMap<String, Day> = [("2026-11-14".to_string(), day(5, 1, 100))].into();
-        write_merged(&dir, &delta, "2026-11-14").unwrap();
+        write_merged(&dir, &delta, "2026-11-14", None).unwrap();
         // A second process wrote in between: its numbers stay, ours add.
         let other: BTreeMap<String, Day> = [("2026-11-14".to_string(), day(7, 2, 50)), ("2026-11-13".to_string(), day(9, 0, 0))].into();
-        write_merged(&dir, &other, "2026-11-14").unwrap();
-        write_merged(&dir, &delta, "2026-11-14").unwrap();
+        write_merged(&dir, &other, "2026-11-14", None).unwrap();
+        write_merged(&dir, &delta, "2026-11-14", None).unwrap();
         let days = read(&dir);
         assert_eq!(days["2026-11-14"], day(17, 4, 250));
         assert_eq!(days["2026-11-13"], day(9, 0, 0));
@@ -566,7 +584,7 @@ mod tests {
         for (i, junk) in ["{not json", "", "null", r#"{"version":2,"days":{}}"#].iter().enumerate() {
             std::fs::write(dir.join("activity.json"), junk).unwrap();
             let delta: BTreeMap<String, Day> = [("2026-11-14".to_string(), day(3, 1, 0))].into();
-            write_merged(&dir, &delta, "2026-11-14").unwrap();
+            write_merged(&dir, &delta, "2026-11-14", None).unwrap();
             assert_eq!(read(&dir)["2026-11-14"], day(3, 1, 0), "{junk:?}");
             let aside = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("activity.damaged-")).count();
             assert!(aside >= 1, "round {i}: the old file is kept");
@@ -731,7 +749,7 @@ mod tests {
         let dir = scratch("usage-is-file");
         std::fs::write(&dir, "mine").unwrap();
         let delta: BTreeMap<String, Day> = [("2026-11-14".to_string(), day(5, 1, 0))].into();
-        assert!(write_merged(&dir, &delta, "2026-11-14").is_err());
+        assert!(write_merged(&dir, &delta, "2026-11-14", None).is_err());
         assert_eq!(std::fs::read_to_string(&dir).unwrap(), "mine");
         let _ = std::fs::remove_file(&dir);
     }
@@ -741,7 +759,7 @@ mod tests {
         let dir = scratch("record-is-dir");
         std::fs::create_dir_all(dir.join("activity.json").join("inside")).unwrap();
         let delta: BTreeMap<String, Day> = [("2026-11-14".to_string(), day(5, 1, 0))].into();
-        assert!(write_merged(&dir, &delta, "2026-11-14").is_err(), "the caller keeps the numbers for the next flush");
+        assert!(write_merged(&dir, &delta, "2026-11-14", None).is_err(), "the caller keeps the numbers for the next flush");
         assert!(dir.join("activity.json").join("inside").is_dir());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -753,7 +771,7 @@ mod tests {
         let other = r#"{"version":1,"written_by":"0.1.40","days":{"2026-11-13":{"seconds":4,"sessions":1,"tokens":9,"by_agent":{"claude":4}},"2026-11-14":{"seconds":1}}}"#;
         std::fs::write(dir.join("activity.json"), other).unwrap();
         let delta: BTreeMap<String, Day> = [("2026-11-14".to_string(), day(5, 1, 100))].into();
-        write_merged(&dir, &delta, "2026-11-14").unwrap();
+        write_merged(&dir, &delta, "2026-11-14", None).unwrap();
         let days = read(&dir);
         // `by_agent` is a real field now: the other version's {"claude":4} is read, not dropped.
         assert_eq!(days["2026-11-13"], Day { by_agent: [("claude".to_string(), 4)].into(), ..day(4, 1, 9) });
@@ -771,7 +789,7 @@ mod tests {
         let junk: &[u8] = &[0xff, 0xfe, b'{', 0, b'}', 0, 0x80, 0x81];
         std::fs::write(dir.join("activity.json"), junk).unwrap();
         let delta: BTreeMap<String, Day> = [("2026-11-14".to_string(), day(3, 1, 0))].into();
-        write_merged(&dir, &delta, "2026-11-14").unwrap();
+        write_merged(&dir, &delta, "2026-11-14", None).unwrap();
         assert_eq!(read(&dir)["2026-11-14"], day(3, 1, 0));
         let aside: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
             .unwrap()
@@ -799,7 +817,7 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("activity.json"), text).unwrap();
             let delta: BTreeMap<String, Day> = [("2026-11-14".to_string(), day(3, 1, 0))].into();
-            write_merged(&dir, &delta, "2026-11-14").unwrap();
+            write_merged(&dir, &delta, "2026-11-14", None).unwrap();
             let got = read(&dir)["2026-11-14"].clone();
             if i == 0 {
                 assert_eq!(got, day(5, 1, 0), "CRLF is valid JSON: merged");
@@ -821,7 +839,7 @@ mod tests {
         for (i, name) in names.iter().enumerate() {
             d.add_usage(name, i as u64 + 1, 0.0);
         }
-        write_merged(&dir, &[("2026-11-14".to_string(), d.clone())].into(), "2026-11-14").unwrap();
+        write_merged(&dir, &[("2026-11-14".to_string(), d.clone())].into(), "2026-11-14", None).unwrap();
         let got = &read(&dir)["2026-11-14"];
         assert_eq!(got, &d);
         for (i, name) in names.iter().enumerate() {
@@ -881,7 +899,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let text = r#"{"version":1,"days":{"2026-11-13":{"seconds":1,"tokens":2,"cost_usd":1e400,"saved":1e400,"by_agent":{"claude":1e400,"codex":5}},"2026-11-12":{"seconds":8,"cost_usd":2.5,"saved":3}}}"#;
         std::fs::write(dir.join("activity.json"), text).unwrap();
-        write_merged(&dir, &[("2026-11-14".to_string(), day(5, 1, 0))].into(), "2026-11-14").unwrap();
+        write_merged(&dir, &[("2026-11-14".to_string(), day(5, 1, 0))].into(), "2026-11-14", None).unwrap();
         let days = read(&dir);
         assert_eq!(days["2026-11-13"], Day { by_agent: [("codex".to_string(), 5)].into(), ..day(1, 0, 2) });
         assert_eq!((days["2026-11-12"].seconds, days["2026-11-12"].cost_usd, days["2026-11-12"].saved), (8, 2.5, 3));
@@ -929,7 +947,7 @@ mod tests {
             std::fs::write(dir.join("activity.json"), text).unwrap();
             let mut delta = Day::default();
             delta.add_usage("claude", 1, add);
-            write_merged(&dir, &[("2026-11-14".to_string(), delta)].into(), "2026-11-14").unwrap();
+            write_merged(&dir, &[("2026-11-14".to_string(), delta)].into(), "2026-11-14", None).unwrap();
             let got = read(&dir)["2026-11-14"].clone();
             assert_eq!((got.tokens, got.by_agent["claude"]), (5, 5), "{file_cost:e}");
             assert!(got.cost_usd.is_finite() && got.cost_usd >= 0.0, "{file_cost:e}: {}", got.cost_usd);
@@ -945,7 +963,7 @@ mod tests {
             std::fs::write(dir.join("activity.json"), format!(r#"{{"version":1,"days":{{"2026-11-14":{{"seconds":2,"cost_usd":{cost}}}}}}}"#)).unwrap();
             let mut delta = day(3, 1, 0);
             delta.add_usage("codex", 6, 0.5);
-            write_merged(&dir, &[("2026-11-14".to_string(), delta)].into(), "2026-11-14").unwrap();
+            write_merged(&dir, &[("2026-11-14".to_string(), delta)].into(), "2026-11-14", None).unwrap();
             let got = read(&dir)["2026-11-14"].clone();
             assert!(got.seconds >= 3 && got.sessions == 1 && got.by_agent["codex"] == 6, "{cost}: {got:?}");
             assert!(got.cost_usd.is_finite() && got.cost_usd >= 0.5, "{cost}: {got:?}");
@@ -964,7 +982,7 @@ mod tests {
         assert_eq!(r.pending["2027-01-01"].by_agent, [("claude".to_string(), 7), ("codex".to_string(), 2)].into());
         assert_eq!((r.pending["2026-12-31"].cost_usd, r.pending["2027-01-01"].cost_usd), (0.5, 0.25));
         let dir = scratch("year-end-usage");
-        write_merged(&dir, &r.pending, "2027-01-01").unwrap();
+        write_merged(&dir, &r.pending, "2027-01-01", None).unwrap();
         assert_eq!(read(&dir), r.pending, "both days are inside the keep window");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -978,9 +996,9 @@ mod tests {
         full.add_usage("claude", 9, 1.5);
         let dir = scratch("keep-new-fields");
         std::fs::create_dir_all(&dir).unwrap();
-        let file = File { version: 1, days: [(kept.clone(), full.clone()), (dropped.clone(), full.clone())].into() };
+        let file = File { version: 1, days: [(kept.clone(), full.clone()), (dropped.clone(), full.clone())].into(), saved_total_at: None };
         std::fs::write(dir.join("activity.json"), serde_json::to_string(&file).unwrap()).unwrap();
-        write_merged(&dir, &[(today.to_string(), day(1, 0, 0))].into(), today).unwrap();
+        write_merged(&dir, &[(today.to_string(), day(1, 0, 0))].into(), today, None).unwrap();
         let days = read(&dir);
         assert_eq!(days.get(&kept), Some(&full), "{kept} is the oldest day kept, with by_agent, cost_usd and saved");
         assert!(!days.contains_key(&dropped), "{dropped} is dropped");
@@ -1004,11 +1022,37 @@ mod tests {
         let dir = scratch("old-reader");
         let mut d = Day { saved: 3, ..day(4, 2, 0) };
         d.add_usage("claude", 10, 0.75);
-        write_merged(&dir, &[("2026-11-14".to_string(), d)].into(), "2026-11-14").unwrap();
+        write_merged(&dir, &[("2026-11-14".to_string(), d)].into(), "2026-11-14", None).unwrap();
         let old: OldFile = serde_json::from_str(&std::fs::read_to_string(dir.join("activity.json")).unwrap()).unwrap();
         assert_eq!(old.version, 1);
         assert_eq!(old.days["2026-11-14"], OldDay { seconds: 4, sessions: 2, tokens: 10 });
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_saved_total_snapshot_is_written_kept_across_writes_and_junk_reads_as_none() {
+        let dir = scratch("saved-total-at");
+        let read = || std::fs::read_to_string(dir.join("activity.json")).unwrap();
+        let day = |s: u64| -> BTreeMap<String, Day> { [("2026-11-14".to_string(), Day { saved: s, ..Day::default() })].into() };
+        // Written with the booking, and a later write without one keeps it.
+        write_merged(&dir, &day(5), "2026-11-14", Some(900)).unwrap();
+        assert!(read().contains("\"saved_total_at\": 900"), "{}", read());
+        write_merged(&dir, &day(1), "2026-11-14", None).unwrap();
+        let file: File = serde_json::from_str(&read()).unwrap();
+        assert_eq!((file.saved_total_at, file.days["2026-11-14"].saved), (Some(900), 6));
+        // A newer snapshot replaces it; a counter that was reset is stored as it is.
+        write_merged(&dir, &day(0), "2026-11-14", Some(40)).unwrap();
+        assert_eq!(serde_json::from_str::<File>(&read()).unwrap().saved_total_at, Some(40));
+        // Junk reads as none and the days still load; a file without the field loads too.
+        for text in [r#"{"version":1,"saved_total_at":"x","days":{}}"#, r#"{"version":1,"saved_total_at":-3,"days":{}}"#, r#"{"version":1,"saved_total_at":1.5,"days":{}}"#, r#"{"version":1,"days":{}}"#] {
+            assert_eq!(serde_json::from_str::<File>(text).unwrap().saved_total_at, None, "{text}");
+        }
+        // Never written for a file that has none.
+        let fresh = scratch("saved-total-none");
+        write_merged(&fresh, &day(1), "2026-11-14", None).unwrap();
+        assert!(!std::fs::read_to_string(fresh.join("activity.json")).unwrap().contains("saved_total_at"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&fresh);
     }
 
     #[test]
@@ -1081,6 +1125,7 @@ mod tests {
         crate::events::token_saver_daily(&Ok(serde_json::json!({"tokens_saved": 300, "outputs": 4})), false);
         assert_eq!(serde_json::from_str::<Saved>(&std::fs::read_to_string(&base).unwrap()).unwrap(), Saved { tokens: 300, outputs: 4 });
         assert_eq!(saved_today(), 300);
+        assert_eq!(recorder().pending_total, Some(300), "the live total is kept with the booking");
         crate::events::token_saver_daily(&Ok(serde_json::json!({"tokens_saved": 500, "outputs": 5})), true);
         assert_eq!(saved_today(), 500);
         // A reset counter adds nothing today and becomes the new base.

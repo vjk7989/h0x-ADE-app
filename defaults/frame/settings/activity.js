@@ -4,7 +4,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { appHome, readTextFile, theme } from "h0x";
+import { appHome, core, readTextFile, theme } from "h0x";
 
 const WEEKS = 53, CELL = 9, GAP = 2, LABELS = 53;
 const MIN_CELL = 6, MAX_CELL = 14, DEFAULT_WIDTH = 634; // the content column at the standard window
@@ -16,6 +16,18 @@ const SHARE = [0, 0.4, 0.62, 0.82, 1];
 
 // Dollars per million input tokens (Claude Sonnet's price): turns tokens saved into the "~$" shown beside them.
 export const SAVED_USD_PER_MILLION_TOKENS = 3;
+// The Token Saver's lifetime counters from `h0x-core gate stats --json`: {tokens_saved, outputs, ...}; null when the
+// core is too old or answers anything else.
+export async function fetchSaved() {
+  try {
+    const r = await core(["gate", "stats", "--json"]);
+    const s = r.code === 0 ? JSON.parse(r.stdout) : null;
+    return Number.isSafeInteger(s?.tokens_saved) && s.tokens_saved >= 0 && Number.isSafeInteger(s?.outputs) && s.outputs >= 0 ? s : null;
+  } catch {
+    return null;
+  }
+}
+
 const PERIODS = [["today", "Today", 1], ["week", "7 days", 7], ["month", "30 days", 30], ["all", "All time", Infinity]];
 const AGENT_NAMES = new Map([["claude", "Claude Code"], ["codex", "Codex"]]);
 
@@ -24,7 +36,7 @@ const key = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate(
 const nth = (from, n) => new Date(from.getFullYear(), from.getMonth(), from.getDate() + n);
 // 8,692 (the runtime has no Intl, so no toLocaleString grouping).
 // Whole numbers only, never in exponent form (1e21 and up go through BigInt); anything not finite is 0.
-const grouped = (n) => (Number.isFinite(n) ? (n >= 1e21 ? BigInt(Math.round(n)).toString() : String(n)) : "0").replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+export const grouped = (n) => (Number.isFinite(n) ? (n >= 1e21 ? BigInt(Math.round(n)).toString() : String(n)) : "0").replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 // A real "YYYY-MM-DD" (2026-02-30 and 2026-00-00 are not).
 const isDate = (k) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k);
@@ -64,6 +76,17 @@ export function parseActivity(text) {
     return days;
   } catch {
     return {};
+  }
+}
+
+// The Token Saver's lifetime total when the days last booked it ("saved_total_at"); null when there is none (an older
+// file) or it is not a whole number.
+export function parseSavedTotalAt(text) {
+  try {
+    const n = JSON.parse(text)?.saved_total_at;
+    return Number.isSafeInteger(n) && n >= 0 ? n : null;
+  } catch {
+    return null;
   }
 }
 
@@ -116,6 +139,8 @@ const cents = (c) => {
   const n = Number.isFinite(c) && c > 0 ? Math.round(c * 100) : 0;
   return `${grouped(Math.floor(n / 100))}.${pad(n % 100)}`;
 };
+// "1,234 (~$0.00)": tokens saved and what they would have cost, rounded and grouped the same on every page.
+export const savedText = (tokens) => `${grouped(tokens)} (~$${cents((tokens * SAVED_USD_PER_MILLION_TOKENS) / 1e6)})`;
 export const costText = (c) => (c > 0 && c < 0.01 ? "<$0.01" : `$${cents(c)}`);
 // 100% only when nothing was used; otherwise at most 99%.
 export const savedPercent = (saved, used) => (saved + used > 0 ? (used === 0 ? 100 : Math.min(99, Math.round((saved * 100) / (saved + used)))) : 0);
@@ -192,8 +217,8 @@ export class ActivityGraph extends View {
     this.cx = cx;
     this.shown = Boolean(props?.shown);
     if (this.shown) this.refresh();
-    // The record changes while Profile is open (an agent is working): read it again each minute.
-    cx.timer.every(60000, () => { if (this.shown) this.refresh(); });
+    // The record changes while Profile is open (an agent is working): read it again every 5 s, only while shown.
+    cx.timer.every(5000, () => { if (this.shown) this.refresh(); });
   }
 
   // Profile opens or closes: reading the record again when it opens.
@@ -203,9 +228,17 @@ export class ActivityGraph extends View {
     if (this.shown && !was) this.refresh();
   }
 
+  // Reads the record and the Token Saver's live total; one read at a time.
   refresh() {
+    if (this.refreshing) return;
+    this.refreshing = true;
     this.cx.spawn(async (cx) => {
-      await loadActivity(this);
+      try {
+        await loadActivity(this);
+        this.liveSaved = (await fetchSaved())?.tokens_saved ?? null;
+      } finally {
+        this.refreshing = false;
+      }
       cx.notify();
     });
   }
@@ -218,7 +251,7 @@ export class ActivityGraph extends View {
 export async function loadActivity(view) {
   let text = null;
   try { text = await readTextFile(`${appHome()}/usage/activity.json`); } catch {}
-  view.activity = { days: parseActivity(text) };
+  view.activity = { days: parseActivity(text), savedTotalAt: parseSavedTotalAt(text) };
 }
 
 const mono = (el) => el.font_family("JetBrains Mono");
@@ -256,7 +289,15 @@ function tokensCard(view, t) {
   const now = new Date(), kept = view.tokenModel;
   const totals = kept && kept.record === view.activity && kept.today === key(now) ? kept.totals : tokenTotals(view.activity?.days ?? {}, now);
   view.tokenModel = { record: view.activity, today: key(now), totals };
-  const sum = totals[period[0]];
+  // The record books the Token Saver once a day, with the live lifetime total at that moment. What it saved since is
+  // the live total above that snapshot (0 after a counter reset): added to every period. Without a snapshot (an older
+  // file) nothing is added to the shorter periods, since the remainder may be old history, and All time is whichever
+  // is more, the live total or the booked days.
+  const live = Number.isSafeInteger(view.liveSaved) ? view.liveSaved : null;
+  const at = Number.isSafeInteger(view.activity?.savedTotalAt) ? view.activity.savedTotalAt : null;
+  const own = totals[period[0]].saved;
+  const unbooked = live === null ? 0 : at !== null ? Math.max(0, live - at) : period[0] === "all" ? Math.max(0, live - own) : 0;
+  const sum = { ...totals[period[0]], saved: own + unbooked };
   const text = (v) => (none ? "—" : v);
   const label = (s) => mono(div().text_size(11).text_color(t.dim)).child(s);
   const value = (id, s) => mono(div().id(id).text_size(12).text_color(t.foreground)).child(s);
@@ -274,7 +315,10 @@ function tokensCard(view, t) {
     .child(h_flex().w_full().justify_between().child(label("Used")).child(value("st-prof-tokens-used", text(tokensText(sum.used)))))
     .children(agents.map(([name, n]) => h_flex().w_full().pl(12).justify_between().child(label(AGENT_NAMES.get(name) ?? (name || "unknown"))).child(value(`st-prof-tokens-agent-${name || "unknown"}`, grouped(n)))))
     .child(h_flex().w_full().justify_between().child(label("API-equivalent est.")).child(value("st-prof-tokens-cost", text(costText(sum.cost)))))
-    .child(h_flex().w_full().justify_between().child(label("Saved")).child(value("st-prof-tokens-saved", text(`${tokensText(sum.saved)} (~$${cents((sum.saved * SAVED_USD_PER_MILLION_TOKENS) / 1e6)}) · ${savedPercent(sum.saved, sum.used)}%`))))
+    .child(h_flex().w_full().justify_between().child(label("Saved")).child(value("st-prof-tokens-saved", none && !live ? "—" : `${tokensText(sum.saved)} (~$${cents((sum.saved * SAVED_USD_PER_MILLION_TOKENS) / 1e6)}) · ${savedPercent(sum.saved, sum.used)}%`)))
+    .child(h_flex().w_full().justify_end().child(mono(div().id("st-prof-tokens-refresh").h(22).px(8).flex().items_center().rounded(5).cursor_pointer().text_size(11)
+      .text_color(t.muted).hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => { view.refresh(); cx.notify(); })).child(view.refreshing ? "Refreshing…" : "Refresh")))
     .child(mono(div().text_size(10.5).text_color(t.dim)).child("Counted for agents started in HyperOx."));
 }
 
