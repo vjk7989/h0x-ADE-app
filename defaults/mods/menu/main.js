@@ -73,7 +73,7 @@ function items(p, git) {
       return [
         ["Rename", "space.rename", { id: tg.id }],
         ...(git ? [["New worktree", "worktree", { space: tg.id, action: "new" }], ["Open worktree", "worktree", { space: tg.id, action: "open" }]] : []),
-        ...(git === "linked" ? [["Remove worktree", "worktree", { space: tg.id, action: "remove" }]] : []),
+        ...(git === "linked" ? [["Merge worktree", "worktree", { space: tg.id, action: "merge" }], ["Remove worktree", "worktree", { space: tg.id, action: "remove" }]] : []),
         ["Close", "space.close", { id: tg.id }],
       ];
     // The sessions panel's ⋯: it remembers which session, so these carry no args.
