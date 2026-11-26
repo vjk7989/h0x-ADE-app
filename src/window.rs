@@ -6555,7 +6555,7 @@ mod tests {
             let local = super::AppWindow::agent_argv(Some(program.clone()), None, None, None);
             assert_eq!(local, Some(local_agent_argv(program.clone())), "{program:?}");
             let remote = super::AppWindow::agent_argv(Some(program.clone()), Some(" "), Some("box"), None);
-            assert_eq!(remote, Some(crate::remote_shell::launch(program)), "{program:?}");
+            assert_eq!(remote, Some(crate::remote_shell::launch(program.clone())), "{program:?}");
         }
         // settings.json as read from disk: no key (or a non-bool) is on; only an explicit false sends `0`.
         let look = crate::layout::Look::default();
