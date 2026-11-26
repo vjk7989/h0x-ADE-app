@@ -79,3 +79,12 @@ Set at launch on a local terminal that HyperOx starts as Claude Code
 (`claude --session-id <uuid>`, or the explicit id of the person's own
 `--session-id`/`--resume`). Usage reads only that session's log, never one
 picked by folder or time. No label: nothing is read.
+
+## Token Saver is an environment flag, not a label
+
+A Claude Code terminal that HyperOx starts (local or on another machine)
+gets `H0X_TOKEN_SAVER=1` (Token Saver on) or `H0X_TOKEN_SAVER=0` (off) in its
+environment. The core's `claude` shim reads it and adds the hooks itself
+(`--settings`), unless the person gave their own `--settings`, which always
+wins (ADR-129). There is no `h0x.ts` label any more, and the app puts no
+settings in the launch's argv.

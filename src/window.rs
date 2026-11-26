@@ -2608,10 +2608,11 @@ impl AppWindow {
         let argv = argv.unwrap_or_default();
         self.require_document(on)?;
         let labels = spawn_labels(space, ctx, on, program);
-        let (addr, cwd) = run_following_folder(cwd, follow, on, |cwd| match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on, size, crate::terminal::initial_display(window)) {
+        let token_saver = token_saver_flag(program);
+        let (addr, cwd) = run_following_folder(cwd, follow, on, |cwd| match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on, size, crate::terminal::initial_display(window), token_saver) {
             // An agent on a machine without `sh` (Windows): in its PowerShell instead.
             Err(e) if on.is_some() && argv.first().map(String::as_str) == Some("sh") && format!("{e:#}").contains("not found") => {
-                self.core.run(Self::powershell_argv(&argv), cwd, labels.clone(), on, size, crate::terminal::initial_display(window))
+                self.core.run(Self::powershell_argv(&argv), cwd, labels.clone(), on, size, crate::terminal::initial_display(window), token_saver)
             }
             r => r,
         })
@@ -2635,8 +2636,7 @@ impl AppWindow {
     /// (on another machine: that machine's shell).
     fn agent_argv(argv: Option<Vec<String>>, task: Option<&str>, on: Option<&str>, route: Option<&crate::programs::Route>) -> Option<Vec<String>> {
         let task = task.map(str::trim).filter(|t| !t.is_empty());
-        argv.filter(|a| !a.is_empty()).map(|cmd| {
-            let mut cmd = crate::programs::with_token_saver(crate::settings::get().token_saver, cmd);
+        argv.filter(|a| !a.is_empty()).map(|mut cmd| {
             if let Some(route) = route {
                 cmd = crate::programs::with_routing(route, cmd);
             }
@@ -2761,7 +2761,6 @@ impl AppWindow {
             .and_then(|_| self.initial_size(&root, &new, window));
         let argv = session_argv(argv, on.as_deref());
         let program = argv.clone().unwrap_or_default();
-        let argv = argv.map(|a| crate::programs::with_token_saver(crate::settings::get().token_saver, a));
         let (addr, _) = self.spawn(argv, &program, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.model.split(&target, axis, &new, &addr);
         Ok(json!({ "pane": new, "terminal": addr }))
@@ -5582,6 +5581,11 @@ fn spawn_labels(space: &str, tab: &str, on: Option<&str>, program: &[String]) ->
     labels
 }
 
+/// `H0X_TOKEN_SAVER` (`1` on, `0` off) for a Claude launch of `program`: the core's `claude` shim adds the hooks from it.
+fn token_saver_flag(program: &[String]) -> Option<&'static str> {
+    crate::programs::token_saver_env(crate::settings::get().token_saver, program)
+}
+
 /// A local Claude gets its own session id; on another machine it stays as asked (no usage is read there).
 fn session_argv(argv: Option<Vec<String>>, on: Option<&str>) -> Option<Vec<String>> {
     argv.map(|a| if on.is_none() { crate::programs::with_session_id(a) } else { a })
@@ -6470,68 +6474,67 @@ mod tests {
         super::unix_agent_argv(sh, cmd, cfg!(target_os = "macos"))
     }
 
+    /// The `H0X_TOKEN_SAVER` value a launch of `program` carries, under Token Saver `on`.
+    fn flag(on: bool, program: &[String]) -> Option<&'static str> {
+        with_token_saver_setting(on, || super::token_saver_flag(program))
+    }
+
     #[test]
-    fn token_saver_puts_its_settings_before_the_task_text_and_leaves_the_task_as_given() {
-        let hook = crate::programs::with_token_saver(true, words(&["claude"]));
-        assert_eq!(hook.len(), 3);
-        let json: serde_json::Value = serde_json::from_str(&hook[2]).unwrap();
-        assert_eq!(json["hooks"]["PostToolUse"][0]["matcher"], "^(Bash|Read|Grep)$");
-        assert_eq!(json["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "\"$H0X_CORE_EXE\" gate");
-        // A task that mentions `--settings` is text, not the person's flag: the hook still goes in.
+    fn token_saver_leaves_the_argv_and_the_task_as_given_and_sets_only_the_env_flag() {
+        // A task that mentions `--settings` is text: argv gets no settings of ours in any case.
         let task = "fix the \"build\" for $USER's sake --settings {} `whoami`";
         let asked = format!("  {task}\n");
-        let run = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(words(&["claude", "--model", "opus"])), Some(asked.as_str()), None, None)).unwrap();
-        assert_eq!(run, local_agent_argv(words(&["claude", "--settings", &hook[2], "--model", "opus", task])));
-        assert_eq!(crate::programs::agent(&run).as_deref(), Some("claude"));
-        // Off: the person's command and task, nothing more.
-        let run = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(words(&["claude", "--model", "opus"])), Some(asked.as_str()), None, None)).unwrap();
-        assert_eq!(run, local_agent_argv(words(&["claude", "--model", "opus", task])));
+        let program = words(&["claude", "--model", "opus"]);
+        for saver in [true, false] {
+            let run = with_token_saver_setting(saver, || super::AppWindow::agent_argv(Some(program.clone()), Some(asked.as_str()), None, None)).unwrap();
+            assert_eq!(run, local_agent_argv(words(&["claude", "--model", "opus", task])), "{saver}");
+            assert_eq!(crate::programs::agent(&run).as_deref(), Some("claude"));
+            assert!(!run.iter().any(|a| a.contains("PostToolUse") || a.contains("hook session")), "{run:?}");
+            // On: `H0X_TOKEN_SAVER=1`; off: `H0X_TOKEN_SAVER=0`.
+            assert_eq!(flag(saver, &program), Some(if saver { "1" } else { "0" }));
+        }
     }
 
     #[test]
-    fn token_saver_on_another_machine_keeps_the_settings_json_one_argument_after_the_wrapper() {
-        let hook = crate::programs::with_token_saver(true, words(&["claude"]));
+    fn token_saver_on_another_machine_keeps_the_argv_as_given_after_the_wrapper() {
         let task = "say \"hi\" to $env:USERNAME's 'box'; $(rm -rf ~)";
-        let want = words(&["claude", "--settings", &hook[2], task]);
-        let run = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(task), Some("box"), None)).unwrap();
-        assert_eq!(run, crate::remote_shell::launch(want.clone()));
-        assert_eq!(run[..4], crate::remote_shell::launch(Vec::new())[..], "the wrapper is the same");
-        assert_eq!(run[4..], want[..]);
-        assert_eq!(run[6], hook[2], "the JSON is one argument, untouched");
-        assert_eq!(crate::programs::agent(&run).as_deref(), Some("claude"));
-        // A blank task adds nothing after the hook.
-        let blank = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(" \n\t"), Some("box"), None)).unwrap();
-        assert_eq!(blank[4..], hook[..]);
+        let want = words(&["claude", task]);
+        for saver in [true, false] {
+            let run = with_token_saver_setting(saver, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(task), Some("box"), None)).unwrap();
+            assert_eq!(run, crate::remote_shell::launch(want.clone()), "{saver}");
+            assert_eq!(run[..4], crate::remote_shell::launch(Vec::new())[..], "the wrapper is the same");
+            assert_eq!(run[4..], want[..]);
+            assert_eq!(crate::programs::agent(&run).as_deref(), Some("claude"));
+            // A blank task adds nothing after the program.
+            let blank = with_token_saver_setting(saver, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(" \n\t"), Some("box"), None)).unwrap();
+            assert_eq!(blank[4..], words(&["claude"])[..]);
+            // The flag goes with the launch to the other machine too.
+            assert_eq!(flag(saver, &words(&["claude"])), Some(if saver { "1" } else { "0" }));
+        }
         // No `sh` there (Windows): its PowerShell starts the same words, quotes and `$` in the task included.
+        let run = super::AppWindow::agent_argv(Some(words(&["claude"])), Some(task), Some("box"), None).unwrap();
         let ps = super::AppWindow::powershell_argv(&run);
         assert_eq!(ps, words(&["powershell.exe", "-NoLogo", "-NoExit", "-Command", &crate::programs::powershell_line(&want)]));
-        // Off: as before.
-        let off = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(task), Some("box"), None)).unwrap();
-        assert_eq!(off, crate::remote_shell::launch(words(&["claude", task])));
     }
 
     #[test]
-    fn agent_argv_is_unchanged_with_token_saver_off_and_for_programs_other_than_claude() {
-        let claude = [(words(&["claude"]), None), (words(&["claude", "--resume"]), Some("go")), (words(&["CLAUDE.EXE"]), Some("go")), (words(&[r"C:\Program Files\claude\claude.exe"]), Some("go"))];
-        let others = [(words(&["codex"]), Some("go")), (words(&["claude-code"]), None), (words(&["pwsh.exe"]), None), (words(&["claude", "--settings", "{}"]), Some("go"))];
+    fn agent_argv_is_unchanged_whatever_token_saver_is_and_the_flag_is_for_claude_only() {
+        // ADR-129: the core shim adds the hooks; a launch gains nothing in argv, off or on.
+        let claude = [(words(&["claude"]), None), (words(&["claude", "--resume"]), Some("go")), (words(&["CLAUDE.EXE"]), Some("go")), (words(&[r"C:\Program Files\claude\claude.exe"]), Some("go")), (words(&["claude", "--settings", "{}"]), Some("go"))];
+        let others = [(words(&["codex"]), Some("go")), (words(&["claude-code"]), None), (words(&["pwsh.exe"]), None)];
         for (argv, task) in claude.iter().chain(others.iter()) {
             let mut cmd = argv.clone();
             cmd.extend(task.map(str::to_owned));
             for on in [None, Some("box")] {
                 let before = if on.is_some() { crate::remote_shell::launch(cmd.clone()) } else { local_agent_argv(cmd.clone()) };
-                if others.iter().any(|(o, _)| o == argv) {
-                    let default = super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None);
-                    assert_eq!(default.as_ref(), Some(&before), "default {argv:?} {on:?}");
+                for saver in [true, false] {
+                    let run = with_token_saver_setting(saver, || super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None));
+                    assert_eq!(run.as_ref(), Some(&before), "{saver} {argv:?} {on:?}");
                 }
-                let off = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None));
-                assert_eq!(off.as_ref(), Some(&before), "off {argv:?} {on:?}");
             }
-        }
-        for (argv, task) in &others {
-            for on in [None, Some("box")] {
-                let off = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None));
-                let run = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(argv.clone()), *task, on, None));
-                assert_eq!(run, off, "on {argv:?} {on:?}");
+            for saver in [true, false] {
+                let want = claude.iter().any(|(c, _)| c == argv).then_some(if saver { "1" } else { "0" });
+                assert_eq!(flag(saver, argv), want, "{saver} {argv:?}");
             }
         }
         // No program or an empty one: nothing to start either way.
@@ -6544,27 +6547,30 @@ mod tests {
     }
 
     #[test]
-    fn a_launch_with_the_default_settings_gets_the_token_saver_here_and_on_another_machine() {
+    fn a_launch_with_the_default_settings_carries_the_on_flag_here_and_on_another_machine() {
         // Nothing set on this thread: the default settings, so Token Saver is on.
         assert!(crate::settings::get().token_saver);
         for program in [words(&["claude"]), words(&[r"C:\Program Files\claude\claude.exe", "--resume"])] {
-            let hooked = crate::programs::with_token_saver(true, program.clone());
-            assert_ne!(hooked, program, "{program:?}");
+            assert_eq!(super::token_saver_flag(&program), Some("1"), "{program:?}");
             let local = super::AppWindow::agent_argv(Some(program.clone()), None, None, None);
-            assert_eq!(local, Some(local_agent_argv(hooked.clone())), "{program:?}");
+            assert_eq!(local, Some(local_agent_argv(program.clone())), "{program:?}");
             let remote = super::AppWindow::agent_argv(Some(program.clone()), Some(" "), Some("box"), None);
-            assert_eq!(remote, Some(crate::remote_shell::launch(hooked)), "{program:?}");
+            assert_eq!(remote, Some(crate::remote_shell::launch(program.clone())), "{program:?}");
         }
-        // settings.json as read from disk: no key (or a non-bool) is on; only an explicit false launches the bare program.
+        // settings.json as read from disk: no key (or a non-bool) is on; only an explicit false sends `0`.
         let look = crate::layout::Look::default();
         for (text, on) in [("{}", true), (r#"{"token_saver":"false"}"#, true), (r#"{"token_saver":null}"#, true), (r#"{"token_saver":false}"#, false)] {
             let person: crate::settings::Person = serde_json::from_str(text).unwrap();
             let original = crate::settings::get();
             crate::settings::set(crate::settings::Settings::compose(&person, &look, false));
             let run = super::AppWindow::agent_argv(Some(words(&["claude"])), None, None, None);
+            let sent = super::token_saver_flag(&words(&["claude"]));
             crate::settings::set((*original).clone());
-            let want = if on { crate::programs::with_token_saver(true, words(&["claude"])) } else { words(&["claude"]) };
-            assert_eq!(run, Some(local_agent_argv(want)), "{text}");
+            // ADR-129: the argv is the same on or off; only the env flag differs.
+            assert_eq!(sent, Some(if on { "1" } else { "0" }), "{text}");
+            assert_eq!(run, Some(local_agent_argv(words(&["claude"]))), "{text}");
+            let remote = with_token_saver_setting(on, || super::AppWindow::agent_argv(Some(words(&["claude"])), None, Some("box"), None));
+            assert_eq!(remote, Some(crate::remote_shell::launch(words(&["claude"]))), "remote {text}");
         }
     }
 
@@ -6585,18 +6591,123 @@ mod tests {
     #[test]
     fn token_saver_settings_never_reach_the_agent_labels() {
         let plain = words(&["claude", "fix it"]);
-        let hooked = crate::programs::with_token_saver(true, plain.clone());
-        assert_ne!(hooked, plain);
+        let own = words(&["claude", "--settings", "{}", "fix it"]);
         let labels = super::spawn_labels("sp1", "tb1", None, &plain);
         assert_eq!(labels["h0x.agent"], "claude");
-        assert_eq!(super::spawn_labels("sp1", "tb1", None, &hooked), labels, "the hook does not change what the terminal is");
+        assert!(labels.get("h0x.ts").is_none(), "the flag is in the environment, not a label");
+        for saver in [true, false] {
+            let l = with_token_saver_setting(saver, || super::spawn_labels("sp1", "tb1", None, &plain));
+            assert_eq!(l, labels, "Token Saver does not change what the terminal is");
+        }
         let text = labels.to_string();
-        assert!(!text.contains("--settings") && !text.contains("H0X_CORE_EXE"), "{text}");
-        assert_eq!(crate::programs::of(None, &hooked), crate::programs::of(None, &plain));
-        // The shell around a hooked Claude still names Claude, here and on another machine.
+        assert!(!text.contains("--settings") && !text.contains("H0X_CORE_EXE") && !text.contains("H0X_TOKEN_SAVER"), "{text}");
+        assert_eq!(crate::programs::of(None, &own)["key"], crate::programs::of(None, &plain)["key"]);
+        // The shell around Claude still names Claude, here and on another machine.
         for on in [None, Some("box")] {
             let run = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(plain.clone()), None, on, None)).unwrap();
             assert_eq!(crate::programs::agent(&run).as_deref(), Some("claude"), "{on:?}");
+        }
+    }
+
+    #[test]
+    fn a_claude_launch_gets_the_env_flag_for_the_setting_and_no_other_launch_does() {
+        let sent = |on: bool, program: &[&str]| flag(on, &words(program));
+        // Here and on another machine the flag is the same: `1` on, `0` off.
+        assert_eq!((sent(true, &["claude"]), sent(true, &["claude", "go"]), sent(false, &["claude"])), (Some("1"), Some("1"), Some("0")));
+        // Another program: no flag. The person's own `--settings` still gets it (the shim then adds nothing).
+        for (saver, program) in [(false, &["codex"][..]), (true, &["codex"]), (true, &["pwsh.exe"]), (true, &[])] {
+            assert_eq!(sent(saver, program), None, "{saver} {program:?}");
+        }
+        for program in [&["claude", "--settings", "{}"][..], &["claude", "--settings=x.json"]] {
+            assert_eq!(sent(true, program), Some("1"), "{program:?}");
+            assert_eq!(sent(false, program), Some("0"), "{program:?}");
+        }
+        // Never a secret, scope or argv in the labels.
+        let text = with_token_saver_setting(true, || super::spawn_labels("sp1", "tb1", None, &words(&["claude"]))).to_string();
+        assert!(!text.contains("H0X_SCOPE") && !text.contains("hook session"), "{text}");
+    }
+
+    #[test]
+    fn the_flag_reads_the_setting_at_each_launch_when_toggled_between_two() {
+        let program = words(&["claude", "go"]);
+        let first = flag(true, &program);
+        let second = flag(false, &program);
+        let third = flag(true, &program);
+        assert_eq!((first, second, third), (Some("1"), Some("0"), Some("1")));
+        // The argv is the same for both launches, here and on another machine.
+        for on in [None, Some("box")] {
+            let a = with_token_saver_setting(true, || super::AppWindow::agent_argv(Some(program.clone()), None, on, None));
+            let b = with_token_saver_setting(false, || super::AppWindow::agent_argv(Some(program.clone()), None, on, None));
+            assert_eq!(a, b, "{on:?}");
+        }
+    }
+
+    #[test]
+    fn a_split_claude_with_its_session_id_still_carries_the_flag_and_its_session_label() {
+        // The split path: session_argv first, then the program is what the flag and the labels read.
+        let local = super::session_argv(Some(words(&["claude", "go"])), None).unwrap();
+        assert_eq!(local[1], "--session-id");
+        let remote = super::session_argv(Some(words(&[r"C:\Program Files\claude\claude.exe"])), Some("box")).unwrap();
+        assert_eq!(remote, words(&[r"C:\Program Files\claude\claude.exe"]), "no session id on another machine");
+        for saver in [true, false] {
+            let want = Some(if saver { "1" } else { "0" });
+            assert_eq!((flag(saver, &local), flag(saver, &remote)), (want, want), "{saver}");
+            let labels = with_token_saver_setting(saver, || super::spawn_labels("sp1", "tb1", None, &local));
+            assert_eq!(labels["h0x.session"], format!("claude:{}", local[2]), "{saver}");
+            assert!(labels.get("h0x.ts").is_none() && !labels.to_string().contains("H0X_TOKEN_SAVER"), "{labels}");
+        }
+        // Not Claude after session_argv: still no flag.
+        for p in [words(&["codex"]), words(&["npx", "claude"]), words(&["claude.cmd"])] {
+            let p = super::session_argv(Some(p), None).unwrap();
+            assert_eq!((flag(true, &p), flag(false, &p)), (None, None), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn the_flag_is_sent_exactly_when_the_launch_starts_claude() {
+        let programs = [
+            (&["claude"][..], true),
+            (&["claude.exe", "go"], true),
+            (&[r"C:\Program Files\Anthropic Claude\claude.exe"], true),
+            (&["/mnt/c/Users/Jane Doe/AppData/Roaming/npm/claude"], true),
+            (&[r"C:\Users\Jane Doe\AppData\Roaming\npm\claude"], true),
+            (&[r"C:\Users\Jane Doe\AppData\Roaming\npm\claude.cmd"], false),
+            (&["claude", "go", "--settings"], true),
+            (&["claude", "--settings="], true),
+            (&["claude", "--settings", "{}"], true),
+            (&["codex"], false),
+            (&["claude-code"], false),
+            (&["npx", "claude"], false),
+            (&[""], false),
+            (&[], false),
+        ];
+        for (program, claude) in programs {
+            let program = words(program);
+            for saver in [true, false] {
+                let want = claude.then_some(if saver { "1" } else { "0" });
+                assert_eq!(flag(saver, &program), want, "{saver} {program:?}");
+                for machine in [None, Some("box")] {
+                    let labels = with_token_saver_setting(saver, || super::spawn_labels("sp1", "tb1", machine, &program));
+                    assert!(labels.get("h0x.ts").is_none());
+                    let text = labels.to_string();
+                    assert!(!text.contains("SCOPE") && !text.contains("--settings") && !text.contains("H0X_CORE_EXE"), "{text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_routed_claude_on_another_machine_gets_its_flags_and_no_settings() {
+        let route = crate::programs::Route { graft: false, tools: vec![], model: Some("haiku".into()) };
+        let program = words(&[r"C:\Program Files\Anthropic Claude\claude.exe"]);
+        for saver in [true, false] {
+            let run = with_token_saver_setting(saver, || super::AppWindow::agent_argv(Some(program.clone()), Some("go"), Some("box"), Some(&route))).unwrap();
+            // remote_shell::launch keeps the command at argv[4..].
+            let cmd = &run[4..];
+            assert_eq!(cmd.iter().filter(|a| *a == "--settings").count(), 0, "{cmd:?}");
+            assert_eq!(cmd, &words(&[program[0].as_str(), "--model", "haiku", "go"])[..]);
+            assert!(!run.iter().any(|a| a.contains("H0X_SCOPE") || a.contains("PostToolUse") || a.contains("SessionStart")), "{run:?}");
+            assert_eq!(flag(saver, &program), Some(if saver { "1" } else { "0" }));
         }
     }
 
@@ -6626,7 +6737,7 @@ mod tests {
         let plain = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some("fix it"), None, None)).unwrap();
         let routed = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some("fix it"), None, Some(&route))).unwrap();
         assert_ne!(routed, plain);
-        let hook = crate::programs::with_token_saver(true, words(&["claude"]));
+        let hook = words(&["claude"]);
         let want = crate::programs::with_routing(&route, hook);
         let mut cmd = want;
         cmd.extend(words(&["--", "fix it"]));
@@ -6646,7 +6757,7 @@ mod tests {
             assert!(route.is_none() && !called, "{task:?}");
         }
         // Interactive launch: argv is the Token Saver one.
-        let hook = crate::programs::with_token_saver(true, words(&["claude"]));
+        let hook = words(&["claude"]);
         let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), None, None, None)).unwrap();
         assert_eq!(run, local_agent_argv(hook));
     }
@@ -6663,7 +6774,7 @@ mod tests {
             let route = with_routing_settings(true, true, || super::AppWindow::route_for(|_| failure, &words(&["claude"]), "/work", Some("go"), None));
             assert!(route.is_none());
             let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some("go"), None, route.as_ref())).unwrap();
-            let mut want = crate::programs::with_token_saver(true, words(&["claude"]));
+            let mut want = words(&["claude"]);
             want.push("go".into());
             assert_eq!(run, local_agent_argv(want));
         }
@@ -6678,14 +6789,14 @@ mod tests {
         let mut asked = None;
         with_routing_settings(true, true, || super::AppWindow::route_for(|p| { asked = Some(p); Ok(haiku_route()) }, &words(&["claude"]), folder, Some("go"), None));
         assert_eq!(asked.unwrap()["cwd"], folder);
-        // Remote launch: the wrapper stays and the settings JSON stays one argument.
+        // Remote launch: the wrapper stays and no `--settings` is added (the core shim adds the hooks there).
         let route: crate::programs::Route = serde_json::from_value(haiku_route()).unwrap();
         let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some("go"), Some("box"), Some(&route))).unwrap();
-        let mut want = crate::programs::with_routing(&route, crate::programs::with_token_saver(true, words(&["claude"])));
+        let mut want = crate::programs::with_routing(&route, words(&["claude"]));
         want.extend(words(&["--", "go"]));
         assert_eq!(run, crate::remote_shell::launch(want.clone()));
         assert_eq!(run[..4], crate::remote_shell::launch(Vec::new())[..]);
-        assert_eq!(run[4..].iter().filter(|a| *a == "--settings").count(), 1);
+        assert_eq!(run[4..].iter().filter(|a| *a == "--settings").count(), 0);
     }
 
     #[test]
@@ -6696,7 +6807,7 @@ mod tests {
             assert!(route.is_none() && !called, "{task:?}");
             // No first message either: the plain Token Saver launch.
             let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(task), None, None)).unwrap();
-            assert_eq!(run, local_agent_argv(crate::programs::with_token_saver(true, words(&["claude"]))), "{task:?}");
+            assert_eq!(run, local_agent_argv(words(&["claude"])), "{task:?}");
         }
     }
 
@@ -6709,7 +6820,7 @@ mod tests {
         assert_eq!(asked.unwrap()["prompt"].as_str(), Some(task.as_str()), "trimmed, never cut");
         for on in [None, Some("box")] {
             let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(padded.as_str()), on, Some(&route))).unwrap();
-            let mut want = crate::programs::with_routing(&route, crate::programs::with_token_saver(true, words(&["claude"])));
+            let mut want = crate::programs::with_routing(&route, words(&["claude"]));
             want.extend(["--".to_owned(), task.clone()]);
             let expected = if on.is_some() { crate::remote_shell::launch(want) } else { local_agent_argv(want) };
             assert_eq!(run, expected, "{on:?}");
@@ -6728,26 +6839,25 @@ mod tests {
         assert_eq!(asked, Some(serde_json::json!({ "prompt": task })), "no local folder for another machine");
         assert!(!route.graft, "no code map hint for another machine");
         let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some(task), Some("box"), Some(&route))).unwrap();
-        let mut want = crate::programs::with_routing(&route, crate::programs::with_token_saver(true, words(&["claude"])));
+        let mut want = crate::programs::with_routing(&route, words(&["claude"]));
         want.extend(words(&["--", task]));
         assert_eq!(run[..4], crate::remote_shell::launch(Vec::new())[..], "the wrapper is the same");
         assert_eq!(run[4..], want[..]);
         let cmd = &run[4..];
-        assert_eq!(cmd[..2], words(&["claude", "--settings"])[..]);
-        let settings: serde_json::Value = serde_json::from_str(&cmd[2]).expect("the settings JSON is one argument");
-        assert!(settings["hooks"]["PostToolUse"].is_array() && settings["hooks"]["SessionStart"].is_array());
-        assert_eq!(cmd[3..7], words(&["--tools", "Bash,Read", "--model", "haiku"])[..]);
+        assert_eq!(cmd[0], "claude");
+        assert!(!cmd.iter().any(|a| a == "--settings"), "the settings are the core shim's, not ours");
+        assert_eq!(cmd[1..5], words(&["--tools", "Bash,Read", "--model", "haiku"])[..]);
         assert!(!cmd.iter().any(|a| a == "--append-system-prompt"), "no map hint on another machine");
-        assert_eq!(cmd[7], "--", "the end-of-options marker keeps the task out of --tools");
-        assert_eq!(cmd[8], task, "the task is last, untouched");
-        assert_eq!(cmd.len(), 9);
+        assert_eq!(cmd[5], "--", "the end-of-options marker keeps the task out of --tools");
+        assert_eq!(cmd[6], task, "the task is last, untouched");
+        assert_eq!(cmd.len(), 7);
         // No `sh` there (Windows): the same words through PowerShell.
         let ps = super::AppWindow::powershell_argv(&run);
         assert_eq!(ps, words(&["powershell.exe", "-NoLogo", "-NoExit", "-Command", &crate::programs::powershell_line(&want)]));
     }
 
     #[test]
-    fn smart_routing_with_no_tools_and_no_model_adds_no_flags_only_the_handoff_hook() {
+    fn smart_routing_with_no_tools_and_no_model_adds_no_flags_and_no_settings() {
         let replies = [
             serde_json::json!({ "graft": false, "tools": [], "model": null }),
             serde_json::json!({}),
@@ -6757,13 +6867,12 @@ mod tests {
             let route = with_routing_settings(true, true, || super::AppWindow::route_for(|_| Ok(reply.clone()), &words(&["claude"]), "/work", Some("go"), None)).expect("an empty route is still a route");
             let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some("go"), Some("box"), Some(&route))).unwrap();
             let cmd = &run[4..];
-            assert_eq!(cmd.len(), 4, "{reply}: {cmd:?}");
-            assert_eq!((cmd[0].as_str(), cmd[1].as_str(), cmd[3].as_str()), ("claude", "--settings", "go"), "{reply}");
+            assert_eq!(cmd.len(), 2, "{reply}: {cmd:?}");
+            assert_eq!((cmd[0].as_str(), cmd[1].as_str()), ("claude", "go"), "{reply}");
             for flag in ["--tools", "--model", "--append-system-prompt"] {
                 assert!(!cmd.iter().any(|a| a == flag), "{reply}: {flag}");
             }
-            let settings: serde_json::Value = serde_json::from_str(&cmd[2]).unwrap();
-            assert!(settings["hooks"]["PostToolUse"].is_array() && settings["hooks"]["SessionStart"].is_array(), "{reply}");
+            assert!(!cmd.iter().any(|a| a == "--settings"), "{reply}: no settings of ours");
         }
     }
 
@@ -6828,7 +6937,7 @@ mod tests {
             let route: crate::programs::Route = serde_json::from_value(reply).unwrap();
             for on in [None, Some("box")] {
                 let run = with_routing_settings(true, true, || super::AppWindow::agent_argv(Some(words(&["claude"])), Some("fix it"), on, Some(&route))).unwrap();
-                let mut want = crate::programs::with_routing(&route, crate::programs::with_token_saver(true, words(&["claude"])));
+                let mut want = crate::programs::with_routing(&route, words(&["claude"]));
                 let at = want.iter().position(|a| a == "--tools").unwrap();
                 assert!(want[at + 1..].iter().all(|a| a != "--"), "{name}: routing alone adds no marker");
                 want.extend(words(&["--", "fix it"]));

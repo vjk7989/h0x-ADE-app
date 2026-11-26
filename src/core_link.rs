@@ -487,8 +487,21 @@ impl Core {
 
     /// Starts a program in a new core terminal and returns its address (`tN`).
     /// Starts a terminal, here or on another machine (`on`: its name in `h0x-core machine ls`).
-    pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>, size: Option<(u16, u16)>, display: Value) -> Result<String> {
-        let env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "h0x"});
+    pub fn run(
+        &self,
+        argv: Vec<String>,
+        cwd: Option<String>,
+        labels: Value,
+        on: Option<&str>,
+        size: Option<(u16, u16)>,
+        display: Value,
+        token_saver: Option<&str>,
+    ) -> Result<String> {
+        let mut env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "h0x"});
+        // Claude launches only: the core's shim reads it to choose its HyperOx settings.
+        if let Some(v) = token_saver {
+            env["H0X_TOKEN_SAVER"] = v.into();
+        }
         let mut params = json!({"argv": argv, "cwd": cwd, "env": env, "labels": labels, "on": on, "keep": true, "display": display});
         // Released cores ignore unknown parameters, including when forwarding to another machine.
         if let Some((cols, rows)) = size {
@@ -949,8 +962,72 @@ mod tests {
             routes.lock().unwrap().replies.remove(&request["id"].as_u64().unwrap()).unwrap()
                 .send(Ok(json!({"address": "t1"}))).unwrap();
         });
-        assert_eq!(core.run(vec![], None, json!({}), None, Some((80, 24)), display).unwrap(), "t1");
+        assert_eq!(core.run(vec![], None, json!({}), None, Some((80, 24)), display, None).unwrap(), "t1");
         peer.join().unwrap();
+    }
+
+    /// The `terminal.run` params that `core.run` sends for `argv` on `on` with `token_saver`.
+    fn run_params(argv: &[&str], on: Option<&str>, token_saver: Option<&str>) -> Value {
+        let (writer, frames) = mpsc::channel();
+        let (_lost_tx, lost) = async_channel::bounded(1);
+        let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let core = Core {
+            hello: Value::Null, writer, routes: Arc::new(Mutex::new(Routes::default())),
+            next_id: AtomicU64::new(1), child: Mutex::new(child), lost,
+        };
+        let routes = core.routes.clone();
+        let peer = std::thread::spawn(move || {
+            let frame = frames.recv().unwrap();
+            let request: Value = serde_json::from_slice(&frame[HEADER..]).unwrap();
+            assert_eq!(request["method"], "terminal.run");
+            routes.lock().unwrap().replies.remove(&request["id"].as_u64().unwrap()).unwrap()
+                .send(Ok(json!({"address": "t1"}))).unwrap();
+            request["params"].clone()
+        });
+        let argv = argv.iter().map(|s| s.to_string()).collect();
+        assert_eq!(core.run(argv, None, json!({}), on, None, json!({}), token_saver).unwrap(), "t1");
+        peer.join().unwrap()
+    }
+
+    #[test]
+    fn run_without_a_token_saver_value_sends_exactly_the_terminal_env() {
+        let base = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "h0x"});
+        for (argv, on) in [(&["claude"][..], None), (&["codex"], None), (&[], None), (&["claude"], Some("box"))] {
+            let params = run_params(argv, on, None);
+            assert_eq!(params["env"], base, "{argv:?} {on:?}");
+            assert!(params["env"].get("H0X_TOKEN_SAVER").is_none());
+            // No settings of the app's in argv either.
+            assert_eq!(params["argv"], json!(argv), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn run_with_a_token_saver_value_adds_only_that_key_here_and_on_another_machine() {
+        for v in ["1", "0"] {
+            for on in [None, Some("box"), Some(r"C:\Users\Jane Doe\box")] {
+                let params = run_params(&["claude", "go"], on, Some(v));
+                let env = params["env"].as_object().unwrap();
+                let mut keys = env.keys().map(String::as_str).collect::<Vec<_>>();
+                keys.sort_unstable();
+                assert_eq!(keys, ["COLORTERM", "H0X_TOKEN_SAVER", "TERM", "TERM_PROGRAM"], "{v} {on:?}");
+                assert_eq!(params["env"]["H0X_TOKEN_SAVER"], v, "a string, never a number or bool: {on:?}");
+                assert_eq!(params["env"]["TERM"], "xterm-256color");
+                assert_eq!(params["on"], json!(on), "the env goes with the launch to the other machine");
+                // The core keeps this env as the terminal's restart_env: off stays `0` after an auto-resume.
+                assert_eq!(params["keep"], true);
+                assert_eq!(params["argv"], json!(["claude", "go"]), "argv untouched: no --settings of the app's");
+            }
+        }
+    }
+
+    #[test]
+    fn token_saver_toggled_between_two_launches_changes_only_that_launchs_env() {
+        let first = run_params(&["claude"], None, Some("1"));
+        let second = run_params(&["claude"], None, Some("0"));
+        let third = run_params(&["claude"], None, None);
+        assert_eq!((first["env"]["H0X_TOKEN_SAVER"].as_str(), second["env"]["H0X_TOKEN_SAVER"].as_str()), (Some("1"), Some("0")));
+        assert!(third["env"].get("H0X_TOKEN_SAVER").is_none(), "no value left over from an earlier launch");
+        assert_eq!(first["argv"], second["argv"]);
     }
 
     #[test]
