@@ -3646,8 +3646,9 @@ fn settings_0x_modes_coming_soon_rows_have_nothing_to_click(cx: &mut TestAppCont
     let staged = Staged::new();
     let (trees, calls) = describe_pressing(cx, &staged, "frame/settings", modes_values(), None, "", 0);
     let tree = &trees[0];
-    // The three rows follow the savings line; nothing from there to the last "Coming soon" has an id, a click or a hand cursor.
-    let start = tree.find("Tokens saved: ").unwrap_or_else(|| panic!("{tree}"));
+    // The three rows follow the savings line and its Refresh button; nothing from the first row to the last "Coming soon"
+    // has an id, a click or a hand cursor.
+    let start = tree.find("Security").unwrap_or_else(|| panic!("{tree}"));
     let end = tree.rfind("Coming soon").unwrap_or_else(|| panic!("{tree}"));
     assert!(start < end, "{tree}");
     let rows = &tree[start..end];
@@ -3657,7 +3658,9 @@ fn settings_0x_modes_coming_soon_rows_have_nothing_to_click(cx: &mut TestAppCont
     }
     let c = calls.borrow();
     assert!(c.writes.is_empty() && c.effects.iter().all(|(n, _)| n != "run" && n != "openLink"), "{:?} {:?}", c.writes, c.effects);
-    assert!(c.cores.is_empty() && c.unexpected.is_empty(), "{:?} {:?}", c.cores, c.unexpected);
+    // Opening 0x Modes reads the live savings once (ADR-137); the rows themselves ask the core for nothing.
+    let gate = ["gate".to_string(), "stats".to_string()];
+    assert!(c.cores.iter().all(|a| a.starts_with(&gate)) && c.unexpected.is_empty(), "{:?} {:?}", c.cores, c.unexpected);
 }
 
 #[gpui::test]
