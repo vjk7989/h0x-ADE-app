@@ -888,15 +888,20 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
 - The defaults are mods too, read them as examples: `spaces`, `agents`,
   `tabs` (the tab bar), `menu`, `prompt`, `confirm`, `help`, `toast`,
   Terminals' `picker`, `peek`, and `pane` (an
-  example pane header, not used by the default layouts), and `worktree`
-  (git worktrees as spaces: the space menu's and the + menu's New worktree,
-  Open worktree (the repo's checkouts, filtered; one already shown is gone
-  to) and Remove worktree open it as a dialog with props `{space, folder?,
-  action: "new" | "open" | "remove"}` (the repo: folder, else where the
-  space's first terminal is), or with `{branch, tab?, argv?}` to make one at once with
-  that first tab; checkouts go to
-  `~/.h0x/worktrees/<repo>/<branch>` on the space's machine, a constant
-  at its top; the
+  example pane header, not used by the default layouts),
+  and `worktree` (HyperOx Worktrees, git worktrees as spaces, done by
+  `h0x-core worktree <list|create|merge|remove> --json [--on <machine>]`: an
+  older core answers "Update h0x-core ... to use Worktrees"; hooks stay off).
+  The space menu's and the + menu's New worktree, Open worktree (the repo's
+  checkouts with dirty, ahead/behind and merged shown, filtered; one already
+  shown is gone to; its Merge button or ctrl+m asks before merging), Merge
+  worktree (squashes the worktree's branch into the default branch, tab picks
+  rebase instead, then removes it and closes its space; a conflict lists the
+  files and changes nothing) and Remove worktree open it as a dialog with props
+  `{space, folder?, action: "new" | "open" | "merge" | "remove"}` (the repo:
+  folder, else where the space's first terminal is), or with `{branch, tab?,
+  argv?}` to make one at once with that first tab; the core picks where
+  checkouts go; the
   `spaces` sidebar nests worktree spaces under their repo's and shows each
   space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
   are HyperOx's; duplicate with `mod.clone` before editing.
